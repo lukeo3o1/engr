@@ -32,8 +32,30 @@ IFS=$'\t' read -r artifact sha256 sbom <<< "$metadata"
 [[ "$artifact" == 'engr-0.1.0-x86_64-unknown-linux-musl.tar.gz' ]]
 [[ "$sha256" == '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ]]
 [[ "$sbom" == 'sbom-x86_64-unknown-linux-musl.cdx.json' ]]
-[[ -z "$(manifest_target_metadata "$manifest" 'x86_64-apple-darwin')" ]]
 [[ "$(normalize_version 'v0.1.0')" == '0.1.0' ]]
+
+[[ "$(
+  uname() {
+    case "$1" in
+      -s) printf '%s\n' 'Darwin' ;;
+      -m) printf '%s\n' 'arm64' ;;
+    esac
+  }
+  detect_target
+)" == 'aarch64-apple-darwin' ]]
+if (
+  uname() {
+    case "$1" in
+      -s) printf '%s\n' 'Darwin' ;;
+      -m) printf '%s\n' 'x86_64' ;;
+    esac
+  }
+  detect_target
+) >"${test_root}/intel-macos-output" 2>&1; then
+  printf 'installer accepted unsupported Intel macOS\n' >&2
+  exit 1
+fi
+grep -q 'Apple Silicon macOS only' "${test_root}/intel-macos-output"
 
 release_dir="${test_root}/release"
 stage_dir="${test_root}/stage"

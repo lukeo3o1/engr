@@ -70,8 +70,8 @@ adopted projects.
 
 Released binaries are installed only after the installer verifies the release
 manifest, its SHA-256 checksum file, and the downloaded archive. The Unix
-installer supports Linux and macOS; Linux selects the portable musl artifact by
-default, while `--target` can select a GNU artifact. The PowerShell installer
+installer supports Linux and Apple Silicon macOS; Linux selects the portable
+musl artifact by default, while `--target` can select a GNU artifact. The PowerShell installer
 supports native Windows x64 and ARM64. Neither installer uses `sudo` or changes
 your `PATH`.
 
@@ -101,8 +101,9 @@ deterministic replay, confirmation recovery, snapshot integrity, conformance
 fixtures, and corpus integrity.
 
 Release workflows are configured to build Windows, Linux (GNU and musl), and
-macOS artifacts from the same Rust implementation. A platform is described as
-supported only after its release CI and runtime evidence are verified. The
+Apple Silicon macOS artifacts from the same Rust implementation. Intel macOS
+is not a supported distribution. A platform is described as supported only
+after its release CI and runtime evidence are verified. The
 repository does not claim a published release merely because a workflow or
 manifest template exists.
 

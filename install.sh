@@ -13,7 +13,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [--version VERSION] [--bin-dir PATH] [--target TARGET]
 
-Installs a verified Engr release for Linux or macOS without sudo.
+Installs a verified Engr release for Linux or Apple Silicon macOS without sudo.
 
 Options:
   --version VERSION  Release version to install (default: latest GitHub release)
@@ -63,8 +63,8 @@ detect_target() {
   case "$os" in
     Darwin)
       case "$architecture" in
-        x86_64|amd64) printf '%s\n' 'x86_64-apple-darwin' ;;
         arm64|aarch64) printf '%s\n' 'aarch64-apple-darwin' ;;
+        x86_64|amd64) die 'Intel macOS is not supported; Engr releases support Apple Silicon macOS only' ;;
         *) die "unsupported macOS architecture: $architecture" ;;
       esac
       ;;

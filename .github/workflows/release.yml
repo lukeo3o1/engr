@@ -34,9 +34,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             archive: tar.gz
             cross: true
-          - runner: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
           - runner: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
