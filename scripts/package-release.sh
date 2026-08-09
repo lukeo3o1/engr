@@ -48,7 +48,10 @@ cargo cyclonedx \
   --format json \
   --target "$target" \
   --override-filename "$sbom_prefix"
-mapfile -t generated_sboms < <(find crates/engr -maxdepth 1 -type f -name "${sbom_prefix}*" -print)
+generated_sboms=()
+while IFS= read -r generated_sbom; do
+  generated_sboms+=("$generated_sbom")
+done < <(find crates/engr -maxdepth 1 -type f -name "${sbom_prefix}*" -print)
 if (( ${#generated_sboms[@]} != 1 )); then
   echo "CycloneDX did not produce exactly one SBOM for $target" >&2
   exit 2
