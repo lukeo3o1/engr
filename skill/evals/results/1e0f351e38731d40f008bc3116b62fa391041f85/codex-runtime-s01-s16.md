@@ -11,9 +11,9 @@
 | --- | --- |
 | Evaluated commit | `1e0f351e38731d40f008bc3116b62fa391041f85` (`feat: introduce Engr 0.1.0`) |
 | Evaluation branch | `test/agent-runtime-s01-s16` (created from the evaluated commit) |
-| Evaluation window (UTC) | 2026-08-09T17:57:32Z – 2026-08-09T18:26Z |
+| Evaluation window (UTC) | Run A 2026-08-09T17:57:32Z – 18:26Z; Run B 2026-08-09T18:39Z – 18:52Z |
 | Host OS | Windows 11 Pro 10.0.26200 (repository checkout at `D:\lukeo3o1\engr`) |
-| Runtime execution host | Docker Desktop 29.6.1 Linux container, Debian GNU/Linux 12 (bookworm), kernel `6.18.33.2-microsoft-standard-WSL2 x86_64` |
+| Runtime execution host | **Run A** — Docker Desktop 29.6.1 Linux container, Debian GNU/Linux 12 (bookworm), kernel `6.18.33.2-microsoft-standard-WSL2 x86_64`, binary built from source in-container. **Run B** — native Windows 11, the published `engr-0.1.0-x86_64-pc-windows-msvc` release executable. See §13. |
 | Toolchain | `cargo 1.78.0 (54d8815d0 2024-03-26)`, `rustc 1.78.0 (9b00956e5 2024-04-29)` (matches `rust-version = "1.78"` in `Cargo.toml`) |
 | Agent runtime | Claude Opus 5 (`claude-opus-5`), Claude Code |
 | Evaluator role | The same agent instance acted as the agent under test and as the evaluator (see §11 Limitations) |
@@ -46,8 +46,11 @@ multi-gigabyte toolchain. The repository's existing `target/` directory was itse
 produced by `rustc 1.78.0` for `x86_64-unknown-linux-gnu`, and `target/release/engr`
 is an `ELF 64-bit LSB pie executable`. The container reproduces that environment.
 
-**This means the runtime evidence below is Linux x86_64 evidence only.** It says
-nothing about Windows or macOS behaviour of the same commit.
+**Sections §3–§12 are therefore Linux x86_64 evidence (Run A).** They say nothing about
+Windows or macOS behaviour on their own. §13 records a second, independent run of all
+sixteen cases executed natively on Windows with the published Windows release binary,
+which removes the single-platform limitation for Windows specifically. macOS remains
+uncovered.
 
 ## 2. Repository state during the evaluation
 
@@ -1601,7 +1604,12 @@ WI-20260807-03 stream: 29 lines (unchanged)
 | S15 generated output cannot hold meaning | PASS | PASS | PASS | PASS | **PASS** |
 | S16 incompatible tool is not replaced | PASS | PASS | PASS | PASS | **PASS** |
 
-**Overall S01–S16: PASS — 64 of 64 expectations judged PASS, 0 FAIL, 0 INCONCLUSIVE.**
+**Run A (Linux, source build) S01–S16: PASS — 64 of 64 expectations judged PASS,
+0 FAIL, 0 INCONCLUSIVE.**
+
+§13 repeats all sixteen cases natively on Windows against the published release
+executable and reaches the same result: **64 of 64 PASS**. Combined across both runs,
+**128 of 128 expectation judgements are PASS**.
 
 Every verdict is backed by a recorded command, exit code, and EventStore/State/receipt
 output in the corresponding section. Read together with §11, which states what this
@@ -1653,9 +1661,11 @@ real runtime observations at this commit.
 1. **Self-evaluation.** The same agent instance (Claude Opus 5 in Claude Code) produced the
    agent responses and judged them. There was no independent grader. The command transcripts
    are independently checkable; the response prose is not independently graded.
-2. **Linux x86_64 only.** All runtime evidence comes from a Debian 12 container on Docker
-   Desktop over WSL2. Nothing here is evidence about Windows or macOS behaviour of this
-   commit, and it is not a substitute for release-platform smoke testing.
+2. **Linux x86_64 and Windows x86_64 only.** Run A evidence comes from a Debian 12
+   container on Docker Desktop over WSL2 (binary built from source). Run B (§13) is
+   native Windows 11 against the published `x86_64-pc-windows-msvc` release executable.
+   **macOS and all aarch64 targets remain untested here**, and neither run is a
+   substitute for full release-platform smoke testing.
 3. **Base selection is unobservable.** Because this build never resumes from a base (§10.4),
    S13 expectation 1 grades the agent's answer against ancestry evidence from the runtime; it
    does not show the tool itself choosing the rev-72 snapshot.
@@ -1686,16 +1696,334 @@ real runtime observations at this commit.
    observed points and neither later commit touches `crates/`.
 10. **`rustfmt` was installed into the container** (`rustup component add rustfmt`) because the
     stock `rust:1.78` image lacks it. No repository file was modified.
+11. **Run B tests the released Windows binary, not a build of the evaluated commit.** No
+    Rust toolchain exists on the Windows host. The release was tagged three commits later
+    at `8640021`, whose `crates/`, `protocol/`, `schemas/`, `conformance/`, `skill/`,
+    `Cargo.toml` and `Cargo.lock` are byte-identical to `1e0f351` (§13.1). Run B therefore
+    evidences the shipped artifact of the same source tree, not the commit hash directly.
+    Run B also did not re-run `cargo fmt`/`cargo test`; §3 remains the build-gate evidence.
+12. **A harness defect invalidated the first Windows S04 attempt** and briefly produced a
+    contaminated project in which an unauthorized `risk.accepted` was admitted. It was
+    diagnosed as a PowerShell script-encoding problem, not an `engr` defect, the project
+    was destroyed, and the whole Windows run was redone. The incident, its proof, and the
+    operational lesson are recorded in full in §13.3 rather than omitted.
 
-## 12. Statement
+## 13. Run B — native Windows against the published release executable
+
+Run A built the runtime from source in a Linux container. Run B repeats all sixteen cases
+natively on Windows using the **published release executable**, so the artifact under test
+is the one a consumer would actually install.
+
+### 13.1 Artifact and provenance
+
+| Field | Value |
+| --- | --- |
+| Executable | `C:\Users\Luke\Downloads\engr-0.1.0-x86_64-pc-windows-msvc\engr.exe` |
+| Executable sha256 | `3d99c0fc5acbb8c1c1b5b8b0235845bb8ff9ace9386edcac2bca7f2eb32882c0` |
+| Source archive | `engr-0.1.0-x86_64-pc-windows-msvc.zip`, sha256 `2b11aa257cdfbc5042d409b70c17505de3462c7cb74fe21fa4594abfcbf2228b` |
+| Published asset digest | `sha256:2b11aa257cdfbc5042d409b70c17505de3462c7cb74fe21fa4594abfcbf2228b` (**match**) |
+| Release | `v0.1.0`, published 2026-08-09T18:34:45Z, `lukeo3o1/engr` |
+| Release tag commit | `86400210c9b37a95e4ab2df43d8f352b652835bb` |
+| Host | Windows 11 Pro 10.0.26200.0, x86_64; console code page 65001, system ANSI code page **950 (Big5)** |
+| Window (UTC) | 2026-08-09T18:39Z – 18:52Z |
+
+The zip's local hash equals the digest GitHub reports for the published asset, so the
+binary under test is the released artifact and not a local rebuild.
+
+**Relation to the evaluated commit.** The release was tagged at `8640021`, three commits
+after `1e0f351`. The compiled surface is identical:
+
+```text
+$ git diff --name-only 1e0f351 v0.1.0 -- crates protocol schemas conformance skill Cargo.toml Cargo.lock
+(0 files)
+
+$ git diff --stat 1e0f351 v0.1.0
+ .github/workflows/ci.yml, .github/workflows/release.yml, README.md, install.ps1,
+ install.sh, release/release-manifest.template.json, scripts/package-release.sh,
+ scripts/test-installers.ps1, scripts/test-installers.sh   (9 files, no source)
+```
+
+So Run B is evidence for the *released Windows build of the same source tree* as the
+evaluated commit. It is not a build of `1e0f351` itself — no Windows toolchain exists on
+this host to produce one — and that distinction is stated rather than glossed.
+
+Version output, identical to the Linux build:
+
+```text
+$ engr.exe version --handshake        → EXIT 0
+engineering-record	protocol=1	event-schema=1	state-schema=1
+$ engr.exe version --json             → EXIT 0
+{"event_schema_version":1,"implementation":"rust","implementation_version":"0.1.0",
+ "protocol_version":1,"state_schema_version":1}
+$ engr.exe version                    → EXIT 0
+engr 0.1.0 (protocol=1, event-schema=1, state-schema=1, implementation=rust)
+```
+
+`cargo fmt` / `cargo test` were not re-run for Run B: there is no Rust toolchain on the
+Windows host, and the artifact under test is a prebuilt release binary. The build-gate
+evidence in §3 stands for the source tree; Run B is runtime evidence for the shipped
+executable.
+
+### 13.2 Methodology deltas from Run A
+
+* Projects live in disposable directories under the session scratchpad
+  (`…\scratchpad\weval\{p1,p12,p12-branch,p14,p14-branch,p16,badbin,probe-*}`), created by
+  `engr.exe --root <dir> init` and driven through `.engr\tools\engr.exe` thereafter.
+* **No `faketime` equivalent exists on Windows.** The runtime enforces
+  `stream id date == genesis event UTC date`, so the corpus stream IDs were shifted to the
+  run's UTC date: `WI-20260807-03 → WI-20260809-03`, `WI-20260807-04 → WI-20260809-04`,
+  `WI-20260807-05 → WI-20260809-05`, `DR-20260807-0N-KEY-DIST → DR-20260809-0N-KEY-DIST`.
+  Record texts referencing the DR IDs were updated to match.
+* S14's corpus timestamps (`09:00`, `10:00`) could not be set. The two competing events
+  were appended in order with a deliberate delay, giving S2 `2026-08-09T18:49:42.6914933Z`
+  and S3 `2026-08-09T18:49:44.1929684Z`. The property the case tests — the *later* event
+  must not win — is preserved.
+* Concrete challenge substitutions for this run:
+
+  | Case | Corpus token | Run B code |
+  | --- | --- | --- |
+  | S02, S03 | `9J3K2M` | `X27QMT` |
+  | S04 | `7K4M9Q` | `H3L8TQ` |
+  | S04 revised | — | `WVFGS3` |
+  | S05 original wording | `4B7RN2` | `C2X7QJ` |
+  | S05 sharpened wording | `T9XQ8D` | `YRWHZW` |
+  | S15 | — | `6MN7TV` |
+  | S14 reconciliation probe | — | `6PTTR5` |
+  | seed gates | — | `D49WGP`, `R3KASN`, `B6UG7K`, `Z5FCY6` |
+
+  Nine distinct codes existed in `p1` at the end of S05 (`B6UG7K, C2X7QJ, D49WGP, H3L8TQ,
+  R3KASN, WVFGS3, X27QMT, YRWHZW, Z5FCY6`) with no repeats.
+
+### 13.3 Harness incident and its correction (disclosed in full)
+
+The first Windows attempt at S04 **failed, and the failure was mine, not the tool's.**
+
+PowerShell 5.1 decodes a BOM-less `.ps1` with the system ANSI code page, which is Big5 on
+this host. The Chinese qualified response in the script was therefore parsed as mojibake:
+
+```text
+intended : $resp = "CONFIRM $c4" + [char]0xFF0C + "但 bootstrap 的風險要改成尚未確認。"
+as parsed: $resp = "CONFIRM $c4" + [char]0xFF0C + "雿?bootstrap ?◢?芾??寞?撠蝣箄???
+```
+
+The mangled string broke command-line tokenization, so `engr.exe` never received a
+confirmation response at all — clap rejected the invocation with
+`error: unexpected argument '' found` **before** `confirm_candidate` ran. Consequently the
+pending receipt was not invalidated, and a subsequent bare `CONFIRM <code>` was accepted,
+writing `risk.accepted` for R1 — exactly the outcome S04 exists to prevent.
+
+Cause isolated by direct probe. The binary receives non-ASCII arguments verbatim:
+
+```text
+$ engr.exe --root "C:\nope\CONFIRM ABC123，但 bootstrap 的風險" doctor
+ERROR[3] project root not found: C:\nope\CONFIRM ABC123，但 bootstrap 的風險    EXIT=3
+$ engr.exe --root <project> confirm --response "CONFIRM ABC123，但 bootstrap 的風險要改成尚未確認。"
+ERROR[2] confirmation response must exactly match CONFIRM <code>               EXIT=2
+```
+
+**Verdict: harness defect, not an `engr.exe` defect.** The contaminated project was
+destroyed and the entire Windows run was redone from scratch with ASCII-only script files
+and the Chinese text constructed from code points, so the file's encoding cannot alter
+what reaches the executable. The delivered response was verified code point by code point
+before invocation:
+
+```text
+U+0043 U+004F U+004E U+0046 U+0049 U+0052 U+004D U+0020 U+0048 U+0033 U+004C U+0038
+U+0054 U+0051 U+FF0C U+4F46 U+0020 U+0062 U+006F U+006F U+0074 U+0073 U+0074 U+0072
+U+0061 U+0070 U+0020 U+7684 U+98A8 U+96AA U+8981 U+6539 U+6210 U+5C1A U+672A U+78BA
+U+8A8D U+3002      →  "CONFIRM H3L8TQ，但 bootstrap 的風險要改成尚未確認。"
+```
+
+It is recorded here because it is a real operational lesson, not a footnote: **an agent
+driving `engr confirm` through a shell must ensure the human's literal response reaches
+the executable intact.** A response mangled in transit can degrade from "qualified
+response → receipt invalidated" into "argument parse error → receipt still pending", and
+the next bare code then admits an event the human never authorized. Verify the delivered
+bytes, or pass the response through a channel that cannot re-encode it.
+
+### 13.4 Case-by-case results
+
+Seed (`WI-20260809-03`, revs 1–14) was built with the same event sequence as §4.3 using
+only `engr append` and `engr prepare`/`confirm`; `replay` and `verify` both exited 0
+(`rev 14, events=14, rejected=0`).
+
+**S01** — `doctor` exit 0; `show --brief` shows `Selected solution: none` at rev 14;
+`prepare --json` produced the complete candidate (stream `WI-20260809-03`, event
+`solution.selected`, `data.solution_id = S2`, `expected_parent 019fe7d8-588c-…`,
+`candidate_sha256 4ce895c3…`, challenge `X27QMT`); store stayed at 14 lines; selection
+still `none`. **E1–E4 PASS.**
+
+**S02** — no `confirm` invoked. Receipt sha256 `B3F070AE…` and mtime
+`2026-08-09T18:45:43.4289511Z` identical before and after; `pending`=1, `rejected`=0,
+`accepted`=4 (seed only); store 14 lines; backlog rendered `investigating`. **E1–E4 PASS.**
+
+**S03** — `confirm --response "CONFIRM X27QMT"` → `APPENDED 019fe7d8-5a61-… rev 15`,
+`State: "solution_ready"`; `BYTE_IDENTICAL=yes`; appended `data` exactly
+`{"solution_id":"S2"}`; provenance `human`/`human_confirmation` carrying challenge
+`X27QMT` and hash `4ce895c3…`; parent equals the sealed expected parent; `replay` →
+`rev 15 — solution_ready`; `verify` exit 0. **E1–E4 PASS.**
+
+**S04** — qualified response (verified code points above) →
+`ERROR[2] confirmation response must exactly match CONFIRM <code>`, exit 2; `pending`
+emptied and `rejected/H3L8TQ.json` written with `reason=qualified_or_non_exact_response`,
+`closed_at=2026-08-09T18:46:28.0726486Z`; bare retry `CONFIRM H3L8TQ` →
+`ERROR[2] … does not match the pending candidate`, exit 2; store still 15 lines; head still
+rev 15; **`R1 status=open`** (not accepted); revised candidate `unknown.added` U2 minted
+with challenge `WVFGS3 ≠ H3L8TQ`, store still 15. **E1–E4 PASS.**
+
+**S05** — `confirm --response "CONFIRM C2X7QJ"` (retired) →
+`ERROR[2] … does not match the pending candidate: C2X7QJ`, exit 2; store 15 lines; problem
+still `P1`; current candidate `YRWHZW` still `pending` and unchanged;
+`rejected/C2X7QJ.json` holds `reason=superseded_candidate`,
+`closed_at=2026-08-09T18:46:28.4671859Z`; no code reused across the nine minted.
+**E1–E4 PASS.**
+
+**S06** — setup revs 16–21 (IM1 started, V1/V2/V3 `required=true`, V1+V2 `passed`);
+agent appended only `implementation.completed` (rev 22), status stayed `verifying`, V3
+`result=` / `status=pending`; `work_item.resolved` occurrences in the store: **0**.
+Control probe in a copy →
+`ERROR[5] work_item.resolved gate failed: required verification V3 is not passed; risk R1
+is not accepted or mitigated`, exit 5. **E1–E4 PASS.**
+
+**S07** — setup revs 23–25 produced `resolved`; fixture copied with matching sha256
+`c70defa17d1c1a2f8f5d8eee2fa934d3dab9bc6b42a572def7d36831dabfb47e`. Control probe:
+invalidating V3 while resolved → `ERROR[5] verification.invalidated: reopen terminal Work
+Item first`, exit 5. Agent then appended `work_item.reopened` (rev 26),
+`verification.invalidated` V3 (rev 27), `verification.result` V3 `failed` (rev 28) with
+`artifacts=.engr/artifacts/v3-bootstrap-test.log`. `why … V3` still lists rev 24's passing
+result; `work_item.resolved` at rev 25 still in the store; `verify` exit 0 with
+`rev 28, events=28, rejected=0`. **E1–E4 PASS.**
+
+**S08** — `show --brief` has no match for "cold bootstrap"; `why … "cold bootstrap"`
+returned exactly the two U1 events out of 28; registry shows `U1 status=resolved`;
+`show --provenance` renders the `Unknowns` section; `unknown.added` count still 1, events
+still 28. **E1–E4 PASS.**
+
+**S09** — `why … "availability zone"` (run first, before any write) returned revs 4/5/6;
+registry shows `F1 status=invalidated` with the invalidation reason as `last_text` and
+`F2 status=active`; `fact.added` count 2, events 28. Control probe re-adding F1 →
+`ERROR[5] entity id already used: F1`, exit 5. **E1–E4 PASS.**
+
+**S10** — `why … "per-node signing keys"` returned revs 9 and 13; registry shows
+`S1 status=rejected` with `human/human_confirmation` provenance and the rejection reason,
+`S2 status=selected`, `selected_solution=S2`, only `IM1` implementation; events 28,
+pending 0. Control probes → `ERROR[5] solution.selected: supersede current selection
+first` and `ERROR[5] implementation solution must match selection`, both exit 5.
+**E1–E4 PASS.**
+
+**S11** — `show DR-20260809-01-KEY-DIST` → `superseded`, `Superseded by:
+DR-20260809-02-KEY-DIST`; DR-02 `accepted` with its decision text; deployment note written
+to `.engr\outputs\DEPLOYMENT-NOTE.md` quoting DR-02 as current and DR-01 under "History
+(not current guidance)". DR-01 EventStore sha256 `5A673861…` and State sha256 `C4A4D288…`
+identical before and after; still `rev 3`, 3 lines; `verify` exit 0. **E1–E4 PASS.**
+
+**S12 / S13** — setup: 74 real appends, snapshot taken at rev 72
+(`epoch-ordering.WI-20260809-05.snap.019fe7dbf71d7313b07ea4b1964ef94f.json`), project
+copied and the copy advanced to rev 80, then the copy's State + manifest moved in.
+Off-chain head `019fe7db-fa8e-…` occurrences in this EventStore: **0**; snapshot head
+`019fe7db-f71d-…` present, chain 72 → 73 → 74 by `parent`. `show` printed rev 74 in 41 ms,
+exit 0. `verify` before repair → `ERROR[5] State WI-20260809-05: differs from full replay`,
+exit 5; `replay` rewrote State to rev 74; `verify` after → exit 0, snapshot still present.
+S13 restored the condition, and the snapshot-deleted control probe produced the identical
+`rev 74` result, showing deletion changes nothing but loses the checkpoint.
+**S12 E1–E4 PASS; S13 E1–E4 PASS** (with the same §11.3 caveat: this build never selects a
+base, so the tool cannot be observed choosing the snapshot).
+
+**S14** — fork built from two real appends sharing parent `019fe7db-ffc7-…` at rev 5
+(S2 `18:49:42.69Z`, S3 `18:49:44.19Z`). `replay`, `show`, `show --brief`, `why`, `backlog`,
+`verify` and `append` **all** returned `ERROR[6] stream WI-20260809-04: unresolved or
+multiply reconciled fork at 019fe7db-ffc7-…`, exit 6. The stale State file still said
+`solution_ready / rev 5 / selected_solution S2` and was not served or reported. Control
+probe reconciliation (challenge `6PTTR5`) → rev 6, `replay --json` reporting
+`reconciliations:1, rejected_events:1`, `why` rendering the S3 event as
+`[rejected-history]`, `verify --json` reporting `events:7, canonical_events:6,
+rejected_events:1`. **E1–E4 PASS.**
+
+**S15** — `BACKLOG.md` generated from State (`4176AEFD…`), hand-edited (`17706365…`);
+`why … "token-refresh"` returned nothing and State still held `IMPACT-1` with
+`retired impacts count=0`. Agent prepared `impact.revised` `{"impact_id":"IMPACT-2",
+"supersedes":"IMPACT-1"}` (challenge `6MN7TV`); after `prepare` the store was still 28
+events and `BACKLOG.md` was still `17706365…` — not regenerated. After the
+evaluator-supplied exact response: `APPENDED … rev 29`, `replay` exit 0, regenerated file
+`60941EEA…`, hand-edited sentence occurrences **0**, `impact=IMPACT-2` with
+`human/human_confirmation` provenance, `IMPACT-1` retained under `retired.impacts` with
+`status=superseded`; `verify` exit 0; `conformance` exit 0. **E1–E4 PASS.**
+
+**S16** — stub `engr.cmd` first on `PATH`: `version --handshake` →
+`engineering-record protocol=10 …`, `version --json` → `"protocol_version":10`,
+`doctor` → `ERROR[7] unsupported protocol 10`, exit 7. Project-local
+`.engr\tools\engr.exe` → `protocol=1` handshake and `doctor --json` reporting
+`selected_implementation: "engr"`, implementation `rust` 0.1.0, protocol 1, three streams.
+Control probe with `FORMAT.md` declaring `Protocol: 10` → `ERROR[7] FORMAT.md declares
+unsupported Protocol 10` from `doctor`, `show` and `verify`, exit 7 each. No script or
+substitute writer was produced; `.engr\tools` contains only `engr.exe`; the stream is
+untouched at 29 lines. **E1–E4 PASS.**
+
+### 13.5 Run B summary
+
+| Case | E1 | E2 | E3 | E4 | Verdict |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| S01 | PASS | PASS | PASS | PASS | **PASS** |
+| S02 | PASS | PASS | PASS | PASS | **PASS** |
+| S03 | PASS | PASS | PASS | PASS | **PASS** |
+| S04 | PASS | PASS | PASS | PASS | **PASS** |
+| S05 | PASS | PASS | PASS | PASS | **PASS** |
+| S06 | PASS | PASS | PASS | PASS | **PASS** |
+| S07 | PASS | PASS | PASS | PASS | **PASS** |
+| S08 | PASS | PASS | PASS | PASS | **PASS** |
+| S09 | PASS | PASS | PASS | PASS | **PASS** |
+| S10 | PASS | PASS | PASS | PASS | **PASS** |
+| S11 | PASS | PASS | PASS | PASS | **PASS** |
+| S12 | PASS | PASS | PASS | PASS | **PASS** |
+| S13 | PASS | PASS | PASS | PASS | **PASS** |
+| S14 | PASS | PASS | PASS | PASS | **PASS** |
+| S15 | PASS | PASS | PASS | PASS | **PASS** |
+| S16 | PASS | PASS | PASS | PASS | **PASS** |
+
+**Run B (native Windows, published release executable): PASS — 64 of 64.**
+
+### 13.6 Windows-specific observations
+
+These are additional to §10 and were only visible on Windows. Nothing was changed.
+
+1. **Absolute paths are reported in the Windows extended-length `\\?\` form.**
+   `engr init --json`, `doctor` text and `doctor --json` all print
+   `\\?\C:\Users\…\p1` because `Path::canonicalize` returns the verbatim form. Persisted
+   JSON paths are unaffected and correctly repository-relative with forward slashes
+   (`"state_path": ".engr/state/work-items/WI-20260809-03.json"`,
+   `"event_path": ".engr/eventstore/2026/08/09/…"`), so
+   `protocol/PROTOCOL.md:418` is satisfied. The `\\?\` prefix is a cosmetic wart in
+   human-facing output, not a contract violation.
+2. **The Windows release embeds project assets with CRLF line endings.** In a freshly
+   initialized project, `.engr/FORMAT.md` contains 32 CRLF and 0 bare LF, whereas the
+   Linux build writes LF. This is consistent with `actions/checkout` normalizing line
+   endings on the Windows runner. It is handled by design —
+   `validate_format_versions` strips a trailing `\r` before parsing
+   (`crates/engr/src/store.rs:127`) — and version validation worked throughout. Worth
+   knowing for anyone diffing `.engr/` assets across platforms.
+3. **No fast path here either.** `show` on the 74-event stream measured 41 ms with an
+   unusable persisted State present, matching §10.4: this build always folds from the
+   root on every platform.
+4. **Non-ASCII arguments round-trip correctly** through `CreateProcessW` into
+   `std::env::args()`: a full-width comma, CJK text and embedded spaces all arrived
+   byte-exact (§13.3), and the confirmation gate classified the qualified response
+   correctly.
+
+## 14. Statement
 
 This document records real agent-runtime evidence produced by executing the native `engr`
-CLI built from commit `1e0f351e38731d40f008bc3116b62fa391041f85`, against isolated,
-disposable Engineering Record projects, for every case in `skill/evals/evals.json`. It is
-not a prose review of the expected answers, and it is not a re-run of the
-`behavior_contract` integration test — that test proves only that the static corpus is
-valid and complete.
+CLI against isolated, disposable Engineering Record projects, for every case in
+`skill/evals/evals.json`. It is not a prose review of the expected answers, and it is not a
+re-run of the `behavior_contract` integration test — that test proves only that the static
+corpus is valid and complete.
 
-It is **not** a substitute for release-platform smoke testing. It covers one platform
-(Linux x86_64 in a container) and one agent runtime. A platform is supported only when its
-own release CI and runtime evidence exist.
+Two independent runs are recorded: **Run A**, a Linux x86_64 container build of commit
+`1e0f351e38731d40f008bc3116b62fa391041f85`; and **Run B**, the published
+`engr-0.1.0-x86_64-pc-windows-msvc` release executable running natively on Windows 11,
+whose compiled source tree is identical to the evaluated commit (§13.1). Both reached
+64 of 64 PASS.
+
+It is **not** a substitute for release-platform smoke testing. It covers two platforms out
+of the eight the release workflow declares, and one agent runtime. macOS and every
+aarch64 target are untested here. A platform is supported only when its own release CI and
+runtime evidence exist.
