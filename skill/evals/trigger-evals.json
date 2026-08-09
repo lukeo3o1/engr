@@ -1,0 +1,74 @@
+[
+  {
+    "query": "Initialize `.engr/` for this long-running effort so agents can preserve facts, unknowns, decisions, risks, and verification without rewriting one giant backlog document.",
+    "should_trigger": true
+  },
+  {
+    "query": "Resume WI-20260807-03 from our engineering EventStore, replay anything after the current State head, and show me only the active problem and verification gates.",
+    "should_trigger": true
+  },
+  {
+    "query": "Two worktrees selected different solutions from the same parent event in `.engr/eventstore/`. Reconcile the stream without last-write-wins.",
+    "should_trigger": true
+  },
+  {
+    "query": "Regenerate BACKLOG.md and DECISIONS.md from the replayed engineering State; those Markdown files have drifted and must not be treated as truth.",
+    "should_trigger": true
+  },
+  {
+    "query": "Record the owner's accepted residual security risk in WI-20260808-04, but make sure the exact wording is confirmed before it becomes durable.",
+    "should_trigger": true
+  },
+  {
+    "query": "Our long-running coding agent keeps resurrecting rejected options and dropping old constraints after 40 turns. Adopt an append-only semantic engineering record with deterministic replay.",
+    "should_trigger": true
+  },
+  {
+    "query": "The implementation finished but topology changed after V2 passed. Invalidate stale verification, reopen the work item, and keep the old evidence traceable.",
+    "should_trigger": true
+  },
+  {
+    "query": "The approved Engr binary is unavailable on this workstation. Install the compatible Engr release and verify protocol-v1 conformance instead of rebuilding or replacing it.",
+    "should_trigger": true
+  },
+  {
+    "query": "Create a Decision Record stream for the key-distribution trust boundary, preserve the exact approved wording, and later supersede it without rewriting history.",
+    "should_trigger": true
+  },
+  {
+    "query": "Design EventStoreDB streams and projections for our ecommerce order service. We need optimistic concurrency and subscription recommendations.",
+    "should_trigger": false
+  },
+  {
+    "query": "Our Elasticsearch cluster is red after a rolling restart. Diagnose shard allocation and recover the ES data nodes.",
+    "should_trigger": false
+  },
+  {
+    "query": "Write an ADR explaining why this small service uses Postgres instead of MySQL; the repository has no `.engr/` protocol and we are not adopting one.",
+    "should_trigger": false
+  },
+  {
+    "query": "Append what I worked on today to my personal daily journal and generate a manager update in Traditional Chinese.",
+    "should_trigger": false
+  },
+  {
+    "query": "Save a private checkpoint so another agent can resume this chat tomorrow with the current focus and pending evidence.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add structured audit logging for every login attempt and send the logs to our SIEM.",
+    "should_trigger": false
+  },
+  {
+    "query": "Model Kafka business events for order fulfillment and choose partition keys for consumers.",
+    "should_trigger": false
+  },
+  {
+    "query": "Fix this one failing unit test, run the focused suite, and stop. There is no durable multi-turn record system in the project.",
+    "should_trigger": false
+  },
+  {
+    "query": "Summarize the Git history of this feature branch into release notes. Do not change project files.",
+    "should_trigger": false
+  }
+]

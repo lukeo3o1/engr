@@ -1,0 +1,571 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://engineering-record.local/schemas/event-v1.schema.json",
+  "title": "Engineering Record Event v1",
+  "description": "Protocol-v1 event envelope and event-data contracts.",
+  "type": "object",
+  "required": [
+    "format",
+    "protocol_version",
+    "event_schema_version",
+    "event_id",
+    "time",
+    "stream",
+    "rev",
+    "parent",
+    "event",
+    "provenance",
+    "record",
+    "data"
+  ],
+  "properties": {
+    "format": { "const": "engineering-event" },
+    "protocol_version": { "const": 1 },
+    "event_schema_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/eventId" },
+    "event_no": {
+      "type": "string",
+      "pattern": "^E-[0-9]{8}-[0-9]{4}$"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "stream": { "$ref": "#/$defs/streamId" },
+    "rev": { "type": "integer", "minimum": 1 },
+    "parent": {
+      "anyOf": [
+        { "$ref": "#/$defs/eventId" },
+        { "type": "null" }
+      ]
+    },
+    "event": {
+      "enum": [
+        "work_item.created",
+        "problem.revised",
+        "impact.revised",
+        "fact.added",
+        "fact.invalidated",
+        "constraint.added",
+        "constraint.removed",
+        "unknown.added",
+        "unknown.resolved",
+        "hypothesis.added",
+        "hypothesis.invalidated",
+        "solution.proposed",
+        "solution.selected",
+        "solution.rejected",
+        "solution.superseded",
+        "implementation.started",
+        "implementation.completed",
+        "verification.criterion_added",
+        "verification.result",
+        "verification.invalidated",
+        "finding.raised",
+        "finding.promoted",
+        "decision.linked",
+        "decision.unlinked",
+        "work_item.related",
+        "work_item.unrelated",
+        "risk.added",
+        "risk.accepted",
+        "risk.mitigated",
+        "work_item.blocked",
+        "work_item.unblocked",
+        "work_item.deferred",
+        "work_item.resumed",
+        "work_item.resolved",
+        "work_item.reopened",
+        "work_item.cancelled",
+        "decision.created",
+        "decision.revised",
+        "decision.accepted",
+        "decision.superseded",
+        "decision.revoked",
+        "stream.fork_reconciled"
+      ]
+    },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "record": { "$ref": "#/$defs/record" },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": {
+          "enum": [
+            "work_item.created",
+            "work_item.deferred",
+            "work_item.resumed",
+            "work_item.resolved",
+            "work_item.reopened",
+            "work_item.cancelled"
+          ]
+        },
+        "data": { "$ref": "#/$defs/emptyData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/decisionId" },
+        "event": {
+          "enum": [
+            "decision.created",
+            "decision.revised",
+            "decision.accepted",
+            "decision.revoked"
+          ]
+        },
+        "data": { "$ref": "#/$defs/emptyData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "problem.revised" },
+        "data": { "$ref": "#/$defs/problemData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "impact.revised" },
+        "data": { "$ref": "#/$defs/impactData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["fact.added", "fact.invalidated"] },
+        "data": { "$ref": "#/$defs/factData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["constraint.added", "constraint.removed"] },
+        "data": { "$ref": "#/$defs/constraintData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["unknown.added", "unknown.resolved"] },
+        "data": { "$ref": "#/$defs/unknownData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["hypothesis.added", "hypothesis.invalidated"] },
+        "data": { "$ref": "#/$defs/hypothesisData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["solution.proposed", "solution.selected", "solution.rejected"] },
+        "data": { "$ref": "#/$defs/solutionData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "solution.superseded" },
+        "data": { "$ref": "#/$defs/solutionSupersededData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "implementation.started" },
+        "data": { "$ref": "#/$defs/implementationStartedData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "implementation.completed" },
+        "data": { "$ref": "#/$defs/implementationCompletedData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "verification.criterion_added" },
+        "data": { "$ref": "#/$defs/verificationCriterionData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "verification.result" },
+        "data": { "$ref": "#/$defs/verificationResultData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "verification.invalidated" },
+        "data": { "$ref": "#/$defs/verificationIdData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "finding.raised" },
+        "data": { "$ref": "#/$defs/findingData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "const": "finding.promoted" },
+        "data": { "$ref": "#/$defs/findingPromotedData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["decision.linked", "decision.unlinked"] },
+        "data": { "$ref": "#/$defs/decisionLinkData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["work_item.related", "work_item.unrelated"] },
+        "data": { "$ref": "#/$defs/workItemRelationData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["risk.added", "risk.accepted", "risk.mitigated"] },
+        "data": { "$ref": "#/$defs/riskData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/workItemId" },
+        "event": { "enum": ["work_item.blocked", "work_item.unblocked"] },
+        "data": { "$ref": "#/$defs/blockerData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/decisionId" },
+        "event": { "const": "decision.superseded" },
+        "data": { "$ref": "#/$defs/decisionSupersededData" }
+      }
+    },
+    {
+      "properties": {
+        "stream": { "$ref": "#/$defs/streamId" },
+        "event": { "const": "stream.fork_reconciled" },
+        "data": { "$ref": "#/$defs/forkReconciledData" }
+      }
+    }
+  ],
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "oneOf": [
+        {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        {
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      ]
+    },
+    "entityId": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9-]{0,63}$"
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WI-[0-9]{8}-[0-9]{2}$"
+    },
+    "decisionId": {
+      "type": "string",
+      "pattern": "^DR-[0-9]{8}-[0-9]{2}-[A-Z0-9]+(?:-[A-Z0-9]+)*$"
+    },
+    "streamId": {
+      "oneOf": [
+        { "$ref": "#/$defs/workItemId" },
+        { "$ref": "#/$defs/decisionId" }
+      ]
+    },
+    "artifactReferences": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "confirmation": {
+      "type": "object",
+      "required": ["challenge"],
+      "properties": {
+        "challenge": {
+          "type": "string",
+          "pattern": "^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$"
+        },
+        "candidate_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["initiator", "basis", "confirmation"],
+          "properties": {
+            "initiator": { "const": "human" },
+            "basis": { "const": "human_confirmation" },
+            "confirmation": { "$ref": "#/$defs/confirmation" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["initiator", "basis"],
+          "properties": {
+            "initiator": { "const": "agent" },
+            "basis": {
+              "enum": [
+                "observation",
+                "inference",
+                "agent_proposal",
+                "implementation",
+                "verification",
+                "dependency_change"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["initiator", "basis"],
+          "properties": {
+            "initiator": { "const": "system" },
+            "basis": {
+              "enum": ["observation", "verification", "dependency_change"]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "record": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "emptyData": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "problemData": {
+      "type": "object",
+      "required": ["problem_id"],
+      "properties": {
+        "problem_id": { "$ref": "#/$defs/entityId" },
+        "supersedes": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "impactData": {
+      "type": "object",
+      "required": ["impact_id"],
+      "properties": {
+        "impact_id": { "$ref": "#/$defs/entityId" },
+        "supersedes": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "factData": {
+      "type": "object",
+      "required": ["fact_id"],
+      "properties": {
+        "fact_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "constraintData": {
+      "type": "object",
+      "required": ["constraint_id"],
+      "properties": {
+        "constraint_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "unknownData": {
+      "type": "object",
+      "required": ["unknown_id"],
+      "properties": {
+        "unknown_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "hypothesisData": {
+      "type": "object",
+      "required": ["hypothesis_id"],
+      "properties": {
+        "hypothesis_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "solutionData": {
+      "type": "object",
+      "required": ["solution_id"],
+      "properties": {
+        "solution_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "solutionSupersededData": {
+      "type": "object",
+      "required": ["solution_id"],
+      "properties": {
+        "solution_id": { "$ref": "#/$defs/entityId" },
+        "by_solution_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "implementationStartedData": {
+      "type": "object",
+      "required": ["implementation_id"],
+      "properties": {
+        "implementation_id": { "$ref": "#/$defs/entityId" },
+        "solution_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "implementationCompletedData": {
+      "type": "object",
+      "required": ["implementation_id"],
+      "properties": {
+        "implementation_id": { "$ref": "#/$defs/entityId" },
+        "solution_id": { "$ref": "#/$defs/entityId" },
+        "artifacts": { "$ref": "#/$defs/artifactReferences" }
+      },
+      "additionalProperties": false
+    },
+    "verificationCriterionData": {
+      "type": "object",
+      "required": ["verification_id", "required"],
+      "properties": {
+        "verification_id": { "$ref": "#/$defs/entityId" },
+        "required": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "verificationResultData": {
+      "type": "object",
+      "required": ["verification_id", "result"],
+      "properties": {
+        "verification_id": { "$ref": "#/$defs/entityId" },
+        "result": { "enum": ["passed", "failed", "inconclusive"] },
+        "artifacts": { "$ref": "#/$defs/artifactReferences" }
+      },
+      "additionalProperties": false
+    },
+    "verificationIdData": {
+      "type": "object",
+      "required": ["verification_id"],
+      "properties": {
+        "verification_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "findingData": {
+      "type": "object",
+      "required": ["finding_id"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "findingPromotedData": {
+      "type": "object",
+      "required": ["finding_id", "work_item_id"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/entityId" },
+        "work_item_id": { "$ref": "#/$defs/workItemId" }
+      },
+      "additionalProperties": false
+    },
+    "decisionLinkData": {
+      "type": "object",
+      "required": ["decision_id"],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/decisionId" }
+      },
+      "additionalProperties": false
+    },
+    "workItemRelationData": {
+      "type": "object",
+      "required": ["work_item_id", "relation"],
+      "properties": {
+        "work_item_id": { "$ref": "#/$defs/workItemId" },
+        "relation": {
+          "enum": ["relates_to", "depends_on", "blocks", "duplicates", "parent_of"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "riskData": {
+      "type": "object",
+      "required": ["risk_id"],
+      "properties": {
+        "risk_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "blockerData": {
+      "type": "object",
+      "required": ["blocker_id"],
+      "properties": {
+        "blocker_id": { "$ref": "#/$defs/entityId" }
+      },
+      "additionalProperties": false
+    },
+    "decisionSupersededData": {
+      "type": "object",
+      "required": ["by_decision_id"],
+      "properties": {
+        "by_decision_id": { "$ref": "#/$defs/decisionId" }
+      },
+      "additionalProperties": false
+    },
+    "forkReconciledData": {
+      "type": "object",
+      "required": ["fork_parent", "accepted_root", "rejected_roots"],
+      "properties": {
+        "fork_parent": { "$ref": "#/$defs/eventId" },
+        "accepted_root": { "$ref": "#/$defs/eventId" },
+        "rejected_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/eventId" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

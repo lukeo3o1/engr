@@ -1,0 +1,1432 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-02"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-02 — discovered",
+      "State through: rev 61 (019fde0f-b840-70a0-8000-0000000000a0)",
+      "",
+      "Findings",
+      "- FIND-1 — Finding 1",
+      "- FIND-2 — Finding 2",
+      "- FIND-3 — Finding 3",
+      "- FIND-4 — Finding 4",
+      "- FIND-5 — Finding 5",
+      "- FIND-6 — Finding 6",
+      "- FIND-7 — Finding 7",
+      "- FIND-8 — Finding 8",
+      "- FIND-9 — Finding 9",
+      "- FIND-10 — Finding 10",
+      "- FIND-11 — Finding 11",
+      "- FIND-12 — Finding 12",
+      "- FIND-13 — Finding 13",
+      "- FIND-14 — Finding 14",
+      "- FIND-15 — Finding 15",
+      "- FIND-16 — Finding 16",
+      "- FIND-17 — Finding 17",
+      "- FIND-18 — Finding 18",
+      "- FIND-19 — Finding 19",
+      "- FIND-20 — Finding 20",
+      "- FIND-21 — Finding 21",
+      "- FIND-22 — Finding 22",
+      "- FIND-23 — Finding 23",
+      "- FIND-24 — Finding 24",
+      "- FIND-25 — Finding 25",
+      "- FIND-26 — Finding 26",
+      "- FIND-27 — Finding 27",
+      "- FIND-28 — Finding 28",
+      "- FIND-29 — Finding 29",
+      "- FIND-30 — Finding 30",
+      "- FIND-31 — Finding 31",
+      "- FIND-32 — Finding 32",
+      "- FIND-33 — Finding 33",
+      "- FIND-34 — Finding 34",
+      "- FIND-35 — Finding 35",
+      "- FIND-36 — Finding 36",
+      "- FIND-37 — Finding 37",
+      "- FIND-38 — Finding 38",
+      "- FIND-39 — Finding 39",
+      "- FIND-40 — Finding 40",
+      "- FIND-41 — Finding 41",
+      "- FIND-42 — Finding 42",
+      "- FIND-43 — Finding 43",
+      "- FIND-44 — Finding 44",
+      "- FIND-45 — Finding 45",
+      "- FIND-46 — Finding 46",
+      "- FIND-47 — Finding 47",
+      "- FIND-48 — Finding 48",
+      "- FIND-49 — Finding 49",
+      "- FIND-50 — Finding 50",
+      "- FIND-51 — Finding 51",
+      "- FIND-52 — Finding 52",
+      "- FIND-53 — Finding 53",
+      "- FIND-54 — Finding 54",
+      "- FIND-55 — Finding 55",
+      "- FIND-56 — Finding 56",
+      "- FIND-57 — Finding 57",
+      "- FIND-58 — Finding 58",
+      "- FIND-59 — Finding 59",
+      "- FIND-60 — Finding 60",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fde0f-b840-70a0-8000-0000000000a0",
+      "rev": 61
+    },
+    "state_integrity": "c429aee50d677ae78dba2bedfcffd44fef8faca3dba426ff9c166455e9796aba",
+    "status": "discovered"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "long-preservation",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-02": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fde0f-b840-7064-8000-000000000064",
+        "event_no": "E-20260808-0100",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Long preservation fixture"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-1"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7065-8000-000000000065",
+        "event_no": "E-20260808-0101",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7064-8000-000000000064",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 1"
+        },
+        "rev": 2,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-2"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7066-8000-000000000066",
+        "event_no": "E-20260808-0102",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7065-8000-000000000065",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 2"
+        },
+        "rev": 3,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-3"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7067-8000-000000000067",
+        "event_no": "E-20260808-0103",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7066-8000-000000000066",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 3"
+        },
+        "rev": 4,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-4"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7068-8000-000000000068",
+        "event_no": "E-20260808-0104",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7067-8000-000000000067",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 4"
+        },
+        "rev": 5,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-5"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7069-8000-000000000069",
+        "event_no": "E-20260808-0105",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7068-8000-000000000068",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 5"
+        },
+        "rev": 6,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-6"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706a-8000-00000000006a",
+        "event_no": "E-20260808-0106",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7069-8000-000000000069",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 6"
+        },
+        "rev": 7,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-7"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706b-8000-00000000006b",
+        "event_no": "E-20260808-0107",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706a-8000-00000000006a",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 7"
+        },
+        "rev": 8,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-8"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706c-8000-00000000006c",
+        "event_no": "E-20260808-0108",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706b-8000-00000000006b",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 8"
+        },
+        "rev": 9,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-9"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706d-8000-00000000006d",
+        "event_no": "E-20260808-0109",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706c-8000-00000000006c",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 9"
+        },
+        "rev": 10,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-10"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706e-8000-00000000006e",
+        "event_no": "E-20260808-0110",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706d-8000-00000000006d",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 10"
+        },
+        "rev": 11,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-11"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-706f-8000-00000000006f",
+        "event_no": "E-20260808-0111",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706e-8000-00000000006e",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 11"
+        },
+        "rev": 12,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-12"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7070-8000-000000000070",
+        "event_no": "E-20260808-0112",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-706f-8000-00000000006f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 12"
+        },
+        "rev": 13,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-13"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7071-8000-000000000071",
+        "event_no": "E-20260808-0113",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7070-8000-000000000070",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 13"
+        },
+        "rev": 14,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-14"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7072-8000-000000000072",
+        "event_no": "E-20260808-0114",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7071-8000-000000000071",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 14"
+        },
+        "rev": 15,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-15"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7073-8000-000000000073",
+        "event_no": "E-20260808-0115",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7072-8000-000000000072",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 15"
+        },
+        "rev": 16,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-16"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7074-8000-000000000074",
+        "event_no": "E-20260808-0116",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7073-8000-000000000073",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 16"
+        },
+        "rev": 17,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-17"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7075-8000-000000000075",
+        "event_no": "E-20260808-0117",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7074-8000-000000000074",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 17"
+        },
+        "rev": 18,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-18"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7076-8000-000000000076",
+        "event_no": "E-20260808-0118",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7075-8000-000000000075",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 18"
+        },
+        "rev": 19,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-19"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7077-8000-000000000077",
+        "event_no": "E-20260808-0119",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7076-8000-000000000076",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 19"
+        },
+        "rev": 20,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-20"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7078-8000-000000000078",
+        "event_no": "E-20260808-0120",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7077-8000-000000000077",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 20"
+        },
+        "rev": 21,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-21"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7079-8000-000000000079",
+        "event_no": "E-20260808-0121",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7078-8000-000000000078",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 21"
+        },
+        "rev": 22,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-22"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707a-8000-00000000007a",
+        "event_no": "E-20260808-0122",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7079-8000-000000000079",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 22"
+        },
+        "rev": 23,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-23"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707b-8000-00000000007b",
+        "event_no": "E-20260808-0123",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707a-8000-00000000007a",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 23"
+        },
+        "rev": 24,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-24"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707c-8000-00000000007c",
+        "event_no": "E-20260808-0124",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707b-8000-00000000007b",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 24"
+        },
+        "rev": 25,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-25"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707d-8000-00000000007d",
+        "event_no": "E-20260808-0125",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707c-8000-00000000007c",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 25"
+        },
+        "rev": 26,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-26"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707e-8000-00000000007e",
+        "event_no": "E-20260808-0126",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707d-8000-00000000007d",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 26"
+        },
+        "rev": 27,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-27"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-707f-8000-00000000007f",
+        "event_no": "E-20260808-0127",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707e-8000-00000000007e",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 27"
+        },
+        "rev": 28,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-28"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7080-8000-000000000080",
+        "event_no": "E-20260808-0128",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-707f-8000-00000000007f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 28"
+        },
+        "rev": 29,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-29"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7081-8000-000000000081",
+        "event_no": "E-20260808-0129",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7080-8000-000000000080",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 29"
+        },
+        "rev": 30,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-30"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7082-8000-000000000082",
+        "event_no": "E-20260808-0130",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7081-8000-000000000081",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 30"
+        },
+        "rev": 31,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-31"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7083-8000-000000000083",
+        "event_no": "E-20260808-0131",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7082-8000-000000000082",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 31"
+        },
+        "rev": 32,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-32"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7084-8000-000000000084",
+        "event_no": "E-20260808-0132",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7083-8000-000000000083",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 32"
+        },
+        "rev": 33,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-33"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7085-8000-000000000085",
+        "event_no": "E-20260808-0133",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7084-8000-000000000084",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 33"
+        },
+        "rev": 34,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-34"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7086-8000-000000000086",
+        "event_no": "E-20260808-0134",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7085-8000-000000000085",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 34"
+        },
+        "rev": 35,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-35"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7087-8000-000000000087",
+        "event_no": "E-20260808-0135",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7086-8000-000000000086",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 35"
+        },
+        "rev": 36,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-36"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7088-8000-000000000088",
+        "event_no": "E-20260808-0136",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7087-8000-000000000087",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 36"
+        },
+        "rev": 37,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-37"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7089-8000-000000000089",
+        "event_no": "E-20260808-0137",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7088-8000-000000000088",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 37"
+        },
+        "rev": 38,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-38"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708a-8000-00000000008a",
+        "event_no": "E-20260808-0138",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7089-8000-000000000089",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 38"
+        },
+        "rev": 39,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-39"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708b-8000-00000000008b",
+        "event_no": "E-20260808-0139",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708a-8000-00000000008a",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 39"
+        },
+        "rev": 40,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-40"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708c-8000-00000000008c",
+        "event_no": "E-20260808-0140",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708b-8000-00000000008b",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 40"
+        },
+        "rev": 41,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-41"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708d-8000-00000000008d",
+        "event_no": "E-20260808-0141",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708c-8000-00000000008c",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 41"
+        },
+        "rev": 42,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-42"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708e-8000-00000000008e",
+        "event_no": "E-20260808-0142",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708d-8000-00000000008d",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 42"
+        },
+        "rev": 43,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-43"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-708f-8000-00000000008f",
+        "event_no": "E-20260808-0143",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708e-8000-00000000008e",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 43"
+        },
+        "rev": 44,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-44"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7090-8000-000000000090",
+        "event_no": "E-20260808-0144",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-708f-8000-00000000008f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 44"
+        },
+        "rev": 45,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-45"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7091-8000-000000000091",
+        "event_no": "E-20260808-0145",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7090-8000-000000000090",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 45"
+        },
+        "rev": 46,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-46"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7092-8000-000000000092",
+        "event_no": "E-20260808-0146",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7091-8000-000000000091",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 46"
+        },
+        "rev": 47,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-47"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7093-8000-000000000093",
+        "event_no": "E-20260808-0147",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7092-8000-000000000092",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 47"
+        },
+        "rev": 48,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-48"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7094-8000-000000000094",
+        "event_no": "E-20260808-0148",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7093-8000-000000000093",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 48"
+        },
+        "rev": 49,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-49"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7095-8000-000000000095",
+        "event_no": "E-20260808-0149",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7094-8000-000000000094",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 49"
+        },
+        "rev": 50,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-50"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7096-8000-000000000096",
+        "event_no": "E-20260808-0150",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7095-8000-000000000095",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 50"
+        },
+        "rev": 51,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-51"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7097-8000-000000000097",
+        "event_no": "E-20260808-0151",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7096-8000-000000000096",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 51"
+        },
+        "rev": 52,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-52"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7098-8000-000000000098",
+        "event_no": "E-20260808-0152",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7097-8000-000000000097",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 52"
+        },
+        "rev": 53,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-53"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-7099-8000-000000000099",
+        "event_no": "E-20260808-0153",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7098-8000-000000000098",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 53"
+        },
+        "rev": 54,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-54"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709a-8000-00000000009a",
+        "event_no": "E-20260808-0154",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7099-8000-000000000099",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 54"
+        },
+        "rev": 55,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-55"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709b-8000-00000000009b",
+        "event_no": "E-20260808-0155",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709a-8000-00000000009a",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 55"
+        },
+        "rev": 56,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-56"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709c-8000-00000000009c",
+        "event_no": "E-20260808-0156",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709b-8000-00000000009b",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 56"
+        },
+        "rev": 57,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-57"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709d-8000-00000000009d",
+        "event_no": "E-20260808-0157",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709c-8000-00000000009c",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 57"
+        },
+        "rev": 58,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-58"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709e-8000-00000000009e",
+        "event_no": "E-20260808-0158",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709d-8000-00000000009d",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 58"
+        },
+        "rev": 59,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-59"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-709f-8000-00000000009f",
+        "event_no": "E-20260808-0159",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709e-8000-00000000009e",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 59"
+        },
+        "rev": 60,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-60"
+        },
+        "event": "finding.raised",
+        "event_id": "019fde0f-b840-70a0-8000-0000000000a0",
+        "event_no": "E-20260808-0160",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-709f-8000-00000000009f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Finding 60"
+        },
+        "rev": 61,
+        "stream": "WI-20260808-02",
+        "time": "2026-08-08T02:30:00+08:00"
+      }
+    ]
+  }
+}

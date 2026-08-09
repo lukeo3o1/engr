@@ -1,0 +1,164 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-07"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-07 — reopened",
+      "State through: rev 6 (019fe0f7-37ea-7828-b669-fa8468b60fe3)",
+      "",
+      "Facts",
+      "- F1 — A production bootstrap received key generation 41 after rotation to 42.",
+      "",
+      "Verification",
+      "- V1 — V1: a new node never receives an expired key generation. [required=true, result=passed]",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe0f7-37ea-7828-b669-fa8468b60fe3",
+      "rev": 6
+    },
+    "state_integrity": "62eb97081d66fe7e3f30959c220169bafa9712b91f6b242e1f3c1656ba94f0b1",
+    "status": "reopened"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "work-item-reopen",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-07": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe0f7-3534-7db0-95ec-382b0b403512",
+        "event_no": "E-20260808-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Bootstrap key generation"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      },
+      {
+        "data": {
+          "required": true,
+          "verification_id": "V1"
+        },
+        "event": "verification.criterion_added",
+        "event_id": "019fe0f7-35bb-7c21-a93a-42d34acce6b3",
+        "event_no": "E-20260808-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-3534-7db0-95ec-382b0b403512",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "V1: a new node never receives an expired key generation."
+        },
+        "rev": 2,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      },
+      {
+        "data": {
+          "result": "passed",
+          "verification_id": "V1"
+        },
+        "event": "verification.result",
+        "event_id": "019fe0f7-3644-79c0-9ccc-8d28d9c965a2",
+        "event_no": "E-20260808-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-35bb-7c21-a93a-42d34acce6b3",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "verification",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "V1 passed in 1000 bootstraps."
+        },
+        "rev": 3,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      },
+      {
+        "data": {},
+        "event": "work_item.resolved",
+        "event_id": "019fe0f7-36ce-774c-8352-1b851c432869",
+        "event_no": "E-20260808-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-3644-79c0-9ccc-8d28d9c965a2",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "All required verification passed."
+        },
+        "rev": 4,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      },
+      {
+        "data": {},
+        "event": "work_item.reopened",
+        "event_id": "019fe0f7-3753-7d82-ab25-7606f3322053",
+        "event_no": "E-20260808-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-36ce-774c-8352-1b851c432869",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Production hit an expired key generation during a bootstrap."
+        },
+        "rev": 5,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F1"
+        },
+        "event": "fact.added",
+        "event_id": "019fe0f7-37ea-7828-b669-fa8468b60fe3",
+        "event_no": "E-20260808-0006",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-3753-7d82-ab25-7606f3322053",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "A production bootstrap received key generation 41 after rotation to 42."
+        },
+        "rev": 6,
+        "stream": "WI-20260808-07",
+        "time": "2026-08-08T18:42:05+08:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,157 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-03"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-03 — investigating",
+      "State through: rev 4 (019fe0f7-1936-7198-ab1f-a10a87735e78)",
+      "",
+      "Facts",
+      "- F2 — Stale entries survive a rolling restart.",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe0f7-1936-7198-ab1f-a10a87735e78",
+      "rev": 4
+    },
+    "provenance_view": [
+      "WI-20260808-03 — investigating",
+      "State through: rev 4 (019fe0f7-1936-7198-ab1f-a10a87735e78)",
+      "",
+      "Facts",
+      "- F1 — The cache is flushed on every deploy. [invalidated; event 019fe0f7-1936-7198-ab1f-a10a87735e78; agent/observation]",
+      "- F2 — Stale entries survive a rolling restart. [active; event 019fe0f7-18b5-7d05-9bcf-e099604c1a08; agent/observation]",
+      "",
+      "Selected solution: none"
+    ],
+    "state_integrity": "685ff635defca3f98809e16b87929b1e23087bddea4172de401b9b4598f374e8",
+    "state_subset": {
+      "facts": [
+        {
+          "id": "F1",
+          "introduced_by": "019fe0f7-1831-755c-bfd3-a93d2e5c5358",
+          "last_event_id": "019fe0f7-1936-7198-ab1f-a10a87735e78",
+          "last_text": "Deploy flushing was removed in release 4.2, so F1 no longer holds.",
+          "provenance": {
+            "basis": "observation",
+            "initiator": "agent"
+          },
+          "status": "invalidated",
+          "text": "The cache is flushed on every deploy."
+        },
+        {
+          "id": "F2",
+          "introduced_by": "019fe0f7-18b5-7d05-9bcf-e099604c1a08",
+          "last_event_id": "019fe0f7-18b5-7d05-9bcf-e099604c1a08",
+          "last_text": "Stale entries survive a rolling restart.",
+          "provenance": {
+            "basis": "observation",
+            "initiator": "agent"
+          },
+          "status": "active",
+          "text": "Stale entries survive a rolling restart."
+        }
+      ]
+    },
+    "status": "investigating"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "fact-invalidation",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-03": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe0f7-17a6-7b03-a712-d78fc09b78d1",
+        "event_no": "E-20260808-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Cache invalidation audit"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-03",
+        "time": "2026-08-08T18:41:57+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F1"
+        },
+        "event": "fact.added",
+        "event_id": "019fe0f7-1831-755c-bfd3-a93d2e5c5358",
+        "event_no": "E-20260808-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-17a6-7b03-a712-d78fc09b78d1",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "The cache is flushed on every deploy."
+        },
+        "rev": 2,
+        "stream": "WI-20260808-03",
+        "time": "2026-08-08T18:41:57+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F2"
+        },
+        "event": "fact.added",
+        "event_id": "019fe0f7-18b5-7d05-9bcf-e099604c1a08",
+        "event_no": "E-20260808-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1831-755c-bfd3-a93d2e5c5358",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Stale entries survive a rolling restart."
+        },
+        "rev": 3,
+        "stream": "WI-20260808-03",
+        "time": "2026-08-08T18:41:57+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F1"
+        },
+        "event": "fact.invalidated",
+        "event_id": "019fe0f7-1936-7198-ab1f-a10a87735e78",
+        "event_no": "E-20260808-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-18b5-7d05-9bcf-e099604c1a08",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Deploy flushing was removed in release 4.2, so F1 no longer holds."
+        },
+        "rev": 4,
+        "stream": "WI-20260808-03",
+        "time": "2026-08-08T18:41:58+08:00"
+      }
+    ]
+  }
+}

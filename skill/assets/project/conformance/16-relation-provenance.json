@@ -1,0 +1,208 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260809-04"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260809-04 — clarifying",
+      "State through: rev 5 (019fe2a0-2b20-7005-9d52-3a1b62e1d005)",
+      "",
+      "Problem",
+      "Rotating the signing key today needs every node restarted at once.",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe2a0-2b20-7005-9d52-3a1b62e1d005",
+      "rev": 5
+    },
+    "provenance_view": [
+      "WI-20260809-04 — clarifying",
+      "State through: rev 5 (019fe2a0-2b20-7005-9d52-3a1b62e1d005)",
+      "",
+      "Problem",
+      "P1 — Rotating the signing key today needs every node restarted at once. [active; event 019fe2a0-2b20-7002-9d52-3a1b62e1d002; agent/observation]",
+      "",
+      "Selected solution: none",
+      "",
+      "Related work items",
+      "- WI-20260809-05 (depends_on) — Rotation does not depend on the key store work; the two can ship in either order. [removed; event 019fe2a0-2b20-7004-9d52-3a1b62e1d004; human/human_confirmation]",
+      "- WI-20260809-05 (relates_to) — Both work items touch the same signing key, so they stay cross-referenced. [active; event 019fe2a0-2b20-7005-9d52-3a1b62e1d005; agent/observation]"
+    ],
+    "state_integrity": "42555cd60b26f116962590ef4d378b8cffe0e9284d2e4fdb29476ce7700a9896",
+    "state_subset": {
+      "related_work_items": [
+        {
+          "introduced_by": "019fe2a0-2b20-7003-9d52-3a1b62e1d003",
+          "last_event_id": "019fe2a0-2b20-7004-9d52-3a1b62e1d004",
+          "provenance": {
+            "basis": "human_confirmation",
+            "initiator": "human"
+          },
+          "relation": "depends_on",
+          "status": "removed",
+          "work_item_id": "WI-20260809-05"
+        },
+        {
+          "introduced_by": "019fe2a0-2b20-7005-9d52-3a1b62e1d005",
+          "last_event_id": "019fe2a0-2b20-7005-9d52-3a1b62e1d005",
+          "provenance": {
+            "basis": "observation",
+            "initiator": "agent"
+          },
+          "relation": "relates_to",
+          "status": "active",
+          "work_item_id": "WI-20260809-05"
+        }
+      ]
+    },
+    "status": "clarifying"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "relation-provenance",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260809-04": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe2a0-2b20-7001-9d52-3a1b62e1d001",
+        "event_no": "E-20260809-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Rotate the signing key without a maintenance window"
+        },
+        "rev": 1,
+        "stream": "WI-20260809-04",
+        "time": "2026-08-09T10:05:00+08:00"
+      },
+      {
+        "data": {
+          "problem_id": "P1"
+        },
+        "event": "problem.revised",
+        "event_id": "019fe2a0-2b20-7002-9d52-3a1b62e1d002",
+        "event_no": "E-20260809-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe2a0-2b20-7001-9d52-3a1b62e1d001",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Rotating the signing key today needs every node restarted at once."
+        },
+        "rev": 2,
+        "stream": "WI-20260809-04",
+        "time": "2026-08-09T10:05:01+08:00"
+      },
+      {
+        "data": {
+          "relation": "depends_on",
+          "work_item_id": "WI-20260809-05"
+        },
+        "event": "work_item.related",
+        "event_id": "019fe2a0-2b20-7003-9d52-3a1b62e1d003",
+        "event_no": "E-20260809-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe2a0-2b20-7002-9d52-3a1b62e1d002",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "inference",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Rotation looks like it has to wait for the shared key store work."
+        },
+        "rev": 3,
+        "stream": "WI-20260809-04",
+        "time": "2026-08-09T10:05:02+08:00"
+      },
+      {
+        "data": {
+          "relation": "depends_on",
+          "work_item_id": "WI-20260809-05"
+        },
+        "event": "work_item.unrelated",
+        "event_id": "019fe2a0-2b20-7004-9d52-3a1b62e1d004",
+        "event_no": "E-20260809-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe2a0-2b20-7003-9d52-3a1b62e1d003",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "human_confirmation",
+          "confirmation": {
+            "challenge": "M3XR7K"
+          },
+          "initiator": "human"
+        },
+        "record": {
+          "text": "Rotation does not depend on the key store work; the two can ship in either order."
+        },
+        "rev": 4,
+        "stream": "WI-20260809-04",
+        "time": "2026-08-09T10:05:03+08:00"
+      },
+      {
+        "data": {
+          "relation": "relates_to",
+          "work_item_id": "WI-20260809-05"
+        },
+        "event": "work_item.related",
+        "event_id": "019fe2a0-2b20-7005-9d52-3a1b62e1d005",
+        "event_no": "E-20260809-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe2a0-2b20-7004-9d52-3a1b62e1d004",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Both work items touch the same signing key, so they stay cross-referenced."
+        },
+        "rev": 5,
+        "stream": "WI-20260809-04",
+        "time": "2026-08-09T10:05:04+08:00"
+      }
+    ],
+    "WI-20260809-05": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe2a0-2b20-7011-9d52-3a1b62e1d011",
+        "event_no": "E-20260809-0006",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Introduce a shared key store for the HA pair"
+        },
+        "rev": 1,
+        "stream": "WI-20260809-05",
+        "time": "2026-08-09T10:04:00+08:00"
+      }
+    ]
+  }
+}

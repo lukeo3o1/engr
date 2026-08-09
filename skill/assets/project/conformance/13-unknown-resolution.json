@@ -1,0 +1,162 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260809-01"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260809-01 — investigating",
+      "State through: rev 5 (019fe21b-df5d-77ee-b56b-4591e774575f)",
+      "",
+      "Facts",
+      "- F1 — The drift reproduces on every cold bootstrap.",
+      "",
+      "Unknowns",
+      "- U2 — Whether the drift also affects nodes rejoining after a network partition.",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe21b-df5d-77ee-b56b-4591e774575f",
+      "rev": 5
+    },
+    "state_integrity": "ad4c9f65eb67c1f741d3cd3e046bdfe8bc173ed31529bbadac08c2ef99b64906",
+    "state_subset": {
+      "facts": [
+        {
+          "id": "F1",
+          "status": "active"
+        }
+      ],
+      "unknowns": [
+        {
+          "id": "U1",
+          "status": "resolved"
+        },
+        {
+          "id": "U2",
+          "status": "unresolved"
+        }
+      ]
+    },
+    "status": "investigating"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "unknown-resolution",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260809-01": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe21b-dd31-7176-b97d-17b86466ce76",
+        "event_no": "E-20260809-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Bootstrap key generation drift"
+        },
+        "rev": 1,
+        "stream": "WI-20260809-01",
+        "time": "2026-08-09T00:01:44+08:00"
+      },
+      {
+        "data": {
+          "unknown_id": "U1"
+        },
+        "event": "unknown.added",
+        "event_id": "019fe21b-ddc0-76e8-9a33-e0ed46d1c101",
+        "event_no": "E-20260809-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe21b-dd31-7176-b97d-17b86466ce76",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Whether a fresh node bootstrap hits the same key generation drift."
+        },
+        "rev": 2,
+        "stream": "WI-20260809-01",
+        "time": "2026-08-09T00:01:44+08:00"
+      },
+      {
+        "data": {
+          "unknown_id": "U2"
+        },
+        "event": "unknown.added",
+        "event_id": "019fe21b-de49-7115-a880-01107fb0afb8",
+        "event_no": "E-20260809-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe21b-ddc0-76e8-9a33-e0ed46d1c101",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Whether the drift also affects nodes rejoining after a network partition."
+        },
+        "rev": 3,
+        "stream": "WI-20260809-01",
+        "time": "2026-08-09T00:01:45+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F1"
+        },
+        "event": "fact.added",
+        "event_id": "019fe21b-ded0-7622-85dc-448d25884ea1",
+        "event_no": "E-20260809-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe21b-de49-7115-a880-01107fb0afb8",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "The drift reproduces on every cold bootstrap."
+        },
+        "rev": 4,
+        "stream": "WI-20260809-01",
+        "time": "2026-08-09T00:01:45+08:00"
+      },
+      {
+        "data": {
+          "unknown_id": "U1"
+        },
+        "event": "unknown.resolved",
+        "event_id": "019fe21b-df5d-77ee-b56b-4591e774575f",
+        "event_no": "E-20260809-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe21b-ded0-7622-85dc-448d25884ea1",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "verification",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "A fresh node bootstrap does hit the drift: 2 of 1000 runs received key generation 41 instead of 42."
+        },
+        "rev": 5,
+        "stream": "WI-20260809-01",
+        "time": "2026-08-09T00:01:45+08:00"
+      }
+    ]
+  }
+}

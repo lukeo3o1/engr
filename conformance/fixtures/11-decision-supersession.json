@@ -1,0 +1,140 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "DR-20260808-01-KEY-DIST"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "DR-20260808-01-KEY-DIST — superseded",
+      "State through: rev 3 (019fe0f7-31fc-7236-9f06-09147e35620e)",
+      "",
+      "Topic",
+      "How signing keys reach each node.",
+      "",
+      "Decision",
+      "Nodes share one signing key protected by a local KEK.",
+      "",
+      "Superseded by: DR-20260808-02-KEY-DIST"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe0f7-31fc-7236-9f06-09147e35620e",
+      "rev": 3
+    },
+    "state_integrity": "2326454a004caf354479aeeec894765beb0314f83aa6746cb6009aecb181e6d6",
+    "status": "superseded"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "decision-supersession",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "DR-20260808-01-KEY-DIST": [
+      {
+        "data": {},
+        "event": "decision.created",
+        "event_id": "019fe0f7-2fde-7ca0-8df4-978056f5fd5f",
+        "event_no": "E-20260808-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "How signing keys reach each node."
+        },
+        "rev": 1,
+        "stream": "DR-20260808-01-KEY-DIST",
+        "time": "2026-08-08T18:42:03+08:00"
+      },
+      {
+        "data": {},
+        "event": "decision.accepted",
+        "event_id": "019fe0f7-3069-7c7b-9565-65cbde60da4b",
+        "event_no": "E-20260808-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2fde-7ca0-8df4-978056f5fd5f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Nodes share one signing key protected by a local KEK."
+        },
+        "rev": 2,
+        "stream": "DR-20260808-01-KEY-DIST",
+        "time": "2026-08-08T18:42:04+08:00"
+      },
+      {
+        "data": {
+          "by_decision_id": "DR-20260808-02-KEY-DIST"
+        },
+        "event": "decision.superseded",
+        "event_id": "019fe0f7-31fc-7236-9f06-09147e35620e",
+        "event_no": "E-20260808-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-3069-7c7b-9565-65cbde60da4b",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "The HSM rollout replaces the shared-key decision."
+        },
+        "rev": 3,
+        "stream": "DR-20260808-01-KEY-DIST",
+        "time": "2026-08-08T18:42:04+08:00"
+      }
+    ],
+    "DR-20260808-02-KEY-DIST": [
+      {
+        "data": {},
+        "event": "decision.created",
+        "event_id": "019fe0f7-30f2-798f-9232-7c364aeb64ad",
+        "event_no": "E-20260808-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "How signing keys reach each node after the HSM rollout."
+        },
+        "rev": 1,
+        "stream": "DR-20260808-02-KEY-DIST",
+        "time": "2026-08-08T18:42:04+08:00"
+      },
+      {
+        "data": {},
+        "event": "decision.accepted",
+        "event_id": "019fe0f7-3179-7529-b6a1-2497b4021ba6",
+        "event_no": "E-20260808-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-30f2-798f-9232-7c364aeb64ad",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Nodes obtain signing capability from the HSM at startup."
+        },
+        "rev": 2,
+        "stream": "DR-20260808-02-KEY-DIST",
+        "time": "2026-08-08T18:42:04+08:00"
+      }
+    ]
+  }
+}

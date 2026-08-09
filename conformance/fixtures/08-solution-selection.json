@@ -1,0 +1,208 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-04"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-04 — solution_ready",
+      "State through: rev 6 (019fe0f7-1f01-7d50-9bfd-50957aae81de)",
+      "",
+      "Solutions",
+      "- S2 — S2: share one signing key protected by each node's local KEK.",
+      "",
+      "Findings",
+      "- FIND-1 — An operator asked again about S1; recording the question does not reselect it.",
+      "",
+      "Selected solution: S2"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe0f7-1f01-7d50-9bfd-50957aae81de",
+      "rev": 6
+    },
+    "provenance_view": [
+      "WI-20260808-04 — solution_ready",
+      "State through: rev 6 (019fe0f7-1f01-7d50-9bfd-50957aae81de)",
+      "",
+      "Solutions",
+      "- S1 — S1: distribute keys from a central Vault. [rejected; event 019fe0f7-1e6f-740e-8df3-c167bf6414d6; agent/observation]",
+      "- S2 — S2: share one signing key protected by each node's local KEK. [selected; event 019fe0f7-1de7-7466-821e-b590f6658366; agent/agent_proposal]",
+      "",
+      "Findings",
+      "- FIND-1 — An operator asked again about S1; recording the question does not reselect it. [active; event 019fe0f7-1f01-7d50-9bfd-50957aae81de; agent/observation]",
+      "",
+      "Selected solution: S2"
+    ],
+    "state_integrity": "16a1c372f02c922a4008d52a4989c5141e84add3e3db463a208f5731a0156f4c",
+    "state_subset": {
+      "selected_solution": "S2",
+      "solutions": [
+        {
+          "id": "S1",
+          "introduced_by": "019fe0f7-1cd5-71ed-960e-455a28bb88b2",
+          "last_event_id": "019fe0f7-1e6f-740e-8df3-c167bf6414d6",
+          "last_text": "S1 needs an always-reachable Vault.",
+          "provenance": {
+            "basis": "observation",
+            "initiator": "agent"
+          },
+          "status": "rejected",
+          "text": "S1: distribute keys from a central Vault."
+        },
+        {
+          "id": "S2",
+          "introduced_by": "019fe0f7-1d64-78b6-a67f-98791ee0e86e",
+          "last_event_id": "019fe0f7-1de7-7466-821e-b590f6658366",
+          "last_text": "Select S2 because offline deployment must keep working.",
+          "provenance": {
+            "basis": "agent_proposal",
+            "initiator": "agent"
+          },
+          "status": "selected",
+          "text": "S2: share one signing key protected by each node's local KEK."
+        }
+      ]
+    },
+    "status": "solution_ready"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "solution-selection",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-04": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe0f7-1c30-7b57-a9dc-b47dcccaea50",
+        "event_no": "E-20260808-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Signing key distribution"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:58+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S1"
+        },
+        "event": "solution.proposed",
+        "event_id": "019fe0f7-1cd5-71ed-960e-455a28bb88b2",
+        "event_no": "E-20260808-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1c30-7b57-a9dc-b47dcccaea50",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "S1: distribute keys from a central Vault."
+        },
+        "rev": 2,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:58+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S2"
+        },
+        "event": "solution.proposed",
+        "event_id": "019fe0f7-1d64-78b6-a67f-98791ee0e86e",
+        "event_no": "E-20260808-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1cd5-71ed-960e-455a28bb88b2",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "S2: share one signing key protected by each node's local KEK."
+        },
+        "rev": 3,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:59+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S2"
+        },
+        "event": "solution.selected",
+        "event_id": "019fe0f7-1de7-7466-821e-b590f6658366",
+        "event_no": "E-20260808-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1d64-78b6-a67f-98791ee0e86e",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Select S2 because offline deployment must keep working."
+        },
+        "rev": 4,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:59+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S1"
+        },
+        "event": "solution.rejected",
+        "event_id": "019fe0f7-1e6f-740e-8df3-c167bf6414d6",
+        "event_no": "E-20260808-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1de7-7466-821e-b590f6658366",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "S1 needs an always-reachable Vault."
+        },
+        "rev": 5,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:59+08:00"
+      },
+      {
+        "data": {
+          "finding_id": "FIND-1"
+        },
+        "event": "finding.raised",
+        "event_id": "019fe0f7-1f01-7d50-9bfd-50957aae81de",
+        "event_no": "E-20260808-0006",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-1e6f-740e-8df3-c167bf6414d6",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "An operator asked again about S1; recording the question does not reselect it."
+        },
+        "rev": 6,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T18:41:59+08:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+/state/
+/outputs/
+/artifacts/confirmations/pending/
+/artifacts/confirmations/transactions/
+*.tmp

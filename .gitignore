@@ -1,0 +1,11 @@
+/target/
+*.log
+!skill/evals/fixtures/*.log
+.DS_Store
+release/*.zip
+release/*.tar.gz
+release/SHA256SUMS
+release/sbom-*.cdx.json
+release/manifest-target-*.json
+release/release-manifest.json
+release/TOOLING.lock.json

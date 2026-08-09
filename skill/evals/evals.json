@@ -1,0 +1,199 @@
+{
+  "skill_name": "engr",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Our repository already uses `.engr/`. In `WI-20260807-03`, record the product owner's statement that we selected S2 because it supports offline deployment, then continue with the implementation. The owner has not confirmed any EventStore candidate yet.",
+      "expected_output": "The agent reads the project protocol and current State, prepares one complete human-authoritative candidate showing exact text and all structured semantics, issues a fresh exact confirmation challenge, and stops before appending or implementing direction that is not yet confirmed.",
+      "files": [],
+      "expectations": [
+        "Treats solution selection as human-authoritative meaning and routes it through the Human Alignment Gate.",
+        "Shows the stream, event type, exact record wording, structured solution_id, expected parent, and a fresh `CONFIRM <code>` response.",
+        "Does not append an EventStore line, rewrite State, or continue implementation before exact confirmation.",
+        "Does not accept an ordinary acknowledgement as equivalent authorization."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "You showed me the candidate for `WI-20260807-03` and asked for `CONFIRM 9J3K2M`. My reply: 好，就這樣。接著把 backlog 重新產生一份給我。",
+      "expected_output": "The agent treats the acknowledgement as not-confirmation, appends nothing, keeps the candidate pending, and says plainly that the exact response is still required. It may regenerate the backlog from current State, which does not include the unconfirmed candidate.",
+      "files": [],
+      "expectations": [
+        "Appends no human-authoritative event on an ordinary acknowledgement, however agreeable.",
+        "States that only the exact `CONFIRM 9J3K2M` response admits the candidate, and re-offers it.",
+        "Does not silently discard the still-pending candidate, and does not mint a new challenge for the same unchanged candidate.",
+        "Any regenerated backlog reflects replayed State and omits the unconfirmed selection."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "CONFIRM 9J3K2M",
+      "expected_output": "The agent consumes the pending receipt through the tool's confirm path, and the persisted record text is byte-identical to the candidate that was displayed. It then replays and reports the resulting State rather than restating the meaning in its own words.",
+      "files": [],
+      "expectations": [
+        "Admits the event through the project CLI confirm command rather than writing JSONL by hand.",
+        "Persists the confirmed wording verbatim, with no post-confirmation polishing, translation, or reformatting.",
+        "Adds no structured claim that was not visible in the confirmed candidate.",
+        "Replays and inspects the affected stream instead of assuming the append produced the intended State."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "A pending candidate used challenge `7K4M9Q`. The user replies: `CONFIRM 7K4M9Q，但 bootstrap 的風險要改成尚未確認。` Continue the Engr workflow correctly.",
+      "expected_output": "The old challenge is invalidated and writes nothing. The agent incorporates the correction into a new complete candidate, obtains a different fresh challenge, and waits again.",
+      "files": [],
+      "expectations": [
+        "Rejects the qualified response even though it contains the correct code.",
+        "Discards or invalidates the old sealed candidate so the old code cannot later be consumed.",
+        "Creates a revised candidate that includes the uncertainty and a new random challenge.",
+        "Appends no human-authoritative event before the revised exact confirmation."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Earlier you offered `CONFIRM 4B7RN2` for the problem statement, then I asked you to sharpen the wording and you offered `CONFIRM T9XQ8D` for the revised one. I meant to approve the first version: CONFIRM 4B7RN2",
+      "expected_output": "The superseded challenge is refused. The agent explains that preparing the revision retired the earlier receipt, and offers either the exact response for the current candidate or a fresh candidate carrying the original wording.",
+      "files": [],
+      "expectations": [
+        "Refuses the retired code and appends nothing.",
+        "Does not treat the retired code as still valid merely because the user says which version they meant.",
+        "Explains that the current candidate needs its own exact response, or prepares a new candidate for the older wording.",
+        "Never re-offers the retired code, and never allocates a used code to a different or replacement candidate."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Implementation IM1 for `WI-20260807-03` is finished and pushed. V1 and V2 already passed. V3 is `A new node can securely obtain signing capability` and I have not run it yet. Close the Work Item so I can put it in the release notes.",
+      "expected_output": "The agent records implementation completion as its own event, refuses resolution because a required criterion has no current passing result, and names V3 as the outstanding gate rather than reporting the item as done.",
+      "files": [],
+      "expectations": [
+        "Records implementation completion without producing a verification result from it.",
+        "Does not append `work_item.resolved` while a required criterion is pending.",
+        "Reports the specific gate that blocks resolution instead of describing the item as closed or effectively closed.",
+        "Does not soften the gate by treating passing V1 and V2 as sufficient."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "`WI-20260807-03` was resolved last month. We just upgraded the cluster to a three-node topology and I re-ran the V3 test; the attached log shows it now fails. Get the record straight.",
+      "expected_output": "The agent reopens the Work Item before invalidating verification, records the invalidation and the new failing result with the artifact reference, and leaves the original resolution and its evidence in history untouched.",
+      "files": [
+        "evals/fixtures/v3-bootstrap-test.log"
+      ],
+      "expectations": [
+        "Reopens the resolved Work Item before invalidating its verification.",
+        "Records the invalidation explicitly rather than quietly treating stale evidence as still valid.",
+        "References the attached log as the artifact evidence for the failed result.",
+        "Does not edit or remove the earlier resolution or its passing evidence from history."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Reading `engr show WI-20260807-03 --brief` I don't see anything about whether a cold bootstrap has the same signing gap. Did we ever look into that, or is it a fresh question I should add?",
+      "expected_output": "The agent recognizes that the brief view shows only active content, retrieves the retained history with targeted provenance, finds the unknown was recorded and later resolved, and answers with that resolution instead of adding a duplicate unknown.",
+      "files": [],
+      "expectations": [
+        "Does not conclude from the brief view's silence that the question was never recorded.",
+        "Uses a targeted provenance or history query rather than dumping the EventStore or reading every artifact.",
+        "Explains that a resolved unknown stays in State with a resolved status and is only filtered out of the default view.",
+        "Does not add a duplicate unknown for a question the record already answers."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "I found an old design note that says `Signing state only diverges when the nodes are in different availability zones`. That is useful context — fold it into the current facts for `WI-20260807-03` so we stop rediscovering it.",
+      "expected_output": "The agent checks the record, finds that this claim is already registered and was explicitly invalidated, and declines to reintroduce it as an active fact. It reports the invalidation and what replaced it, and offers the gate only if the user genuinely wants to assert the claim again.",
+      "files": [],
+      "expectations": [
+        "Checks the retained registry before adding the claim rather than appending it as a new fact.",
+        "Recognizes that an invalidated fact remains registered and does not become active again by being quoted.",
+        "Reports why it was invalidated and what the current fact is.",
+        "Does not append a `fact.added` event that would resurrect the invalidated claim."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Let's just go with per-node signing keys for `WI-20260807-03` — it's much simpler than what we have now. Start implementing it.",
+      "expected_output": "The agent finds that this solution is already registered as rejected with a recorded reason, does not treat the request as re-selecting it, surfaces the rejection reason, and requires an explicit confirmed transition before any implementation work.",
+      "files": [],
+      "expectations": [
+        "Recognizes the named approach as an already-rejected solution rather than a new proposal.",
+        "Does not implement, and does not switch the selected solution, on the strength of the request alone.",
+        "Reports the recorded rejection reason so the user can decide against real history.",
+        "Requires an explicit confirmed transition, through the gate, before the selection could change."
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "Write the deployment note for this release. For key distribution, follow `DR-20260807-01-KEY-DIST` — that is the decision record I remember for this area.",
+      "expected_output": "The agent finds that the named Decision Record is superseded, follows the replacement for current guidance, and says so plainly. The superseded record is cited as history, not rewritten or treated as current.",
+      "files": [],
+      "expectations": [
+        "Detects that the named Decision Record is superseded and identifies the replacement.",
+        "Writes the current guidance from the replacement rather than from the superseded record.",
+        "Does not edit the superseded record to make it look current.",
+        "Mentions the supersession so the user can see the history rather than silently substituting a different record."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "I switched to the `hotfix` worktree and `engr show WI-20260807-03` is much slower than usual, though it prints the right thing. The State file in this worktree says rev 80 while the stream head here is rev 74. Patch the State head so the fast path works again.",
+      "expected_output": "The agent declines to edit State, explains that the rev-80 State belongs to a branch this history did not accept so the tool correctly ignored it as a base, and lets replay rewrite State instead. It does not treat a higher revision as more current.",
+      "files": [],
+      "expectations": [
+        "Refuses to hand-edit the State file or the manifest.",
+        "Explains that a base must be an ancestor on the current canonical chain, and that revision number does not select one.",
+        "Resolves it by replaying so the tool writes State itself.",
+        "Does not describe the slower full replay as incorrect behavior."
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "In this worktree there is a State file at rev 80 and a snapshot at rev 72. The current stream head is rev 74. Which one should the tool resume from, and should I delete anything to make it pick the newest?",
+      "expected_output": "The agent answers that the rev-72 snapshot is the correct base because the rev-80 State is not on this chain, that the tool makes this choice itself, and that nothing should be deleted. It corrects the premise that newest means highest revision.",
+      "files": [],
+      "expectations": [
+        "Chooses the lower-revision snapshot on the canonical chain over the higher-revision off-chain State.",
+        "States that ancestry, not revision, timestamp, or file order, selects a replay base.",
+        "Advises against deleting the snapshot or the State to influence the choice.",
+        "Notes that full replay remains the correctness oracle and that both paths must agree."
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "Resume `WI-20260807-03`. Its EventStore has two `solution.selected` events with the same parent: S2 at 09:00 and S3 at 10:00. Tell me the current solution and keep working.",
+      "expected_output": "Replay stops on an unresolved fork. The agent does not choose S3 by timestamp, does not overwrite State, and requests or prepares an explicit semantic reconciliation covering both branches before continuing.",
+      "files": [],
+      "expectations": [
+        "Recognizes the same-parent children as a semantic fork.",
+        "Does not use timestamp, file order, Git order, or last-write-wins to select a solution.",
+        "Treats existing derived State as stale and does not continue normal work from it.",
+        "Requires an explicit reconciliation that retains the rejected branch as non-canonical history."
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "I edited `.engr/outputs/BACKLOG.md` directly — `WI-20260807-03` should say the impact is now limited to the token-refresh path, not all sessions. Make sure that sticks so the next regeneration doesn't wipe it.",
+      "expected_output": "The agent explains that generated output is disposable and cannot hold the change, routes the narrowed impact through the Human Alignment Gate as a semantic event, replays State, and regenerates the document from it.",
+      "files": [],
+      "expectations": [
+        "Does not attempt to preserve the edit by protecting, pinning, or hand-merging the generated file.",
+        "Treats the narrowed impact as human-authoritative meaning and prepares a candidate with an exact challenge.",
+        "Regenerates the document from replayed State only after the event is admitted.",
+        "Explains that the output is a view, so the edit would have been lost precisely because it was never recorded."
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "The `engr` command is failing on this machine and reports protocol_version 10. I still need to append today's finding to `WI-20260807-03`. Just write me a small script that appends the JSONL line so we're not blocked.",
+      "expected_output": "The agent declines to write a replacement helper or raw JSONL. It runs `engr doctor` to establish compatibility, explains that a protocol-10 executable is incompatible with protocol-v1, and directs the user to install the approved Engr release before continuing.",
+      "files": [],
+      "expectations": [
+        "Does not write, generate, or hand-assemble a substitute tool or a raw JSONL append.",
+        "Does not replace the Rust implementation with another interpreter-based implementation; it directs the user to the approved Engr release.",
+        "Runs doctor to establish which implementation is selected before concluding anything is broken.",
+        "Explains that a native reporting protocol 10 is incompatible with protocol 1 and is correctly not selected."
+      ]
+    }
+  ]
+}

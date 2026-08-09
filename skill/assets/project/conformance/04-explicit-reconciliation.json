@@ -1,0 +1,126 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-04"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-04 — investigating",
+      "State through: rev 3 (019fde0f-b840-7193-8000-000000000193)",
+      "",
+      "Facts",
+      "- F1 — Accepted branch fact",
+      "",
+      "Selected solution: none"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fde0f-b840-7193-8000-000000000193",
+      "rev": 3
+    },
+    "rejected_event_ids": [
+      "019fde0f-b840-7192-8000-000000000192"
+    ],
+    "state_integrity": "f53893592233aa0463348a962472737b5fb5454f68cbea55db4a8d2ed0469890",
+    "status": "investigating"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "explicit-reconciliation",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-04": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fde0f-b840-7190-8000-000000000190",
+        "event_no": "E-20260808-0400",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Fork fixture"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F1"
+        },
+        "event": "fact.added",
+        "event_id": "019fde0f-b840-7191-8000-000000000191",
+        "event_no": "E-20260808-0401",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7190-8000-000000000190",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Accepted branch fact"
+        },
+        "rev": 2,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "fact_id": "F2"
+        },
+        "event": "fact.added",
+        "event_id": "019fde0f-b840-7192-8000-000000000192",
+        "event_no": "E-20260808-0402",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7190-8000-000000000190",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Rejected branch fact"
+        },
+        "rev": 2,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T02:30:00+08:00"
+      },
+      {
+        "data": {
+          "accepted_root": "019fde0f-b840-7191-8000-000000000191",
+          "fork_parent": "019fde0f-b840-7190-8000-000000000190",
+          "rejected_roots": [
+            "019fde0f-b840-7192-8000-000000000192"
+          ]
+        },
+        "event": "stream.fork_reconciled",
+        "event_id": "019fde0f-b840-7193-8000-000000000193",
+        "event_no": "E-20260808-0403",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fde0f-b840-7191-8000-000000000191",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Keep the accepted fact branch; retain the conflicting branch as non-canonical history."
+        },
+        "rev": 3,
+        "stream": "WI-20260808-04",
+        "time": "2026-08-08T02:30:00+08:00"
+      }
+    ]
+  }
+}

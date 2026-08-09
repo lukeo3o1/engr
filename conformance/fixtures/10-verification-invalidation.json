@@ -1,0 +1,257 @@
+{
+  "command": {
+    "name": "replay",
+    "stream": "WI-20260808-06"
+  },
+  "event_schema_version": 1,
+  "expected": {
+    "brief_view": [
+      "WI-20260808-06 — verifying",
+      "State through: rev 10 (019fe0f7-2d22-7555-a481-62010f67adf5)",
+      "",
+      "Solutions",
+      "- S1 — S1: replicate signing state.",
+      "",
+      "Implementations",
+      "- IM1 — Implement S1.",
+      "",
+      "Verification",
+      "- V1 — V1: existing tokens survive a failover. [required=true, result=pending]",
+      "",
+      "Selected solution: S1"
+    ],
+    "exit": 0,
+    "head": {
+      "event_id": "019fe0f7-2d22-7555-a481-62010f67adf5",
+      "rev": 10
+    },
+    "state_integrity": "4ba29ef3d5dcda8cd5c34536d403b6deaa368092318d88fbca4b3295ced040e1",
+    "status": "verifying"
+  },
+  "format": "engineering-eventstore-conformance-fixture",
+  "name": "verification-invalidation",
+  "protocol_version": 1,
+  "state_schema_version": 1,
+  "streams": {
+    "WI-20260808-06": [
+      {
+        "data": {},
+        "event": "work_item.created",
+        "event_id": "019fe0f7-2807-7545-bf9f-09d690027f5f",
+        "event_no": "E-20260808-0001",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": null,
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Signing state replication"
+        },
+        "rev": 1,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:01+08:00"
+      },
+      {
+        "data": {
+          "required": true,
+          "verification_id": "V1"
+        },
+        "event": "verification.criterion_added",
+        "event_id": "019fe0f7-288f-7615-9086-af0211872736",
+        "event_no": "E-20260808-0002",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2807-7545-bf9f-09d690027f5f",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "V1: existing tokens survive a failover."
+        },
+        "rev": 2,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:01+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S1"
+        },
+        "event": "solution.proposed",
+        "event_id": "019fe0f7-2912-7941-b9b1-fe83e2c0a05d",
+        "event_no": "E-20260808-0003",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-288f-7615-9086-af0211872736",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "S1: replicate signing state."
+        },
+        "rev": 3,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {
+          "solution_id": "S1"
+        },
+        "event": "solution.selected",
+        "event_id": "019fe0f7-2996-7d0d-b3a5-d768339295f2",
+        "event_no": "E-20260808-0004",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2912-7941-b9b1-fe83e2c0a05d",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "agent_proposal",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Select S1."
+        },
+        "rev": 4,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {
+          "implementation_id": "IM1",
+          "solution_id": "S1"
+        },
+        "event": "implementation.started",
+        "event_id": "019fe0f7-2a14-7db7-ac82-d6d79067c1d6",
+        "event_no": "E-20260808-0005",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2996-7d0d-b3a5-d768339295f2",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "implementation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Implement S1."
+        },
+        "rev": 5,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {
+          "implementation_id": "IM1",
+          "solution_id": "S1"
+        },
+        "event": "implementation.completed",
+        "event_id": "019fe0f7-2aa7-7408-8174-070cfe03b7c2",
+        "event_no": "E-20260808-0006",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2a14-7db7-ac82-d6d79067c1d6",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "implementation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "S1 implementation is complete."
+        },
+        "rev": 6,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {
+          "result": "passed",
+          "verification_id": "V1"
+        },
+        "event": "verification.result",
+        "event_id": "019fe0f7-2b3c-7922-afb2-eb14000409b2",
+        "event_no": "E-20260808-0007",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2aa7-7408-8174-070cfe03b7c2",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "verification",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "V1 passed in 1000 iterations."
+        },
+        "rev": 7,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {},
+        "event": "work_item.resolved",
+        "event_id": "019fe0f7-2bdc-799e-b055-d721d3db4b68",
+        "event_no": "E-20260808-0008",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2b3c-7922-afb2-eb14000409b2",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "All required verification passed."
+        },
+        "rev": 8,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:02+08:00"
+      },
+      {
+        "data": {},
+        "event": "work_item.reopened",
+        "event_id": "019fe0f7-2c8b-7c20-bff8-8f0078c4f654",
+        "event_no": "E-20260808-0009",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2bdc-799e-b055-d721d3db4b68",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "observation",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "Production changed the cluster topology after this resolution."
+        },
+        "rev": 9,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:03+08:00"
+      },
+      {
+        "data": {
+          "verification_id": "V1"
+        },
+        "event": "verification.invalidated",
+        "event_id": "019fe0f7-2d22-7555-a481-62010f67adf5",
+        "event_no": "E-20260808-0010",
+        "event_schema_version": 1,
+        "format": "engineering-event",
+        "parent": "019fe0f7-2c8b-7c20-bff8-8f0078c4f654",
+        "protocol_version": 1,
+        "provenance": {
+          "basis": "dependency_change",
+          "initiator": "agent"
+        },
+        "record": {
+          "text": "The topology change invalidates the V1 evidence."
+        },
+        "rev": 10,
+        "stream": "WI-20260808-06",
+        "time": "2026-08-08T18:42:03+08:00"
+      }
+    ]
+  }
+}
