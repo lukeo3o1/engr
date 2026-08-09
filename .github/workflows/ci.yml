@@ -22,6 +22,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --all-targets
       - run: cargo run -p engr -- version --handshake
+      - if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/test-installers.sh
+      - if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/test-installers.ps1
 
   build-targets:
     name: ${{ matrix.target }}

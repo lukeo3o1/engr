@@ -83,6 +83,11 @@ jobs:
         run: |
           bash scripts/assemble-release-manifest.sh "${GITHUB_REF_NAME#v}" release
           rm release/manifest-target-*.json
+      - name: Include verified installers
+        shell: bash
+        run: |
+          cp install.sh release/install.sh
+          cp install.ps1 release/install.ps1
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -92,3 +97,5 @@ jobs:
             release/sbom-*.cdx.json
             release/release-manifest.json
             release/TOOLING.lock.json
+            release/install.sh
+            release/install.ps1

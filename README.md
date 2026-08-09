@@ -66,6 +66,32 @@ formats, reducer rules, confirmation behavior, replay selection, fork handling,
 and exit categories. The [Skill](skill/SKILL.md) owns runtime agent guidance for
 adopted projects.
 
+### Install a released binary
+
+Released binaries are installed only after the installer verifies the release
+manifest, its SHA-256 checksum file, and the downloaded archive. The Unix
+installer supports Linux and macOS; Linux selects the portable musl artifact by
+default, while `--target` can select a GNU artifact. The PowerShell installer
+supports native Windows x64 and ARM64. Neither installer uses `sudo` or changes
+your `PATH`.
+
+Download the installer from the versioned GitHub Release rather than piping an
+unversioned script into a shell:
+
+```bash
+curl -fsSLO https://github.com/lukeo3o1/engr/releases/download/v0.1.0/install.sh
+bash install.sh --version 0.1.0
+```
+
+```powershell
+Invoke-WebRequest https://github.com/lukeo3o1/engr/releases/download/v0.1.0/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version 0.1.0
+```
+
+Use `--bin-dir` / `-BinDir` to choose an installation directory and `--target`
+/ `-Target` to select an exact supported target. Omitting the version selects
+the latest GitHub release.
+
 ## Status and evidence
 
 Source version `0.1.0` contains the Rust runtime, protocol/schema artifacts,
