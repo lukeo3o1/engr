@@ -164,7 +164,7 @@ main() {
   target="${target:-$(detect_target)}"
 
   local release_base="https://github.com/${REPOSITORY}/releases/download/v${version}"
-  local manifest metadata artifact expected_sha sbom checksum_file archive actual_sha declared_sha expected_artifact extract destination temporary_destination reported
+  local manifest metadata artifact expected_sha sbom checksum_file archive actual_sha declared_sha expected_artifact extract destination temporary_destination reported reported_version
   temporary="$(mktemp -d "${TMPDIR:-/tmp}/engr-install.XXXXXX")"
   trap 'rm -rf "${temporary:-}"' EXIT
 
@@ -203,7 +203,8 @@ main() {
   mv -f "$temporary_destination" "$destination"
 
   reported="$("$destination" version --json)" || die 'installed engr binary did not run successfully'
-  [[ "$reported" == *"\"implementation_version\":\"${version}\""* ]] \
+  reported_version="$(printf '%s\n' "$reported" | sed -n 's/.*"implementation_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ "$reported_version" == "$version" ]] \
     || die 'installed engr binary reported a version different from the requested release'
 
   printf 'Installed Engr %s for %s at %s\n' "$version" "$target" "$destination"

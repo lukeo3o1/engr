@@ -64,7 +64,10 @@ mkdir -p "$release_dir" "$stage_dir"
 cat > "${stage_dir}/engr" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == 'version' && "$2" == '--json' ]]; then
-  printf '%s\n' '{"implementation":"rust","implementation_version":"0.1.0"}'
+  printf '%s\n' '{'
+  printf '%s\n' '  "implementation": "rust",'
+  printf '%s\n' '  "implementation_version": "0.1.0"'
+  printf '%s\n' '}'
   exit 0
 fi
 exit 2
@@ -103,7 +106,7 @@ run_fixture_install() {
 
 run_fixture_install "$install_dir"
 [[ -x "${install_dir}/engr" ]]
-[[ "$("${install_dir}/engr" version --json)" == *'"implementation_version":"0.1.0"'* ]]
+"${install_dir}/engr" version --json | grep -Eq '"implementation_version"[[:space:]]*:[[:space:]]*"0.1.0"'
 
 printf '%064d  %s\n' 0 "$archive_name" > "${release_dir}/${archive_name}.sha256"
 if run_fixture_install "${test_root}/rejected-bin"; then
