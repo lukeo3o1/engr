@@ -35,9 +35,9 @@ impl SectionStatus {
     pub fn label(&self) -> &'static str {
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
-            (true, false) => "地基已變動",
-            (false, true) => "依據已變動",
-            (true, true) => "地基與依據都變動",
+            (true, false) => "basis moved",
+            (false, true) => "refs moved",
+            (true, true) => "basis and refs moved",
         }
     }
 
@@ -150,7 +150,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
     ));
     out.push_str(&format!("{} sections   {} ok", tally.total, tally.ok));
     if tally.attention > 0 {
-        out.push_str(&format!("   {} 需注意", tally.attention));
+        out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
     if let Some(commit) = &object.last_projection_commit {
@@ -185,17 +185,17 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // Say what to do about it, rather than making the reader work it out.
         if let Some(distance) = &status.basis {
             out.push_str(&format!(
-                "    建議     自 {} 起 {} 個 commit、{} 個檔案變動;確認本段是否仍成立\n",
-                short(section.based_on.as_deref().unwrap_or("")),
+                "    advice   {} commits and {} files have changed since {}; check this still holds\n",
                 distance.commits,
-                distance.files.len()
+                distance.files.len(),
+                short(section.based_on.as_deref().unwrap_or("")),
             ));
         }
         for drift in &status.drifted {
             match (&drift.current_sha256, &drift.lookback) {
                 (Some(current), Some(lookback)) => {
                     out.push_str(&format!(
-                        "    建議     {} §{} 確認時 {} → 目前 {}\n             {}\n",
+                        "    advice   {} §{} was {} when confirmed, now {}\n             {}\n",
                         abbrev(&drift.object, w),
                         drift.section,
                         short(&drift.confirmed_sha256),
@@ -205,7 +205,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 }
                 _ => {
                     out.push_str(&format!(
-                        "    建議     {} §{} 已不存在;本段的依據消失了\n",
+                        "    advice   {} §{} no longer exists; what this section stood on is gone\n",
                         abbrev(&drift.object, w),
                         drift.section
                     ));
@@ -319,7 +319,7 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
                 .map(|id| format!("§{id}"))
                 .collect::<Vec<_>>()
                 .join(" "),
-            _ if tally.attention > 0 => format!("{} 需注意", tally.attention),
+            _ if tally.attention > 0 => format!("{} stale", tally.attention),
             _ => "ok".to_owned(),
         };
         out.push_str(&format!(
@@ -376,7 +376,7 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
             let closed = object.status == Status::Closed;
             let marker = if closed { "⚠" } else { "·" };
             let tail = if closed {
-                " —— 沒有人在看的物件"
+                " — nobody is looking at this one"
             } else {
                 ""
             };

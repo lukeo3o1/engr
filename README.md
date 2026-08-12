@@ -11,11 +11,13 @@ way in.
 ```bash
 engr prepare --object 019ff75b --add --text-file draft.txt
 #   Candidate  section.added
+#   Object     019ff75b
 #   Based on   9348f28f
 #
-#   寫入只有一條路:prepare → confirm。
+#   Retry with backoff, capped at 30s. Past that the caller has
+#   already given up, so a longer wait only delays the error.
 #
-#   逐字輸入以確認:  CONFIRM 7U9K2U
+#   Type this exactly to confirm:  CONFIRM 7U9K2U
 
 engr confirm 'CONFIRM 7U9K2U'
 ```

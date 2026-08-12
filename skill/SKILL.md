@@ -89,8 +89,8 @@ the abbreviation for you.
 
 | Marking | What happened |
 | --- | --- |
-| 地基已變動 / `stale_basis` | HEAD moved past the commit this wording was written against |
-| 依據已變動 / `stale_refs` | A section this one references was rewritten |
+| `basis moved` / `stale_basis` | HEAD moved past the commit this wording was written against |
+| `refs moved` / `stale_refs` | A section this one references was rewritten |
 
 **Do not quietly reason from a drifted section.** Take the `git show` command
 `show` hands you, read what the dependency used to say, and decide whether this

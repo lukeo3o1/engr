@@ -344,7 +344,7 @@ fn render_candidate(candidate: &gate::Candidate, width: usize) -> String {
         }
     }
     out.push_str(&format!(
-        "\n逐字輸入以確認:  CONFIRM {}\n",
+        "\nType this exactly to confirm:  CONFIRM {}\n",
         candidate.challenge
     ));
     out
@@ -356,14 +356,16 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
             let candidate = gate::find(root, code)?;
             print!("{}", render_candidate(&candidate, view::width(root)));
             if !gate::is_live(root, &candidate) {
-                println!("\n這個候選已經失效 —— 物件在它準備之後變動過。重新 prepare 一次。");
+                println!(
+                    "\nThis candidate is dead — the object moved after it was prepared. Prepare again."
+                );
             }
             Ok(())
         }
         None => {
             let pending = gate::pending(root)?;
             if pending.is_empty() {
-                println!("沒有待確認的候選");
+                println!("nothing is awaiting confirmation");
                 return Ok(());
             }
             let width = view::width(root);
@@ -401,7 +403,7 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
 fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool) -> Result<()> {
     let objects = load_all(root, all)?;
     if objects.is_empty() {
-        println!("沒有物件");
+        println!("no objects");
         return Ok(());
     }
     if sections {
@@ -409,7 +411,7 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
     } else if stale {
         let out = view::render_stale(root, &objects);
         if out.is_empty() {
-            println!("全部 ok");
+            println!("all ok");
         } else {
             print!("{out}");
         }
