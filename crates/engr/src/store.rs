@@ -80,6 +80,23 @@ struct Format {
     version: u32,
 }
 
+/// Written by [`init`], because `git add -A` is the normal way people stage a
+/// workspace and two of these files must never travel with it. A candidate's
+/// filename *is* its challenge code, so committing a live one hands the code to
+/// everyone with repository access — the gate assumes it goes to one human and
+/// comes back. Telling people not to do that in a README does not stop `-A`.
+const GITIGNORE: &str = "\
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. events/ is safe to commit too: the challenge codes in it have
+# already been spent, and a spent code resolves to nothing.
+#
+# These two are local only:
+#   lock         a mutex for this machine, nothing to share
+#   candidates/  each file is named after a *live* challenge code
+/lock
+/candidates/
+";
+
 pub fn init(root: &Path) -> Result<PathBuf> {
     let dir = engr_dir(root);
     ensure!(
@@ -98,6 +115,8 @@ pub fn init(root: &Path) -> Result<PathBuf> {
             version: FORMAT_VERSION,
         },
     )?;
+    let ignore = dir.join(".gitignore");
+    fs::write(&ignore, GITIGNORE).map_err(|error| tool_error(ignore.display(), error))?;
     Ok(dir)
 }
 

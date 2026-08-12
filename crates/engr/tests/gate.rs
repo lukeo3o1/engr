@@ -271,3 +271,50 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
     assert_eq!(object.sections.len(), 1);
     assert!(gate::find(&root, &code).is_err());
 }
+
+/// `git check-ignore -q`: 0 ignored, 1 not, anything else is a broken invocation
+/// and must not be read as "not ignored".
+fn ignored(root: &Path, relative: &str) -> bool {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "--no-index", relative])
+        .status()
+        .expect("git check-ignore");
+    match status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!("git check-ignore {relative}: {other:?}"),
+    }
+}
+
+/// `git add -A` is how a workspace gets staged, and a candidate's filename *is* a
+/// live challenge code. If one can reach the repository by accident then the code
+/// no longer travels to a single human, and the gate stops meaning anything.
+///
+/// The negative half matters as much: an over-broad rule here would silently stop
+/// the record from ever being committed, and look-back lives in git.
+#[test]
+fn a_live_challenge_code_is_kept_out_of_git() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q", "."])
+        .status()
+        .expect("git init");
+    store::init(&root).expect("init");
+
+    let id = engr::model::new_id();
+    let prepared =
+        gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
+    let code = &prepared.candidate.challenge;
+
+    assert!(ignored(&root, ".engr/lock"));
+    assert!(ignored(&root, &format!(".engr/candidates/{code}.json")));
+
+    assert!(!ignored(&root, ".engr/format.json"));
+    assert!(!ignored(&root, &format!(".engr/objects/{id}.json")));
+    assert!(!ignored(&root, &format!(".engr/events/{id}.jsonl")));
+}

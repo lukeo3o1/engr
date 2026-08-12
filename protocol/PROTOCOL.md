@@ -211,11 +211,21 @@ different process. That is not v0.
 ```text
 .engr/
   format.json              workspace format and version
+  .gitignore               excludes lock and candidates/
   lock                     one writer at a time
-  objects/<uuid>.json      the authority
+  objects/<uuid>.json      the authority        commit this
   events/<uuid>.jsonl      the buffer, purgeable
-  candidates/<CODE>.json   awaiting a human
+  candidates/<CODE>.json   awaiting a human     never commit this
 ```
+
+`init` MUST write a `.gitignore` excluding `lock` and `candidates/`. A candidate's
+filename is a live challenge code, and `git add -A` is how a workspace gets
+staged: committing one hands the code to everyone with repository access, which
+is not where a code the gate expects a single human to return is supposed to go.
+The exclusion MUST NOT cover `objects/`, since look-back is delegated to git.
+
+Events are safe to commit. The challenge codes they carry have been spent, and a
+spent code resolves to no candidate.
 
 ## Exit codes
 

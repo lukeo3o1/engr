@@ -126,6 +126,11 @@ Objects live in the repository. **Remind the human to commit `.engr/objects`.**
 git is where earlier wording is recovered from; uncommitted, that recovery
 silently is not there. `engr confirm` says when an object has uncommitted changes.
 
+`git add -A` is safe: `engr init` writes a `.engr/.gitignore` that keeps the lock
+and any pending candidate out. Do not stage a candidate by hand to work around
+it — its filename is the challenge code, and putting that in shared history hands
+it to everyone with repository access.
+
 ## What not to do
 
 - Do not look for a way to write without confirmation. There isn't one, and the

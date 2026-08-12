@@ -93,7 +93,9 @@ engr verify                                  # recompute section hashes
 Objects are addressed by unique id prefix, like a git commit.
 
 **Commit `.engr/objects`.** git is where old wording is recovered from; without
-it, look-back disappears silently.
+it, look-back disappears silently. `init` writes a `.engr/.gitignore` that keeps
+the lock and any pending candidate out, so `git add -A` is safe — a candidate's
+filename is a live challenge code and has no business in shared history.
 
 ## Install
 
