@@ -95,7 +95,7 @@ sha256() {
 # archive that cannot run here.
 triple() {
 	case "$(uname -s):$(uname -m)" in
-	Linux:x86_64) echo "x86_64-unknown-linux-gnu" ;;
+	Linux:x86_64) echo "x86_64-unknown-linux-musl" ;;
 	Darwin:arm64 | Darwin:aarch64) echo "aarch64-apple-darwin" ;;
 	*) return 1 ;;
 	esac

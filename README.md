@@ -132,7 +132,9 @@ also what CI exercises:
 
 That path needs a Rust toolchain ([rustup.rs](https://rustup.rs)) and exits 3 if
 it is missing. Archives are published for x86-64 Linux, Apple-silicon macOS and
-x86-64 Windows; anywhere else, build from source.
+x86-64 Windows; anywhere else, build from source. The Linux binary is statically
+linked against musl, so it does not care which glibc the machine has — including
+having none.
 
 The `latest` release is published by hand from the Actions tab — **release** →
 *Run workflow* — and never by pushing a tag. Until that has been run once there is

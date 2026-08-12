@@ -32,8 +32,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Static musl rather than gnu. A gnu build carries the runner's glibc
+          # floor, and GitHub moving `ubuntu-latest` raises that floor silently:
+          # the first release built this way demanded GLIBC_2.39, which excludes
+          # Ubuntu 22.04, Debian 12 and RHEL 9 — every one of them still current.
+          # engr has no native dependencies, so linking statically costs nothing
+          # and the question cannot come back.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive: tar
           - os: macos-14
             target: aarch64-apple-darwin
@@ -46,6 +52,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The musl target links through `cc`, so the runner needs musl-gcc. Absent
+      # it the failure lands at the link step, well after everything compiles.
+      - name: musl linker
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y musl-tools
       - run: cargo test --workspace --all-targets
       - run: cargo build --release --locked -p engr --target ${{ matrix.target }}
 
