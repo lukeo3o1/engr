@@ -97,27 +97,47 @@ it, look-back disappears silently.
 
 ## Install
 
-The installers build from the checkout, which is the point of them living in it —
-no network, no archive to trust. They verify the installed binary runs, print the
-commit it came from, and never touch your PATH; they tell you what to add.
+Fetch the installer, read it, run it. It downloads the archive for your platform
+from the `latest` release, checks it against the published `SHA256SUMS`, and
+installs it — no clone and no Rust toolchain needed.
 
 ```bash
-git clone https://github.com/lukeo3o1/engr && cd engr
-./install.sh                        # → ~/.local/bin/engr
-./install.sh --bin-dir /usr/local/bin
+curl -fsSLO https://raw.githubusercontent.com/lukeo3o1/engr/main/install.sh
+sh install.sh                       # → ~/.local/bin/engr
+sh install.sh --bin-dir /usr/local/bin
 ```
 
 ```powershell
+Invoke-WebRequest -UseBasicParsing -OutFile install.ps1 https://raw.githubusercontent.com/lukeo3o1/engr/main/install.ps1
 .\install.ps1                       # → %LOCALAPPDATA%\Programs\engr
 .\install.ps1 -BinDir C:\tools
 ```
 
-Both need a Rust toolchain ([rustup.rs](https://rustup.rs)) and exit 3 if it is
-missing.
+Reading it first is not ceremony here. A tool whose whole premise is that a human
+read the thing before it counted should not be asking you to pipe it into a shell
+unseen.
 
-Prebuilt archives are attached to the `latest` release, which is published from
-the Actions tab — **release** → *Run workflow* — and never by pushing a tag.
-Until that has been run once there is nothing there to download.
+Both verify the binary they placed by running it, and the version line names the
+commit it came from. Neither touches your PATH; they tell you what to add.
+
+**From a checkout instead**, which needs no network and nothing to trust — this is
+also what CI exercises:
+
+```bash
+./install.sh --from-source
+```
+```powershell
+.\install.ps1 -FromSource
+```
+
+That path needs a Rust toolchain ([rustup.rs](https://rustup.rs)) and exits 3 if
+it is missing. Archives are published for x86-64 Linux, Apple-silicon macOS and
+x86-64 Windows; anywhere else, build from source.
+
+The `latest` release is published by hand from the Actions tab — **release** →
+*Run workflow* — and never by pushing a tag. Until that has been run once there is
+nothing to download, and the installers say so rather than looking like a network
+failure.
 
 ## The Skill
 

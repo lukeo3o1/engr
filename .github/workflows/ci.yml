@@ -24,10 +24,13 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo run -p engr -- --help
       - run: cargo run -p engr -- --version
+      # --from-source, not the default download path: what needs testing is this
+      # commit's installer against this commit's code, not whatever the last
+      # release happens to hold.
       - name: installer
         if: matrix.os != 'windows-latest'
-        run: ./install.sh --bin-dir "$RUNNER_TEMP/bin"
+        run: ./install.sh --from-source --bin-dir "$RUNNER_TEMP/bin"
       - name: installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: .\install.ps1 -BinDir "$env:RUNNER_TEMP\bin"
+        run: .\install.ps1 -FromSource -BinDir "$env:RUNNER_TEMP\bin"
