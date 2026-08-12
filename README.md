@@ -82,6 +82,33 @@ Objects are addressed by unique id prefix, like a git commit.
 **Commit `.engr/objects`.** git is where old wording is recovered from; without
 it, look-back disappears silently.
 
+## Install
+
+There is no released archive to download yet, so the installers build from the
+checkout you already have. They verify the installed binary runs, and never touch
+your PATH — they tell you what to add.
+
+```bash
+git clone https://github.com/lukeo3o1/engr && cd engr
+./install.sh                        # → ~/.local/bin/engr
+./install.sh --bin-dir /usr/local/bin
+```
+
+```powershell
+.\install.ps1                       # → %LOCALAPPDATA%\Programs\engr
+.\install.ps1 -BinDir C:\tools
+```
+
+Both need a Rust toolchain ([rustup.rs](https://rustup.rs)) and exit 3 if it is
+missing.
+
+## The Skill
+
+[skill/SKILL.md](skill/SKILL.md) is the runtime guide for an agent working in a
+project that has adopted `.engr/`. Since the gate is a convention rather than a
+mechanism, that document is what actually holds it up — most of it is about
+proposing and then waiting.
+
 ## Build
 
 ```bash
