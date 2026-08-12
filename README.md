@@ -102,16 +102,20 @@ from the `latest` release, checks it against the published `SHA256SUMS`, and
 installs it — no clone and no Rust toolchain needed.
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/lukeo3o1/engr/main/install.sh
+curl -fsSLO https://github.com/lukeo3o1/engr/releases/download/latest/install.sh
 sh install.sh                       # → ~/.local/bin/engr
 sh install.sh --bin-dir /usr/local/bin
 ```
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing -OutFile install.ps1 https://raw.githubusercontent.com/lukeo3o1/engr/main/install.ps1
+Invoke-WebRequest -UseBasicParsing -OutFile install.ps1 https://github.com/lukeo3o1/engr/releases/download/latest/install.ps1
 .\install.ps1                       # → %LOCALAPPDATA%\Programs\engr
 .\install.ps1 -BinDir C:\tools
 ```
+
+The installer comes from the release rather than from `main` on purpose: each
+release carries the installer that matches its own assets. `SHA256SUMS` covers
+the installers too, so you can check the one you just downloaded.
 
 Reading it first is not ceremony here. A tool whose whole premise is that a human
 read the thing before it counted should not be asking you to pipe it into a shell

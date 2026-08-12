@@ -1,0 +1,12 @@
+# One line ending everywhere, LF, in the working tree as much as in the object
+# store. A Windows checkout defaulting to CRLF broke two things that were hard to
+# see:
+#
+#   * `sh install.sh` from a Windows clone reads a CRLF script and dies on
+#     `$'\r': command not found`.
+#   * A build inside a Linux container marked every file modified, because git
+#     there compares CRLF working-tree files against LF blobs. The version stamp
+#     then reported `-dirty` for a tree that was clean.
+#
+# Nothing in this repository wants CRLF, so there is no exception list.
+* text=auto eol=lf

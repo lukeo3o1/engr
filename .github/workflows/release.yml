@@ -114,6 +114,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The installers ship with the release they install, so the two cannot
+      # drift apart. An installer taken from `main` can expect an asset name the
+      # release it points at does not have — which is exactly what renaming the
+      # Linux archive to `-musl` did to every installer already downloaded.
+      - name: attach the installers
+        run: cp install.sh install.ps1 dist/
+
       - name: checksums
         run: |
           cd dist
@@ -131,7 +138,16 @@ jobs:
           engr latest (${short})
           \`\`\`
 
-          Built from \`${GITHUB_SHA}\`. \`SHA256SUMS\` covers the archives.
+          Install with the \`install.sh\` or \`install.ps1\` attached here — each
+          release carries the installer that matches its own assets:
+
+          \`\`\`
+          curl -fsSLO https://github.com/lukeo3o1/engr/releases/download/latest/install.sh
+          sh install.sh
+          \`\`\`
+
+          Built from \`${GITHUB_SHA}\`. \`SHA256SUMS\` covers everything attached,
+          the installers included.
           EOF
           cat "${RUNNER_TEMP}/notes.md"
 
