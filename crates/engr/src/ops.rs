@@ -1,7 +1,7 @@
 //! Maintenance: crash reconciliation, purge, and verify.
 
-use crate::model::{project, Object};
-use crate::{ensure, git, store, Result, EXIT_INVARIANT};
+use crate::model::{project, Action, Object};
+use crate::{ensure, git, store, Result, EXIT_INVARIANT, EXIT_NOT_FOUND};
 use std::path::Path;
 
 /// Close the window between appending an event and saving the projection.
@@ -10,8 +10,21 @@ use std::path::Path;
 /// an event whose rev is ahead of the object; replaying the tail here makes the
 /// two agree instead of leaving the workspace wedged.
 pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
-    let mut object = store::load_object(root, id)?;
     let events = store::load_events(root, id)?;
+    let mut object = match store::load_object(root, id) {
+        Ok(object) => object,
+        Err(error) if error.code == EXIT_NOT_FOUND => {
+            let created = events.iter().find(|event| event.rev == 1).ok_or(error)?;
+            ensure!(
+                created.payload.object == id
+                    && matches!(&created.payload.action, Action::ObjectCreated),
+                EXIT_INVARIANT,
+                "{id}: event rev 1 cannot reconstruct a missing object"
+            );
+            Object::new(id.to_owned(), String::new())
+        }
+        Err(error) => return Err(error),
+    };
     let mut applied = false;
     // Walk forward one rev at a time, which also refuses to skip a gap.
     while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {
@@ -44,6 +57,21 @@ pub fn purge(root: &Path, id: &str) -> Result<Purged> {
         unprojected == 0,
         EXIT_INVARIANT,
         "{unprojected} events are not reflected in the sections yet; refusing to purge"
+    );
+    let recovery_events = crate::gate::pending(root)?
+        .iter()
+        .filter(|candidate| candidate.payload.object == object.id)
+        .filter(|candidate| {
+            events.iter().any(|event| {
+                event.rev == candidate.expected_rev + 1
+                    && event.confirmation.payload_sha256 == candidate.payload_sha256
+            })
+        })
+        .count();
+    ensure!(
+        recovery_events == 0,
+        EXIT_INVARIANT,
+        "{recovery_events} events are still needed to finish crash recovery; refusing to purge"
     );
     let count = events.len();
     object.last_projection_commit = git::head(root);

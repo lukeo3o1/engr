@@ -1,6 +1,113 @@
 //! What the command line promises the outside world.
 
-use std::process::Command;
+use engr::{
+    model::{Action, Confirmation, Content, Event, Object, Payload, EVENT_FORMAT},
+    store,
+};
+use serde_json::Value;
+use std::fs::OpenOptions;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
+use tempfile::TempDir;
+
+fn run_engr(root: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run engr")
+}
+
+fn prepare(root: &Path, args: &[&str]) -> Value {
+    let mut args = args.to_vec();
+    args.push("--json");
+    let output = run_engr(root, &args);
+    assert!(
+        output.status.success(),
+        "prepare failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("prepare prints a candidate JSON document")
+}
+
+fn confirm(root: &Path, candidate: &Value) {
+    let challenge = candidate["challenge"]
+        .as_str()
+        .expect("candidate challenge");
+    let response = format!("CONFIRM {challenge}");
+    let output = run_engr(root, &["confirm", &response]);
+    assert!(
+        output.status.success(),
+        "confirm failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path().to_path_buf();
+    store::init(&root).expect("init");
+    let object = Object::new(engr::model::new_id(), "event validation".to_owned());
+    let id = object.id.clone();
+    store::save_object(&root, &object).expect("save object");
+    let payload = Payload {
+        action: Action::SectionAdded,
+        object: id,
+        content: Content {
+            text: "event wording".to_owned(),
+            based_on: None,
+            refs: Vec::new(),
+        },
+    };
+    let payload_sha256 = payload.sha256().expect("payload hash");
+    let event = Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::FORMAT_VERSION,
+        event_id: engr::model::new_id(),
+        rev: 1,
+        time: "2026-08-13T00:00:00Z".to_owned(),
+        payload,
+        confirmation: Confirmation {
+            challenge: "234567".to_owned(),
+            payload_sha256,
+        },
+    };
+    (workspace, root, event)
+}
+
+fn assert_event_is_rejected(root: &Path, event: Event) {
+    let id = event.payload.object.clone();
+    store::append_event(root, &event).expect("write event");
+    let output = run_engr(root, &["verify", &id]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "malformed events must be rejected as stored-data errors: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn write_event_to(root: &Path, id: &str, event: &Event) {
+    let line = serde_json::to_string(event).expect("serialize event");
+    std::fs::write(store::events_path(root, id), format!("{line}\n")).expect("write event");
+}
 
 /// The installers echo this line back as proof the binary they placed runs, and
 /// `latest` never changes — so the part in parentheses is the only thing that
@@ -20,4 +127,255 @@ fn the_version_names_the_commit_it_was_built_from() {
         .and_then(|rest| rest.strip_suffix(')'))
         .unwrap_or_else(|| panic!("expected `engr latest (<commit>)`, got {line:?}"));
     assert!(!commit.is_empty(), "nothing was stamped in: {line:?}");
+}
+
+#[test]
+fn stale_listing_includes_closed_objects_whose_basis_moved() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    std::fs::write(root.join("basis.txt"), "initial basis\n").expect("write basis");
+    git(root, &["add", "basis.txt"]);
+    git(root, &["commit", "-qm", "basis"]);
+
+    let init = run_engr(root, &["init"]);
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let created = prepare(root, &["prepare", "--new", "--text", "closed record"]);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    confirm(root, &created);
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--add",
+            "--object",
+            &object,
+            "--text",
+            "basis wording",
+        ],
+    );
+    confirm(root, &added);
+
+    let closed = prepare(root, &["prepare", "--close", "--object", &object]);
+    confirm(root, &closed);
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record closed object"]);
+
+    std::fs::write(root.join("basis.txt"), "changed basis\n").expect("change basis");
+    git(root, &["add", "basis.txt"]);
+    git(root, &["commit", "-qm", "basis moved"]);
+
+    let output = run_engr(root, &["ls", "--stale"]);
+    assert!(
+        output.status.success(),
+        "ls --stale failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listing = String::from_utf8(output.stdout).expect("utf8 listing");
+    assert!(
+        listing.contains("closed"),
+        "a closed object whose basis moved must be surfaced by `ls --stale`; got {listing:?}"
+    );
+}
+
+#[test]
+fn an_object_file_must_match_its_embedded_id() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let object = Object::new(engr::model::new_id(), "mismatched storage key".to_owned());
+    store::write_json(&store::object_path(root, "wrong"), &object).expect("write object");
+
+    let output = run_engr(root, &["show", "wrong"]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "a filename/id mismatch is malformed stored data, not a usable object: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
+    use fs2::FileExt;
+
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    let init = run_engr(root, &["init"]);
+    assert!(init.status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "locked read"]);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    confirm(root, &created);
+
+    let payload = Payload {
+        action: Action::SectionAdded,
+        object: object.clone(),
+        content: Content {
+            text: "reconcile under lock".to_owned(),
+            based_on: None,
+            refs: Vec::new(),
+        },
+    };
+    let payload_sha256 = payload.sha256().expect("payload hash");
+    store::append_event(
+        root,
+        &Event {
+            format: EVENT_FORMAT.to_owned(),
+            version: engr::FORMAT_VERSION,
+            event_id: engr::model::new_id(),
+            rev: 2,
+            time: "2026-08-13T00:00:00Z".to_owned(),
+            payload,
+            confirmation: Confirmation {
+                challenge: "234567".to_owned(),
+                payload_sha256,
+            },
+        },
+    )
+    .expect("append unprojected event");
+
+    let lock_path = store::engr_dir(root).join("lock");
+    let lock = OpenOptions::new()
+        .write(true)
+        .open(lock_path)
+        .expect("open workspace lock");
+    lock.lock_exclusive().expect("hold workspace lock");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(["show", &object])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start show");
+    std::thread::sleep(Duration::from_millis(200));
+    let while_locked = child.try_wait().expect("inspect show process");
+    FileExt::unlock(&lock).expect("release workspace lock");
+
+    assert!(
+        while_locked.is_none(),
+        "show must not reconcile and write while another writer holds the lock"
+    );
+    let output = child.wait_with_output().expect("wait for show");
+    assert!(
+        output.status.success(),
+        "show failed after the lock released: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        store::load_object(root, &object)
+            .expect("load reconciled object")
+            .rev,
+        2,
+        "show must have reconciled the pending event after acquiring the lock"
+    );
+}
+
+#[test]
+fn unsupported_event_versions_are_rejected() {
+    let (_workspace, root, mut event) = event_workspace();
+    event.version += 1;
+    assert_event_is_rejected(&root, event);
+}
+
+#[test]
+fn events_must_belong_to_their_object_file() {
+    let (_workspace, root, mut event) = event_workspace();
+    let path_id = event.payload.object.clone();
+    event.payload.object = engr::model::new_id();
+    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    write_event_to(&root, &path_id, &event);
+    let output = run_engr(&root, &["verify", &path_id]);
+    assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
+}
+
+#[test]
+fn invalid_event_payloads_are_rejected() {
+    let (_workspace, root, mut event) = event_workspace();
+    event.payload.content.text.clear();
+    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    assert_event_is_rejected(&root, event);
+}
+
+#[test]
+fn event_confirmation_hashes_are_verified() {
+    let (_workspace, root, mut event) = event_workspace();
+    event.confirmation.payload_sha256 = "0".repeat(64);
+    assert_event_is_rejected(&root, event);
+}
+
+#[test]
+fn duplicate_event_revisions_are_rejected() {
+    let (_workspace, root, event) = event_workspace();
+    store::append_event(&root, &event).expect("write first event");
+    store::append_event(&root, &event).expect("write duplicate event");
+    let output = run_engr(&root, &["verify", &event.payload.object]);
+    assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
+}
+
+#[test]
+fn event_revisions_must_be_contiguous_within_the_buffer() {
+    let (_workspace, root, event) = event_workspace();
+    store::append_event(&root, &event).expect("write first event");
+    let mut skipped = event.clone();
+    skipped.rev += 2;
+    store::append_event(&root, &skipped).expect("write skipped event");
+    let output = run_engr(&root, &["verify", &event.payload.object]);
+    assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
+}
+
+#[test]
+fn stale_listing_includes_a_closed_object_after_an_empty_commit() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    std::fs::write(root.join("basis.txt"), "initial basis\n").expect("write basis");
+    git(root, &["add", "basis.txt"]);
+    git(root, &["commit", "-qm", "basis"]);
+
+    let init = run_engr(root, &["init"]);
+    assert!(init.status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "closed record"]);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    confirm(root, &created);
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--add",
+            "--object",
+            &object,
+            "--text",
+            "basis wording",
+        ],
+    );
+    confirm(root, &added);
+    let closed = prepare(root, &["prepare", "--close", "--object", &object]);
+    confirm(root, &closed);
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record closed object"]);
+    git(
+        root,
+        &["commit", "--allow-empty", "-qm", "no source changes"],
+    );
+
+    let output = run_engr(root, &["ls", "--stale"]);
+    assert!(output.status.success(), "ls --stale");
+    let listing = String::from_utf8(output.stdout).expect("utf8 listing");
+    assert!(
+        listing.contains("closed"),
+        "a newer empty commit still means the basis moved; got {listing:?}"
+    );
 }

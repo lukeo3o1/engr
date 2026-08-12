@@ -272,6 +272,137 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
     assert!(gate::find(&root, &code).is_err());
 }
 
+#[test]
+fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "interrupted confirmation");
+    let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::FORMAT_VERSION,
+        event_id: engr::model::new_id(),
+        rev: first.candidate.expected_rev + 1,
+        time: "2026-08-13T00:00:00Z".to_owned(),
+        payload: first.candidate.payload.clone(),
+        confirmation: engr::model::Confirmation {
+            challenge: first.candidate.challenge.clone(),
+            payload_sha256: first.candidate.payload_sha256.clone(),
+        },
+    };
+    store::append_event(&root, &event).expect("append before the crash");
+
+    // A later action must first replay the confirmed tail. Otherwise it is
+    // prepared at the same revision, its event collides with this one, and
+    // purging can erase the first confirmed section.
+    let second =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "second")).expect("second");
+    assert_eq!(second.candidate.expected_rev, 2);
+    let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge))
+        .expect("confirm second")
+        .1;
+    assert_eq!(object.rev, 3);
+    let text: Vec<_> = object
+        .sections
+        .iter()
+        .map(|section| section.text.as_str())
+        .collect();
+    assert_eq!(text, vec!["first", "second"]);
+}
+
+#[test]
+fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "interrupted confirmation");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::FORMAT_VERSION,
+        event_id: engr::model::new_id(),
+        rev: prepared.candidate.expected_rev + 1,
+        time: "2026-08-13T00:00:00Z".to_owned(),
+        payload: prepared.candidate.payload.clone(),
+        confirmation: engr::model::Confirmation {
+            challenge: code.clone(),
+            payload_sha256: prepared.candidate.payload_sha256.clone(),
+        },
+    };
+    store::append_event(&root, &event).expect("append before the crash");
+
+    let (_, object) =
+        gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
+    assert_eq!(object.rev, 2);
+    assert_eq!(object.sections[0].text, "once");
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "retrying must not append a second rev 2 event"
+    );
+    assert!(gate::find(&root, &code).is_err());
+}
+
+#[test]
+fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    let prepared =
+        gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::FORMAT_VERSION,
+        event_id: engr::model::new_id(),
+        rev: 1,
+        time: "2026-08-13T00:00:00Z".to_owned(),
+        payload: prepared.candidate.payload.clone(),
+        confirmation: engr::model::Confirmation {
+            challenge: prepared.candidate.challenge.clone(),
+            payload_sha256: prepared.candidate.payload_sha256.clone(),
+        },
+    };
+    store::append_event(&root, &event).expect("append before the crash");
+
+    let code = prepared.candidate.challenge;
+    let (_, object) =
+        gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
+    assert_eq!(object.rev, 1);
+    assert_eq!(object.title, "created once");
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        1,
+        "retrying must not append a second rev 1 event"
+    );
+    assert!(gate::find(&root, &code).is_err());
+}
+
+#[test]
+fn purge_keeps_the_event_needed_to_finish_crash_recovery() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "purge recovery");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let response = format!("CONFIRM {code}");
+    gate::confirm(&root, &response).expect("confirm");
+
+    // Stand in for a crash after saving the projection but before clearing the
+    // candidate. The matching event is the evidence confirm needs to recognize
+    // a retry as idempotent rather than applying it again.
+    store::write_json(&store::candidate_path(&root, &code), &prepared.candidate).expect("rewrite");
+
+    let error =
+        ops::purge(&root, &id).expect_err("purge must retain an event needed for crash recovery");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        !store::load_events(&root, &id).expect("events").is_empty(),
+        "the recovery evidence must still be present"
+    );
+
+    let (_, object) = gate::confirm(&root, &response).expect("idempotent recovery");
+    assert_eq!(object.rev, 2, "the event must not be applied a second time");
+    assert!(gate::find(&root, &code).is_err());
+}
+
 /// `git check-ignore -q`: 0 ignored, 1 not, anything else is a broken invocation
 /// and must not be read as "not ignored".
 fn ignored(root: &Path, relative: &str) -> bool {

@@ -163,7 +163,7 @@ fn run(cli: Cli) -> Result<()> {
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
             let id = store::resolve_id(&root, &object)?;
-            let object = ops::reconcile(&root, &id)?;
+            let object = store::with_lock(&root, || ops::reconcile(&root, &id))?;
             if format == Format::Json {
                 println!("{}", view::render_show_json(&root, &object)?);
             } else {
@@ -401,7 +401,9 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
 }
 
 fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool) -> Result<()> {
-    let objects = load_all(root, all)?;
+    // A closed object whose basis moved is the one case that must surface
+    // unprompted. `--stale` therefore cannot inherit `ls`'s open-only default.
+    let objects = load_all(root, all || stale)?;
     if objects.is_empty() {
         println!("no objects");
         return Ok(());

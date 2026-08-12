@@ -103,13 +103,13 @@ fn repointing_a_reference_is_detected() {
 }
 
 #[test]
-fn purge_refuses_to_drop_an_event_that_is_not_projected() {
+fn purge_does_not_remove_a_malformed_event_buffer() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "purge safety");
     let object = admit(&root, payload(Action::SectionAdded, &id, "one"));
 
-    // Stand in for a crash between appending the event and saving the
-    // projection: an event exists that the sections do not reflect.
+    // A gap cannot arise from one append, so stored data containing one is
+    // malformed rather than an event tail `reconcile` may safely replay.
     let orphan = Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
         version: engr::FORMAT_VERSION,
@@ -119,16 +119,18 @@ fn purge_refuses_to_drop_an_event_that_is_not_projected() {
         payload: payload(Action::SectionAdded, &id, "never projected"),
         confirmation: engr::model::Confirmation {
             challenge: "AAAAAA".to_owned(),
-            payload_sha256: "0".repeat(64),
+            payload_sha256: payload(Action::SectionAdded, &id, "never projected")
+                .sha256()
+                .expect("payload hash"),
         },
     };
     store::append_event(&root, &orphan).expect("append");
 
     let error = ops::purge(&root, &id).expect_err("purge must refuse");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(
-        !store::load_events(&root, &id).expect("events").is_empty(),
-        "nothing may be dropped when the check fails"
+        store::events_path(&root, &id).exists(),
+        "nothing may be dropped when validation fails"
     );
 }
 

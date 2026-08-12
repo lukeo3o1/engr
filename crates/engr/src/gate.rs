@@ -7,8 +7,8 @@ use crate::model::{
     project, Action, Confirmation, Content, Event, Object, Payload, CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::{
-    ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
-    EXIT_STALE, EXIT_USAGE, FORMAT_VERSION,
+    ensure, git, ops, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA, EXIT_STALE, EXIT_USAGE, FORMAT_VERSION,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -108,7 +108,7 @@ pub struct Prepared {
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
     payload.validate()?;
-    let object = match store::load_object(root, &payload.object) {
+    let object = match ops::reconcile(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
@@ -313,7 +313,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
         "candidate {code} does not match its own hash"
     );
 
-    let mut object = match store::load_object(root, &candidate.payload.object) {
+    let mut object = match ops::reconcile(root, &candidate.payload.object) {
         Ok(object) => object,
         Err(error) if error.code == EXIT_NOT_FOUND => {
             Object::new(candidate.payload.object.clone(), String::new())

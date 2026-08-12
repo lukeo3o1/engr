@@ -182,8 +182,16 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
-    let object: Object = read_json(&object_path(root, id))?;
+    let path = object_path(root, id);
+    let object: Object = read_json(&path)?;
     object.validate()?;
+    ensure!(
+        object.id == id,
+        EXIT_SCHEMA,
+        "{}: object id {:?} does not match its filename",
+        path.display(),
+        object.id
+    );
     Ok(object)
 }
 
@@ -273,7 +281,7 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         return Ok(Vec::new());
     }
     let text = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
-    let mut events = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -291,6 +299,65 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
             path.display(),
             index + 1
         );
+        // Reconciliation can turn an event back into authority after a crash,
+        // so corrupt recovery data must fail before it reaches the reducer.
+        ensure!(
+            event.version == FORMAT_VERSION,
+            EXIT_SCHEMA,
+            "{}:{}: unsupported event version {}",
+            path.display(),
+            index + 1,
+            event.version
+        );
+        ensure!(
+            event.payload.object == id,
+            EXIT_SCHEMA,
+            "{}:{}: event belongs to object {:?}, not {:?}",
+            path.display(),
+            index + 1,
+            event.payload.object,
+            id
+        );
+        event.payload.validate().map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{}:{}: invalid event payload: {}",
+                    path.display(),
+                    index + 1,
+                    error.message
+                ),
+            )
+        })?;
+        let payload_sha256 = event.payload.sha256().map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{}:{}: invalid event payload: {}",
+                    path.display(),
+                    index + 1,
+                    error.message
+                ),
+            )
+        })?;
+        ensure!(
+            event.confirmation.payload_sha256 == payload_sha256,
+            EXIT_SCHEMA,
+            "{}:{}: confirmation does not match the event payload",
+            path.display(),
+            index + 1
+        );
+        if let Some(previous) = events.last() {
+            ensure!(
+                previous.rev.checked_add(1) == Some(event.rev),
+                EXIT_SCHEMA,
+                "{}:{}: event rev {} does not immediately follow rev {}",
+                path.display(),
+                index + 1,
+                event.rev,
+                previous.rev
+            );
+        }
         events.push(event);
     }
     Ok(events)

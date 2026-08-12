@@ -68,7 +68,7 @@ pub struct Distance {
 
 impl Distance {
     pub fn moved(&self) -> bool {
-        self.commits > 0 && !self.files.is_empty()
+        self.commits > 0
     }
 }
 
