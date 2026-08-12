@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build engr from this checkout and install it.
 #
-# v0 is not released, so there is no verified archive to download. This builds
-# from the source you already have, which is the only honest option — an
-# installer pointing at a release tag that does not exist would fail in a way
-# that looks like a network problem.
+# The archives on the `latest` release are the other way to get a binary; this is
+# the way that works from a clone with no network and nothing to trust. The
+# version line it prints at the end names the commit the binary was built from,
+# which is the only thing that identifies a build — there are no version numbers.
 #
 # It never modifies PATH; it says what to add and leaves that to you.
 
@@ -61,13 +61,18 @@ command -v cargo >/dev/null 2>&1 || {
 }
 
 echo "building    ${PROFILE}"
+# --target-dir on the command line beats CARGO_TARGET_DIR and any config, so the
+# path read below is certain to be the path just written. Guessing `target/`
+# instead is worse than a miss: a stale binary left there from an earlier build
+# gets installed and then "verified", which is the one thing this must not do.
+TARGET_DIR="${REPO}/target"
 if [ "${PROFILE}" = "release" ]; then
-	(cd "${REPO}" && cargo build --release --quiet -p engr)
+	(cd "${REPO}" && cargo build --release --quiet -p engr --target-dir "${TARGET_DIR}")
 else
-	(cd "${REPO}" && cargo build --quiet -p engr)
+	(cd "${REPO}" && cargo build --quiet -p engr --target-dir "${TARGET_DIR}")
 fi
 
-BUILT="${REPO}/target/${PROFILE}/engr"
+BUILT="${TARGET_DIR}/${PROFILE}/engr"
 [ -x "${BUILT}" ] || {
 	echo "install.sh: expected a binary at ${BUILT}" >&2
 	exit 8

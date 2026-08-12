@@ -3,10 +3,10 @@
 Build engr from this checkout and install it.
 
 .DESCRIPTION
-v0 is not released, so there is no verified archive to download. This builds from
-the source you already have, which is the only honest option — an installer
-pointing at a release tag that does not exist would fail in a way that looks like
-a network problem.
+The archives on the `latest` release are the other way to get a binary; this is
+the way that works from a clone with no network and nothing to trust. The version
+line it prints at the end names the commit the binary was built from, which is
+the only thing that identifies a build — there are no version numbers.
 
 It never modifies PATH; it says what to add and leaves that to you.
 
@@ -44,13 +44,19 @@ if ($null -eq (Get-Command cargo -ErrorAction SilentlyContinue)) {
 if ($DebugProfile) { $profileName = 'debug' } else { $profileName = 'release' }
 Write-Host "building    $profileName"
 
+# --target-dir on the command line beats CARGO_TARGET_DIR and any config, so the
+# path read below is certain to be the path just written. Guessing `target\`
+# instead is worse than a miss: a stale binary left there from an earlier build
+# gets installed and then "verified", which is the one thing this must not do.
+$targetDir = Join-Path $repo 'target'
+
 Push-Location $repo
 try {
     if ($profileName -eq 'release') {
-        & cargo build --release --quiet -p engr
+        & cargo build --release --quiet -p engr --target-dir $targetDir
     }
     else {
-        & cargo build --quiet -p engr
+        & cargo build --quiet -p engr --target-dir $targetDir
     }
     if ($LASTEXITCODE -ne 0) {
         Fail 'install.ps1: the build failed' 8
@@ -60,7 +66,7 @@ finally {
     Pop-Location
 }
 
-$built = Join-Path $repo "target\$profileName\engr.exe"
+$built = Join-Path $targetDir "$profileName\engr.exe"
 if (-not (Test-Path $built)) {
     Fail "install.ps1: expected a binary at $built" 8
 }
