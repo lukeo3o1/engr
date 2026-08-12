@@ -42,9 +42,20 @@ means nobody is looking, which is exactly when drift goes unnoticed.
 
 ## Status
 
-**v0, not released.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
-Sixteen tests cover the gate and the record. There is no installer yet; build
-from source.
+**v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md). Seventeen
+tests cover the gate and the record.
+
+There are no version numbers. One release tag, `latest`, published by hand and
+moved each time — so the commit compiled into the binary is what identifies a
+build:
+
+```bash
+engr --version
+# engr latest (259db27)
+```
+
+A `-dirty` suffix means it was built from a modified tree, so it corresponds to
+no commit at all.
 
 v0 is a deliberate rewrite. The previous design was event-sourced with 48 event
 types, of which **35 never fired once** on the only day it was genuinely used. v0
@@ -84,9 +95,9 @@ it, look-back disappears silently.
 
 ## Install
 
-There is no released archive to download yet, so the installers build from the
-checkout you already have. They verify the installed binary runs, and never touch
-your PATH — they tell you what to add.
+The installers build from the checkout, which is the point of them living in it —
+no network, no archive to trust. They verify the installed binary runs, print the
+commit it came from, and never touch your PATH; they tell you what to add.
 
 ```bash
 git clone https://github.com/lukeo3o1/engr && cd engr
@@ -101,6 +112,10 @@ git clone https://github.com/lukeo3o1/engr && cd engr
 
 Both need a Rust toolchain ([rustup.rs](https://rustup.rs)) and exit 3 if it is
 missing.
+
+Prebuilt archives are attached to the `latest` release, which is published from
+the Actions tab — **release** → *Run workflow* — and never by pushing a tag.
+Until that has been run once there is nothing there to download.
 
 ## The Skill
 

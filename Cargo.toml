@@ -3,7 +3,10 @@ members = ["crates/engr"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+# There is no version number: one moving release tag, `latest`, and a commit id
+# compiled in. Cargo demands the field, so it stays at zero rather than implying
+# a release history that does not exist.
+version = "0.0.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/lukeo3o1/engr"

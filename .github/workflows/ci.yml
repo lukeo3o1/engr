@@ -23,6 +23,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --all-targets
       - run: cargo run -p engr -- --help
+      - run: cargo run -p engr -- --version
       - name: installer
         if: matrix.os != 'windows-latest'
         run: ./install.sh --bin-dir "$RUNNER_TEMP/bin"

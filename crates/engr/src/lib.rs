@@ -12,7 +12,10 @@ pub mod store;
 pub mod view;
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const IMPLEMENTATION_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// There is no version number. One moving release tag, `latest`, and the commit
+/// the binary was built from — see `build.rs` for where that comes from and what
+/// `-dirty` means.
+pub const IMPLEMENTATION_VERSION: &str = concat!("latest (", env!("ENGR_COMMIT"), ")");
 
 /// Invalid command line, or a confirmation response that did not match.
 pub const EXIT_USAGE: i32 = 2;

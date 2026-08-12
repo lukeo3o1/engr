@@ -21,7 +21,8 @@ to move together:
 1. **`protocol/PROTOCOL.md`** — it is normative. If the code and the document
    disagree, say which one is wrong.
 2. **Tests** — `tests/gate.rs` for what may enter the record, `tests/record.rs`
-   for what the record then guarantees.
+   for what the record then guarantees, `tests/cli.rs` for what the command line
+   promises the outside world.
 3. **The reasoning, in a comment** — not what the code does, but why it is that
    way. Most of the sharp edges here came from a specific failure; the comment is
    where that stays recoverable.

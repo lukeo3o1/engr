@@ -1,0 +1,141 @@
+name: release
+
+# Manual only. There is one release — `latest` — and it moves, so publishing has
+# to be a decision somebody makes rather than something a push causes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    name: publishable
+    runs-on: ubuntu-latest
+    steps:
+      # `latest` carries no version number, so nothing in the tag would later
+      # reveal that it had been published off an unmerged branch. The workflow
+      # dispatch form makes that a one-click mistake; fail here rather than after
+      # three platform builds.
+      - name: refuse to publish from anywhere but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "latest is published from main; this run is on ${{ github.ref }}" >&2
+          exit 1
+      - run: echo "publishing ${{ github.sha }}"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo test --workspace --all-targets
+      - run: cargo build --release --locked -p engr --target ${{ matrix.target }}
+
+      # A published archive that cannot say which commit it came from defeats the
+      # point of having no version number, and one built from a modified tree
+      # cannot be reproduced at all. Both are release-only failures: locally,
+      # `unknown` and `-dirty` are the correct answers.
+      - name: package
+        if: matrix.archive == 'tar'
+        run: |
+          binary="target/${{ matrix.target }}/release/engr"
+          version="$("${binary}" --version)"
+          echo "${version}"
+          case "${version}" in
+          *unknown* | *dirty*)
+            echo "not traceable to a clean commit: ${version}" >&2
+            exit 1
+            ;;
+          esac
+          mkdir -p dist
+          tar -czf "dist/engr-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" engr
+
+      - name: package
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $binary = "target\${{ matrix.target }}\release\engr.exe"
+          $version = & $binary --version
+          Write-Host $version
+          if ($version -match 'unknown|dirty') {
+              [Console]::Error.WriteLine("not traceable to a clean commit: $version")
+              exit 1
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path $binary -Force `
+            -DestinationPath "dist\engr-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    # Every platform first, so a partial set is never published: `latest` moving
+    # is what tells people something changed, and it should not move for two of
+    # three platforms.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum -- * | tee SHA256SUMS
+
+      - name: notes
+        run: |
+          short="$(git rev-parse --short=8 "${GITHUB_SHA}")"
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          There is no version number. This tag moves, and the commit compiled into
+          the binary is what identifies a build:
+
+          \`\`\`
+          \$ engr --version
+          engr latest (${short})
+          \`\`\`
+
+          Built from \`${GITHUB_SHA}\`. \`SHA256SUMS\` covers the archives.
+          EOF
+          cat "${RUNNER_TEMP}/notes.md"
+
+      - name: publish latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # One moving tag, so the old release and the old tag both go first —
+          # recreating the tag is what points it at this commit. Deleting the tag
+          # separately covers a tag left behind without a release, which
+          # `gh release create` would otherwise silently reuse as-is.
+          gh release delete latest --yes || true
+          git push origin --delete latest || true
+          gh release create latest \
+            --target "${GITHUB_SHA}" \
+            --title latest \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            dist/*
