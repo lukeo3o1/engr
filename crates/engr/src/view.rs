@@ -1,240 +1,395 @@
-use crate::{EngrError, Result, EXIT_SCHEMA};
-use serde_json::Value;
+//! Read surfaces: staleness assessment, `show`, and `ls`.
+//!
+//! Two rules shape everything here. The confirmed wording and how much it can
+//! be trusted appear on the *same* default surface — the previous design hid the
+//! confirmed text behind a flag, and a reader given the default output drew the
+//! opposite conclusion from the truth. And nothing is truncated: an agent asked
+//! to reason from a record needs all of it.
 
-fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| EngrError::new(EXIT_SCHEMA, format!("State.{key}: expected string")))
-}
-fn format_item(entry: &Value, provenance: bool) -> Result<String> {
-    let mut line = format!("{} — {}", string(entry, "id")?, string(entry, "text")?);
-    if provenance {
-        let detail = entry
-            .get("provenance")
-            .and_then(Value::as_object)
-            .ok_or_else(|| EngrError::new(EXIT_SCHEMA, "State entry provenance missing"))?;
-        line.push_str(&format!(
-            " [{}; event {}; {}/{}]",
-            string(entry, "status")?,
-            string(entry, "last_event_id")?,
-            detail
-                .get("initiator")
-                .and_then(Value::as_str)
-                .unwrap_or("?"),
-            detail.get("basis").and_then(Value::as_str).unwrap_or("?")
-        ));
-    }
-    Ok(line)
-}
-fn format_link(entry: &Value, label: &str) -> Result<String> {
-    let provenance = entry
-        .get("provenance")
-        .and_then(Value::as_object)
-        .ok_or_else(|| EngrError::new(EXIT_SCHEMA, "State link provenance missing"))?;
-    Ok(format!(
-        "{label} — {} [{}; event {}; {}/{}]",
-        string(entry, "last_text")?,
-        string(entry, "status")?,
-        string(entry, "last_event_id")?,
-        provenance
-            .get("initiator")
-            .and_then(Value::as_str)
-            .unwrap_or("?"),
-        provenance
-            .get("basis")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-    ))
+use crate::git;
+use crate::model::{Object, Ref, Status};
+use crate::{store, Result};
+use serde::Serialize;
+use std::path::Path;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RefDrift {
+    pub object: String,
+    pub section: u64,
+    pub confirmed_sha256: String,
+    pub current_sha256: Option<String>,
+    pub lookback: Option<String>,
 }
 
-pub fn render_state(state: &Value, provenance: bool, markdown: bool) -> Result<String> {
-    let heading = if markdown { "# " } else { "" };
-    let sub = if markdown { "## " } else { "" };
-    let head = state
-        .get("head")
-        .and_then(Value::as_object)
-        .ok_or_else(|| EngrError::new(EXIT_SCHEMA, "State.head missing"))?;
-    let mut lines = vec![
-        format!(
-            "{heading}{} — {}",
-            string(state, "stream")?,
-            string(state, "status")?
-        ),
-        format!(
-            "State through: rev {} ({})",
-            head.get("rev")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| EngrError::new(EXIT_SCHEMA, "State.head.rev missing"))?,
-            head.get("event_id").and_then(Value::as_str).unwrap_or("?")
-        ),
-    ];
-    if state.get("kind").and_then(Value::as_str) == Some("decision") {
-        lines.extend([
-            String::new(),
-            format!("{sub}Topic"),
-            state["topic"]["text"].as_str().unwrap_or("?").to_owned(),
-        ]);
-        if let Some(decision) = state.get("decision").and_then(Value::as_object) {
-            lines.extend([
-                String::new(),
-                format!("{sub}Decision"),
-                decision
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?")
-                    .to_owned(),
-            ]);
-        }
-        if let Some(target) = state.get("superseded_by").and_then(Value::as_str) {
-            lines.extend([String::new(), format!("Superseded by: {target}")]);
-        }
-        return Ok(lines.join("\n") + "\n");
+#[derive(Debug, Clone, Default)]
+pub struct SectionStatus {
+    pub basis: Option<git::Distance>,
+    pub drifted: Vec<RefDrift>,
+}
+
+impl SectionStatus {
+    pub fn is_ok(&self) -> bool {
+        self.basis.is_none() && self.drifted.is_empty()
     }
-    for (title, key) in [("Problem", "problem"), ("Impact", "impact")] {
-        if let Some(entry) = state.get(key).filter(|entry| !entry.is_null()) {
-            lines.extend([
-                String::new(),
-                format!("{sub}{title}"),
-                if provenance {
-                    format_item(entry, true)?
-                } else {
-                    entry
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("?")
-                        .to_owned()
-                },
-            ]);
+
+    pub fn label(&self) -> &'static str {
+        match (self.basis.is_some(), !self.drifted.is_empty()) {
+            (false, false) => "ok",
+            (true, false) => "地基已變動",
+            (false, true) => "依據已變動",
+            (true, true) => "地基與依據都變動",
         }
     }
-    let sections: [(&str, &str, &[&str]); 10] = [
-        ("Facts", "facts", &["active"]),
-        ("Constraints", "constraints", &["active"]),
-        ("Unknowns", "unknowns", &["unresolved"]),
-        ("Hypotheses", "hypotheses", &["active"]),
-        ("Solutions", "solutions", &["proposed", "selected"]),
-        (
-            "Implementations",
-            "implementations",
-            &["in_progress", "completed"],
-        ),
-        (
-            "Verification",
-            "verification",
-            &["pending", "passed", "failed", "inconclusive"],
-        ),
-        ("Findings", "findings", &["active"]),
-        ("Risks", "risks", &["open", "accepted", "mitigated"]),
-        ("Blockers", "blockers", &["active"]),
-    ];
-    for (title, key, statuses) in sections {
-        let entries = state
-            .get(key)
-            .and_then(Value::as_array)
-            .ok_or_else(|| EngrError::new(EXIT_SCHEMA, format!("State.{key}: expected array")))?;
-        let selected: Vec<_> = entries
-            .iter()
-            .filter(|entry| {
-                provenance
-                    || entry
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .is_some_and(|status| statuses.contains(&status))
-            })
-            .collect();
-        if selected.is_empty() {
-            continue;
-        }
-        lines.extend([String::new(), format!("{sub}{title}")]);
-        for entry in selected {
-            let mut text = format_item(entry, provenance)?;
-            if key == "verification" {
-                text.push_str(&format!(
-                    " [required={}, result={}]",
-                    entry
-                        .get("required")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    entry
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or("pending")
-                ));
-            }
-            lines.push(format!("- {text}"));
+
+    pub fn key(&self) -> &'static str {
+        match (self.basis.is_some(), !self.drifted.is_empty()) {
+            (false, false) => "ok",
+            (true, false) => "stale_basis",
+            (false, true) => "stale_refs",
+            (true, true) => "stale_both",
         }
     }
-    lines.extend([
-        String::new(),
-        format!(
-            "Selected solution: {}",
-            state
-                .get("selected_solution")
-                .and_then(Value::as_str)
-                .unwrap_or("none")
-        ),
-    ]);
-    if !provenance {
-        if let Some(items) = state.get("decisions").and_then(Value::as_array) {
-            let decisions: Vec<_> = items
+}
+
+/// For commit ids and content hashes, which are random throughout.
+fn short(value: &str) -> &str {
+    &value[..8.min(value.len())]
+}
+
+/// For object ids, whose leading characters are a timestamp. `len` comes from
+/// [`store::abbrev_len`] over the whole set.
+fn abbrev(id: &str, len: usize) -> &str {
+    &id[..len.min(id.len())]
+}
+
+/// The abbreviation width to use across one command's output.
+pub fn width(root: &Path) -> usize {
+    store::object_ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(8)
+}
+
+fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
+    let current = store::load_object(root, &reference.object)
+        .ok()
+        .and_then(|target| target.section(reference.section).ok().cloned())
+        .map(|section| section.sha256);
+    let lookback = current
+        .as_ref()
+        .filter(|now| **now != reference.sha256)
+        .map(|_| {
+            format!(
+                "git show {}:{}/objects/{}.json",
+                short(&reference.commit),
+                store::DIR,
+                reference.object
+            )
+        });
+    RefDrift {
+        object: reference.object.clone(),
+        section: reference.section,
+        confirmed_sha256: reference.sha256.clone(),
+        current_sha256: current,
+        lookback,
+    }
+}
+
+/// Assess every section. Status is computed, never stored — a stored verdict
+/// would be wrong the moment HEAD moved.
+pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
+    object
+        .sections
+        .iter()
+        .map(|section| {
+            let basis = section
+                .based_on
+                .as_deref()
+                .and_then(|commit| git::distance(root, commit))
+                .filter(git::Distance::moved);
+            let drifted = section
+                .refs
                 .iter()
-                .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("linked"))
-                .filter_map(|entry| entry.get("decision_id").and_then(Value::as_str))
+                .map(|reference| drift_for(root, reference))
+                .filter(|drift| {
+                    drift.current_sha256.as_deref() != Some(drift.confirmed_sha256.as_str())
+                })
                 .collect();
-            if !decisions.is_empty() {
-                lines.push(format!("Decisions: {}", decisions.join(", ")));
-            }
-        }
+            (section.id, SectionStatus { basis, drifted })
+        })
+        .collect()
+}
+
+pub struct Counts {
+    pub total: usize,
+    pub ok: usize,
+    pub attention: usize,
+}
+
+pub fn counts(assessment: &[(u64, SectionStatus)]) -> Counts {
+    let ok = assessment
+        .iter()
+        .filter(|(_, status)| status.is_ok())
+        .count();
+    Counts {
+        total: assessment.len(),
+        ok,
+        attention: assessment.len() - ok,
     }
-    if provenance {
-        if let Some(entries) = state
-            .get("decisions")
-            .and_then(Value::as_array)
-            .filter(|entries| !entries.is_empty())
-        {
-            lines.extend([String::new(), format!("{sub}Decisions")]);
-            for entry in entries {
-                lines.push(format!(
-                    "- {}",
-                    format_link(
-                        entry,
-                        entry
-                            .get("decision_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("?")
-                    )?
-                ));
-            }
+}
+
+pub fn render_show(root: &Path, object: &Object) -> String {
+    let assessment = assess(root, object);
+    let tally = counts(&assessment);
+    let w = width(root);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  {}  {}\n",
+        abbrev(&object.id, w),
+        object.status.as_str(),
+        object.title
+    ));
+    out.push_str(&format!("{} sections   {} ok", tally.total, tally.ok));
+    if tally.attention > 0 {
+        out.push_str(&format!("   {} 需注意", tally.attention));
+    }
+    out.push_str(&format!("   rev {}\n", object.rev));
+    if let Some(commit) = &object.last_projection_commit {
+        out.push_str(&format!("last_projection_commit  {}\n", short(commit)));
+    }
+
+    for section in &object.sections {
+        let status = assessment
+            .iter()
+            .find(|(id, _)| *id == section.id)
+            .map(|(_, status)| status.clone())
+            .unwrap_or_default();
+        out.push_str(&format!("\n── §{} ── {}\n", section.id, status.label()));
+        out.push_str(section.text.trim_end());
+        out.push('\n');
+        if let Some(commit) = &section.based_on {
+            out.push_str(&format!(
+                "    based_on {}   confirmed {}\n",
+                short(commit),
+                section.confirmed_at
+            ));
+        } else {
+            out.push_str(&format!("    confirmed {}\n", section.confirmed_at));
         }
-        if let Some(entries) = state
-            .get("related_work_items")
-            .and_then(Value::as_array)
-            .filter(|entries| !entries.is_empty())
-        {
-            lines.extend([String::new(), format!("{sub}Related work items")]);
-            for entry in entries {
-                let label = format!(
-                    "{} ({})",
-                    entry
-                        .get("work_item_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("?"),
-                    entry.get("relation").and_then(Value::as_str).unwrap_or("?")
-                );
-                lines.push(format!("- {}", format_link(entry, &label)?));
-            }
+        for reference in &section.refs {
+            out.push_str(&format!(
+                "    refs     {} §{}\n",
+                abbrev(&reference.object, w),
+                reference.section
+            ));
         }
-        if let Some(retired) = state.get("retired").and_then(Value::as_object) {
-            for (kind, entries) in retired {
-                if let Some(entries) = entries.as_array().filter(|entries| !entries.is_empty()) {
-                    lines.extend([String::new(), format!("{sub}Retired {kind}")]);
-                    for entry in entries {
-                        lines.push(format!("- {}", format_item(entry, true)?));
-                    }
+        // Say what to do about it, rather than making the reader work it out.
+        if let Some(distance) = &status.basis {
+            out.push_str(&format!(
+                "    建議     自 {} 起 {} 個 commit、{} 個檔案變動;確認本段是否仍成立\n",
+                short(section.based_on.as_deref().unwrap_or("")),
+                distance.commits,
+                distance.files.len()
+            ));
+        }
+        for drift in &status.drifted {
+            match (&drift.current_sha256, &drift.lookback) {
+                (Some(current), Some(lookback)) => {
+                    out.push_str(&format!(
+                        "    建議     {} §{} 確認時 {} → 目前 {}\n             {}\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        short(&drift.confirmed_sha256),
+                        short(current),
+                        lookback
+                    ));
+                }
+                _ => {
+                    out.push_str(&format!(
+                        "    建議     {} §{} 已不存在;本段的依據消失了\n",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
                 }
             }
         }
     }
-    Ok(lines.join("\n") + "\n")
+    out
+}
+
+#[derive(Serialize)]
+struct JsonSection<'a> {
+    id: u64,
+    text: &'a str,
+    status: &'static str,
+    based_on: Option<&'a str>,
+    refs: &'a [Ref],
+    sha256: &'a str,
+    confirmed_at: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    basis_commits_behind: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    basis_files_changed: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stale: Vec<RefDrift>,
+}
+
+#[derive(Serialize)]
+struct JsonSummary {
+    sections: usize,
+    ok: usize,
+    attention: usize,
+}
+
+#[derive(Serialize)]
+struct JsonObject<'a> {
+    id: &'a str,
+    title: &'a str,
+    status: &'static str,
+    rev: u64,
+    last_projection_commit: Option<&'a str>,
+    summary: JsonSummary,
+    sections: Vec<JsonSection<'a>>,
+}
+
+pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
+    let assessment = assess(root, object);
+    let tally = counts(&assessment);
+    let sections = object
+        .sections
+        .iter()
+        .map(|section| {
+            let status = assessment
+                .iter()
+                .find(|(id, _)| *id == section.id)
+                .map(|(_, status)| status.clone())
+                .unwrap_or_default();
+            JsonSection {
+                id: section.id,
+                text: &section.text,
+                status: status.key(),
+                based_on: section.based_on.as_deref(),
+                refs: &section.refs,
+                sha256: &section.sha256,
+                confirmed_at: &section.confirmed_at,
+                basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
+                basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
+                stale: status.drifted.clone(),
+            }
+        })
+        .collect();
+    let value = JsonObject {
+        id: &object.id,
+        title: &object.title,
+        status: object.status.as_str(),
+        rev: object.rev,
+        last_projection_commit: object.last_projection_commit.as_deref(),
+        summary: JsonSummary {
+            sections: tally.total,
+            ok: tally.ok,
+            attention: tally.attention,
+        },
+        sections,
+    };
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
+}
+
+/// One line per object, stable columns, never wrapped — so `grep`, `awk` and
+/// `fzf` all compose with it.
+pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> String {
+    let w = width(root);
+    let mut out = String::new();
+    for object in objects {
+        let assessment = assess(root, object);
+        let tally = counts(&assessment);
+        let hits = keyword.map(|needle| matching_sections(object, needle));
+        if let Some(hits) = &hits {
+            if hits.is_empty()
+                && !object
+                    .title
+                    .to_lowercase()
+                    .contains(&keyword.unwrap().to_lowercase())
+            {
+                continue;
+            }
+        }
+        let note = match &hits {
+            Some(hits) if !hits.is_empty() => hits
+                .iter()
+                .map(|id| format!("§{id}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ if tally.attention > 0 => format!("{} 需注意", tally.attention),
+            _ => "ok".to_owned(),
+        };
+        out.push_str(&format!(
+            "{}  {:<6}  {:>2} sections  {:<12}  {}\n",
+            abbrev(&object.id, w),
+            object.status.as_str(),
+            tally.total,
+            note,
+            object.title
+        ));
+    }
+    out
+}
+
+fn matching_sections(object: &Object, needle: &str) -> Vec<u64> {
+    let needle = needle.to_lowercase();
+    object
+        .sections
+        .iter()
+        .filter(|section| section.text.to_lowercase().contains(&needle))
+        .map(|section| section.id)
+        .collect()
+}
+
+/// One line per section, so grep can reach the text.
+pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
+    let w = width(root);
+    let mut out = String::new();
+    for object in objects {
+        for section in &object.sections {
+            out.push_str(&format!(
+                "{} §{:<3} {:<6}  {}\n",
+                abbrev(&object.id, w),
+                section.id,
+                object.status.as_str(),
+                section.text.replace('\n', " ").trim()
+            ));
+        }
+    }
+    out
+}
+
+/// The one case worth interrupting for by default: an object someone declared
+/// finished, whose basis has since moved. Closed means nobody is looking, which
+/// is exactly when drift goes unnoticed.
+pub fn render_stale(root: &Path, objects: &[Object]) -> String {
+    let w = width(root);
+    let mut out = String::new();
+    for object in objects {
+        for (id, status) in assess(root, object) {
+            if status.is_ok() {
+                continue;
+            }
+            let closed = object.status == Status::Closed;
+            let marker = if closed { "⚠" } else { "·" };
+            let tail = if closed {
+                " —— 沒有人在看的物件"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "{} {}  {:<6}  §{}  {}{}\n",
+                marker,
+                abbrev(&object.id, w),
+                object.status.as_str(),
+                id,
+                status.label(),
+                tail
+            ));
+        }
+    }
+    out
 }

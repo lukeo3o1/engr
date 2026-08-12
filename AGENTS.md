@@ -1,121 +1,67 @@
-# Engr Agent Constitution
+# Working in this repository
 
-## Purpose
+## What this is
 
-Engr is designed to mitigate engineering-context drift across long-running
-human-AI engineering work, including repeatedly revised ADRs, specifications,
-design documents, summaries, handoff material, and reports. Keep the
-implementation subordinate to that purpose. Do not turn Engr into a
-mutable-document editor, a free-form summary system, or an ad-hoc
-event-sourcing example.
+engr v0. An object holds sections; every change to a section goes through a gate
+where a human reads it and types a challenge code. Sections are the authority,
+the event log is a purgeable buffer, and history is git's job.
 
-## Non-Negotiable Model
+Read [protocol/PROTOCOL.md](protocol/PROTOCOL.md) before changing behaviour. It is
+normative, and it explains why each rule exists rather than just stating it.
 
-EventStore is the authoritative semantic history. State is deterministic,
-derived State. A Snapshot is a replay checkpoint, not authority. Artifacts are
-evidence. Outputs are derived communication surfaces. State must never be
-semantically patched, and accepted EventStore history must never be rewritten
-to make present understanding look cleaner.
-
-Corrections use explicit semantic transitions. Preserve these distinctions:
+## Layout
 
 ```text
-inference != fact
-proposal != accepted decision
-implementation completed != verification passed
-verification passed != automatic resolution
+crates/engr/src/model.rs    objects, sections, the confirmed payload, projection
+crates/engr/src/gate.rs     prepare, confirm, candidates
+crates/engr/src/store.rs    filesystem layout, locking, atomic writes
+crates/engr/src/git.rs      HEAD, distance, uncommitted
+crates/engr/src/ops.rs      reconcile, purge, verify
+crates/engr/src/view.rs     staleness assessment, show, ls
+crates/engr/src/main.rs     the CLI
+crates/engr/tests/gate.rs   what may enter the record
+crates/engr/tests/record.rs what the record then guarantees
 ```
 
-Retained history is part of correctness. Inactive, invalidated, rejected,
-superseded, and resolved entities remain available with explicit status. A
-derived view may filter them; it must not make them disappear from State.
-Semantic forks fail closed and require explicit reconciliation. Never sort or
-choose a branch by time, revision, filesystem order, Git order, or identifier.
+## If you are the agent using engr, not editing it
 
-## Human Authority
+Propose with `prepare`; never look for another way in, because there is not one
+and adding one would defeat the point.
 
-Human-authoritative semantic change follows this invariant:
+`engr candidate <code>` re-renders a pending candidate. Use it when a human comes
+back later — **re-running `prepare` mints a new code and voids the one they are
+holding.**
 
-```text
-exact candidate -> fresh challenge -> exact CONFIRM <code> -> exact confirmed wording appended
+Read state with `engr show <id>`. Each section is annotated with how far it can be
+trusted and what to do about it; that is not a separate report to fetch. Use
+`--format json` when you want structure. `status` there is computed, not stored.
+
+When `show` says a section's basis or a dependency moved, do not quietly reason
+from it. Recover the old wording with the `git show` command it hands you, decide
+whether the section still holds, and if it does not, propose a revision.
+
+## Conventions
+
+Comments explain why, not what. Most of the sharp edges here exist because
+something specific failed before; the comment is where that stays recoverable.
+Do not add a comment that restates the line beneath it.
+
+Match the surrounding code: `ensure!` for rule violations with an exit code, plain
+`Result` everywhere, no `unwrap` outside tests unless the invariant is stated
+right there.
+
+Before claiming anything works, run it:
+
+```bash
+cargo test --workspace
+cargo fmt --all -- --check
 ```
 
-The gate protects requirements, constraints, selected direction, accepted risk,
-priority, and durable decision acceptance, supersession, or revocation. It does
-not apply to every event. Agent-originated observations, hypotheses,
-implementation progress, and verification results may be recorded when their
-certainty and provenance are accurate. Do not mistake ordinary clarification
-for confirmation, and never hide human meaning in structured fields.
+## What not to do
 
-## Source Authority
+Do not add fields, actions, or statuses because they seem likely to be needed.
+The growth rule in the protocol is the whole reason this version exists — see the
+table of what is deliberately absent and the signal that would bring each one in.
 
-When sources disagree, use this order: explicit human-settled direction;
-protocol and reducer semantics; schemas and conformance oracles; current
-replayed State in an adopted project; then repository guidance and generated
-views. Tests and examples are evidence, not permission to change a higher
-authority. A genesis design may clarify the original problem and enduring
-semantic objectives when it does not conflict with a higher authority; it must
-not restore an implementation choice that later human-settled direction has
-superseded. Do not infer a semantic rule from implementation convenience or a
-document that is merely a derived output.
-
-## Change Discipline
-
-Keep one canonical repository, one canonical Skill, and one Rust production
-implementation with many verified platform distributions. Do not introduce a
-second editable Skill, another production writer, a compatibility alias, or an
-ad-hoc replacement when tooling is unavailable.
-
-Protocol-sensitive work requires matching evidence in the appropriate owner:
-protocol or event types for normative rules, schemas for machine contracts,
-conformance for fixed expectations, and tests for executable invariants. Keep
-documentation responsibilities separate. Do not copy detailed algorithms, field
-tables, exit codes, or command syntax into a general guide when their canonical
-owner already exists.
-
-## Git Workflow
-
-Use short branches named `<type>/<short-kebab-description>` and Conventional
-Commits. Common types are `feat`, `fix`, `docs`, `refactor`, `test`,
-`chore`, and `release`. A semantic or protocol breaking change must say so
-explicitly; never disguise it as a refactor, cleanup, chore, or routine
-documentation edit. Detailed branch, review, CI, and release procedures belong
-in `CONTRIBUTING.md`.
-
-## Claims
-
-Use evidence-bounded language. It is valid to say that Engr is designed to
-mitigate engineering-context drift. Do not claim that it prevents drift,
-eliminates hallucinations, guarantees correct decisions, has a published
-release, or supports a platform without the corresponding direct evidence.
-Configuration, a green local build, or a manifest template is not proof of a
-published artifact or platform runtime support.
-
-## Stop Conditions
-
-Stop and request explicit human direction when canonical sources conflict; an
-invariant would need to change; a protocol or architecture decision is needed;
-or implementation convenience would weaken a semantic guarantee. Stop normal
-record work on an unresolved fork, incompatible runtime, or replay/verification
-failure. Do not work around those conditions by editing derived files or
-writing raw EventStore data.
-
-## Definition of Done
-
-Before claiming a change is complete, confirm the implementation, protocol,
-schemas, documentation, and relevant tests agree. Run the focused checks that
-cover the changed invariant, and run the full required suite when scope or
-project rules require it. Ensure generated or packaged outputs are not claimed
-without direct artifact evidence. Review the diff for accidental authority,
-compatibility, or wording changes. A passing narrow test cannot prove a broader
-semantic claim.
-
-## Where Details Belong
-
-`README.md` owns purpose, motivation, architecture overview, and evidence
-status. `skill/SKILL.md` owns agent behavior inside an adopted project.
-`CONTRIBUTING.md` owns repository workflow. `protocol/` owns normative
-semantics and the CLI contract; `schemas/` owns machine-readable contracts;
-`conformance/` owns fixed oracles. Put extensive rationale, research, or
-experiments in `docs/` when they are needed. This constitution remains short,
-durable, and subordinate to the protocol.
+Do not make the reducer depend on anything outside the event. No clocks, no git,
+no model calls.

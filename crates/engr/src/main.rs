@@ -1,19 +1,17 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use engr::protocol::{canonical_json, HANDSHAKE};
-use engr::state::canonical_chain;
-use engr::store::{
-    append_event, confirm_candidate, create_snapshot, doctor, find_project_root, init_project,
-    list_streams, load_current_state, load_events, prepare_candidate, read_data, read_record,
-    replay_stream, run_conformance, verify_project, version_object,
-};
-use engr::view::render_state;
-use engr::{EngrError, Result, EXIT_USAGE, IMPLEMENTATION_VERSION, PROTOCOL_VERSION};
-use serde_json::{json, Value};
-use std::path::PathBuf;
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use engr::model::{self, Action, Payload, Ref};
+use engr::{gate, git, ops, store, view};
+use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_USAGE};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name="engr", version=IMPLEMENTATION_VERSION, about="Engineering Record protocol-v1 CLI")]
+#[command(
+    name = "engr",
+    version = engr::IMPLEMENTATION_VERSION,
+    about = "Engineering records whose every word a human confirmed"
+)]
 struct Cli {
+    /// Workspace root. Defaults to the nearest ancestor containing .engr
     #[arg(long, global = true)]
     root: Option<PathBuf>,
     #[command(subcommand)]
@@ -22,427 +20,450 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a workspace in the current directory
     Init,
-    Version {
-        #[arg(long)]
-        json: bool,
-        #[arg(long)]
-        handshake: bool,
+    /// Put a change up for a human to confirm
+    Prepare(Prepare),
+    /// List candidates awaiting confirmation, or show one in full
+    Candidate {
+        /// Challenge code. Omit to list everything pending
+        code: Option<String>,
     },
-    Doctor {
+    /// Admit a candidate. The response must be exactly `CONFIRM <code>`
+    Confirm { response: String },
+    /// List objects. Only open ones unless --all
+    Ls {
+        /// Keyword to filter by, matched against titles and section text
+        keyword: Option<String>,
         #[arg(long)]
-        json: bool,
+        all: bool,
+        /// One line per section, so grep can reach the text
+        #[arg(long)]
+        sections: bool,
+        /// Only what needs attention
+        #[arg(long)]
+        stale: bool,
     },
-    Prepare(WriteCandidate),
-    Confirm {
-        #[arg(long)]
-        response: String,
-        #[arg(long)]
-        json: bool,
-    },
-    Discard {
-        code: String,
-        #[arg(long, default_value = "candidate_corrected")]
-        reason: String,
-        #[arg(long)]
-        json: bool,
-    },
-    Append(Append),
-    Replay {
-        stream: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
+    /// Show one object: its sections, and how much each can be trusted
     Show {
-        stream: String,
-        #[arg(long)]
-        brief: bool,
-        #[arg(long)]
-        provenance: bool,
+        object: String,
         #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
+        format: Format,
     },
-    Backlog {
-        #[arg(long, value_enum, default_value = "text")]
-        format: OutputFormat,
-    },
-    Why {
-        stream: String,
-        subject: Option<String>,
-        #[arg(long, value_enum, default_value = "text")]
-        format: WhyFormat,
-    },
-    Snapshot {
-        stream: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    Verify {
-        stream: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    Conformance {
-        #[arg(long)]
-        json: bool,
-    },
+    /// Drop the event buffer for an object that has settled
+    Purge { object: String },
+    /// Recompute section hashes
+    Verify { object: Option<String> },
 }
 
-#[derive(Args)]
-struct WriteCandidate {
-    #[arg(long)]
-    stream: String,
-    #[arg(long)]
-    event: String,
-    #[arg(long)]
-    record_file: PathBuf,
-    #[arg(long)]
-    data_file: Option<PathBuf>,
-    #[arg(long)]
-    json: bool,
-}
-#[derive(Args)]
-struct Append {
-    #[arg(long)]
-    stream: String,
-    #[arg(long)]
-    event: String,
-    #[arg(long)]
-    record_file: PathBuf,
-    #[arg(long)]
-    data_file: Option<PathBuf>,
-    #[arg(long)]
-    initiator: String,
-    #[arg(long)]
-    basis: String,
-    #[arg(long)]
-    expected_parent: String,
-    #[arg(long)]
-    json: bool,
-}
-#[derive(Clone, Copy, ValueEnum, PartialEq)]
-enum OutputFormat {
-    Text,
-    Markdown,
-    Json,
-}
-#[derive(Clone, Copy, ValueEnum, PartialEq)]
-enum WhyFormat {
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Format {
     Text,
     Json,
 }
 
-fn print_json(value: &Value) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("JSON serialization cannot fail")
-    );
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("action")
+        .required(true)
+        .args(["new", "add", "revise", "merge", "delete", "close", "reopen"])
+))]
+struct Prepare {
+    /// Propose a new object
+    #[arg(long)]
+    new: bool,
+    /// Propose a new section
+    #[arg(long)]
+    add: bool,
+    /// Replace the wording of a section
+    #[arg(long, value_name = "SECTION")]
+    revise: Option<u64>,
+    /// Consolidate sections into one
+    #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
+    merge: Option<Vec<u64>>,
+    /// Remove a section
+    #[arg(long, value_name = "SECTION")]
+    delete: Option<u64>,
+    /// Declare the object finished
+    #[arg(long)]
+    close: bool,
+    /// Take a finished object back up
+    #[arg(long)]
+    reopen: bool,
+
+    /// The object to act on. Any unique id prefix. Omit only with --new
+    #[arg(long)]
+    object: Option<String>,
+    /// Wording, inline
+    #[arg(long)]
+    text: Option<String>,
+    /// Wording, from a file
+    #[arg(long)]
+    text_file: Option<PathBuf>,
+    /// Commit this wording is written against. Defaults to HEAD
+    #[arg(long)]
+    based_on: Option<String>,
+    /// A section of another object this depends on, as OBJECT:SECTION
+    #[arg(long = "ref", value_name = "OBJECT:SECTION")]
+    references: Vec<String>,
+    #[arg(long)]
+    json: bool,
 }
-fn project(cli: &Cli) -> Result<PathBuf> {
-    let root = find_project_root(cli.root.as_deref())?;
-    engr::store::validate_format_versions(&root)?;
-    Ok(root)
-}
-fn parent(value: &str) -> Result<Value> {
-    if value == "none" {
-        return Ok(Value::Null);
-    }
-    if engr::protocol::valid_event_id(value) {
-        Ok(Value::String(value.into()))
-    } else {
-        Err(EngrError::new(
-            EXIT_USAGE,
-            "--expected-parent must be an event id or 'none'",
-        ))
+
+fn main() {
+    if let Err(error) = run(Cli::parse()) {
+        eprintln!("error: {}", error.message);
+        std::process::exit(error.code);
     }
 }
 
-fn execute(cli: Cli) -> Result<()> {
-    if let Command::Version { json, handshake } = &cli.command {
-        if *handshake {
-            println!("{HANDSHAKE}");
-        } else if *json {
-            print_json(&version_object());
+fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.command, Command::Init) {
+        let root = match cli.root {
+            Some(path) => path,
+            None => std::env::current_dir()
+                .map_err(|error| engr::tool_error("current directory", error))?,
+        };
+        let dir = store::init(&root)?;
+        println!("initialised {}", dir.display());
+        if git::is_repo(&root) {
+            println!("git          ok");
         } else {
             println!(
-                "engr {} (protocol={}, event-schema=1, state-schema=1, implementation=rust)",
-                IMPLEMENTATION_VERSION, PROTOCOL_VERSION
+                "git          not a repository — commit {}/objects to keep look-back working",
+                store::DIR
             );
         }
         return Ok(());
     }
-    if matches!(&cli.command, Command::Init) {
-        let root = cli
-            .root
-            .as_deref()
-            .ok_or_else(|| EngrError::new(EXIT_USAGE, "init requires --root <project-root>"))?;
-        let result = init_project(root)?;
-        print_json(&result);
+
+    let root = store::find_root(cli.root.as_deref())?;
+    store::validate_format(&root)?;
+
+    match cli.command {
+        Command::Init => unreachable!("handled above"),
+        Command::Prepare(command) => prepare(&root, command),
+        Command::Candidate { code } => candidate(&root, code.as_deref()),
+        Command::Confirm { response } => {
+            let (event, object) = store::with_lock(&root, || gate::confirm(&root, &response))?;
+            println!(
+                "CONFIRMED  {}  {}  rev {}",
+                shorten(&object.id, view::width(&root)),
+                event.payload.action.label(),
+                object.rev
+            );
+            warn_uncommitted(&root, &object.id);
+            Ok(())
+        }
+        Command::Ls {
+            keyword,
+            all,
+            sections,
+            stale,
+        } => ls(&root, keyword.as_deref(), all, sections, stale),
+        Command::Show { object, format } => {
+            let id = store::resolve_id(&root, &object)?;
+            let object = ops::reconcile(&root, &id)?;
+            if format == Format::Json {
+                println!("{}", view::render_show_json(&root, &object)?);
+            } else {
+                print!("{}", view::render_show(&root, &object));
+            }
+            Ok(())
+        }
+        Command::Purge { object } => {
+            let id = store::resolve_id(&root, &object)?;
+            let purged = store::with_lock(&root, || ops::purge(&root, &id))?;
+            println!("purged     {} events", purged.events);
+            match purged.commit {
+                Some(commit) => println!("watermark  {}", &commit[..8.min(commit.len())]),
+                None => println!("watermark  none — not a git repository"),
+            }
+            Ok(())
+        }
+        Command::Verify { object } => verify(&root, object.as_deref()),
+    }
+}
+
+fn prepare(root: &Path, command: Prepare) -> Result<()> {
+    let action = if command.new {
+        Action::ObjectCreated
+    } else if command.add {
+        Action::SectionAdded
+    } else if let Some(section) = command.revise {
+        Action::SectionRevised { section }
+    } else if let Some(absorbs) = command.merge.clone() {
+        Action::SectionMerged { absorbs }
+    } else if let Some(section) = command.delete {
+        Action::SectionDeleted { section }
+    } else if command.close {
+        Action::ObjectClosed
+    } else {
+        Action::ObjectReopened
+    };
+
+    let object = match (&action, &command.object) {
+        (Action::ObjectCreated, Some(_)) => {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--new mints its own id; drop --object",
+            ))
+        }
+        (Action::ObjectCreated, None) => model::new_id(),
+        (_, Some(prefix)) => store::resolve_id(root, prefix)?,
+        (_, None) => {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--object is required for everything except --new",
+            ))
+        }
+    };
+
+    let text = match (&command.text, &command.text_file) {
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "use --text or --text-file, not both",
+            ))
+        }
+        (Some(text), None) => Some(text.clone()),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|error| engr::tool_error(path.display(), error))?,
+        ),
+        (None, None) => None,
+    };
+
+    let mut references = Vec::new();
+    for spec in &command.references {
+        references.push(parse_ref(root, spec)?);
+    }
+
+    let content = gate::content(root, text, command.based_on.clone(), references);
+    let payload = Payload {
+        action,
+        object,
+        content,
+    };
+    let prepared = store::with_lock(root, || gate::prepare(root, payload))?;
+
+    if command.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&prepared.candidate)
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+        );
         return Ok(());
     }
-    let root = project(&cli)?;
-    match cli.command {
-        Command::Doctor { json } => {
-            let report = doctor(&root)?;
-            if json {
-                print_json(&report)
-            } else {
-                println!("PASS protocol-v{PROTOCOL_VERSION}\nProject: {}\nSelected implementation: engr\nStreams: {}",root.display(),report["streams"].as_array().map_or(0,Vec::len));
-            }
-        }
-        Command::Prepare(command) => {
-            let receipt = prepare_candidate(
-                &root,
-                &command.stream,
-                &command.event,
-                &read_record(&command.record_file)?,
-                read_data(command.data_file.as_deref())?,
-            )?;
-            if command.json {
-                print_json(&receipt)
-            } else {
-                println!(
-                    "Candidate {}\nConfirm exactly: CONFIRM {}\n\n{}",
-                    receipt["event"].as_str().unwrap_or("?"),
-                    receipt["challenge"].as_str().unwrap_or("?"),
-                    receipt["record"]["text"].as_str().unwrap_or("")
-                );
-            }
-        }
-        Command::Confirm { response, json } => {
-            let (event, state, path) = confirm_candidate(&root, &response)?;
-            let result = json!({"ok":true,"event_id":event["event_id"],"stream":event["stream"],"head":state["head"],"event_path":path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\',"/")});
-            if json {
-                print_json(&result)
-            } else {
-                println!(
-                    "APPENDED {} {} rev {}\nState: {} through rev {}",
-                    event["event_id"].as_str().unwrap(),
-                    event["stream"].as_str().unwrap(),
-                    event["rev"],
-                    state["status"],
-                    state["head"]["rev"]
-                );
-            }
-        }
-        Command::Discard { code, reason, json } => {
-            let receipt = engr::store::discard_candidate(&root, &code, &reason)?;
-            if json {
-                print_json(&receipt)
-            } else {
-                println!("DISCARDED {code}");
-            }
-        }
-        Command::Append(command) => {
-            if !matches!(command.initiator.as_str(), "agent" | "system") {
-                return Err(EngrError::new(
-                    EXIT_USAGE,
-                    "append only permits agent or system provenance; use prepare and confirm for human truth",
-                ));
-            }
-            let provenance = json!({"initiator":command.initiator,"basis":command.basis});
-            let (event, state, path) = append_event(
-                &root,
-                &command.stream,
-                &command.event,
-                &read_record(&command.record_file)?,
-                read_data(command.data_file.as_deref())?,
-                provenance,
-                parent(&command.expected_parent)?,
-            )?;
-            let result = json!({"ok":true,"event_id":event["event_id"],"stream":event["stream"],"head":state["head"],"event_path":path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\',"/")});
-            if command.json {
-                print_json(&result)
-            } else {
-                println!(
-                    "APPENDED {} {} rev {}\nState: {} through rev {}",
-                    event["event_id"].as_str().unwrap(),
-                    event["stream"].as_str().unwrap(),
-                    event["rev"],
-                    state["status"],
-                    state["head"]["rev"]
-                );
-            }
-        }
-        Command::Replay { stream, json } => {
-            let streams = stream
-                .map(|stream| vec![stream])
-                .unwrap_or(list_streams(&root)?);
-            if streams.is_empty() {
-                return Err(EngrError::new(
-                    engr::EXIT_NOT_FOUND,
-                    "EventStore contains no streams",
-                ));
-            }
-            let mut values = Vec::new();
-            for stream in streams {
-                let (state, chain) = replay_stream(&root, &stream, true)?;
-                values.push(json!({"stream":stream,"head":state["head"],"status":state["status"],"rejected_events":chain.rejected.len(),"reconciliations":chain.resolutions.len()}));
-            }
-            if json {
-                print_json(&json!({"ok":true,"streams":values}))
-            } else {
-                for value in values {
-                    println!(
-                        "REPLAYED {} rev {} — {}",
-                        value["stream"].as_str().unwrap(),
-                        value["head"]["rev"],
-                        value["status"].as_str().unwrap()
-                    );
-                }
-            }
-        }
-        Command::Show {
-            stream,
-            brief: _,
-            provenance,
-            format,
-        } => {
-            let state = load_current_state(&root, &stream)?;
-            if format == OutputFormat::Json {
-                print_json(&state)
-            } else {
-                print!(
-                    "{}",
-                    render_state(&state, provenance, format == OutputFormat::Markdown)?
-                );
-            }
-        }
-        Command::Backlog { format } => {
-            let mut states = Vec::new();
-            for stream in list_streams(&root)? {
-                if engr::protocol::stream_kind(&stream)? == "work_item" {
-                    states.push(load_current_state(&root, &stream)?);
-                }
-            }
-            if format == OutputFormat::Json {
-                print_json(&json!({ "work_items": states }))
-            } else if format == OutputFormat::Markdown {
-                println!("# Engineering Backlog");
-                for state in states {
-                    println!(
-                        "- **{}** — {} — {}",
-                        state["stream"].as_str().unwrap(),
-                        state["status"].as_str().unwrap(),
-                        state["title"]["text"].as_str().unwrap()
-                    );
-                }
-            } else {
-                for state in states {
-                    println!(
-                        "{} — {} — {}",
-                        state["stream"].as_str().unwrap(),
-                        state["status"].as_str().unwrap(),
-                        state["title"]["text"].as_str().unwrap()
-                    );
-                }
-            }
-        }
-        Command::Why {
-            stream,
-            subject,
-            format,
-        } => {
-            let events = load_events(&root, &stream)?;
-            let chain = canonical_chain(&events, &stream)?;
-            let needle = subject.as_ref().map(|item| item.to_lowercase());
-            let mut values = Vec::new();
-            for event in events {
-                let search = format!(
-                    "{} {} {} {}",
-                    event["event_id"].as_str().unwrap_or(""),
-                    event["event"].as_str().unwrap_or(""),
-                    event["record"]["text"].as_str().unwrap_or(""),
-                    canonical_json(&event["data"])
-                )
-                .to_lowercase();
-                if needle
-                    .as_ref()
-                    .is_some_and(|needle| !search.contains(needle))
-                {
-                    continue;
-                }
-                values.push(json!({"event_id":event["event_id"],"rev":event["rev"],"event":event["event"],"text":event["record"]["text"],"data":event["data"],"provenance":event["provenance"],"canonical":chain.chain.iter().any(|item|item["event_id"]==event["event_id"]),"rejected_by_reconciliation":chain.rejected.contains(event["event_id"].as_str().unwrap_or(""))}));
-            }
-            values.sort_by_key(|item| {
-                (
-                    item["rev"].as_i64().unwrap_or(0),
-                    item["event_id"].as_str().unwrap_or("").to_owned(),
-                )
-            });
-            if subject.is_none() && values.len() > 20 {
-                values = values.split_off(values.len() - 20);
-            }
-            if format == WhyFormat::Json {
-                print_json(&json!({"stream":stream,"subject":subject,"events":values}))
-            } else {
-                for value in values {
-                    println!(
-                        "rev {} {} {} [{}]\n  {}",
-                        value["rev"],
-                        value["event_id"].as_str().unwrap(),
-                        value["event"].as_str().unwrap(),
-                        if value["canonical"].as_bool() == Some(true) {
-                            "canonical"
-                        } else {
-                            "rejected-history"
-                        },
-                        value["text"].as_str().unwrap()
-                    );
-                }
-            }
-        }
-        Command::Snapshot { stream, name, json } => {
-            let (path, value) = create_snapshot(&root, &stream, name.as_deref())?;
-            let result = json!({"ok":true,"path":path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\',"/"),"through":value["through"]});
-            if json {
-                print_json(&result)
-            } else {
-                println!(
-                    "SNAPSHOT {} through rev {}",
-                    result["path"].as_str().unwrap(),
-                    result["through"]["rev"]
-                );
-            }
-        }
-        Command::Verify { stream, json } => {
-            let report = verify_project(&root, stream.as_deref())?;
-            if json {
-                print_json(&report)
-            } else {
-                println!("PASS protocol-v{PROTOCOL_VERSION}");
-                for item in report["verified_streams"].as_array().unwrap() {
-                    println!(
-                        "{}: rev {}, events={}, rejected={}",
-                        item["stream"].as_str().unwrap(),
-                        item["head"]["rev"],
-                        item["events"],
-                        item["rejected_events"]
-                    );
-                }
-            }
-        }
-        Command::Conformance { json } => {
-            let report = run_conformance(&root)?;
-            if json {
-                print_json(&report)
-            } else {
-                println!("PASS protocol-v{PROTOCOL_VERSION}");
-                for fixture in report["fixtures"].as_array().unwrap() {
-                    println!("{}: passed", fixture["name"].as_str().unwrap());
-                }
-            }
-        }
-        Command::Init | Command::Version { .. } => unreachable!(),
+    print!(
+        "{}",
+        render_candidate(&prepared.candidate, view::width(root))
+    );
+    for code in &prepared.superseded {
+        println!("(candidate {code} was superseded by this one)");
     }
     Ok(())
 }
-fn main() {
-    let cli = Cli::parse();
-    if let Err(error) = execute(cli) {
-        eprintln!("ERROR[{}] {}", error.code, error.message);
-        std::process::exit(error.code);
+
+/// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
+/// so the caller cannot pin something the target never said.
+fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+    let (prefix, section) = spec.split_once(':').ok_or_else(|| {
+        Error::new(
+            EXIT_USAGE,
+            format!("--ref {spec:?} must be OBJECT:SECTION, for example 019ff800:2"),
+        )
+    })?;
+    let section: u64 = section.parse().map_err(|_| {
+        Error::new(
+            EXIT_USAGE,
+            format!("--ref {spec:?}: section must be a number"),
+        )
+    })?;
+    let id = store::resolve_id(root, prefix)?;
+    let target = store::load_object(root, &id)?;
+    let target_section = target.section(section)?;
+    let commit = git::head(root).ok_or_else(|| {
+        Error::new(
+            engr::EXIT_INVARIANT,
+            "a reference records the commit it was read at, which needs a git repository",
+        )
+    })?;
+    Ok(Ref {
+        object: id,
+        section,
+        sha256: target_section.sha256.clone(),
+        commit,
+    })
+}
+
+fn shorten(id: &str, width: usize) -> &str {
+    &id[..width.min(id.len())]
+}
+
+fn render_candidate(candidate: &gate::Candidate, width: usize) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Candidate  {}\nObject     {}\n",
+        candidate.payload.action.label(),
+        shorten(&candidate.payload.object, width)
+    ));
+    if let Some(commit) = &candidate.payload.content.based_on {
+        out.push_str(&format!("Based on   {}\n", &commit[..8.min(commit.len())]));
+    }
+    for reference in &candidate.payload.content.refs {
+        out.push_str(&format!(
+            "Ref        {} §{}\n",
+            shorten(&reference.object, width),
+            reference.section
+        ));
+    }
+    out.push('\n');
+    // Show the change, not the whole section again: making a human re-read
+    // everything is how confirmation decays into rubber-stamping.
+    match (&candidate.previous_text, &candidate.payload.action) {
+        (Some(previous), Action::SectionDeleted { .. }) => {
+            for line in previous.trim_end().lines() {
+                out.push_str(&format!("- {line}\n"));
+            }
+        }
+        (Some(previous), _) => {
+            for line in previous.trim_end().lines() {
+                out.push_str(&format!("- {line}\n"));
+            }
+            for line in candidate.payload.content.text.trim_end().lines() {
+                out.push_str(&format!("+ {line}\n"));
+            }
+        }
+        (None, _) if candidate.payload.action.carries_content() => {
+            out.push_str(candidate.payload.content.text.trim_end());
+            out.push('\n');
+        }
+        (None, action) => {
+            out.push_str(&format!("({})\n", action.label()));
+        }
+    }
+    out.push_str(&format!(
+        "\n逐字輸入以確認:  CONFIRM {}\n",
+        candidate.challenge
+    ));
+    out
+}
+
+fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
+    match code {
+        Some(code) => {
+            let candidate = gate::find(root, code)?;
+            print!("{}", render_candidate(&candidate, view::width(root)));
+            if !gate::is_live(root, &candidate) {
+                println!("\n這個候選已經失效 —— 物件在它準備之後變動過。重新 prepare 一次。");
+            }
+            Ok(())
+        }
+        None => {
+            let pending = gate::pending(root)?;
+            if pending.is_empty() {
+                println!("沒有待確認的候選");
+                return Ok(());
+            }
+            let width = view::width(root);
+            for candidate in pending {
+                println!(
+                    "{}   {:<16} {} {:<8} {}",
+                    candidate.challenge,
+                    candidate.payload.action.label(),
+                    shorten(&candidate.payload.object, width),
+                    if gate::is_live(root, &candidate) {
+                        "pending"
+                    } else {
+                        "stale"
+                    },
+                    candidate.created_at
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
+    let mut objects = Vec::new();
+    for id in store::object_ids(root)? {
+        let object = store::load_object(root, &id)?;
+        if all || object.status == engr::model::Status::Open {
+            objects.push(object);
+        }
+    }
+    objects.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(objects)
+}
+
+fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool) -> Result<()> {
+    let objects = load_all(root, all)?;
+    if objects.is_empty() {
+        println!("沒有物件");
+        return Ok(());
+    }
+    if sections {
+        print!("{}", view::render_ls_sections(root, &objects));
+    } else if stale {
+        let out = view::render_stale(root, &objects);
+        if out.is_empty() {
+            println!("全部 ok");
+        } else {
+            print!("{out}");
+        }
+    } else {
+        print!("{}", view::render_ls(root, &objects, keyword));
+    }
+    Ok(())
+}
+
+fn verify(root: &Path, object: Option<&str>) -> Result<()> {
+    let ids = match object {
+        Some(prefix) => vec![store::resolve_id(root, prefix)?],
+        None => store::object_ids(root)?,
+    };
+    if ids.is_empty() {
+        return Err(Error::new(EXIT_NOT_FOUND, "no objects to verify"));
+    }
+    let mut failed = false;
+    let width = view::width(root);
+    for id in ids {
+        let report = ops::verify(root, &id)?;
+        let verdict = if report.passed() { "PASS" } else { "FAIL" };
+        println!(
+            "{}  {:<4}  {} sections  {}",
+            shorten(&report.object, width),
+            verdict,
+            report.sections,
+            report.title
+        );
+        for section in &report.tampered {
+            println!("          §{section} content does not match its recorded hash");
+        }
+        if report.unprojected > 0 {
+            println!(
+                "          {} events are not reflected in the sections",
+                report.unprojected
+            );
+        }
+        if report.uncommitted == Some(true) {
+            println!("          uncommitted — git holds no record of the current wording yet");
+        }
+        failed |= !report.passed();
+    }
+    if failed {
+        return Err(Error::new(engr::EXIT_INVARIANT, "verification failed"));
+    }
+    Ok(())
+}
+
+fn warn_uncommitted(root: &Path, id: &str) {
+    if git::uncommitted(root, &store::object_path(root, id)) == Some(true) {
+        println!(
+            "note       commit {}/objects to keep look-back working",
+            store::DIR
+        );
     }
 }

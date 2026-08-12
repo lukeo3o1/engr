@@ -1,114 +1,96 @@
-# Engr
+# engr
 
-**Keep engineering context coherent across long-running human-AI collaboration.**
+**Engineering records whose every word a human confirmed.**
 
-Engr is a complete Engineering Record system. It combines a protocol, an AI
-Agent Skill, a deterministic Rust runtime, schemas, conformance fixtures,
-behavioral-evaluation inputs, the `engr` CLI, and release tooling in one
-canonical repository.
-
-## The problem
-
-Long-running engineering work often revises ADRs, specifications, design
-documents, summaries, handoff material, and reports many times. Those mutable
-documents can drift: constraints disappear, rejected options reappear, and
-implementation or verification status becomes inconsistent. Future agents then
-receive noisy or contradictory engineering context.
-
-Engr is designed to mitigate this failure mode. It does not claim to eliminate
-context drift, guarantee decisions, or establish empirical effectiveness.
-
-## The Engr approach
-
-```text
-semantic engineering change
-        -> Semantic Event
-        -> EventStore
-        -> deterministic replay
-        -> State
-        -> targeted views and generated documents
-```
-
-EventStore is the append-only authoritative semantic history. State is derived
-by deterministic replay. Snapshots accelerate replay without becoming
-authority. Artifacts are evidence, while ADRs, specifications, reports, and
-agent views are derived communication surfaces. A document does not become
-engineering truth merely because it was edited.
-
-Every semantic entity remains in State with an explicit status, including
-superseded, rejected, invalidated, and resolved history. Same-parent competing
-events are a semantic fork and fail closed until explicit reconciliation.
-
-## Human authority and semantic change
-
-Human-authoritative changes cross the Human Alignment Gate: the exact candidate
-is shown, a fresh challenge is issued, and only the exact `CONFIRM <code>`
-response admits the displayed wording. This gate does not apply to every event.
-Agent-originated observations, findings, hypotheses, implementation progress,
-and verification results may be recorded when the protocol permits and their
-certainty and provenance are accurate.
-
-Engr records domain changes such as `fact.added`, `solution.selected`,
-`verification.result`, and `decision.superseded`; it does not treat paragraph
-edits or Markdown patches as semantic history. Implementation completion is not
-verification, and verification passing is not automatic resolution.
-
-## Using Engr
-
-`engr` is the stable operational interface. Running `engr init` creates the
-single supported project-local workspace, `.engr/`. The project-local runtime
-and its declared compatibility are checked with `engr doctor`; the Skill
-explains how an agent should read State, retrieve targeted provenance, classify
-new knowledge, and record it safely.
-
-The [protocol](protocol/PROTOCOL.md) owns the exact command surface, wire
-formats, reducer rules, confirmation behavior, replay selection, fork handling,
-and exit categories. The [Skill](skill/SKILL.md) owns runtime agent guidance for
-adopted projects.
-
-### Install a released binary
-
-Released binaries are installed only after the installer verifies the release
-manifest, its SHA-256 checksum file, and the downloaded archive. The Unix
-installer supports Linux and Apple Silicon macOS; Linux selects the portable
-musl artifact by default, while `--target` can select a GNU artifact. The PowerShell installer
-supports native Windows x64 and ARM64. Neither installer uses `sudo` or changes
-your `PATH`.
-
-Download the installer from the versioned GitHub Release rather than piping an
-unversioned script into a shell:
+An object holds sections. Each section carries text, the commit it was written
+against, and references to the sections of other objects it depends on. Adding,
+revising, merging, deleting, closing — all of it goes through one gate: an agent
+proposes, a human reads the change, and types a challenge code. There is no other
+way in.
 
 ```bash
-curl -fsSLO https://github.com/lukeo3o1/engr/releases/download/v0.1.0/install.sh
-bash install.sh --version 0.1.0
+engr prepare --object 019ff75b --add --text-file draft.txt
+#   Candidate  section.added
+#   Based on   9348f28f
+#
+#   寫入只有一條路:prepare → confirm。
+#
+#   逐字輸入以確認:  CONFIRM 7U9K2U
+
+engr confirm 'CONFIRM 7U9K2U'
 ```
 
-```powershell
-Invoke-WebRequest https://github.com/lukeo3o1/engr/releases/download/v0.1.0/install.ps1 -OutFile install.ps1
-.\install.ps1 -Version 0.1.0
+## What it is for
+
+Long-running work drifts in two different ways, and only one of them is a file
+changing. The other is that **nothing changed and the world moved on** — a record
+sits untouched for three months, still reads correctly, and its basis has
+quietly gone out from under it. Nothing in a diff can see that, because a diff
+only records actions.
+
+engr gives that second kind of drift two signals, neither of which needs anyone
+to be reading:
+
+- **The basis moved.** A section records the commit it was written against, so
+  how far HEAD has since travelled is a computation.
+- **A dependency changed.** A reference pins the hash of the section it depends
+  on, so the target being rewritten is a computation too — and it pins the commit
+  as well, so `git show` recovers what it used to say.
+
+The case worth interrupting for is a **closed** object whose basis moved. Closed
+means nobody is looking, which is exactly when drift goes unnoticed.
+
+## Status
+
+**v0, not released.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
+Sixteen tests cover the gate and the record. There is no installer yet; build
+from source.
+
+v0 is a deliberate rewrite. The previous design was event-sourced with 48 event
+types, of which **35 never fired once** on the only day it was genuinely used. v0
+keeps the part that worked — the gate — and delegates history to git. It grows
+only when a recorded use demands it; see the growth rule in the protocol.
+
+One thing it does **not** solve: `prepare` prints the challenge code where the
+agent can read it, so nothing stops an agent confirming its own proposal. The
+gate is a convention, not yet a mechanism.
+
+## Using it
+
+```bash
+engr init                                    # in a git repository
+engr prepare --new --text "the title"        # propose an object
+engr confirm 'CONFIRM <code>'                # the only way in
+engr prepare --object <id> --add  --text-file f.txt
+engr prepare --object <id> --revise 3 --text-file f.txt
+engr prepare --object <id> --merge 1,2 --text-file f.txt
+engr prepare --object <id> --delete 3
+engr prepare --object <id> --close
+engr candidate                               # what is awaiting a human
+engr candidate <code>                        # show it again, hours later
+engr ls                                      # open objects
+engr ls --all --stale                        # what needs attention
+engr ls --all --sections | grep <term>       # one line per section, greppable
+engr show <id>                               # sections, and how far each can be trusted
+engr show <id> --format json                 # the same, for an agent
+engr purge <id>                              # drop the event buffer once settled
+engr verify                                  # recompute section hashes
 ```
 
-Use `--bin-dir` / `-BinDir` to choose an installation directory and `--target`
-/ `-Target` to select an exact supported target. Omitting the version selects
-the latest GitHub release.
+Objects are addressed by unique id prefix, like a git commit.
 
-## Status and evidence
+**Commit `.engr/objects`.** git is where old wording is recovered from; without
+it, look-back disappears silently.
 
-Source version `0.1.0` contains the Rust runtime, protocol/schema artifacts,
-16 fixed conformance fixtures, the T7 long-horizon case, mutation coverage, and
-an S01-S16 behavior-contract corpus. The Rust suite verifies the native CLI,
-deterministic replay, confirmation recovery, snapshot integrity, conformance
-fixtures, and corpus integrity.
+## Build
 
-Release workflows are configured to build Windows, Linux (GNU and musl), and
-Apple Silicon macOS artifacts from the same Rust implementation. Intel macOS
-is not a supported distribution. A platform is described as supported only
-after its release CI and runtime evidence are verified. The
-repository does not claim a published release merely because a workflow or
-manifest template exists.
+```bash
+cargo test --workspace
+cargo run -p engr -- --help
+```
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for branches, commits, reviews, tests,
-and release discipline. Semantic changes require corresponding protocol, schema,
-conformance, and behavior-test evidence.
+[CONTRIBUTING.md](CONTRIBUTING.md). The short version: a change to the model
+needs the protocol and the tests to move with it, and anything new has to be
+something a real use asked for.
