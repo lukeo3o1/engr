@@ -186,6 +186,70 @@ fn stale_listing_includes_closed_objects_whose_basis_moved() {
     );
 }
 
+/// `confirm` asks for the object file to be committed. Counting that commit
+/// made every section stale the moment its own record was saved, so the tool's
+/// instructions broke the tool's signal and the only way back to zero was to
+/// re-confirm every section — until the next commit.
+#[test]
+fn committing_the_record_does_not_move_its_own_basis() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    std::fs::create_dir(root.join("src")).expect("mkdir src");
+    std::fs::write(root.join("src/audit.go"), "package audit\n").expect("write source");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "the basis"]);
+
+    let init = run_engr(root, &["init"]);
+    assert!(init.status.success());
+
+    let created = prepare(root, &["prepare", "--new", "--text", "reason codes"]);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    confirm(root, &created);
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--add",
+            "--object",
+            &object,
+            "--text",
+            "Ruling: expose the reason code.",
+        ],
+    );
+    confirm(root, &added);
+
+    // Exactly what `confirm` tells the user to do next.
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record the ruling"]);
+
+    let output = run_engr(root, &["show", &object]);
+    let shown = String::from_utf8(output.stdout).expect("utf8");
+    assert!(
+        !shown.contains("basis moved"),
+        "saving the record moved the record's own basis: {shown}"
+    );
+    assert!(shown.contains("1 ok"), "{shown}");
+
+    // A real change to the code the ruling was made against still counts.
+    std::fs::write(root.join("src/audit.go"), "package audit\n// reworked\n").expect("edit source");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "rework the audit package"]);
+
+    let output = run_engr(root, &["show", &object]);
+    let shown = String::from_utf8(output.stdout).expect("utf8");
+    assert!(
+        shown.contains("basis moved"),
+        "a change outside the record must still be reported: {shown}"
+    );
+    assert!(
+        shown.contains("1 commits and 1 files"),
+        "the two halves of the sentence have to be filtered the same way: {shown}"
+    );
+}
+
 #[test]
 fn an_object_file_must_match_its_embedded_id() {
     let workspace = TempDir::new().expect("temp dir");
@@ -334,8 +398,16 @@ fn event_revisions_must_be_contiguous_within_the_buffer() {
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }
 
+/// Reversed deliberately. This test used to assert the opposite — that any
+/// newer commit, empty or not, means the basis moved — on the reasoning that
+/// HEAD moving is not something the tool should second-guess. Excluding the
+/// record's own files from the comparison makes that untenable: the same rule
+/// that stops `commit .engr` from moving a section's basis also stops a commit
+/// that changes nothing at all from moving it. That is the right answer to the
+/// question the signal is actually asked — did what I decided against change?
+/// — and an empty commit is the clearest case of no.
 #[test]
-fn stale_listing_includes_a_closed_object_after_an_empty_commit() {
+fn an_empty_commit_is_not_the_basis_moving() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     git(root, &["init", "-q"]);
@@ -374,8 +446,20 @@ fn stale_listing_includes_a_closed_object_after_an_empty_commit() {
     let output = run_engr(root, &["ls", "--stale"]);
     assert!(output.status.success(), "ls --stale");
     let listing = String::from_utf8(output.stdout).expect("utf8 listing");
+    assert_eq!(
+        listing, "all ok\n",
+        "neither saving the record nor an empty commit changed what the ruling was made against"
+    );
+
+    // The closed object still surfaces the moment something real moves, which
+    // is the guarantee this test was written to protect.
+    std::fs::write(root.join("basis.txt"), "changed basis\n").expect("change basis");
+    git(root, &["add", "basis.txt"]);
+    git(root, &["commit", "-qm", "basis moved"]);
+    let output = run_engr(root, &["ls", "--stale"]);
+    let listing = String::from_utf8(output.stdout).expect("utf8 listing");
     assert!(
         listing.contains("closed"),
-        "a newer empty commit still means the basis moved; got {listing:?}"
+        "a closed object whose basis really moved must still surface; got {listing:?}"
     );
 }

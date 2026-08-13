@@ -34,7 +34,9 @@ engr gives that second kind of drift two signals, neither of which needs anyone
 to be reading:
 
 - **The basis moved.** A section records the commit it was written against, so
-  how far HEAD has since travelled is a computation.
+  how far HEAD has since travelled is a computation. Changes to the record's own
+  files do not count — `confirm` asks you to commit them, and a signal its own
+  instructions switch on permanently is a signal nobody reads.
 - **A dependency changed.** A reference pins the hash of the section it depends
   on, so the target being rewritten is a computation too — and it pins the commit
   as well, so `git show` recovers what it used to say.

@@ -170,6 +170,20 @@ Both are reported as **information, not a verdict**. A threshold nobody has
 validated would be a guess, and a binary "stale" that fires on every commit is
 worthless.
 
+The comparison MUST exclude the workspace's own directory. `confirm` asks for
+the object file to be committed, so counting that commit makes every section
+stale the moment its own record is saved — the tool's instructions break the
+tool's signal, and the only way back to zero is to re-confirm every section,
+until the next commit. A signal that is always on is not read, including on the
+occasions it is right. The exclusion also means a commit that changes nothing
+outside the record — an empty one included — is not the basis moving. The
+question the signal answers is *did what I decided against change*.
+
+The pathspec MUST be anchored at the repository root. A cwd-relative exclusion
+looks equivalent and is not: with the workspace in a subdirectory it narrows the
+whole comparison to that subdirectory and hides changes elsewhere in the tree.
+Reporting no change where there was one is the worse failure.
+
 Status is never stored. A stored verdict is wrong the moment HEAD moves.
 
 The case worth surfacing unprompted is a **closed** object whose basis moved:

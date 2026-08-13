@@ -91,7 +91,7 @@ the abbreviation for you.
 | --- | --- |
 | `TAMPERED` / `tampered` | This section's wording does not match the hash confirmed with it |
 | `REF TAMPERED` / `ref_tampered` | A section this one stands on does not match *its* hash |
-| `basis moved` / `stale_basis` | HEAD moved past the commit this wording was written against |
+| `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
 | `refs moved` / `stale_refs` | A section this one references was rewritten through the gate |
 
 The first two are a different kind of problem from the last two, and they are
@@ -108,6 +108,9 @@ decide whether this section still holds. If it does not, prepare a revision —
 and put *why* in the text, because that is what a reader three months out needs.
 
 A drifted section is not wrong. It is unverified. A tampered one is neither.
+
+Committing `.engr` does not make anything stale: the comparison ignores the
+record's own files, so `basis moved` means real work landed.
 
 ## Choosing an action
 

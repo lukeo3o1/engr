@@ -40,18 +40,46 @@ pub fn exists(root: &Path, revision: &str) -> bool {
     run(root, &["cat-file", "-e", &format!("{revision}^{{commit}}")]).is_some()
 }
 
+/// Keeping the record is not the world moving.
+///
+/// `confirm` asks for the object file to be committed, so counting that commit
+/// makes every section stale the moment its own record is saved — the tool's
+/// instructions break the tool's signal, and a signal that is always on gets
+/// ignored along with the ones that matter.
+///
+/// Both patterns are anchored with `:(top)`. A cwd-relative `.` looks
+/// equivalent and is not: with the workspace in a subdirectory it narrows the
+/// whole comparison to that subdirectory, so a change to `src/` outside it
+/// disappears. Falsely quiet is worse than falsely loud.
+fn outside_the_record() -> [String; 2] {
+    [
+        ":(top)".to_owned(),
+        format!(":(top,exclude,glob)**/{}/**", crate::store::DIR),
+    ]
+}
+
 /// How far HEAD has moved past `from`: commits ahead, and how many files
-/// changed. Reported as information rather than a verdict — a threshold nobody
-/// has validated would be a guess, and a binary "stale" on every commit would
-/// make the signal worthless.
+/// changed, ignoring the record's own files. Reported as information rather
+/// than a verdict — a threshold nobody has validated would be a guess, and a
+/// binary "stale" on every commit would make the signal worthless.
 pub fn distance(root: &Path, from: &str) -> Option<Distance> {
     if !exists(root, from) {
         return None;
     }
-    let commits = run(root, &["rev-list", "--count", &format!("{from}..HEAD")])?
-        .parse::<usize>()
-        .ok()?;
-    let names = run(root, &["diff", "--name-only", &format!("{from}..HEAD")])?;
+    let range = format!("{from}..HEAD");
+    let spec = outside_the_record();
+    let commits = run(
+        root,
+        &["rev-list", "--count", &range, "--", &spec[0], &spec[1]],
+    )?
+    .parse::<usize>()
+    .ok()?;
+    // The same pathspec on both calls, or the two halves of one sentence
+    // disagree: "3 commits and 0 files have changed".
+    let names = run(
+        root,
+        &["diff", "--name-only", &range, "--", &spec[0], &spec[1]],
+    )?;
     let files: Vec<String> = names
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -84,8 +112,14 @@ pub struct Distance {
 }
 
 impl Distance {
+    /// Either half is enough. `rev-list` with a pathspec simplifies history and
+    /// can pass over a merge whose change exists only in the merge commit,
+    /// while `diff` compares the two endpoints and still names the file — and
+    /// if `from` is not an ancestor of HEAD there may be no commits to count
+    /// yet plenty of difference. Missing a real change is the failure that
+    /// matters here.
     pub fn moved(&self) -> bool {
-        self.commits > 0
+        self.commits > 0 || !self.files.is_empty()
     }
 }
 
