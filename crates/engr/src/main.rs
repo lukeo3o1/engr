@@ -269,7 +269,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
     print!(
         "{}",
-        render_candidate(&prepared.candidate, view::width(root))
+        render_candidate(&prepared.candidate, view::width(root), &prepared.notes)
     );
     for code in &prepared.superseded {
         println!("(candidate {code} was superseded by this one)");
@@ -313,7 +313,7 @@ fn shorten(id: &str, width: usize) -> &str {
     &id[..width.min(id.len())]
 }
 
-fn render_candidate(candidate: &gate::Candidate, width: usize) -> String {
+fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::Note]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Candidate  {}\nObject     {}\n",
@@ -355,6 +355,16 @@ fn render_candidate(candidate: &gate::Candidate, width: usize) -> String {
             out.push_str(&format!("({})\n", action.label()));
         }
     }
+    // Above the code, not below it: the point of a note is to be read while
+    // there is still a decision to make.
+    for note in notes {
+        match note {
+            gate::Note::DuplicateTitle { object } => out.push_str(&format!(
+                "\nnote       an existing object has this title: {}\n",
+                shorten(object, width)
+            )),
+        }
+    }
     out.push_str(&format!(
         "\nType this exactly to confirm:  CONFIRM {}\n",
         candidate.challenge
@@ -366,7 +376,11 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
     match code {
         Some(code) => {
             let candidate = gate::find(root, code)?;
-            print!("{}", render_candidate(&candidate, view::width(root)));
+            let notes = gate::notes_for(root, &candidate);
+            print!(
+                "{}",
+                render_candidate(&candidate, view::width(root), &notes)
+            );
             if !gate::is_live(root, &candidate) {
                 println!(
                     "\nThis candidate is dead — the object moved after it was prepared. Prepare again."

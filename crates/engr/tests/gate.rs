@@ -252,6 +252,81 @@ fn references_are_checked_at_the_gate() {
     gate::prepare(&root, good).expect("a well-formed reference is admitted");
 }
 
+/// The field is unforgiving — no rename, and the mistake only shows after
+/// confirmation — so a body pasted in here has to be refused at the gate.
+#[test]
+fn a_title_that_is_really_a_body_is_refused() {
+    let (_dir, root) = workspace();
+
+    let body = "The audit failure reason code is not queryable. ".repeat(12);
+    assert!(body.chars().count() > 120);
+    let error = gate::prepare(
+        &root,
+        payload(Action::ObjectCreated, &engr::model::new_id(), &body),
+    )
+    .expect_err("a 500-character title is refused");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(
+        error.message.contains("title") && error.message.contains("--add"),
+        "the message has to teach what the field is and where the detail goes: {:?}",
+        error.message
+    );
+
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::ObjectCreated,
+            &engr::model::new_id(),
+            "a title\nwith a second line",
+        ),
+    )
+    .expect_err("a title cannot span lines");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+
+    gate::prepare(
+        &root,
+        payload(
+            Action::ObjectCreated,
+            &engr::model::new_id(),
+            "audit failure reason codes",
+        ),
+    )
+    .expect("an ordinary title is admitted");
+}
+
+/// Not blocked: two objects may legitimately share a title. But they cannot be
+/// told apart in `ls`, and the moment to reconsider is while the human is
+/// still holding the code.
+#[test]
+fn a_duplicate_title_is_flagged_but_not_blocked() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "audit failure reason codes");
+
+    let prepared = gate::prepare(
+        &root,
+        payload(
+            Action::ObjectCreated,
+            &engr::model::new_id(),
+            "  Audit Failure Reason Codes  ",
+        ),
+    )
+    .expect("a duplicate title is admitted");
+    assert_eq!(prepared.notes.len(), 1, "trimmed and case-folded match");
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    assert_eq!(object, &first);
+
+    let prepared = gate::prepare(
+        &root,
+        payload(
+            Action::ObjectCreated,
+            &engr::model::new_id(),
+            "something else entirely",
+        ),
+    )
+    .expect("prepare");
+    assert!(prepared.notes.is_empty());
+}
+
 #[test]
 fn re_confirming_after_a_crash_does_not_apply_twice() {
     let (_dir, root) = workspace();

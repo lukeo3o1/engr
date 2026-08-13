@@ -104,6 +104,23 @@ in the previous design poison a global health check permanently, with no way bac
 There is **one live candidate per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.
 
+### The title
+
+An object's title is a label, not a body. Creating an object MUST refuse a title
+that spans lines or exceeds 120 characters, and the refusal MUST say where the
+detail belongs instead. The field is unforgiving — v0 has no rename — so a body
+pasted into it is only discovered after confirmation, and rebuilding the
+workspace is the way out.
+
+That check belongs at the gate, **not** in payload validation: payloads are
+validated when events are *loaded*, so a limit enforced there would leave a
+workspace holding an over-long title unable to replay its own history.
+
+Titles are not unique and are not required to be. A duplicate MUST be reported
+with the candidate and MUST NOT be refused — two objects may legitimately share
+a title, but they cannot be told apart in a listing, and the moment to
+reconsider is while the human is still holding the code.
+
 The candidate records `expected_rev`. A candidate prepared against an older state
 cannot be confirmed.
 

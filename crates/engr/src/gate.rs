@@ -96,10 +96,69 @@ pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
     }
 }
 
+/// Something worth weighing before typing the code, but not grounds to refuse.
+/// Rendered with the candidate, because the moment to reconsider is while the
+/// human is still holding the code.
+#[derive(Debug)]
+pub enum Note {
+    DuplicateTitle { object: String },
+}
+
 #[derive(Debug)]
 pub struct Prepared {
     pub candidate: Candidate,
     pub superseded: Vec<String>,
+    pub notes: Vec<Note>,
+}
+
+/// A title is a label, not a body.
+///
+/// The field is unforgiving: there is no rename, and a body pasted into it is
+/// only discovered after confirmation, with rebuilding the workspace as the way
+/// out. 120 characters is wide for a label and nowhere near a paragraph.
+const TITLE_MAX: usize = 120;
+
+fn check_title(text: &str) -> Result<()> {
+    ensure!(
+        !text.contains('\n'),
+        EXIT_USAGE,
+        "--new --text is the object's title, so it cannot span lines. \
+         Give a short title, then put the detail in a section with --add."
+    );
+    let length = text.chars().count();
+    ensure!(
+        length <= TITLE_MAX,
+        EXIT_USAGE,
+        "--new --text is the object's title, not its body \
+         ({length} characters, limit {TITLE_MAX}). Create the object with a short \
+         title, then put the detail in a section with --add."
+    );
+    Ok(())
+}
+
+/// Recomputed rather than stored, so `engr candidate <code>` shows the same
+/// notes as `prepare` did — that screen is where a human reads before typing,
+/// and a note absent from it is a note that missed its moment.
+pub fn notes_for(root: &Path, candidate: &Candidate) -> Vec<Note> {
+    let mut notes = Vec::new();
+    if matches!(candidate.payload.action, Action::ObjectCreated) {
+        if let Some(object) = object_with_title(root, &candidate.payload.content.text) {
+            notes.push(Note::DuplicateTitle { object });
+        }
+    }
+    notes
+}
+
+/// Titles are not unique and are not meant to be — but two objects sharing one
+/// cannot be told apart in `ls`, so say so rather than deciding for the human.
+fn object_with_title(root: &Path, title: &str) -> Option<String> {
+    let needle = title.trim().to_lowercase();
+    store::object_ids(root)
+        .ok()?
+        .iter()
+        .filter_map(|id| store::load_object(root, id).ok())
+        .find(|object| object.title.trim().to_lowercase() == needle)
+        .map(|object| object.id)
 }
 
 /// Validate a proposed action against the current object and put it up for
@@ -121,7 +180,10 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
                 "that object already exists".to_owned(),
             ))
         }
-        (Action::ObjectCreated, None) => {}
+        // Here, not in `Payload::validate`: that runs when events are *loaded*,
+        // so a limit enforced there would make a workspace holding an
+        // over-long title unable to replay its own history.
+        (Action::ObjectCreated, None) => check_title(&payload.content.text)?,
         (_, None) => {
             return Err(Error::new(
                 EXIT_NOT_FOUND,
@@ -204,9 +266,13 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
         }
     }
     store::write_json(&store::candidate_path(root, &challenge), &candidate)?;
+
+    let notes = notes_for(root, &candidate);
+
     Ok(Prepared {
         candidate,
         superseded,
+        notes,
     })
 }
 
