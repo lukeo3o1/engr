@@ -306,3 +306,17 @@ bring it in:
 | Typed relations | Something needs to act on the type mechanically |
 | Machine observations (test results, progress) | Those need to be in the record |
 | Splitting `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
+| Path scoping on a section (`--about internal/audit/**`) | A basis reads as moved because of a change to an area the section does not cover, often enough that the signal stops being read |
+| A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
+| More than one action per confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
+
+Path scoping would have to be a section field carrying into the content hash —
+what a section is *about* is part of what was confirmed — and it MUST then be
+omitted from the canonical form when empty, or every section already recorded
+fails its own hash the day the field is added.
+
+More than one action per confirmation MUST NOT be reached by allowing several
+live candidates for one object: each pins `expected_rev`, so confirming one
+kills the rest. It would have to be one candidate carrying several actions,
+appending an event per action with consecutive revs — which leaves projection
+untouched and keeps crash recovery working off the first event.
