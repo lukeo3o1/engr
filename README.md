@@ -51,8 +51,8 @@ word must not print `ok` over words nobody agreed to.
 
 ## Status
 
-**v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md). Seventeen
-tests cover the gate and the record.
+**v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
+Thirty-eight tests cover the gate, the record and the command line.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a

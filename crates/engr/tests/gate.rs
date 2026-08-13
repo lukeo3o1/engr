@@ -252,6 +252,39 @@ fn references_are_checked_at_the_gate() {
     gate::prepare(&root, good).expect("a well-formed reference is admitted");
 }
 
+/// Refusing is right; the old wording said "points at *another* object" to
+/// someone who had just pointed at the same one, and sent them hunting for a
+/// mistyped id that was not there.
+#[test]
+fn a_reference_inside_the_same_object_says_so() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "self reference");
+    admit(&root, payload(Action::SectionAdded, &id, "the first"));
+    let pinned = store::load_object(&root, &id).expect("object").sections[0]
+        .sha256
+        .clone();
+
+    let mut inward = payload(Action::SectionAdded, &id, "the second");
+    inward.content.refs = vec![Ref {
+        object: id.clone(),
+        section: 1,
+        sha256: pinned,
+        commit: "0".repeat(40),
+    }];
+    let error = gate::prepare(&root, inward).expect_err("a self reference is refused");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("belongs to this object"),
+        "the message has to describe what was typed, not the invariant: {:?}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("another object;"),
+        "still says the user pointed somewhere else: {:?}",
+        error.message
+    );
+}
+
 /// The field is unforgiving — no rename, and the mistake only shows after
 /// confirmation — so a body pasted in here has to be refused at the gate.
 #[test]

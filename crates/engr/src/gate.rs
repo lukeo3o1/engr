@@ -278,10 +278,14 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
 
 fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
     for reference in &payload.content.refs {
+        // Stated as a fact about what was typed, then what the flag is for. The
+        // previous wording described the invariant being checked ("points at
+        // another object") to someone who had just done the opposite, and sent
+        // them looking for a mistyped id that was not there.
         ensure!(
             reference.object != payload.object,
             EXIT_INVARIANT,
-            "a reference points at another object; use the text for §{} of this one",
+            "§{} belongs to this object; --ref is only for other objects",
             reference.section
         );
         let target = store::load_object(root, &reference.object).map_err(|error| {
