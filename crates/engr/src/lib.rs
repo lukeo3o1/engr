@@ -17,6 +17,20 @@ pub const FORMAT_VERSION: u32 = 1;
 /// `-dirty` means.
 pub const IMPLEMENTATION_VERSION: &str = concat!("latest (", env!("ENGR_COMMIT"), ")");
 
+/// The protocol this build implements, compiled in.
+///
+/// It is normative, and it is installed from a release archive that carries no
+/// checkout — so without this the one document that says what the tool
+/// guarantees is not on the machine the tool is on, and the copy people would
+/// reach for describes whatever `main` says today rather than this binary.
+/// Reading it against a build stamped with its own commit is what makes "where
+/// this document and the implementation disagree" a question anyone can settle.
+///
+/// `include_str!` also makes it a build dependency: move or delete the file and
+/// the compile fails, which is a harder guarantee than any check that has to be
+/// remembered.
+pub const PROTOCOL: &str = include_str!("../../../protocol/PROTOCOL.md");
+
 /// Invalid command line, or a confirmation response that did not match.
 pub const EXIT_USAGE: i32 = 2;
 /// Object, section, or candidate not found.

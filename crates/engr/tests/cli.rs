@@ -463,3 +463,28 @@ fn an_empty_commit_is_not_the_basis_moving() {
         "a closed object whose basis really moved must still surface; got {listing:?}"
     );
 }
+
+/// Installed from a release archive there is no checkout, so the document that
+/// says what the tool guarantees would otherwise not be on the machine the tool
+/// is on. It also has to work before `init`: the protocol is what someone reads
+/// to decide whether to adopt engr at all.
+#[test]
+fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
+    let empty = TempDir::new().expect("temp dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .current_dir(empty.path())
+        .arg("protocol")
+        .output()
+        .expect("run engr");
+    assert!(
+        output.status.success(),
+        "engr protocol must need no workspace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Byte for byte, so `engr protocol > PROTOCOL.md` reproduces the document
+    // rather than something one newline away from it.
+    let printed = String::from_utf8(output.stdout).expect("utf-8");
+    assert_eq!(printed, engr::PROTOCOL);
+    assert!(printed.starts_with("# engr protocol v0"));
+}

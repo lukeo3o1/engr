@@ -22,6 +22,8 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
+    /// Print the protocol this build implements
+    Protocol,
     /// Put a change up for a human to confirm
     Prepare(Prepare),
     /// List candidates awaiting confirmation, or show one in full
@@ -121,6 +123,13 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // Before the workspace is located, like `init`: the protocol is what you
+    // read to decide whether to adopt engr at all, so needing an adopted
+    // workspace to reach it would put it behind the decision it informs.
+    if matches!(cli.command, Command::Protocol) {
+        print!("{}", engr::PROTOCOL);
+        return Ok(());
+    }
     if matches!(cli.command, Command::Init) {
         let root = match cli.root {
             Some(path) => path,
@@ -144,7 +153,7 @@ fn run(cli: Cli) -> Result<()> {
     store::validate_format(&root)?;
 
     match cli.command {
-        Command::Init => unreachable!("handled above"),
+        Command::Init | Command::Protocol => unreachable!("handled above"),
         Command::Prepare(command) => prepare(&root, command),
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {

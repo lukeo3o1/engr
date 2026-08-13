@@ -51,8 +51,11 @@ word must not print `ok` over words nobody agreed to.
 
 ## Status
 
-**v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
-Forty-two tests cover the gate, the record and the command line.
+**v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md), and is
+compiled into the binary — `engr protocol` prints the copy that matches the
+build you are running, which is what makes "where this document and the
+implementation disagree" a question you can settle without a checkout.
+Forty-three tests cover the gate, the record and the command line.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a
@@ -96,6 +99,7 @@ engr show <id>                               # sections, and how far each can be
 engr show <id> --format json                 # the same, for an agent
 engr purge <id>                              # drop the event buffer once settled
 engr verify                                  # recompute section hashes, and those they stand on
+engr protocol                                # the spec this binary implements
 ```
 
 Objects are addressed by unique id prefix, like a git commit.

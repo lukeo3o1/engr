@@ -19,6 +19,20 @@ metadata:
 The runtime guide for working with a project's record. For changing the engr
 repository itself, read `AGENTS.md` there instead.
 
+This is all you need to use the record. When something comes up that it does not
+answer — what a signal actually guarantees, what a stored field means, why a
+command exited the way it did — the binary carries its own specification:
+
+```bash
+engr protocol
+```
+
+Read it **then, not first**. It is normative and it matches the build you are
+running, but it is written for people implementing engr: most of its rules are
+obligations on the tool rather than on you, and reading it up front costs a lot
+to learn nothing you can act on. If it and this guide disagree, the protocol is
+right about what the tool does — say so rather than working around it.
+
 ## The one rule
 
 **You propose. A human admits.**
