@@ -120,7 +120,12 @@ record's own files, so `basis moved` means real work landed.
 | The same point, worded differently or corrected | `--revise <n>` |
 | Two sections saying one thing | `--merge <a>,<b>` |
 | No longer belongs | `--delete <n>` |
+| The object's title no longer describes it | `--rename --text "..."` |
 | The work has settled | `--close` |
+
+`--rename` replaces the title and nothing else, and a closed object refuses it —
+reopen first. Do not reach for it to record that the work changed shape: that
+belongs in a section, where it can say why.
 
 Prefer `--revise` over delete-then-add. A revision keeps the section's id, so
 every reference to it stays meaningful; delete-then-add breaks them, and the id

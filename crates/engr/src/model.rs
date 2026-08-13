@@ -173,6 +173,7 @@ impl Object {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     ObjectCreated,
+    ObjectRenamed,
     SectionAdded,
     SectionRevised { section: u64 },
     SectionMerged { absorbs: Vec<u64> },
@@ -185,6 +186,7 @@ impl Action {
     pub fn label(&self) -> &'static str {
         match self {
             Action::ObjectCreated => "object.created",
+            Action::ObjectRenamed => "object.renamed",
             Action::SectionAdded => "section.added",
             Action::SectionRevised { .. } => "section.revised",
             Action::SectionMerged { .. } => "section.merged",
@@ -199,10 +201,18 @@ impl Action {
         matches!(
             self,
             Action::ObjectCreated
+                | Action::ObjectRenamed
                 | Action::SectionAdded
                 | Action::SectionRevised { .. }
                 | Action::SectionMerged { .. }
         )
+    }
+
+    /// Actions whose content is the object's title rather than a section's
+    /// wording. The gate holds both to the same shape, so a body cannot be
+    /// pasted into a label through the door that was added later.
+    pub fn carries_title(&self) -> bool {
+        matches!(self, Action::ObjectCreated | Action::ObjectRenamed)
     }
 }
 
@@ -289,6 +299,14 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                 EXIT_INVARIANT,
                 "object.created must be the first action"
             );
+            object.title = content.text.clone();
+        }
+        // Open, like everything else that changes the object. A title is part of
+        // what settled, so allowing it through on a closed object would make
+        // `closed` mean "the sections have settled" rather than "this has" — and
+        // it is the second reading that makes closed usable as the purge signal.
+        Action::ObjectRenamed => {
+            object.require_open("object.renamed")?;
             object.title = content.text.clone();
         }
         Action::SectionAdded => {

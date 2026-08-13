@@ -360,6 +360,119 @@ fn a_duplicate_title_is_flagged_but_not_blocked() {
     assert!(prepared.notes.is_empty());
 }
 
+/// A title written correctly in January can be wrong by June without anyone
+/// having touched it. One confirmation changes it; nothing else does.
+#[test]
+fn a_title_changes_through_one_confirmation() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "audit failure reason codes");
+
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::ObjectRenamed, &id, "audit failure reason codes v2"),
+    )
+    .expect("prepare");
+    assert_eq!(
+        prepared.candidate.previous_text.as_deref(),
+        Some("audit failure reason codes"),
+        "a rename shows the change, so the old title has to travel with it"
+    );
+
+    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect("confirm")
+        .1;
+    assert_eq!(object.title, "audit failure reason codes v2");
+    assert_eq!(object.rev, 2, "a rename is an action like any other");
+
+    // It replays from the log, not just from the projection sitting on disk.
+    let replayed = ops::reconcile(&root, &id).expect("reconcile");
+    assert_eq!(replayed.title, "audit failure reason codes v2");
+}
+
+/// The guard on `--new` would be worth nothing if `--rename` were the way past
+/// it, and the refusal has to name the flag that was actually typed.
+#[test]
+fn a_rename_is_held_to_the_same_shape_as_a_title() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "short enough");
+
+    let body = "The audit failure reason code is not queryable. ".repeat(12);
+    let error =
+        gate::prepare(&root, payload(Action::ObjectRenamed, &id, &body)).expect_err("too long");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(
+        error.message.contains("--rename") && !error.message.contains("--new"),
+        "the refusal has to name the flag that was typed: {:?}",
+        error.message
+    );
+
+    let error = gate::prepare(&root, payload(Action::ObjectRenamed, &id, "two\nlines"))
+        .expect_err("a title cannot span lines");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+}
+
+/// Renaming onto a title someone else already holds is worth saying; renaming
+/// an object onto its own title is not, and a note that fires on a non-problem
+/// is how people learn to skip the notes.
+#[test]
+fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "audit failure reason codes");
+    let second = new_object(&root, "retry policy");
+
+    let prepared = gate::prepare(
+        &root,
+        payload(
+            Action::ObjectRenamed,
+            &second,
+            "  Audit Failure Reason Codes  ",
+        ),
+    )
+    .expect("a duplicate title is admitted, not refused");
+    assert_eq!(prepared.notes.len(), 1);
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    assert_eq!(object, &first);
+    // Stored as it will be listed. The duplicate check above already ignores the
+    // padding, and a listing that prints what that check ignores puts one row
+    // out of column underneath a note saying the two titles match.
+    assert_eq!(
+        prepared.candidate.payload.content.text,
+        "Audit Failure Reason Codes"
+    );
+
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::ObjectRenamed, &second, "Retry Policy"),
+    )
+    .expect("prepare");
+    assert!(
+        prepared.notes.is_empty(),
+        "an object already holding this title is not a clash with itself"
+    );
+}
+
+/// Closed has to mean the whole object settled, not just its sections —
+/// otherwise it cannot carry the weight of being the purge signal.
+#[test]
+fn a_closed_object_refuses_a_rename() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "settled");
+    admit(&root, empty(Action::ObjectClosed, &id));
+
+    let error = gate::prepare(&root, payload(Action::ObjectRenamed, &id, "unsettled"))
+        .expect_err("a closed object refuses a rename");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("reopen"),
+        "the refusal has to say the way through: {:?}",
+        error.message
+    );
+
+    admit(&root, empty(Action::ObjectReopened, &id));
+    let object = admit(&root, payload(Action::ObjectRenamed, &id, "unsettled"));
+    assert_eq!(object.title, "unsettled");
+}
+
 #[test]
 fn re_confirming_after_a_crash_does_not_apply_twice() {
     let (_dir, root) = workspace();

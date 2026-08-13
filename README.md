@@ -52,7 +52,7 @@ word must not print `ok` over words nobody agreed to.
 ## Status
 
 **v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
-Thirty-eight tests cover the gate, the record and the command line.
+Forty-two tests cover the gate, the record and the command line.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a
@@ -81,6 +81,7 @@ gate is a convention, not yet a mechanism.
 engr init                                    # in a git repository
 engr prepare --new --text "the title"        # propose an object
 engr confirm 'CONFIRM <code>'                # the only way in
+engr prepare --object <id> --rename --text "a better title"
 engr prepare --object <id> --add  --text-file f.txt
 engr prepare --object <id> --revise 3 --text-file f.txt
 engr prepare --object <id> --merge 1,2 --text-file f.txt

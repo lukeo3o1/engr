@@ -113,25 +113,30 @@ pub struct Prepared {
 
 /// A title is a label, not a body.
 ///
-/// The field is unforgiving: there is no rename, and a body pasted into it is
-/// only discovered after confirmation, with rebuilding the workspace as the way
-/// out. 120 characters is wide for a label and nowhere near a paragraph.
+/// It is the line `ls` prints, so a paragraph pasted in here degrades the
+/// listing for every other object as well as its own. `--rename` makes the
+/// mistake recoverable rather than fatal, which is a reason to keep this check
+/// and not a reason to drop it — the listing is wrecked either way until
+/// someone notices. 120 characters is wide for a label and nowhere near a
+/// paragraph.
 const TITLE_MAX: usize = 120;
 
-fn check_title(text: &str) -> Result<()> {
+/// `flag` names what the caller actually typed, so the refusal reads as a fact
+/// about their command rather than about the one that happens to be older.
+fn check_title(flag: &str, text: &str) -> Result<()> {
     ensure!(
         !text.contains('\n'),
         EXIT_USAGE,
-        "--new --text is the object's title, so it cannot span lines. \
-         Give a short title, then put the detail in a section with --add."
+        "{flag} --text is the object's title, so it cannot span lines. \
+         Keep it to a short label and put the detail in a section with --add."
     );
     let length = text.chars().count();
     ensure!(
         length <= TITLE_MAX,
         EXIT_USAGE,
-        "--new --text is the object's title, not its body \
-         ({length} characters, limit {TITLE_MAX}). Create the object with a short \
-         title, then put the detail in a section with --add."
+        "{flag} --text is the object's title, not its body \
+         ({length} characters, limit {TITLE_MAX}). Keep it to a short label and \
+         put the detail in a section with --add."
     );
     Ok(())
 }
@@ -141,8 +146,13 @@ fn check_title(text: &str) -> Result<()> {
 /// and a note absent from it is a note that missed its moment.
 pub fn notes_for(root: &Path, candidate: &Candidate) -> Vec<Note> {
     let mut notes = Vec::new();
-    if matches!(candidate.payload.action, Action::ObjectCreated) {
-        if let Some(object) = object_with_title(root, &candidate.payload.content.text) {
+    if candidate.payload.action.carries_title() {
+        let clash = object_with_title(
+            root,
+            &candidate.payload.content.text,
+            &candidate.payload.object,
+        );
+        if let Some(object) = clash {
             notes.push(Note::DuplicateTitle { object });
         }
     }
@@ -151,11 +161,16 @@ pub fn notes_for(root: &Path, candidate: &Candidate) -> Vec<Note> {
 
 /// Titles are not unique and are not meant to be — but two objects sharing one
 /// cannot be told apart in `ls`, so say so rather than deciding for the human.
-fn object_with_title(root: &Path, title: &str) -> Option<String> {
+///
+/// `excluding` is the object being written. A rename that only changes casing or
+/// spacing would otherwise report a clash with itself, and a note that fires on
+/// a non-problem is how people learn to skip the notes.
+fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String> {
     let needle = title.trim().to_lowercase();
     store::object_ids(root)
         .ok()?
         .iter()
+        .filter(|id| id.as_str() != excluding)
         .filter_map(|id| store::load_object(root, id).ok())
         .find(|object| object.title.trim().to_lowercase() == needle)
         .map(|object| object.id)
@@ -165,7 +180,16 @@ fn object_with_title(root: &Path, title: &str) -> Option<String> {
 /// confirmation. References are checked here, at the gate — not in `verify`.
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
-pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
+pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
+    // A title is the line a listing prints, so whitespace around it is never
+    // meaningful and always visible — it pushes one row out of column. The
+    // duplicate check already ignores it; storing what that check ignores is how
+    // a listing ends up misaligned underneath a note saying the titles match.
+    // Normalised here, before the candidate is minted, so the human confirms the
+    // exact string that will be stored.
+    if payload.action.carries_title() {
+        payload.content.text = payload.content.text.trim().to_owned();
+    }
     payload.validate()?;
     let object = match ops::reconcile(root, &payload.object) {
         Ok(object) => Some(object),
@@ -183,7 +207,8 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
         // Here, not in `Payload::validate`: that runs when events are *loaded*,
         // so a limit enforced there would make a workspace holding an
         // over-long title unable to replay its own history.
-        (Action::ObjectCreated, None) => check_title(&payload.content.text)?,
+        (Action::ObjectCreated, None) => check_title("--new", &payload.content.text)?,
+        (Action::ObjectRenamed, Some(_)) => check_title("--rename", &payload.content.text)?,
         (_, None) => {
             return Err(Error::new(
                 EXIT_NOT_FOUND,
@@ -194,6 +219,7 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
     }
 
     let previous_text = match (&payload.action, &object) {
+        (Action::ObjectRenamed, Some(object)) => Some(object.title.clone()),
         (Action::SectionRevised { section }, Some(object)) => {
             Some(object.section(*section)?.text.clone())
         }

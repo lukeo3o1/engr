@@ -66,12 +66,15 @@ enum Format {
 #[command(group(
     ArgGroup::new("action")
         .required(true)
-        .args(["new", "add", "revise", "merge", "delete", "close", "reopen"])
+        .args(["new", "rename", "add", "revise", "merge", "delete", "close", "reopen"])
 ))]
 struct Prepare {
     /// Propose a new object
     #[arg(long)]
     new: bool,
+    /// Replace the object's title
+    #[arg(long)]
+    rename: bool,
     /// Propose a new section
     #[arg(long)]
     add: bool,
@@ -200,6 +203,8 @@ fn run(cli: Cli) -> Result<()> {
 fn prepare(root: &Path, command: Prepare) -> Result<()> {
     let action = if command.new {
         Action::ObjectCreated
+    } else if command.rename {
+        Action::ObjectRenamed
     } else if command.add {
         Action::SectionAdded
     } else if let Some(section) = command.revise {
@@ -320,7 +325,17 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
         candidate.payload.action.label(),
         shorten(&candidate.payload.object, width)
     ));
-    if let Some(commit) = &candidate.payload.content.based_on {
+    // A title is a label, not wording written against code, so the commit it
+    // happened to be typed at says nothing about the change being confirmed.
+    // It stays in the payload; it just does not belong on this screen, where
+    // every line that means nothing is a line that trains people to skim.
+    let basis = candidate
+        .payload
+        .content
+        .based_on
+        .as_deref()
+        .filter(|_| !candidate.payload.action.carries_title());
+    if let Some(commit) = basis {
         out.push_str(&format!("Based on   {}\n", &commit[..8.min(commit.len())]));
     }
     for reference in &candidate.payload.content.refs {

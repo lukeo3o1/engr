@@ -65,11 +65,12 @@ where `max(existing) + 1` would hand out a deleted id.
 
 ## Actions
 
-Seven. All of them gated.
+Eight. All of them gated.
 
 | Action | Data | Effect |
 | --- | --- | --- |
 | `object_created` | — | Creates the object with the confirmed title |
+| `object_renamed` | — | Replaces the title; requires an open object |
 | `section_added` | — | Appends a section, id from the counter |
 | `section_revised` | `section` | Replaces that section's content; id unchanged |
 | `section_merged` | `absorbs[]` | New id carrying the confirmed wording; absorbed sections removed |
@@ -77,12 +78,15 @@ Seven. All of them gated.
 | `object_closed` | — | `status` → `closed` |
 | `object_reopened` | — | `status` → `open` |
 
-`object_created`, `section_added`, `section_revised` and `section_merged` carry
-content; the others must carry none.
+`object_created`, `object_renamed`, `section_added`, `section_revised` and
+`section_merged` carry content; the others must carry none.
 
-A **closed object refuses every section action**. Reopen it first. The friction
-is deliberate: if a closed object could still change, `closed` would not mean
-"this has settled" and could not be used as the signal that it is safe to purge.
+A **closed object refuses every section action, and a rename**. Reopen it first.
+The friction is deliberate: if a closed object could still change, `closed` would
+not mean "this has settled" and could not be used as the signal that it is safe
+to purge. A title is part of what settled, so exempting it would narrow `closed`
+to "the sections have settled" — and it is the wider reading that the purge
+signal rests on.
 
 Sections have no `status` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
@@ -106,20 +110,28 @@ previous one, so a human never holds two codes for the same thing.
 
 ### The title
 
-An object's title is a label, not a body. Creating an object MUST refuse a title
-that spans lines or exceeds 120 characters, and the refusal MUST say where the
-detail belongs instead. The field is unforgiving — v0 has no rename — so a body
-pasted into it is only discovered after confirmation, and rebuilding the
-workspace is the way out.
+An object's title is a label, not a body. Every action that sets a title —
+`object_created` and `object_renamed` — MUST refuse one that spans lines or
+exceeds 120 characters, and the refusal MUST say where the detail belongs
+instead and MUST name the action the caller actually took. The title is the line
+a listing prints, so a body pasted into it degrades the listing for every other
+object as well as its own.
 
 That check belongs at the gate, **not** in payload validation: payloads are
 validated when events are *loaded*, so a limit enforced there would leave a
 workspace holding an over-long title unable to replay its own history.
 
+A title is not written against anything. Read surfaces MUST NOT present a
+title-carrying action as having a basis, even where one was recorded: a line
+that means nothing about the change being confirmed is a line that teaches
+people to skim the screen the whole design depends on them reading.
+
 Titles are not unique and are not required to be. A duplicate MUST be reported
 with the candidate and MUST NOT be refused — two objects may legitimately share
 a title, but they cannot be told apart in a listing, and the moment to
-reconsider is while the human is still holding the code.
+reconsider is while the human is still holding the code. The object being
+written MUST be excluded from that check, so a rename that changes only casing
+or spacing does not report a clash with itself.
 
 The candidate records `expected_rev`. A candidate prepared against an older state
 cannot be confirmed.
