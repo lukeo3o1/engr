@@ -268,6 +268,28 @@ as evidence that a human was present. Making the gate a mechanism needs the
 challenge to travel where the agent cannot read it, or `confirm` to run in a
 different process. That is not v0.
 
+### Redaction is not a goal
+
+Taking back something already confirmed — a secret, a person's name, a remark
+about someone — is **not** engr's job, and is not waiting on a later version.
+
+It cannot succeed here. Objects are committed and look-back reads them with
+`git show <commit>:<path>`, so rewriting the current file leaves every earlier
+copy exactly where it was. A redaction that looks like it worked while the text
+is still one command away is worse than none, because someone will believe it.
+
+It would also spend the read path's alarm. A section referencing the redacted
+one pins its hash, so replacing the text makes every referrer report that a
+section it stands on no longer matches — a signal that means *the record was
+edited outside the gate*. Firing it for a sanctioned act teaches readers to
+dismiss it, and it is the one signal that cannot afford to be dismissed.
+
+The way through is built from what already exists: `section_deleted` through the
+gate, which leaves the id gap that records something was there; then rewrite git
+history with a tool meant for it; then accept that references into the deleted
+section no longer resolve. engr adds nothing to those three steps, and pretending
+otherwise would only obscure the second.
+
 ## Layout
 
 ```text
@@ -318,9 +340,27 @@ bring it in:
 | Typed relations | Something needs to act on the type mechanically |
 | Machine observations (test results, progress) | Those need to be in the record |
 | Splitting `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
+| Statuses between open and closed (`deferred`, `blocked`) | A record is neither being worked on nor settled, and calling it one of the two loses something someone needed |
+| A priority on an object | Which record matters more has to be answered mechanically — a listing has to order by it |
 | Path scoping on a section (`--about internal/audit/**`) | A basis reads as moved because of a change to an area the section does not cover, often enough that the signal stops being read |
 | A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
 | More than one action per confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
+
+Splitting `closed` is the nearest of these, and part of its signal is already
+visible: abandoned work can only be closed, so the record goes on reporting a
+moved basis for something nobody intends to return to. That is a false alarm in
+the signal this design exists to keep believable. Any new status MUST answer the
+three questions the existing two answer — does it refuse section actions, is it
+safe to purge, and does it earn the closed-and-drifted alarm — and `abandoned`
+is so far the only candidate whose answers differ from `closed`'s.
+
+A priority would be a decision like any other and would go through the gate. The
+test for whether it belongs is whether a human wants to be asked to confirm a
+change to it: if confirming it would be tiresome, that is the signal it is
+tracker data, and admitting it would need a second write path — which is the one
+rule. An estimate of size is absent for a different reason and is not expected
+back: it is a guess about the future rather than a record of something agreed,
+and nothing would ever bring a human to re-confirm it.
 
 Path scoping would have to be a section field carrying into the content hash —
 what a section is *about* is part of what was confirmed — and it MUST then be
