@@ -60,6 +60,23 @@ pub fn distance(root: &Path, from: &str) -> Option<Distance> {
     Some(Distance { commits, files })
 }
 
+/// The last commit that touched `path`. `show` uses it to hand the reader the
+/// command that recovers what a file said before it was edited.
+pub fn last_commit_for(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let commit = run(
+        root,
+        &[
+            "log",
+            "-1",
+            "--format=%H",
+            "--",
+            &relative.to_string_lossy().replace('\\', "/"),
+        ],
+    )?;
+    (!commit.is_empty()).then_some(commit)
+}
+
 #[derive(Debug, Clone)]
 pub struct Distance {
     pub commits: usize,

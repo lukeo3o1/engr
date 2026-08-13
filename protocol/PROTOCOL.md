@@ -139,6 +139,24 @@ no language model, no interpretation of prose.** Everything it needs is inside
 the event, because the agent's judgement was frozen there when a human confirmed
 it. Structure that was not recorded does not exist.
 
+## Integrity on the read path
+
+Every read surface MUST recompute each section's hash before rendering it, and
+MUST say so where the reader is already looking. A reading path that prints
+unverified wording under an `ok` is worse than one that prints nothing: it is an
+assertion, and this record's whole claim is that a human agreed to these words.
+
+A section MUST also be marked when a section it references fails **its** hash.
+Comparing `refs[].sha256` against the target's stored `sha256` cannot see this —
+an edit that rewrites the target's text and leaves its stored hash alone moves
+neither side of that comparison, so the reference looks untouched while the
+wording under it was replaced. Only the directly referenced section is checked;
+the target's own read covers what *it* stands on.
+
+Corruption outranks staleness. A section whose content does not match its hash
+is not a section that drifted, and its drift assessment describes something
+nobody confirmed, so the label MUST report the corruption and not the drift.
+
 ## Staleness
 
 Two signals, both computed at read time, both needing nobody to be reading.
@@ -185,7 +203,8 @@ or the object has settled. A `closed` object is the obvious candidate.
 
 ## Verify
 
-`verify` recomputes each section's hash from what is stored.
+`verify` recomputes each section's hash from what is stored, and the hash of
+each section those sections reference.
 
 It catches a section edited without recomputing the hash. It **cannot** catch an
 edit that recomputes the hash too: once events are purged, the hash sits beside

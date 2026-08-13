@@ -83,21 +83,31 @@ Objects are addressed by unique id prefix, like a git commit. A uuidv7 prefix is
 a timestamp, so objects created close together need more characters; engr widens
 the abbreviation for you.
 
-## When a section has drifted
+## When a section is marked
 
-`show` marks two things, and tells you what to do about each:
+`show` marks four things, and tells you what to do about each:
 
 | Marking | What happened |
 | --- | --- |
+| `TAMPERED` / `tampered` | This section's wording does not match the hash confirmed with it |
+| `REF TAMPERED` / `ref_tampered` | A section this one stands on does not match *its* hash |
 | `basis moved` / `stale_basis` | HEAD moved past the commit this wording was written against |
-| `refs moved` / `stale_refs` | A section this one references was rewritten |
+| `refs moved` / `stale_refs` | A section this one references was rewritten through the gate |
 
-**Do not quietly reason from a drifted section.** Take the `git show` command
-`show` hands you, read what the dependency used to say, and decide whether this
-section still holds. If it does not, prepare a revision — and put *why* in the
-text, because that is what a reader three months out needs.
+The first two are a different kind of problem from the last two, and they are
+not something to work around. **Stop and tell the human.** Someone edited the
+stored file directly rather than going through the gate, so nothing about that
+wording was agreed to by anyone. `show` hands you `git show <commit>:<path>` —
+run it, and report what the record said before the edit. `engr show` and
+`engr verify` exit non-zero here; `engr ls` still exits 0 so a survey of many
+objects is not cut short.
 
-A drifted section is not wrong. It is unverified.
+For the last two: **do not quietly reason from a drifted section.** Take the
+`git show` command `show` hands you, read what the dependency used to say, and
+decide whether this section still holds. If it does not, prepare a revision —
+and put *why* in the text, because that is what a reader three months out needs.
+
+A drifted section is not wrong. It is unverified. A tampered one is neither.
 
 ## Choosing an action
 
@@ -123,8 +133,15 @@ when the thing you relied on changes.
 ## Committing
 
 Objects live in the repository. **Remind the human to commit `.engr/objects`.**
-git is where earlier wording is recovered from; uncommitted, that recovery
-silently is not there. `engr confirm` says when an object has uncommitted changes.
+
+This is a safety rule, not a convenience. The hash that proves a section was not
+edited sits in the same file as the section — so it catches a careless edit and
+not a careful one. Committed history is what actually anchors the wording:
+`git show` is the only thing that can say what the record said before someone
+changed it. Until an object is committed, `engr verify` can tell you the file is
+inconsistent but nothing can tell you what it used to say. It is also where
+earlier wording is recovered from for drift. `engr confirm` says when an object
+has uncommitted changes.
 
 `git add -A` is safe: `engr init` writes a `.engr/.gitignore` that keeps the lock
 and any pending candidate out. Do not stage a candidate by hand to work around

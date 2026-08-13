@@ -169,6 +169,18 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 print!("{}", view::render_show(&root, &object));
             }
+            // `show` asserts about one object, so a broken one must not exit 0
+            // and let `set -e` carry on. `ls` surveys, and keeps exiting 0.
+            let forged = view::assess(&root, &object)
+                .iter()
+                .filter(|(_, status)| status.forged())
+                .count();
+            if forged > 0 {
+                return Err(Error::new(
+                    engr::EXIT_INVARIANT,
+                    format!("{forged} sections are not what was confirmed; run: engr verify"),
+                ));
+            }
             Ok(())
         }
         Command::Purge { object } => {
@@ -409,7 +421,13 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
         return Ok(());
     }
     if sections {
+        // stdout stays byte for byte what it was — this is the surface people
+        // pipe into grep — so the alarm goes to stderr, which survives the pipe.
         print!("{}", view::render_ls_sections(root, &objects));
+        let forged = view::tampered_count(&objects);
+        if forged > 0 {
+            eprintln!("!! {forged} sections do not match their hashes; run: engr verify");
+        }
     } else if stale {
         let out = view::render_stale(root, &objects);
         if out.is_empty() {
@@ -445,6 +463,14 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
         );
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");
+        }
+        for stood in &report.standing_on_tampered {
+            println!(
+                "          §{} stands on {} §{}, which does not match its own hash",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section
+            );
         }
         if report.unprojected > 0 {
             println!(

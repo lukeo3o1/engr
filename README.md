@@ -42,6 +42,11 @@ to be reading:
 The case worth interrupting for is a **closed** object whose basis moved. Closed
 means nobody is looking, which is exactly when drift goes unnoticed.
 
+Reading is also checking. `show` recomputes every section's hash before printing
+it, and the hash of every section it stands on, because the default way in is the
+one worth lying to: a record whose selling point is that a human agreed to each
+word must not print `ok` over words nobody agreed to.
+
 ## Status
 
 **v0.** The protocol is in [protocol/PROTOCOL.md](protocol/PROTOCOL.md). Seventeen
@@ -87,13 +92,17 @@ engr ls --all --sections | grep <term>       # one line per section, greppable
 engr show <id>                               # sections, and how far each can be trusted
 engr show <id> --format json                 # the same, for an agent
 engr purge <id>                              # drop the event buffer once settled
-engr verify                                  # recompute section hashes
+engr verify                                  # recompute section hashes, and those they stand on
 ```
 
 Objects are addressed by unique id prefix, like a git commit.
 
-**Commit `.engr/objects`.** git is where old wording is recovered from; without
-it, look-back disappears silently. `init` writes a `.engr/.gitignore` that keeps
+**Commit `.engr/objects`.** This is a safety rule. A section's hash sits in the
+same file as the section, so it catches a careless edit and not a careful one —
+committed history is what actually anchors the wording, and `git show` is the
+only thing that can say what a record said before someone changed it. It is
+where old wording is recovered from for drift too; without it, look-back
+disappears silently. `init` writes a `.engr/.gitignore` that keeps
 the lock and any pending candidate out, so `git add -A` is safe — a candidate's
 filename is a live challenge code and has no business in shared history.
 

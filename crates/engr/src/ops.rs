@@ -83,35 +83,68 @@ pub fn purge(root: &Path, id: &str) -> Result<Purged> {
     })
 }
 
+/// A section here is sound, but a section it explicitly leans on is not.
+#[derive(Debug)]
+pub struct StandsOnTampered {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub object: String,
     pub title: String,
     pub sections: usize,
     pub tampered: Vec<u64>,
+    pub standing_on_tampered: Vec<StandsOnTampered>,
     pub unprojected: usize,
     pub uncommitted: Option<bool>,
 }
 
 impl Report {
     pub fn passed(&self) -> bool {
-        self.tampered.is_empty() && self.unprojected == 0
+        self.tampered.is_empty() && self.standing_on_tampered.is_empty() && self.unprojected == 0
     }
 }
 
-/// Recompute every section's hash from what is stored.
+/// Recompute every section's hash from what is stored, and the hash of every
+/// section this object explicitly stands on.
 ///
-/// This catches a section edited without recomputing its hash. It cannot catch
-/// an edit that recomputes the hash too — once the events are purged, the hash
-/// sits beside the content it covers, so committed git history is the real
-/// tamper anchor. That is why an uncommitted object file is reported here.
+/// The second half is not redundant. A ref pins the target's hash, so drift is
+/// detected by comparing hashes — but an edit that rewrites the target's text
+/// and leaves its stored hash alone moves neither side of that comparison. The
+/// ref looks unmoved, and this object would report PASS while the wording under
+/// it says something nobody agreed to. Only the section directly referenced is
+/// checked: the target's own `verify` covers what *it* stands on.
+///
+/// None of this catches an edit that recomputes the hash too — once the events
+/// are purged the hash sits beside the content it covers, so committed git
+/// history is the real tamper anchor. That is why an uncommitted object file is
+/// reported here.
 pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let object = store::load_object(root, id)?;
     let events = store::load_events(root, id)?;
     let mut tampered = Vec::new();
+    let mut standing_on_tampered = Vec::new();
     for section in &object.sections {
         if section.recomputed_sha256()? != section.sha256 {
             tampered.push(section.id);
+        }
+        for reference in &section.refs {
+            let Ok(target) = store::load_object(root, &reference.object) else {
+                continue;
+            };
+            let Ok(target_section) = target.section(reference.section) else {
+                continue;
+            };
+            if target_section.recomputed_sha256()? != target_section.sha256 {
+                standing_on_tampered.push(StandsOnTampered {
+                    section: section.id,
+                    target: reference.object.clone(),
+                    target_section: reference.section,
+                });
+            }
         }
     }
     Ok(Report {
@@ -119,6 +152,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         title: object.title.clone(),
         sections: object.sections.len(),
         tampered,
+        standing_on_tampered,
         unprojected: events.iter().filter(|event| event.rev > object.rev).count(),
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })

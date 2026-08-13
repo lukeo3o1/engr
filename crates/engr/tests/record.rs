@@ -204,6 +204,122 @@ fn a_reference_is_drift_once_its_target_is_revised() {
 }
 
 #[test]
+fn show_marks_a_section_whose_content_does_not_match_its_hash() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "audit failure reason codes");
+    admit(
+        &root,
+        payload(
+            Action::SectionAdded,
+            &id,
+            "Ruling: expose the reason code on the audit detail view.",
+        ),
+    );
+
+    tamper(&root, &id, |value| {
+        value["sections"][0]["text"] =
+            Value::String("Ruling: cancelled, we are not doing reason codes.".into());
+    });
+
+    let object = store::load_object(&root, &id).expect("object");
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(status.tampered);
+    assert!(!status.is_ok());
+    assert_eq!(
+        status.label(),
+        "TAMPERED",
+        "the label a reader scans must not read `ok` over wording nobody confirmed"
+    );
+    assert_eq!(status.key(), "tampered");
+
+    let rendered = view::render_show(&root, &object);
+    assert!(rendered.contains("1 tampered"), "{rendered}");
+    assert!(
+        !rendered.contains("1 ok"),
+        "the header asserted the section was fine: {rendered}"
+    );
+    assert!(
+        rendered.contains("content does not match the hash confirmed at"),
+        "{rendered}"
+    );
+}
+
+/// The hole a hash-to-hash comparison cannot see. An editor that rewrites the
+/// target's text and leaves its stored hash alone moves neither side of the
+/// ref comparison, so the referencing section would report `ok` — and `verify`
+/// would report PASS — over wording that was rewritten behind it.
+#[test]
+fn a_section_standing_on_tampered_wording_is_not_ok() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(
+            Action::SectionAdded,
+            &target,
+            "Ruling: reason codes are numeric.",
+        ),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(
+        Action::SectionAdded,
+        &source,
+        "Therefore the UI renders them as integers.",
+    );
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned.clone(),
+        commit: "0".repeat(40),
+    }];
+    admit(&root, with_ref);
+
+    let object = store::load_object(&root, &source).expect("source");
+    assert!(view::assess(&root, &object)[0].1.is_ok());
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    tamper(&root, &target, |value| {
+        value["sections"][0]["text"] =
+            Value::String("Ruling: reason codes are free-text strings.".into());
+    });
+
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(
+        !status.tampered,
+        "this section's own wording was not touched"
+    );
+    assert!(status.stands_on_tampered());
+    assert!(!status.is_ok(), "it stands on wording nobody confirmed");
+    assert_eq!(status.label(), "REF TAMPERED");
+    assert_eq!(status.key(), "ref_tampered");
+    assert_eq!(
+        status.drifted[0].current_sha256.as_deref(),
+        Some(pinned.as_str()),
+        "the stored hash did not move, which is exactly why comparing hashes is not enough"
+    );
+
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(
+        !report.passed(),
+        "verify reported PASS over rewritten foundations"
+    );
+    assert!(report.tampered.is_empty());
+    assert_eq!(report.standing_on_tampered.len(), 1);
+    assert_eq!(report.standing_on_tampered[0].section, 1);
+    assert_eq!(report.standing_on_tampered[0].target, target);
+
+    let rendered = view::render_show(&root, &object);
+    assert!(
+        rendered.contains("does not match its own hash"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
     let object = engr::model::new_id();
     let content = Content {
