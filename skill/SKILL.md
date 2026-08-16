@@ -4,11 +4,12 @@ description: >-
   Use engr in a repository that has adopted `.engr/` to keep engineering records
   whose every word a human confirmed. Propose sections through the gate and wait
   for the human's challenge code, re-render a pending candidate instead of
-  re-preparing it, read current wording and staleness with `engr show`, and act
-  on a section whose git basis or referenced section has moved. Not for
-  application event-sourcing architecture, EventStoreDB or Kafka work, ordinary
-  logs, personal journals, private session checkpoints, or writing decision
-  documents outside an adopted project.
+  re-preparing it, read current wording and staleness with `engr show`, act on a
+  section whose git basis or referenced section has moved, and park work that is
+  still unresolved in `engr backlog` rather than the record. Not for application
+  event-sourcing architecture, EventStoreDB or Kafka work, ordinary logs,
+  personal journals, private session checkpoints, or writing decision documents
+  outside an adopted project.
 license: MIT
 metadata:
   origin: https://github.com/lukeo3o1/engr
@@ -98,10 +99,14 @@ significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
 
+Also run `engr backlog ls` — an unresolved point recorded there is exactly the
+context a previous session left for you, and re-deciding something already being
+worked on is the failure it exists to prevent.
+
 After a durable decision, constraint, assumption, or rationale is established,
 consider capturing it when a future agent would need it. Do not record transient
 task state, guesses, routine observations, or every thought merely because engr
-is available.
+is available. An open question is not a decision: stage it instead.
 
 ```bash
 engr ls                              # open objects
@@ -147,6 +152,42 @@ A drifted section is not wrong. It is unverified. A tampered one is neither.
 Committing `.engr` does not make anything stale: the comparison ignores the
 record's own files, so `basis moved` means real work landed.
 
+## Work that is not settled yet
+
+Do not force an undecided question through the gate, and do not carry it in your
+head across sessions. It goes in the backlog, which needs no confirmation:
+
+```bash
+engr backlog ls                          # what is still unresolved
+engr backlog show <id>                   # points, subjects, outcomes so far
+engr backlog new --topic "..." --text "the unresolved point"
+engr backlog add <id> --text "another point in the same topic"
+engr backlog revise <id> --section 2 --text "sharpened"
+engr backlog rm <id> --section 2          # removing it is what says "settled"
+```
+
+Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
+backlog section as though it were the record**, and never quote one to a human
+without saying where it came from. If a point has become something you can
+assert, propose it through the gate like anything else — the wording a human
+confirms is usually not the wording you staged.
+
+Two rules keep it honest:
+
+- **A section that is still there is still unresolved**, whatever it has already
+  produced. `produced` lists confirmed outcomes that came out of working on it;
+  it is progress, not a verdict. Read it when you resume so you do not re-solve
+  what an earlier session already got confirmed.
+- **Removing a section is the act of judging it resolved.** There is no status
+  to set, so do not remove one you have not actually settled.
+
+Give `--subject-file <path>` or `--subject-symbol <path> <name>` when the point
+concerns specific source. engr pins the commit and refuses to pin HEAD while
+that path is dirty — commit it first, or pass `--subject-commit <rev>`. Use
+`--subject engr:obj:<id>:<section>` for a record section the point concerns;
+that is context, not a dependency, and it does not make the record depend on
+anything unconfirmed.
+
 ## Choosing an action
 
 | Situation | Action |
@@ -180,7 +221,7 @@ thing you relied on changes. A section cannot directly reference itself.
 ## Committing
 
 Objects and confirmed history live in the repository. **Remind the human to
-commit `.engr/objects` and `.engr/events`.**
+commit `.engr/objects`, `.engr/events` and `.engr/backlog`.**
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and
@@ -199,7 +240,8 @@ it to everyone with repository access.
 ## What not to do
 
 - Do not look for a way to write without confirmation. There isn't one, and the
-  absence is the point.
+  absence is the point. The backlog is not one either — it is outside the record,
+  and putting an assertion there does not make it recorded.
 - Do not put a decision's reasoning in a commit message instead of a section. The
   record is where it belongs; the commit message is not addressable and cannot be
   referenced.
