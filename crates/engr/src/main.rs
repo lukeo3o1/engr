@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::{gate, git, ops, store, view};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
@@ -56,6 +57,161 @@ enum Command {
     },
     /// Recompute section hashes
     Verify { object: Option<String> },
+    /// Unresolved staging. Nothing here is confirmed
+    #[command(subcommand)]
+    Backlog(Backlog),
+}
+
+/// Backlog edits do not go through the gate, and must not look as though they
+/// might: a separate namespace keeps `ls`, `show` and `verify` meaning exactly
+/// what they meant before, which is confirmed record and nothing else.
+#[derive(Subcommand)]
+enum Backlog {
+    /// Start a topic with its first unresolved point
+    New {
+        #[arg(long)]
+        topic: String,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// List unresolved topics
+    Ls {
+        /// Keyword, matched against topics and section text
+        keyword: Option<String>,
+    },
+    /// Show one topic: its unresolved points, subjects and produced outcomes
+    Show {
+        item: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Replace the topic. Does not touch section activity
+    Rename {
+        item: String,
+        #[arg(long)]
+        topic: String,
+    },
+    /// Add another unresolved point to a topic
+    Add {
+        item: String,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Reword an unresolved point
+    Revise {
+        item: String,
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        text: TextArg,
+    },
+    /// Replace what an unresolved point concerns
+    Subjects {
+        item: String,
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Consolidate unresolved points into one
+    Merge {
+        item: String,
+        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
+        sections: Vec<u64>,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Remove an unresolved point, or the whole topic
+    Rm {
+        item: String,
+        /// Remove one point. The topic goes when its last one does
+        #[arg(long)]
+        section: Option<u64>,
+    },
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("wording").required(true).args(["text", "text_file"])))]
+struct TextArg {
+    /// Wording, inline
+    #[arg(long)]
+    text: Option<String>,
+    /// Wording, from a file
+    #[arg(long)]
+    text_file: Option<PathBuf>,
+}
+
+impl TextArg {
+    fn read(&self) -> Result<String> {
+        match (&self.text, &self.text_file) {
+            (Some(text), None) => Ok(text.clone()),
+            (None, Some(path)) => std::fs::read_to_string(path)
+                .map_err(|error| engr::tool_error(path.display(), error)),
+            _ => Err(Error::new(
+                EXIT_USAGE,
+                "use --text or --text-file, not both",
+            )),
+        }
+    }
+}
+
+#[derive(Args)]
+struct SubjectArgs {
+    /// Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+    #[arg(long = "subject", value_name = "ENGR_REF")]
+    subject: Vec<String>,
+    /// A repository file this concerns
+    #[arg(long = "subject-file", value_name = "PATH")]
+    subject_file: Vec<String>,
+    /// A source symbol this concerns
+    #[arg(long = "subject-symbol", value_names = ["PATH", "SYMBOL"], num_args = 2)]
+    subject_symbol: Vec<String>,
+    /// Committed revision to pin file and symbol subjects at. Defaults to HEAD
+    /// only while the path itself is clean
+    #[arg(long, value_name = "REVISION")]
+    subject_commit: Option<String>,
+}
+
+impl SubjectArgs {
+    fn build(&self, root: &Path) -> Result<Vec<Subject>> {
+        let revision = self.subject_commit.as_deref();
+        let mut subjects = Vec::new();
+        for spec in &self.subject {
+            let relative = spec.strip_prefix("engr:").ok_or_else(|| {
+                Error::new(
+                    EXIT_USAGE,
+                    format!("--subject {spec:?} must be an engr: reference"),
+                )
+            })?;
+            subjects.push(Subject::engr(relative.to_owned()));
+        }
+        for path in &self.subject_file {
+            subjects.push(Subject::File {
+                commit: backlog::pin(root, path, revision)?,
+                path: path.clone(),
+            });
+        }
+        for pair in self.subject_symbol.chunks(2) {
+            let [path, symbol] = pair else {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--subject-symbol takes a path and a symbol name",
+                ));
+            };
+            subjects.push(Subject::Symbol {
+                commit: backlog::pin(root, path, revision)?,
+                path: path.clone(),
+                symbol: symbol.clone(),
+            });
+        }
+        Ok(subjects)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -174,14 +330,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
             store::require_current(&root)?;
-            let (event, object) = gate::confirm(&root, &response)?;
+            let admitted = gate::confirm(&root, &response)?;
             println!(
                 "CONFIRMED  {}  {}  rev {}",
-                shorten(&object.id, view::width(&root)),
-                event.payload.action.label(),
-                object.rev
+                shorten(&admitted.object.id, view::width(&root)),
+                admitted.event.payload.action.label(),
+                admitted.object.rev
             );
-            warn_uncommitted(&root, &object.id);
+            report_backlog(&root, &admitted.backlog);
+            warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
         Command::Ls {
@@ -217,6 +374,143 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
+        Command::Backlog(command) => backlog_command(&root, command),
+    }
+}
+
+/// Say what confirmation did to unresolved staging, in the same breath as the
+/// admission. A source that moved needs a decision, and the moment the human is
+/// still here is the moment to say so.
+fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
+    let width = view::backlog_width(root);
+    for outcome in outcomes {
+        let item = shorten(&outcome.item, width);
+        let line = match &outcome.result {
+            backlog::Reconciliation::Recorded { added: 0 } => {
+                "already recorded — nothing to add".to_owned()
+            }
+            backlog::Reconciliation::Recorded { added } => {
+                format!("recorded {added} produced outcome(s); still unresolved")
+            }
+            backlog::Reconciliation::Consumed { item_removed: true } => {
+                "resolved and consumed; the topic had nothing else unresolved".to_owned()
+            }
+            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
+            backlog::Reconciliation::SourceChanged => {
+                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
+            }
+            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
+        };
+        println!("backlog    {item} §{}  {line}", outcome.section);
+    }
+}
+
+fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
+    match command {
+        Backlog::New {
+            topic,
+            text,
+            subjects,
+        } => {
+            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            print!("{}", view::render_backlog_show(root, &item));
+            Ok(())
+        }
+        Backlog::Ls { keyword } => {
+            let items = backlog::all(root)?;
+            if items.is_empty() {
+                println!("nothing unresolved");
+                return Ok(());
+            }
+            print!(
+                "{}",
+                view::render_backlog_ls(root, &items, keyword.as_deref())
+            );
+            Ok(())
+        }
+        Backlog::Show { item, format } => {
+            let item = backlog::load(root, &backlog::resolve_id(root, &item)?)?;
+            if format == Format::Json {
+                println!("{}", view::render_backlog_json(&item)?);
+            } else {
+                print!("{}", view::render_backlog_show(root, &item));
+            }
+            Ok(())
+        }
+        Backlog::Rename { item, topic } => {
+            let id = backlog::resolve_id(root, &item)?;
+            let item = backlog::rename(root, &id, &topic)?;
+            println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
+            Ok(())
+        }
+        Backlog::Add {
+            item,
+            text,
+            subjects,
+        } => {
+            let id = backlog::resolve_id(root, &item)?;
+            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            println!("added §{section}");
+            Ok(())
+        }
+        Backlog::Revise {
+            item,
+            section,
+            text,
+        } => {
+            let id = backlog::resolve_id(root, &item)?;
+            backlog::revise_section(root, &id, section, &text.read()?)?;
+            println!("revised §{section}");
+            Ok(())
+        }
+        Backlog::Subjects {
+            item,
+            section,
+            subjects,
+        } => {
+            let id = backlog::resolve_id(root, &item)?;
+            let subjects = subjects.build(root)?;
+            let count = subjects.len();
+            backlog::set_subjects(root, &id, section, subjects)?;
+            println!("§{section} now concerns {count} subject(s)");
+            Ok(())
+        }
+        Backlog::Merge {
+            item,
+            sections,
+            text,
+            subjects,
+        } => {
+            let id = backlog::resolve_id(root, &item)?;
+            let section = backlog::merge_sections(
+                root,
+                &id,
+                &sections,
+                &text.read()?,
+                subjects.build(root)?,
+            )?;
+            println!("merged into §{section}");
+            Ok(())
+        }
+        Backlog::Rm { item, section } => {
+            let id = backlog::resolve_id(root, &item)?;
+            match section {
+                Some(section) => {
+                    if backlog::delete_section(root, &id, section)? {
+                        println!(
+                            "removed §{section}, and the topic with it — nothing else was unresolved"
+                        );
+                    } else {
+                        println!("removed §{section}");
+                    }
+                }
+                None => {
+                    backlog::delete_item(root, &id)?;
+                    println!("removed {}", shorten(&id, view::backlog_width(root)));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -456,15 +750,15 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
     // every line that means nothing is a line that trains people to skim.
     if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
         if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
-            if !candidate.previous_semantics_recorded {
+            if !candidate.context.previous_semantics_recorded {
                 out.push_str(
                     "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
                 );
             }
-            if candidate.previous_based_on != candidate.payload.content.based_on {
+            if candidate.context.previous_based_on != candidate.payload.content.based_on {
                 out.push_str(&format!(
                     "Based on - {}\nBased on + {}\n",
-                    render_basis(candidate.previous_based_on.as_deref()),
+                    render_basis(candidate.context.previous_based_on.as_deref()),
                     render_basis(candidate.payload.content.based_on.as_deref())
                 ));
             } else {
@@ -473,13 +767,13 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
                     render_basis(candidate.payload.content.based_on.as_deref())
                 ));
             }
-            for reference in &candidate.previous_refs {
+            for reference in &candidate.context.previous_refs {
                 if !candidate.payload.content.refs.contains(reference) {
                     out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
                 }
             }
             for reference in &candidate.payload.content.refs {
-                if !candidate.previous_refs.contains(reference) {
+                if !candidate.context.previous_refs.contains(reference) {
                     out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
                 }
             }
@@ -493,10 +787,30 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
             }
         }
     }
+    // Confirming this will also edit unresolved staging, so the human reading
+    // the change is shown that before they type, not told about it afterwards.
+    for source in &candidate.context.backlog {
+        out.push_str(&format!(
+            "Backlog    {} §{}  {}\n",
+            shorten(&source.item, width),
+            source.section,
+            if source.resolves {
+                "resolved by this — will be consumed"
+            } else {
+                "still unresolved after this"
+            }
+        ));
+        for produced in &source.produced {
+            out.push_str(&format!(
+                "           produced engr:{}\n",
+                produced.target.reference
+            ));
+        }
+    }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
     // everything is how confirmation decays into rubber-stamping.
-    match (&candidate.previous_text, &candidate.payload.action) {
+    match (&candidate.context.previous_text, &candidate.payload.action) {
         (Some(previous), _) => {
             let diff = similar::TextDiff::from_lines(previous, &candidate.payload.content.text);
             out.push_str(

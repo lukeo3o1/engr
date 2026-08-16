@@ -55,7 +55,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
 fn admit(root: &Path, payload: Payload) -> engr::model::Object {
     let prepared = gate::prepare(root, payload).expect("prepare");
     let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").1
+    gate::confirm(root, &response).expect("confirm").object
 }
 
 fn new_object(root: &Path, title: &str) -> String {

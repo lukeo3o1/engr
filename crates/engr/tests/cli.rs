@@ -1594,6 +1594,209 @@ fn an_empty_commit_is_not_the_basis_moving() {
     );
 }
 
+/// The two domains share a workspace and nothing else. A reader who runs the
+/// record commands must not be shown a word of unconfirmed staging, and a
+/// reader who runs the staging commands must not be able to mistake what they
+/// are looking at.
+#[test]
+fn record_surfaces_never_mix_in_unconfirmed_staging() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "confirmed record"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &object,
+            "--add",
+            "--text",
+            "confirmed wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    let staged = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "reconsider the confirmed wording",
+            "--text",
+            "unconfirmed exploratory wording",
+        ],
+    );
+    assert!(
+        staged.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let staged = String::from_utf8(staged.stdout).expect("utf8");
+    assert!(staged.contains("UNCONFIRMED STAGING"), "got {staged:?}");
+
+    for args in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &object],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).expect("utf8");
+        assert!(
+            !text.contains("unconfirmed exploratory wording")
+                && !text.contains("reconsider the confirmed wording"),
+            "{args:?} must not mix staging into the record: {text:?}"
+        );
+    }
+
+    // `verify` stays record-oriented: staging existing is not a record verdict.
+    let verify = run_engr(root, &["verify"]);
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("PASS"));
+
+    // And structured staging output carries the boundary as a field, because
+    // that is what travels furthest from the banner.
+    let shown = run_engr(root, &["backlog", "ls"]);
+    let listing = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(listing.contains("UNCONFIRMED STAGING"));
+    let id = listing
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().next())
+        .expect("a listed item")
+        .to_owned();
+    let json = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).expect("backlog json");
+    assert_eq!(json["authority"], "unconfirmed_staging");
+    assert_eq!(
+        json["sections"][0]["text"],
+        "unconfirmed exploratory wording"
+    );
+}
+
+/// Backlog CRUD through the command line, including the one refusal that keeps
+/// a subject from claiming provenance it does not have.
+#[test]
+fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.name", "test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    std::fs::write(root.join("session.rs"), "fn refresh() {}\n").expect("source");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "source"]);
+
+    let created = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "refresh strategy",
+            "--text",
+            "offline mode may invalidate it",
+            "--subject-file",
+            "session.rs",
+            "--subject-symbol",
+            "session.rs",
+            "refresh",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let id = engr::backlog::ids(root).expect("ids").remove(0);
+
+    assert!(
+        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
+            .status
+            .success()
+    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "2",
+            "--text",
+            "reworded"
+        ]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "merge",
+            &id,
+            "--sections",
+            "1,2",
+            "--text",
+            "one point"
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
+            .status
+            .success()
+    );
+
+    let item = engr::backlog::load(root, &id).expect("item");
+    assert_eq!(item.topic, "refresh");
+    assert_eq!(item.sections.len(), 1);
+    assert_eq!(item.sections[0].id, 3);
+    assert!(
+        engr::gate::pending(root).expect("candidates").is_empty(),
+        "staging edits never mint a challenge code"
+    );
+
+    // A dirty path cannot be pinned, and the refusal says what to do about it.
+    std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "concerns dirty source",
+            "--subject-file",
+            "session.rs",
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("commit it first"), "got {message:?}");
+
+    assert!(run_engr(root, &["backlog", "rm", &id, "--section", "3"])
+        .status
+        .success());
+    assert!(
+        engr::backlog::ids(root).expect("ids").is_empty(),
+        "removing the last unresolved point removes the topic"
+    );
+    let empty = run_engr(root, &["backlog", "ls"]);
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("nothing unresolved"));
+}
+
 /// Installed from a release archive there is no checkout, so the document that
 /// says what the tool guarantees would otherwise not be on the machine the tool
 /// is on. It also has to work before `init`: the protocol is what someone reads

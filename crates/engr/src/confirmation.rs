@@ -13,6 +13,19 @@ pub const CHALLENGE_LEN: usize = 6;
 /// The persisted, domain-neutral part of a prepared mutation. Domains provide
 /// their own binding fields and mutation vocabulary; flattening keeps their
 /// storage envelope independent without recreating the admission protocol.
+///
+/// Two fingerprints, because they answer different questions. `payload_sha256`
+/// is the mutation's own identity: it travels into the confirmed Event and is
+/// what an already-applied retry matches against, so its input may never widen.
+/// `integrity_sha256` covers that value together with the prepared binding and
+/// whatever context the domain stored — the state that decides what the human
+/// is shown and what admission will do besides mutating. Without it those
+/// fields sit outside every check while still steering the confirmation.
+///
+/// This is not a boundary against someone who controls the machine: the file it
+/// protects is on that machine, and so is this binary. It is the narrower
+/// guarantee that a candidate rewritten on disk cannot present or bind a
+/// materially different confirmation context and still pass its own checks.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Candidate<M, B> {
     pub challenge: String,
@@ -22,27 +35,51 @@ pub struct Candidate<M, B> {
     #[serde(flatten)]
     pub payload: M,
     pub payload_sha256: String,
+    /// Defaulted on load rather than required, so an envelope that predates
+    /// this value fails the integrity check with an answer — prepare it again —
+    /// instead of a deserializer complaining about a missing field. The empty
+    /// string is never a digest, so absence can only fail.
+    #[serde(default)]
+    pub integrity_sha256: String,
 }
 
-impl<M: Serialize, B> Candidate<M, B> {
-    pub fn prepare(payload: M, binding: B, taken: &[String], created_at: String) -> Result<Self> {
-        Self::prepare_with(payload, binding, taken, created_at, fingerprint)
+/// The exact input to `integrity_sha256`. A named struct rather than an ad-hoc
+/// map, so the covered set is one declaration a reader can check against.
+#[derive(Serialize)]
+struct Integrity<'a, B, C> {
+    payload_sha256: &'a str,
+    binding: &'a B,
+    context: &'a C,
+}
+
+impl<M: Serialize, B: Serialize> Candidate<M, B> {
+    pub fn prepare(
+        payload: M,
+        binding: B,
+        context: &impl Serialize,
+        taken: &[String],
+        created_at: String,
+    ) -> Result<Self> {
+        Self::prepare_with(payload, binding, context, taken, created_at, fingerprint)
     }
 
     pub fn prepare_with(
         payload: M,
         binding: B,
+        context: &impl Serialize,
         taken: &[String],
         created_at: String,
         fingerprint: impl FnOnce(&M) -> Result<String>,
     ) -> Result<Self> {
         let payload_sha256 = fingerprint(&payload)?;
+        let integrity_sha256 = integrity(&payload_sha256, &binding, context)?;
         Ok(Self {
             challenge: mint(taken),
             created_at,
             binding,
             payload,
             payload_sha256,
+            integrity_sha256,
         })
     }
 
@@ -62,6 +99,31 @@ impl<M: Serialize, B> Candidate<M, B> {
         );
         Ok(())
     }
+
+    /// Check the binding and the domain's stored context against the value
+    /// minted at prepare. Call it wherever a candidate is loaded — rendering it
+    /// again is as much a use of the prepared context as admitting it is.
+    pub fn verify_integrity(&self, context: &impl Serialize) -> Result<()> {
+        ensure!(
+            self.integrity_sha256 == integrity(&self.payload_sha256, &self.binding, context)?,
+            EXIT_SCHEMA,
+            "candidate {} does not match its own integrity hash; prepare it again",
+            self.challenge
+        );
+        Ok(())
+    }
+}
+
+pub fn integrity(
+    payload_sha256: &str,
+    binding: &impl Serialize,
+    context: &impl Serialize,
+) -> Result<String> {
+    fingerprint(&Integrity {
+        payload_sha256,
+        binding,
+        context,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -185,8 +247,16 @@ mod tests {
         resolver_fingerprint: String,
     }
 
+    #[derive(Serialize, Clone, Debug)]
+    struct AliasContext {
+        previous_target: String,
+    }
+
     #[test]
     fn another_domain_can_prepare_verify_and_admit_without_an_object_gate() {
+        let mut context = AliasContext {
+            previous_target: "obj:old".to_owned(),
+        };
         let candidate = Candidate::prepare(
             AliasMutation {
                 alias: "auth",
@@ -195,11 +265,20 @@ mod tests {
             AliasBinding {
                 resolver_fingerprint: "before".to_owned(),
             },
+            &context,
             &[],
             "2026-08-16T00:00:00Z".to_owned(),
         )
         .expect("prepare alias mutation");
         candidate.verify_payload().expect("bound payload");
+        candidate
+            .verify_integrity(&context)
+            .expect("untouched prepared context");
+        context.previous_target = "obj:something-else".to_owned();
+        assert!(
+            candidate.verify_integrity(&context).is_err(),
+            "presentation context is covered by candidate integrity"
+        );
         assert_eq!(
             admission(
                 &candidate.binding.resolver_fingerprint,
