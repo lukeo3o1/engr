@@ -8,7 +8,6 @@
 use crate::FORMAT_VERSION;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// uuidv7: time-ordered, and with no date welded into a human-facing id — the
 /// previous scheme put one there and could not represent anything backdated, nor
@@ -67,11 +66,7 @@ impl Content {
 }
 
 fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
-    let value = serde_json::to_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical form: {error}")))?;
-    let canonical = serde_json::to_string(&value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical form: {error}")))?;
-    Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+    crate::confirmation::fingerprint(value)
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]

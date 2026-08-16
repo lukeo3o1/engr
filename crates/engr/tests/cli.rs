@@ -84,8 +84,10 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         serde_json::to_vec_pretty(&object).expect("json"),
     )
     .expect("legacy object");
-    std::fs::remove_file(store::engr_dir(root).join("format.json")).expect("remove authority");
-
+    assert!(
+        store::engr_dir(root).join("format.json").exists(),
+        "Phase 0 already had the version 1 workspace authority"
+    );
     let shown = run_engr(root, &["show", id]);
     assert!(
         shown.status.success(),
@@ -95,6 +97,10 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     let refused = run_engr(root, &["prepare", "--object", id, "--close"]);
     assert_eq!(refused.status.code(), Some(engr::EXIT_SCHEMA));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("engr migrate"));
+    let still_legacy: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    assert_eq!(still_legacy["status"], "open");
+    assert!(still_legacy.get("state").is_none());
 
     let migrated = run_engr(root, &["migrate"]);
     assert!(

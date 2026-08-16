@@ -18,13 +18,8 @@ use std::path::Path;
 pub struct Candidate {
     pub format: String,
     pub version: u32,
-    pub challenge: String,
-    pub created_at: String,
-    /// The object revision this was prepared against.
-    pub expected_rev: u64,
     #[serde(flatten)]
-    pub payload: Payload,
-    pub payload_sha256: String,
+    pub gate: crate::confirmation::Candidate<Payload, ObjectBinding>,
     /// What the human is shown when the candidate carries a change to existing
     /// wording, so they read the change rather than the whole section again.
     pub previous_text: Option<String>,
@@ -40,6 +35,20 @@ pub struct Candidate {
     /// candidate that never captured those values at all.
     #[serde(default)]
     pub previous_semantics_recorded: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ObjectBinding {
+    /// The object revision this was prepared against.
+    pub expected_rev: u64,
+}
+
+impl std::ops::Deref for Candidate {
+    type Target = crate::confirmation::Candidate<Payload, ObjectBinding>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.gate
+    }
 }
 
 fn now() -> String {
@@ -86,8 +95,8 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
 /// Whether a pending candidate can still be confirmed, or was overtaken.
 pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
     match store::load_object(root, &candidate.payload.object) {
-        Ok(object) => object.rev == candidate.expected_rev,
-        Err(_) => candidate.expected_rev == 0,
+        Ok(object) => object.rev == candidate.binding.expected_rev,
+        Err(_) => candidate.binding.expected_rev == 0,
     }
 }
 
@@ -269,18 +278,20 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
     let taken: Vec<String> = pending(root)?
         .into_iter()
-        .map(|candidate| candidate.challenge)
+        .map(|candidate| candidate.challenge.clone())
         .collect();
-    let challenge = crate::confirmation::mint(&taken);
     let previous_semantics_recorded = matches!(payload.action, Action::SectionRevised { .. });
+    let gate = crate::confirmation::Candidate::prepare_with(
+        payload,
+        ObjectBinding { expected_rev },
+        &taken,
+        now(),
+        Payload::sha256,
+    )?;
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
         version: FORMAT_VERSION,
-        challenge: challenge.clone(),
-        created_at: now(),
-        expected_rev,
-        payload_sha256: payload.sha256()?,
-        payload,
+        gate,
         previous_text,
         previous_based_on,
         previous_refs,
@@ -294,10 +305,13 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         if existing.payload.object == candidate.payload.object {
             fs::remove_file(store::candidate_path(root, &existing.challenge))
                 .map_err(|error| tool_error("discarding a superseded candidate", error))?;
-            superseded.push(existing.challenge);
+            superseded.push(existing.challenge.clone());
         }
     }
-    store::write_json(&store::candidate_path(root, &challenge), &candidate)?;
+    store::write_json(
+        &store::candidate_path(root, &candidate.challenge),
+        &candidate,
+    )?;
 
     let notes = notes_for(root, &candidate);
 
@@ -394,33 +408,11 @@ pub fn discard(root: &Path, challenge: &str) -> Result<()> {
 /// candidate. Accepting a bare code instead would put the agent in the position
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
 pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
-    let code = match crate::confirmation::response(response) {
-        crate::confirmation::Response::Exact(code) => code,
-        crate::confirmation::Response::Qualified(first) => {
-            if store::candidate_path(root, first).exists() {
-                discard(root, first)?;
-                return Err(Error::new(
-                    EXIT_USAGE,
-                    format!("`CONFIRM {first}` carried commentary, so it is a qualified yes rather than assent; candidate {first} was discarded"),
-                ));
-            }
-            return Err(Error::new(
-                EXIT_USAGE,
-                "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
-            ));
-        }
-        crate::confirmation::Response::Invalid => {
-            // Words beyond the code are commentary — "yes, but reword the second
-            // line" is not assent, and letting it through would make the agent the
-            // judge of whether a qualified yes counted. That discards the candidate.
-            // A whitespace or casing slip is a typo, not a qualification, so it is
-            // merely rejected and the candidate survives to be confirmed properly.
-            return Err(Error::new(
-                EXIT_USAGE,
-                "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
-            ));
-        }
-    };
+    let code = crate::confirmation::authorize(
+        response,
+        |code| store::candidate_path(root, code).exists(),
+        |code| discard(root, code),
+    )?;
 
     let candidate = find(root, code)?;
     ensure!(
@@ -429,11 +421,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
         EXIT_SCHEMA,
         "candidate {code} predates complete semantic revision rendering; prepare it again"
     );
-    ensure!(
-        candidate.payload_sha256 == candidate.payload.sha256()?,
-        EXIT_SCHEMA,
-        "candidate {code} does not match its own hash"
-    );
+    candidate.verify_payload_with(Payload::sha256)?;
 
     let mut object = match ops::reconcile(root, &candidate.payload.object) {
         Ok(object) => object,
@@ -446,19 +434,29 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     // then clears the candidate; a crash in the middle leaves the change applied
     // and the candidate still pending. Re-confirming the same code must report
     // what already happened rather than apply it a second time.
-    if object.rev > candidate.expected_rev {
+    let already_applied = if object.rev > candidate.binding.expected_rev {
         let events = store::load_events(root, &candidate.payload.object)?;
-        if let Some(applied) = events.iter().find(|event| {
-            event.rev == candidate.expected_rev + 1
+        events.into_iter().find(|event| {
+            event.rev == candidate.binding.expected_rev + 1
                 && event.confirmation.payload_sha256 == candidate.payload_sha256
-        }) {
-            let applied = applied.clone();
+        })
+    } else {
+        None
+    };
+
+    match crate::confirmation::admission(
+        &candidate.binding.expected_rev,
+        &object.rev,
+        already_applied.is_some(),
+        "the object revision",
+    )? {
+        crate::confirmation::Admission::AlreadyApplied => {
+            let applied = already_applied.expect("the shared gate classified this as applied");
             discard(root, code)?;
             return Ok((applied, object));
         }
+        crate::confirmation::Admission::Apply => {}
     }
-
-    crate::confirmation::ensure_fresh(&candidate.expected_rev, &object.rev, "the object revision")?;
 
     // Re-check references at the moment of admission, not only at prepare: a
     // target may have been revised while the human was reading.

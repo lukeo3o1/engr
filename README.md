@@ -17,6 +17,9 @@ Canonical Object references are `engr:obj:<compact-id>` (optionally followed by
 as 26 lowercase Crockford Base32 characters; stored identity and filenames
 remain standard UUID strings.
 
+An abbreviated or symbolic `@<commit>` is accepted only as input. Canonical
+reference output resolves it to the full Git object ID.
+
 ```bash
 engr prepare --object 019ff75b --add --text-file draft.txt
 #   Candidate  section.added

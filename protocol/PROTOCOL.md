@@ -298,12 +298,14 @@ otherwise would only obscure the second.
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
-workspace. New resource files do not repeat those fields. A workspace without
-that authority may be recognized as legacy v0 for reading, but remains
-read-only until `engr migrate` is explicitly run. Migration changes only
-incompatible representation (`Object.status` to `Object.state`) and preserves
-compatible legacy markers and confirmed Event envelopes. Unknown or newer
-workspace versions are never mutated.
+workspace. New resource files do not repeat those fields. Phase 0 workspaces
+already carrying version 1 are still recognized as transitional while any
+Object uses `status`; workspaces without the authority may also be recognized
+from their legacy resource markers. Either form remains read-only until
+`engr migrate` is explicitly run. Migration changes only incompatible
+representation (`Object.status` to `Object.state`) and preserves compatible
+legacy markers and confirmed Event envelopes. Unknown or newer workspace
+versions are never mutated.
 
 ```text
 .engr/
@@ -338,6 +340,10 @@ Embedded references omit `engr:` and pair their namespace-relative `ref` with
 `kind: "engr"`. The shared parser owns syntax only: each caller decides which
 resources and selectors are legal and what they mean. Repository-qualified
 resolution is deferred.
+
+Snapshot input may be abbreviated or symbolic, but it is unresolved input, not
+canonical reference data. Canonical or persisted output MUST contain the full
+resolved Git object ID; an unresolved selector cannot be rendered canonically.
 
 ## Exit codes
 

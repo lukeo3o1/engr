@@ -328,17 +328,13 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
                 format!("--ref {spec:?} must identify an Object section"),
             ));
         }
-        let id = engr::reference::decode_uuid(&reference.id)?.to_string();
-        let section = reference.section.expect("checked above");
+        let canonical = reference.canonicalize(|revision| git::resolve(root, revision))?;
+        let id = engr::reference::decode_uuid(&canonical.id)?.to_string();
+        let section = canonical.section.expect("checked before canonicalization");
         let target = store::load_object(root, &id)?;
         let target_section = target.section(section)?;
-        let commit = match reference.snapshot {
-            Some(revision) => git::resolve(root, &revision).ok_or_else(|| {
-                Error::new(
-                    engr::EXIT_INVARIANT,
-                    format!("snapshot {revision} is not a commit in this repository"),
-                )
-            })?,
+        let commit = match canonical.snapshot {
+            Some(commit) => commit,
             None => git::head(root).ok_or_else(|| {
                 Error::new(
                     engr::EXIT_INVARIANT,

@@ -151,6 +151,9 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
+    if contains_legacy_objects(root)? {
+        return Ok(WorkspaceFormat::LegacyV0);
+    }
     Ok(WorkspaceFormat::Current)
 }
 
@@ -170,6 +173,34 @@ fn detect_legacy(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn contains_legacy_objects(root: &Path) -> Result<bool> {
+    let mut legacy = false;
+    for id in object_ids(root)? {
+        let path = object_path(root, &id);
+        let value: serde_json::Value = read_json(&path)?;
+        let object = value.as_object().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: object must be a JSON object", path.display()),
+            )
+        })?;
+        ensure!(
+            !(object.contains_key("status") && object.contains_key("state")),
+            EXIT_SCHEMA,
+            "{}: contains both legacy status and canonical state",
+            path.display()
+        );
+        ensure!(
+            object.contains_key("status") || object.contains_key("state"),
+            EXIT_SCHEMA,
+            "{}: object has neither status nor state",
+            path.display()
+        );
+        legacy |= object.contains_key("status");
+    }
+    Ok(legacy)
+}
+
 pub fn require_current(root: &Path) -> Result<()> {
     ensure!(
         validate_format(root)? == WorkspaceFormat::Current,
@@ -183,7 +214,7 @@ pub fn migrate(root: &Path) -> Result<()> {
     ensure!(
         validate_format(root)? == WorkspaceFormat::LegacyV0,
         EXIT_SCHEMA,
-        "workspace is already at version {FORMAT_VERSION}"
+        "workspace does not require migration"
     );
     for id in object_ids(root)? {
         let path = object_path(root, &id);
@@ -328,7 +359,7 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
         ensure!(
             reference.kind == crate::reference::ResourceKind::Object
                 && reference.section.is_none()
-                && reference.snapshot.is_none(),
+                && reference.snapshot_selector.is_none(),
             EXIT_NOT_FOUND,
             "{prefix:?} is not a current Object reference"
         );

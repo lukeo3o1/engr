@@ -1,7 +1,6 @@
 //! Canonical syntax for engr resource references.
 
 use crate::{ensure, Error, Result, EXIT_SCHEMA};
-use std::fmt;
 
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -24,6 +23,16 @@ impl ResourceKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngrRef {
+    pub kind: ResourceKind,
+    pub id: String,
+    pub section: Option<u64>,
+    /// Input selector only. It may be abbreviated or symbolic and must be
+    /// resolved before a canonical reference can be emitted.
+    pub snapshot_selector: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalEngrRef {
     pub kind: ResourceKind,
     pub id: String,
     pub section: Option<u64>,
@@ -93,10 +102,44 @@ impl EngrRef {
             kind,
             id: id.to_owned(),
             section,
-            snapshot,
+            snapshot_selector: snapshot,
         })
     }
 
+    pub fn canonicalize(
+        self,
+        resolve_snapshot: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<CanonicalEngrRef> {
+        let snapshot = self
+            .snapshot_selector
+            .as_deref()
+            .map(|selector| {
+                resolve_snapshot(selector).ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!("Git snapshot {selector:?} could not be resolved"),
+                    )
+                })
+            })
+            .transpose()?
+            .map(|snapshot| snapshot.to_ascii_lowercase());
+        if let Some(snapshot) = &snapshot {
+            ensure!(
+                is_full_git_oid(snapshot),
+                EXIT_SCHEMA,
+                "resolved Git snapshot must be a full 40- or 64-character object id"
+            );
+        }
+        Ok(CanonicalEngrRef {
+            kind: self.kind,
+            id: self.id,
+            section: self.section,
+            snapshot,
+        })
+    }
+}
+
+impl CanonicalEngrRef {
     pub fn embedded(&self) -> String {
         let mut value = format!("{}:{}", self.kind.token(), self.id);
         if let Some(section) = self.section {
@@ -110,10 +153,14 @@ impl EngrRef {
     }
 }
 
-impl fmt::Display for EngrRef {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for CanonicalEngrRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "engr:{}", self.embedded())
     }
+}
+
+fn is_full_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn encode_uuid(uuid: uuid::Uuid) -> String {
@@ -189,13 +236,28 @@ mod tests {
     fn standalone_and_embedded_forms_share_one_parser() {
         let parsed = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123")
             .expect("reference");
+        let canonical = parsed
+            .clone()
+            .canonicalize(|selector| {
+                assert_eq!(selector, "abc123");
+                Some("0123456789abcdef0123456789abcdef01234567".to_owned())
+            })
+            .expect("resolved reference");
         assert_eq!(
-            parsed.to_string(),
-            "engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123"
+            canonical.to_string(),
+            "engr:obj:01h47kwz2mfk0v47mffcnstqva:3@0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(
-            EngrRef::parse_embedded(&parsed.embedded()).expect("embedded"),
-            parsed
+            EngrRef::parse_embedded("obj:01h47kwz2mfk0v47mffcnstqva:3@abc123").expect("embedded"),
+            parsed,
         );
+    }
+
+    #[test]
+    fn unresolved_or_abbreviated_snapshots_cannot_be_emitted_canonically() {
+        let parsed = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva@main")
+            .expect("input reference");
+        assert!(parsed.clone().canonicalize(|_| None).is_err());
+        assert!(parsed.canonicalize(|_| Some("abc123".to_owned())).is_err());
     }
 }

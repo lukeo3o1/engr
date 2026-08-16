@@ -185,7 +185,8 @@ fn one_live_candidate_per_object() {
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first draft"))
         .expect("first")
         .candidate
-        .challenge;
+        .challenge
+        .clone();
     let second =
         gate::prepare(&root, payload(Action::SectionAdded, &id, "second draft")).expect("second");
     assert_eq!(second.superseded, vec![first.clone()]);
@@ -582,7 +583,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
         format: engr::model::EVENT_FORMAT.to_owned(),
         version: engr::FORMAT_VERSION,
         event_id: engr::model::new_id(),
-        rev: first.candidate.expected_rev + 1,
+        rev: first.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: first.candidate.payload.clone(),
         confirmation: engr::model::Confirmation {
@@ -597,7 +598,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     // purging can erase the first confirmed section.
     let second =
         gate::prepare(&root, payload(Action::SectionAdded, &id, "second")).expect("second");
-    assert_eq!(second.candidate.expected_rev, 2);
+    assert_eq!(second.candidate.binding.expected_rev, 2);
     let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge))
         .expect("confirm second")
         .1;
@@ -621,7 +622,7 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
         format: engr::model::EVENT_FORMAT.to_owned(),
         version: engr::FORMAT_VERSION,
         event_id: engr::model::new_id(),
-        rev: prepared.candidate.expected_rev + 1,
+        rev: prepared.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: prepared.candidate.payload.clone(),
         confirmation: engr::model::Confirmation {
@@ -663,7 +664,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     };
     store::append_event(&root, &event).expect("append before the crash");
 
-    let code = prepared.candidate.challenge;
+    let code = prepared.candidate.challenge.clone();
     let (_, object) =
         gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
     assert_eq!(object.rev, 1);
@@ -713,7 +714,7 @@ fn a_live_challenge_code_is_kept_out_of_git() {
     let id = engr::model::new_id();
     let prepared =
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
-    let code = &prepared.candidate.challenge;
+    let code = &prepared.candidate.challenge.clone();
 
     assert!(ignored(&root, ".engr/lock"));
     assert!(ignored(&root, &format!(".engr/candidates/{code}.json")));
