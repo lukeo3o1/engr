@@ -21,8 +21,13 @@ impl ResourceKind {
     }
 }
 
+/// Read-only validated fields of a parsed engr reference.
+///
+/// The fields are exposed through [`EngrRef`]'s immutable `Deref` only to keep
+/// existing callers ergonomic. Constructing this value does not construct an
+/// `EngrRef`; the validated wrapper itself can only be created by the parser.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EngrRef {
+pub struct EngrRefFields {
     pub kind: ResourceKind,
     pub id: String,
     pub section: Option<u64>,
@@ -31,12 +36,84 @@ pub struct EngrRef {
     pub snapshot_selector: Option<String>,
 }
 
+/// Parsed reference input. Its invariant-bearing state cannot be constructed or
+/// mutated directly by callers.
+///
+/// ```compile_fail
+/// use engr::reference::{EngrRef, ResourceKind};
+///
+/// let _ = EngrRef {
+///     kind: ResourceKind::Object,
+///     id: "not-a-validated-id".to_owned(),
+///     section: None,
+///     snapshot_selector: None,
+/// };
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalEngrRef {
+pub struct EngrRef {
+    fields: EngrRefFields,
+}
+
+impl std::ops::Deref for EngrRef {
+    type Target = EngrRefFields;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+/// Read-only validated fields of a canonical engr reference.
+///
+/// A value of this helper type is not itself a canonical reference; only the
+/// opaque [`CanonicalEngrRef`] wrapper can be rendered canonically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalEngrRefFields {
     pub kind: ResourceKind,
     pub id: String,
     pub section: Option<u64>,
     pub snapshot: Option<String>,
+}
+
+/// A reference that has passed all canonicalization invariants.
+///
+/// Callers cannot construct or mutate its invariant-bearing state directly.
+/// In particular, an abbreviated/symbolic snapshot can exist only on
+/// [`EngrRef`] input; canonical output contains either no snapshot or a full Git
+/// object id.
+///
+/// ```compile_fail
+/// use engr::reference::{CanonicalEngrRef, ResourceKind};
+///
+/// let _ = CanonicalEngrRef {
+///     kind: ResourceKind::Object,
+///     id: "01h47kwz2mfk0v47mffcnstqva".to_owned(),
+///     section: None,
+///     snapshot: Some("abc123".to_owned()),
+/// };
+/// ```
+///
+/// ```compile_fail
+/// use engr::reference::EngrRef;
+///
+/// let mut canonical = EngrRef::parse_standalone(
+///     "engr:obj:01h47kwz2mfk0v47mffcnstqva@abc123",
+/// )
+/// .unwrap()
+/// .canonicalize(|_| Some("0123456789abcdef0123456789abcdef01234567".to_owned()))
+/// .unwrap();
+/// canonical.snapshot = Some("abc123".to_owned());
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalEngrRef {
+    fields: CanonicalEngrRefFields,
+}
+
+impl std::ops::Deref for CanonicalEngrRef {
+    type Target = CanonicalEngrRefFields;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
 }
 
 impl EngrRef {
@@ -79,18 +156,7 @@ impl EngrRef {
                 ))
             }
         };
-        match kind {
-            ResourceKind::Object | ResourceKind::Backlog => {
-                decode_uuid(id)?;
-            }
-            ResourceKind::Collection => {
-                ensure!(
-                    id.len() == 10 && id.bytes().all(|byte| CROCKFORD.contains(&byte)),
-                    EXIT_SCHEMA,
-                    "collection id must be 10 lowercase Crockford Base32 characters"
-                );
-            }
-        }
+        validate_id(kind, id)?;
         let section = section
             .map(|value| {
                 value
@@ -99,19 +165,48 @@ impl EngrRef {
             })
             .transpose()?;
         Ok(Self {
-            kind,
-            id: id.to_owned(),
-            section,
-            snapshot_selector: snapshot,
+            fields: EngrRefFields {
+                kind,
+                id: id.to_owned(),
+                section,
+                snapshot_selector: snapshot,
+            },
         })
+    }
+
+    pub fn kind(&self) -> ResourceKind {
+        self.fields.kind
+    }
+
+    pub fn id(&self) -> &str {
+        &self.fields.id
+    }
+
+    pub fn section(&self) -> Option<u64> {
+        self.fields.section
+    }
+
+    pub fn snapshot_selector(&self) -> Option<&str> {
+        self.fields.snapshot_selector.as_deref()
     }
 
     pub fn canonicalize(
         self,
         resolve_snapshot: impl FnOnce(&str) -> Option<String>,
     ) -> Result<CanonicalEngrRef> {
-        let snapshot = self
-            .snapshot_selector
+        let EngrRefFields {
+            kind,
+            id,
+            section,
+            snapshot_selector,
+        } = self.fields;
+
+        // Keep canonicalization independently defensive even though the parser
+        // already validates ids: future constructors inside this module must not
+        // become a way around the canonical type invariant.
+        validate_id(kind, &id)?;
+
+        let snapshot = snapshot_selector
             .as_deref()
             .map(|selector| {
                 resolve_snapshot(selector).ok_or_else(|| {
@@ -131,15 +226,33 @@ impl EngrRef {
             );
         }
         Ok(CanonicalEngrRef {
-            kind: self.kind,
-            id: self.id,
-            section: self.section,
-            snapshot,
+            fields: CanonicalEngrRefFields {
+                kind,
+                id,
+                section,
+                snapshot,
+            },
         })
     }
 }
 
 impl CanonicalEngrRef {
+    pub fn kind(&self) -> ResourceKind {
+        self.fields.kind
+    }
+
+    pub fn id(&self) -> &str {
+        &self.fields.id
+    }
+
+    pub fn section(&self) -> Option<u64> {
+        self.fields.section
+    }
+
+    pub fn snapshot(&self) -> Option<&str> {
+        self.fields.snapshot.as_deref()
+    }
+
     pub fn embedded(&self) -> String {
         let mut value = format!("{}:{}", self.kind.token(), self.id);
         if let Some(section) = self.section {
@@ -157,6 +270,22 @@ impl std::fmt::Display for CanonicalEngrRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "engr:{}", self.embedded())
     }
+}
+
+fn validate_id(kind: ResourceKind, id: &str) -> Result<()> {
+    match kind {
+        ResourceKind::Object | ResourceKind::Backlog => {
+            decode_uuid(id)?;
+        }
+        ResourceKind::Collection => {
+            ensure!(
+                id.len() == 10 && id.bytes().all(|byte| CROCKFORD.contains(&byte)),
+                EXIT_SCHEMA,
+                "collection id must be 10 lowercase Crockford Base32 characters"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn is_full_git_oid(value: &str) -> bool {
@@ -259,5 +388,22 @@ mod tests {
             .expect("input reference");
         assert!(parsed.clone().canonicalize(|_| None).is_err());
         assert!(parsed.canonicalize(|_| Some("abc123".to_owned())).is_err());
+    }
+
+    #[test]
+    fn canonical_output_exposes_only_validated_read_only_fields() {
+        let canonical = EngrRef::parse_standalone(
+            "engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123",
+        )
+        .expect("input")
+        .canonicalize(|_| Some("0123456789ABCDEF0123456789ABCDEF01234567".to_owned()))
+        .expect("canonical");
+        assert_eq!(canonical.kind(), ResourceKind::Object);
+        assert_eq!(canonical.id(), "01h47kwz2mfk0v47mffcnstqva");
+        assert_eq!(canonical.section(), Some(3));
+        assert_eq!(
+            canonical.snapshot(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
     }
 }
