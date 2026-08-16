@@ -7,6 +7,7 @@
 //!   objects/<uuid>.json      the authority
 //!   events/<uuid>.jsonl      append-only confirmed history
 //!   candidates/<CODE>.json   awaiting a human
+//!   backlog/<uuid>.json      unresolved staging, confirmed by nobody
 //! ```
 
 use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
@@ -121,7 +122,12 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         "{} already exists",
         dir.display()
     );
-    for path in [objects_dir(root), events_dir(root), candidates_dir(root)] {
+    for path in [
+        objects_dir(root),
+        events_dir(root),
+        candidates_dir(root),
+        crate::backlog::dir(root),
+    ] {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
     write_json(

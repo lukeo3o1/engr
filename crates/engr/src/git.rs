@@ -52,6 +52,21 @@ pub fn source_dirty(root: &Path) -> Option<bool> {
     Some(!status.trim().is_empty())
 }
 
+/// Whether one source path has changes git has not recorded, including being
+/// untracked. Narrower than [`source_dirty`] on purpose: a Backlog subject pins
+/// the snapshot of the path it names, so an unrelated dirty file elsewhere says
+/// nothing about whether that pin would be honest.
+pub fn path_dirty(root: &Path, path: &str) -> Option<bool> {
+    let status = run(root, &["status", "--porcelain", "--", path])?;
+    Some(!status.trim().is_empty())
+}
+
+/// Whether `path` exists in `commit`. A pinned snapshot that never held the
+/// path is false provenance, which is exactly what pinning is meant to prevent.
+pub fn path_at(root: &Path, commit: &str, path: &str) -> bool {
+    run(root, &["cat-file", "-e", &format!("{commit}:{path}")]).is_some()
+}
+
 #[derive(Deserialize)]
 struct HistoricalWorkspaceFormat {
     format: String,
