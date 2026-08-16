@@ -97,14 +97,15 @@ engr ls --all --stale                        # what needs attention
 engr ls --all --sections | grep <term>       # one line per section, greppable
 engr show <id>                               # sections, and how far each can be trusted
 engr show <id> --format json                 # the same, for an agent
-engr purge <id>                              # drop the event buffer once settled
 engr verify                                  # recompute section hashes, and those they stand on
 engr protocol                                # the spec this binary implements
 ```
 
 Objects are addressed by unique id prefix, like a git commit.
 
-**Commit `.engr/objects`.** This is a safety rule. A section's hash sits in the
+**Commit `.engr/objects` and `.engr/events`.** Confirmed events are append-only
+history and audit evidence; sections remain the authority for current wording.
+This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —
 committed history is what actually anchors the wording, and `git show` is the
 only thing that can say what a record said before someone changed it. It is

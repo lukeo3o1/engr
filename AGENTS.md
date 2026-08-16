@@ -3,8 +3,9 @@
 ## What this is
 
 engr v0. An object holds sections; every change to a section goes through a gate
-where a human reads it and types a challenge code. Sections are the authority,
-the event log is a purgeable buffer, and history is git's job.
+where a human reads it and types a challenge code. Sections are the current
+authority, confirmed events are append-only history, and git anchors committed
+projections.
 
 Read [protocol/PROTOCOL.md](protocol/PROTOCOL.md) before changing behaviour. It is
 normative, and it explains why each rule exists rather than just stating it.
@@ -16,7 +17,7 @@ crates/engr/src/model.rs    objects, sections, the confirmed payload, projection
 crates/engr/src/gate.rs     prepare, confirm, candidates
 crates/engr/src/store.rs    filesystem layout, locking, atomic writes
 crates/engr/src/git.rs      HEAD, distance, uncommitted
-crates/engr/src/ops.rs      reconcile, purge, verify
+crates/engr/src/ops.rs      reconcile, verify
 crates/engr/src/view.rs     staleness assessment, show, ls
 crates/engr/src/main.rs     the CLI
 crates/engr/tests/gate.rs   what may enter the record

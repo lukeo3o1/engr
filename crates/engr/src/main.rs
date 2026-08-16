@@ -52,8 +52,6 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Drop the event buffer for an object that has settled
-    Purge { object: String },
     /// Recompute section hashes
     Verify { object: Option<String> },
 }
@@ -105,10 +103,13 @@ struct Prepare {
     /// Wording, from a file
     #[arg(long)]
     text_file: Option<PathBuf>,
-    /// Commit this wording is written against. Defaults to HEAD
+    /// Committed repository basis. Defaults to HEAD only when source is clean
     #[arg(long)]
     based_on: Option<String>,
-    /// A section of another object this depends on, as OBJECT:SECTION
+    /// Record that this wording has no repository basis
+    #[arg(long, conflicts_with = "based_on")]
+    no_based_on: bool,
+    /// A section this wording depends on, as OBJECT:SECTION
     #[arg(long = "ref", value_name = "OBJECT:SECTION")]
     references: Vec<String>,
     #[arg(long)]
@@ -142,7 +143,8 @@ fn run(cli: Cli) -> Result<()> {
             println!("git          ok");
         } else {
             println!(
-                "git          not a repository — commit {}/objects to keep look-back working",
+                "git          not a repository — commit {}/objects and {}/events to preserve the record",
+                store::DIR,
                 store::DIR
             );
         }
@@ -192,16 +194,6 @@ fn run(cli: Cli) -> Result<()> {
                     engr::EXIT_INVARIANT,
                     format!("{forged} sections are not what was confirmed; run: engr verify"),
                 ));
-            }
-            Ok(())
-        }
-        Command::Purge { object } => {
-            let id = store::resolve_id(&root, &object)?;
-            let purged = store::with_lock(&root, || ops::purge(&root, &id))?;
-            println!("purged     {} events", purged.events);
-            match purged.commit {
-                Some(commit) => println!("watermark  {}", &commit[..8.min(commit.len())]),
-                None => println!("watermark  none — not a git repository"),
             }
             Ok(())
         }
@@ -265,7 +257,26 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         references.push(parse_ref(root, spec)?);
     }
 
-    let content = gate::content(root, text, command.based_on.clone(), references);
+    if action.carries_title() && (command.based_on.is_some() || command.no_based_on) {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "a title has no repository basis; use --based-on or --no-based-on only for section wording",
+        ));
+    }
+    if !action.carries_content() && command.no_based_on {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "--no-based-on applies only to section wording",
+        ));
+    }
+
+    let content = gate::content(
+        root,
+        text,
+        command.based_on.clone(),
+        command.no_based_on || action.carries_title(),
+        references,
+    )?;
     let payload = Payload {
         action,
         object,
@@ -327,6 +338,22 @@ fn shorten(id: &str, width: usize) -> &str {
     &id[..width.min(id.len())]
 }
 
+fn render_ref(reference: &Ref, width: usize) -> String {
+    format!(
+        "{} §{}  sha256 {}  commit {}",
+        shorten(&reference.object, width),
+        reference.section,
+        shorten(&reference.sha256, 8),
+        shorten(&reference.commit, 8)
+    )
+}
+
+fn render_basis(basis: Option<&str>) -> String {
+    basis
+        .map(|commit| shorten(commit, 8).to_owned())
+        .unwrap_or_else(|| "none (explicit)".to_owned())
+}
+
 fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::Note]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -338,38 +365,58 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
     // happened to be typed at says nothing about the change being confirmed.
     // It stays in the payload; it just does not belong on this screen, where
     // every line that means nothing is a line that trains people to skim.
-    let basis = candidate
-        .payload
-        .content
-        .based_on
-        .as_deref()
-        .filter(|_| !candidate.payload.action.carries_title());
-    if let Some(commit) = basis {
-        out.push_str(&format!("Based on   {}\n", &commit[..8.min(commit.len())]));
-    }
-    for reference in &candidate.payload.content.refs {
-        out.push_str(&format!(
-            "Ref        {} §{}\n",
-            shorten(&reference.object, width),
-            reference.section
-        ));
+    if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
+        if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
+            if !candidate.previous_semantics_recorded {
+                out.push_str(
+                    "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
+                );
+            }
+            if candidate.previous_based_on != candidate.payload.content.based_on {
+                out.push_str(&format!(
+                    "Based on - {}\nBased on + {}\n",
+                    render_basis(candidate.previous_based_on.as_deref()),
+                    render_basis(candidate.payload.content.based_on.as_deref())
+                ));
+            } else {
+                out.push_str(&format!(
+                    "Based on   {}\n",
+                    render_basis(candidate.payload.content.based_on.as_deref())
+                ));
+            }
+            for reference in &candidate.previous_refs {
+                if !candidate.payload.content.refs.contains(reference) {
+                    out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                }
+            }
+            for reference in &candidate.payload.content.refs {
+                if !candidate.previous_refs.contains(reference) {
+                    out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
+                }
+            }
+        } else {
+            out.push_str(&format!(
+                "Based on   {}\n",
+                render_basis(candidate.payload.content.based_on.as_deref())
+            ));
+            for reference in &candidate.payload.content.refs {
+                out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
+            }
+        }
     }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
     // everything is how confirmation decays into rubber-stamping.
     match (&candidate.previous_text, &candidate.payload.action) {
-        (Some(previous), Action::SectionDeleted { .. }) => {
-            for line in previous.trim_end().lines() {
-                out.push_str(&format!("- {line}\n"));
-            }
-        }
         (Some(previous), _) => {
-            for line in previous.trim_end().lines() {
-                out.push_str(&format!("- {line}\n"));
-            }
-            for line in candidate.payload.content.text.trim_end().lines() {
-                out.push_str(&format!("+ {line}\n"));
-            }
+            let diff = similar::TextDiff::from_lines(previous, &candidate.payload.content.text);
+            out.push_str(
+                &diff
+                    .unified_diff()
+                    .context_radius(3)
+                    .header("previous", "candidate")
+                    .to_string(),
+            );
         }
         (None, _) if candidate.payload.action.carries_content() => {
             out.push_str(candidate.payload.content.text.trim_end());
@@ -530,7 +577,8 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
 fn warn_uncommitted(root: &Path, id: &str) {
     if git::uncommitted(root, &store::object_path(root, id)) == Some(true) {
         println!(
-            "note       commit {}/objects to keep look-back working",
+            "note       commit {}/objects and {}/events to preserve history and look-back",
+            store::DIR,
             store::DIR
         );
     }

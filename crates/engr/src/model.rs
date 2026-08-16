@@ -37,7 +37,7 @@ impl Status {
     }
 }
 
-/// A reference to one section of another object, pinned to what it said and the
+/// A reference to one section, pinned to what it said and the
 /// commit it said it at. `sha256` makes "my basis changed" computable locally;
 /// `commit` makes the old wording recoverable with `git show`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -52,7 +52,7 @@ pub struct Ref {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Content {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub based_on: Option<String>,
     #[serde(default)]
     pub refs: Vec<Ref>,
@@ -62,7 +62,7 @@ impl Content {
     /// SHA-256 over canonical JSON. `serde_json::Map` is a `BTreeMap`, so going
     /// through `Value` sorts keys and the digest is independent of field order.
     pub fn sha256(&self) -> Result<String> {
-        canonical_sha256(self)
+        canonical_sha256_with_basis(self)
     }
 }
 
@@ -78,6 +78,7 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
 pub struct Section {
     pub id: u64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub based_on: Option<String>,
     #[serde(default)]
     pub refs: Vec<Ref>,
@@ -112,12 +113,11 @@ pub struct Object {
     /// Increments on every confirmed action. Candidates pin it, so one prepared
     /// against an older state cannot be confirmed after the object moved.
     pub rev: u64,
-    /// Monotonic and never reset. Section ids are never reused, so this has to
-    /// survive a purge: `max(existing) + 1` would hand out the id of a section
+    /// Monotonic and never reset. Section ids are never reused, so this cannot
+    /// be derived as `max(existing) + 1`: that would hand out the id of a section
     /// that was deleted, and every outside reference to it would silently point
     /// at different content.
     pub next_section_id: u64,
-    pub last_projection_commit: Option<String>,
     pub sections: Vec<Section>,
 }
 
@@ -131,7 +131,6 @@ impl Object {
             status: Status::Open,
             rev: 0,
             next_section_id: 1,
-            last_projection_commit: None,
             sections: Vec::new(),
         }
     }
@@ -229,7 +228,7 @@ pub struct Payload {
 
 impl Payload {
     pub fn sha256(&self) -> Result<String> {
-        canonical_sha256(self)
+        canonical_sha256_with_basis(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -269,6 +268,19 @@ impl Payload {
     }
 }
 
+/// `based_on: null` was part of the v0 hash canonical form before no-basis was
+/// represented by an absent persisted field. Keeping it in the digest form
+/// lets compatible legacy sections and confirmed events validate unchanged;
+/// serialization and hashing are separate representations for this one field.
+fn canonical_sha256_with_basis<T: Serialize>(value: &T) -> Result<String> {
+    let mut value = serde_json::to_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical form: {error}")))?;
+    if let serde_json::Value::Object(object) = &mut value {
+        object.entry("based_on").or_insert(serde_json::Value::Null);
+    }
+    canonical_sha256(&value)
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Confirmation {
     pub challenge: String,
@@ -304,7 +316,8 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         // Open, like everything else that changes the object. A title is part of
         // what settled, so allowing it through on a closed object would make
         // `closed` mean "the sections have settled" rather than "this has" — and
-        // it is the second reading that makes closed usable as the purge signal.
+        // it is the second reading that makes closed mean the whole object has
+        // settled.
         Action::ObjectRenamed => {
             object.require_open("object.renamed")?;
             object.title = content.text.clone();

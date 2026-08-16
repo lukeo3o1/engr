@@ -5,7 +5,7 @@
 //!   format.json              what version wrote this workspace
 //!   lock                     one writer at a time
 //!   objects/<uuid>.json      the authority
-//!   events/<uuid>.jsonl      the buffer, purgeable
+//!   events/<uuid>.jsonl      append-only confirmed history
 //!   candidates/<CODE>.json   awaiting a human
 //! ```
 
@@ -361,12 +361,4 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         events.push(event);
     }
     Ok(events)
-}
-
-pub fn discard_events(root: &Path, id: &str) -> Result<()> {
-    let path = events_path(root, id);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
-    }
-    Ok(())
 }

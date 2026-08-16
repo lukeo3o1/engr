@@ -1,8 +1,8 @@
 //! engr v0 — engineering records whose every word a human confirmed.
 //!
-//! Objects hold sections. Sections are the authority; the event log is a buffer
-//! that is projected into them at confirm time and may then be purged. History
-//! is delegated to git.
+//! Objects hold sections. Sections are the current authority; confirmed events
+//! are append-only history and audit evidence, projected immediately at confirm
+//! time. Git additionally preserves committed projections.
 
 pub mod gate;
 pub mod git;

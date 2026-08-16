@@ -222,10 +222,6 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
-    if let Some(commit) = &object.last_projection_commit {
-        out.push_str(&format!("last_projection_commit  {}\n", short(commit)));
-    }
-
     for section in &object.sections {
         let status = assessment
             .iter()
@@ -353,7 +349,6 @@ struct JsonObject<'a> {
     title: &'a str,
     status: &'static str,
     rev: u64,
-    last_projection_commit: Option<&'a str>,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
 }
@@ -389,7 +384,6 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         title: &object.title,
         status: object.status.as_str(),
         rev: object.rev,
-        last_projection_commit: object.last_projection_commit.as_deref(),
         summary: JsonSummary {
             sections: tally.total,
             ok: tally.ok,

@@ -34,7 +34,8 @@ Changing any of these needs a paragraph in the pull request, not just a diff:
 - **The exact confirmation phrase.** Accepting a bare code would put the agent in
   the position of deciding whether a qualified yes counted as a yes.
 - **Section ids are never reused.** Reuse silently repoints every outside
-  reference. The counter must survive a purge.
+  reference. The monotonic counter, rather than the current maximum, allocates
+  them.
 - **The section hash covers `refs` and `based_on`, not just `text`.** Otherwise a
   reference can be repointed and `verify` still passes.
 - **The reducer is deterministic.** No clocks, no git, no model calls. `verify`

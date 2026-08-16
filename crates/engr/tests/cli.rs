@@ -60,6 +60,296 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+#[test]
+fn dirty_source_requires_an_explicit_repository_basis_choice() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    std::fs::write(root.join("source.txt"), "committed\n").expect("source");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+    );
+
+    let created = prepare(root, &["prepare", "--new", "--text", "basis choices"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    std::fs::write(root.join("source.txt"), "dirty\n").expect("source");
+
+    let rejected = run_engr(
+        root,
+        &["prepare", "--object", id, "--add", "--text", "assertion"],
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--no-based-on"));
+
+    let explicit = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "external assertion",
+            "--no-based-on",
+        ],
+    );
+    assert!(
+        explicit.get("based_on").is_none(),
+        "no basis is represented by an absent field"
+    );
+}
+
+#[test]
+fn revision_candidate_renders_a_contextual_unified_diff() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "diffs"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let old = (1..=20)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            &old,
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &added);
+    let revised = old.replace("line 10", "line ten");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &revised,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(rendered.contains("@@"));
+    assert!(rendered.contains("-line 10"));
+    assert!(rendered.contains("+line ten"));
+    assert!(
+        !rendered.contains(" line 1\n"),
+        "distant context was not omitted"
+    );
+
+    let appended = format!("{old}\nline 21");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &appended,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("+line 21"));
+
+    let removed = old.replace("line 10\n", "");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &removed,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("-line 10"));
+}
+
+#[test]
+fn revision_candidate_renders_basis_and_reference_changes() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "workspace",
+        ],
+    );
+    let basis = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8");
+    let basis = basis.trim();
+
+    let target = prepare(root, &["prepare", "--new", "--text", "target"]);
+    confirm(root, &target);
+    let target_id = target["object"].as_str().expect("target id");
+    let target_section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            target_id,
+            "--add",
+            "--text",
+            "pinned wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &target_section);
+    git(root, &["add", ".engr"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "target wording",
+        ],
+    );
+
+    let source = prepare(root, &["prepare", "--new", "--text", "source"]);
+    confirm(root, &source);
+    let source_id = source["object"].as_str().expect("source id");
+    let source_section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--add",
+            "--text",
+            "dependent wording",
+            "--based-on",
+            basis,
+        ],
+    );
+    confirm(root, &source_section);
+
+    let reference = format!("{target_id}:1");
+    let added_ref = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--revise",
+            "1",
+            "--text",
+            "dependent wording",
+            "--no-based-on",
+            "--ref",
+            &reference,
+        ],
+    );
+    let code = added_ref["challenge"].as_str().expect("challenge");
+    let rendered = run_engr(root, &["candidate", code]);
+    let rendered = String::from_utf8_lossy(&rendered.stdout);
+    assert!(rendered.contains("Based on -"));
+    assert!(rendered.contains("Based on + none (explicit)"));
+    assert!(rendered.contains("Ref      +"));
+    assert!(rendered.contains("sha256"));
+    assert!(rendered.contains("commit"));
+    confirm(root, &added_ref);
+
+    let removed_ref = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--revise",
+            "1",
+            "--text",
+            "dependent wording",
+            "--no-based-on",
+        ],
+    );
+    let code = removed_ref["challenge"].as_str().expect("challenge");
+    let rendered = run_engr(root, &["candidate", code]);
+    assert!(String::from_utf8_lossy(&rendered.stdout).contains("Ref      -"));
+}
+
+#[test]
+fn implicit_head_fails_when_source_cleanliness_is_unknown() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+    );
+    let created = prepare(root, &["prepare", "--new", "--text", "unknown clean state"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    std::fs::write(root.join(".git/index"), "not an index").expect("corrupt index");
+
+    let output = run_engr(
+        root,
+        &["prepare", "--object", id, "--add", "--text", "wording"],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not determine"));
+}
+
 fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path().to_path_buf();
@@ -388,7 +678,7 @@ fn duplicate_event_revisions_are_rejected() {
 }
 
 #[test]
-fn event_revisions_must_be_contiguous_within_the_buffer() {
+fn event_revisions_must_be_contiguous_within_history() {
     let (_workspace, root, event) = event_workspace();
     store::append_event(&root, &event).expect("write first event");
     let mut skipped = event.clone();
