@@ -1683,6 +1683,91 @@ fn record_surfaces_never_mix_in_unconfirmed_staging() {
     );
 }
 
+/// What a candidate derived from staging shows, and what confirming it says it
+/// did. The flags that declare a source are still an open protocol question, so
+/// the candidate is prepared through the library — but the screens a human
+/// reads are the command line's, and they are what this pins.
+#[test]
+fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    let staging = engr::backlog::create(root, "two points", "settled here", Vec::new())
+        .expect("stage")
+        .id;
+    engr::backlog::add_section(root, &staging, "still open", Vec::new()).expect("second point");
+
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&object).expect("object id is a uuid"));
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+        vec![
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: true,
+            },
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 2,
+                produced: vec![engr::backlog::Produced::object(format!("obj:{compact}"))],
+                resolves: false,
+            },
+        ],
+    )
+    .expect("prepare from staging");
+    let code = prepared.candidate.challenge.clone();
+
+    // Re-rendered hours later, the screen still says what typing the code does.
+    let shown = run_engr(root, &["candidate", &code]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(
+        shown.contains("§1  resolved by this — will be consumed"),
+        "got {shown:?}"
+    );
+    assert!(
+        shown.contains("§2  still unresolved after this"),
+        "got {shown:?}"
+    );
+    assert!(shown.contains(&format!("produced engr:obj:{compact}")));
+
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        confirmed.status.success(),
+        "confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    let confirmed = String::from_utf8(confirmed.stdout).expect("utf8");
+    assert!(confirmed.contains("CONFIRMED"));
+    assert!(
+        confirmed.contains("resolved and consumed"),
+        "confirming must say what it did to staging: {confirmed:?}"
+    );
+    assert!(
+        confirmed.contains("recorded 1 produced outcome(s); still unresolved"),
+        "including the point it did not settle: {confirmed:?}"
+    );
+
+    let stored = engr::backlog::load(root, &staging).expect("the second point survives");
+    assert_eq!(stored.sections.len(), 1);
+    assert_eq!(stored.sections[0].id, 2);
+    assert_eq!(stored.sections[0].produced.len(), 1);
+}
+
 /// Backlog CRUD through the command line, including the one refusal that keeps
 /// a subject from claiming provenance it does not have.
 #[test]
