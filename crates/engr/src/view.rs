@@ -487,6 +487,17 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
 /// left to be inferred from which subcommand they happened to type.
 pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here was confirmed by a human\n";
 
+/// Activity to the second. The stored value keeps whatever precision the clock
+/// gave it, but nine fractional digits in a listing column push the topic —
+/// the thing being scanned for — off to the right for no gain: triage asks
+/// which points were touched recently, not which nanosecond.
+fn to_the_second(timestamp: &str) -> String {
+    match timestamp.split_once('.') {
+        Some((seconds, _)) => format!("{seconds}Z"),
+        None => timestamp.to_owned(),
+    }
+}
+
 pub fn backlog_width(root: &Path) -> usize {
     backlog::ids(root)
         .map(|ids| store::abbrev_len(&ids))
@@ -558,7 +569,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
             abbrev(&item.id, w),
             item.sections.len(),
             note,
-            item.updated_at(),
+            to_the_second(item.updated_at()),
             item.topic
         ));
     }
@@ -577,13 +588,16 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     out.push_str(&format!(
         "{} unresolved   updated {}\n",
         item.sections.len(),
-        item.updated_at()
+        to_the_second(item.updated_at())
     ));
     for section in &item.sections {
         out.push_str(&format!("\n── §{} ── unresolved\n", section.id));
         out.push_str(section.text.trim_end());
         out.push('\n');
-        out.push_str(&format!("    updated  {}\n", section.updated_at));
+        out.push_str(&format!(
+            "    updated  {}\n",
+            to_the_second(&section.updated_at)
+        ));
         for subject in &section.subjects {
             match subject_note(root, subject) {
                 Some(note) => {

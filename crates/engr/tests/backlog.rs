@@ -854,40 +854,68 @@ fn a_backlog_edit_racing_confirmation_cannot_consume_the_newer_wording() {
     .expect("prepare");
     let response = format!("CONFIRM {}", prepared.candidate.challenge);
 
-    // Hold the writer lock so the edit is guaranteed to land between prepare
-    // and the moment confirmation would compare-and-consume.
+    // Hold the writer lock so neither side can start, then release it and let
+    // the two contend for the moment between the basis check and the write.
     let lock = std::fs::OpenOptions::new()
         .write(true)
         .open(store::engr_dir(&root).join("lock"))
         .expect("open lock");
     lock.lock_exclusive().expect("hold the lock");
 
-    let start = Arc::new(Barrier::new(2));
-    let confirming = Arc::clone(&start);
-    std::thread::scope(|scope| {
+    let start = Arc::new(Barrier::new(3));
+    let admitted = std::thread::scope(|scope| {
+        let confirming = Arc::clone(&start);
+        let editing = Arc::clone(&start);
         let confirm_root = &root;
-        let handle = scope.spawn(move || {
+        let edit_root = &root;
+        let edited = staging.clone();
+        let confirm = scope.spawn(move || {
             confirming.wait();
             gate::confirm(confirm_root, &response)
         });
+        let edit = scope.spawn(move || {
+            editing.wait();
+            backlog::revise_section(edit_root, &edited, 1, "sharpened while they were reading")
+        });
         start.wait();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        // The editor cannot get in either while the lock is held; release it
-        // and let the two contend for real.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         FileExt::unlock(&lock).expect("release");
-        let admitted = handle.join().expect("confirm thread").expect("confirm");
-        assert_eq!(admitted.object.rev, 2);
+        let admitted = confirm
+            .join()
+            .expect("confirm thread")
+            .expect("the confirmed object change admits either way");
+        let _ = edit.join().expect("edit thread");
         admitted
     });
+    assert_eq!(
+        admitted.object.rev, 2,
+        "the record mutation is never the loser"
+    );
 
-    // Whichever order they took, staging is self-consistent: the point is
-    // either consumed exactly as compared, or still there with its own wording.
+    // Either order is safe, and each has exactly one legal shape. What must
+    // never happen is the newer wording being consumed by a candidate that
+    // compared against the older one.
     match backlog::load(&root, &staging) {
-        Ok(stored) => assert_eq!(
-            stored.sections[0].text, "the wording the candidate compared against",
-            "consumption may only remove what the candidate actually compared"
-        ),
-        Err(error) => assert_eq!(error.code, engr::EXIT_NOT_FOUND),
+        Ok(stored) => {
+            assert_eq!(
+                stored.sections[0].text, "sharpened while they were reading",
+                "the edit won, so the newer wording must be what survives"
+            );
+            assert!(
+                matches!(admitted.backlog[0].result, Reconciliation::SourceChanged),
+                "and consumption must have refused, not silently deleted it"
+            );
+        }
+        Err(error) => {
+            assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+            assert!(
+                matches!(
+                    admitted.backlog[0].result,
+                    Reconciliation::Consumed { item_removed: true }
+                ),
+                "the item may only be gone because consumption compared and matched"
+            );
+        }
     }
 }
 

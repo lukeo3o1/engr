@@ -867,13 +867,24 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
             Ok(())
         }
         None => {
-            let pending = gate::pending(root)?;
-            if pending.is_empty() {
+            let codes = gate::pending_codes(root)?;
+            if codes.is_empty() {
                 println!("nothing is awaiting confirmation");
                 return Ok(());
             }
             let width = view::width(root);
-            for candidate in pending {
+            // Per code, not the whole list at once. One candidate this build
+            // will not admit — left by an older one, or edited on disk — is
+            // exactly what somebody runs this to find out about, so it belongs
+            // on a line of its own rather than replacing the listing.
+            for code in codes {
+                let candidate = match gate::find(root, &code) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        println!("{code}   {:<16} {}", "unusable", error.message);
+                        continue;
+                    }
+                };
                 println!(
                     "{}   {:<16} {} {:<8} {}",
                     candidate.challenge,

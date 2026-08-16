@@ -98,30 +98,48 @@ fn now() -> String {
         .expect("formatting a timestamp cannot fail")
 }
 
-pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
+/// Every challenge code a candidate file currently claims.
+///
+/// Read from the filenames, without loading anything. Minting a fresh code has
+/// to avoid every code on disk, including one this build refuses to admit —
+/// otherwise a candidate left by an older build would either be silently
+/// overwritten, or would make preparing anything at all fail with a message
+/// about some unrelated code.
+pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     let dir = store::candidates_dir(root);
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut found = Vec::new();
+    let mut codes = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
         let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
-        let path = entry.path();
-        if path.extension().and_then(|item| item.to_str()) != Some("json") {
-            continue;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(code) = name.strip_suffix(".json") {
+            if crate::confirmation::valid_challenge(code) {
+                codes.push(code.to_owned());
+            }
         }
-        let candidate: Candidate = store::read_json(&path)?;
-        ensure!(
-            candidate.format == CANDIDATE_FORMAT,
-            EXIT_SCHEMA,
-            "{}: not an engr candidate",
-            path.display()
-        );
-        validate_candidate(&candidate)?;
-        found.push(candidate);
+    }
+    codes.sort();
+    Ok(codes)
+}
+
+pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
+    let mut found = Vec::new();
+    for code in pending_codes(root)? {
+        found.push(find(root, &code)?);
     }
     found.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(found)
+}
+
+/// Which object a candidate file is about, without holding it to this build's
+/// rules. Superseding has to work against a candidate this build would refuse,
+/// because leaving that one live is what would give one object two codes.
+fn candidate_object(root: &Path, code: &str) -> Option<String> {
+    let path = store::candidate_path(root, code).ok()?;
+    let value: serde_json::Value = store::read_json(&path).ok()?;
+    value.get("object")?.as_str().map(str::to_owned)
 }
 
 pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
@@ -559,10 +577,7 @@ fn prepare_locked(
     validate_refs(root, &payload)?;
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
-    let taken: Vec<String> = pending(root)?
-        .into_iter()
-        .map(|candidate| candidate.challenge.clone())
-        .collect();
+    let taken = pending_codes(root)?;
     let context = PreparedContext {
         previous_text,
         previous_based_on,
@@ -586,13 +601,17 @@ fn prepare_locked(
     };
 
     // One live candidate per object: a second proposal supersedes the first, so
-    // a human is never holding two codes for the same thing.
+    // a human is never holding two codes for the same thing. Read leniently, so
+    // a candidate this build would refuse still gets superseded rather than
+    // being left beside its replacement.
     let mut superseded = Vec::new();
-    for existing in pending(root)? {
-        if existing.payload.object == candidate.payload.object {
-            fs::remove_file(store::candidate_path(root, &existing.challenge)?)
+    for code in pending_codes(root)? {
+        if code != candidate.challenge
+            && candidate_object(root, &code).as_deref() == Some(candidate.payload.object.as_str())
+        {
+            fs::remove_file(store::candidate_path(root, &code)?)
                 .map_err(|error| tool_error("discarding a superseded candidate", error))?;
-            superseded.push(existing.challenge.clone());
+            superseded.push(code);
         }
     }
     store::write_json(

@@ -432,6 +432,10 @@ wording a human already confirmed — the record mutation still admits — and a
 old candidate MUST NOT mutate newer unresolved staging. Failing to reconcile
 because the source moved is an expected outcome, not a failed admission.
 
+A source declared resolved is consumed, so outcomes declared alongside it have
+nowhere to be written and are not: the point is settled, and the outcome is in
+the record, which is where it belongs.
+
 Reconciliation MUST happen inside the same successful confirmation, holding the
 same lock that made the mutation durable, so nothing can edit the source between
 the basis check and the write. It MUST also be idempotent: appending an outcome

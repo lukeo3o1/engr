@@ -862,6 +862,59 @@ fn a_candidate_envelope_without_integrity_is_refused_rather_than_trusted() {
     assert_eq!(ops::effective(&root, &id).expect("object").rev, 1);
 }
 
+/// A candidate this build refuses is one file, not a broken workspace. It must
+/// not take the listing down with it, must not stop anything else being
+/// prepared, and must still be superseded when its own object is proposed
+/// again — leaving it beside its replacement is what would hand one object two
+/// live codes.
+#[test]
+fn a_refused_candidate_does_not_block_the_rest_of_the_workspace() {
+    let (_dir, root) = workspace();
+    let stranded = new_object(&root, "left by an older build");
+    let unrelated = new_object(&root, "prepared afterwards");
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &stranded, "old envelope"),
+    )
+    .expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let path = store::candidate_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+    let stored_object = stored.as_object_mut().expect("candidate object");
+    stored_object.insert("version".to_owned(), serde_json::json!(1));
+    stored_object.remove("integrity_sha256");
+    store::write_json(&path, &stored).expect("legacy candidate");
+
+    // Preparing something else works, and does not reuse the stranded code.
+    let other = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &unrelated, "unaffected"),
+    )
+    .expect("an unrelated proposal is unaffected");
+    assert_ne!(other.candidate.challenge, code);
+    assert!(other.superseded.is_empty());
+    assert!(
+        gate::confirm(&root, &format!("CONFIRM {}", other.candidate.challenge)).is_ok(),
+        "and confirms normally"
+    );
+
+    // Proposing the stranded candidate's own object supersedes it.
+    let replacement = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &stranded, "prepared again"),
+    )
+    .expect("prepare again");
+    assert_eq!(replacement.superseded, vec![code.clone()]);
+    assert!(store::candidate_path(&root, &code)
+        .map(|path| !path.exists())
+        .unwrap_or(false));
+    gate::confirm(
+        &root,
+        &format!("CONFIRM {}", replacement.candidate.challenge),
+    )
+    .expect("the replacement admits");
+}
+
 /// The already-applied retry still has to work, and integrity is checked on the
 /// way through it: cleanup after a crash is the one path where a candidate is
 /// deliberately re-read after its event is durable.
