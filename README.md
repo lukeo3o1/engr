@@ -74,7 +74,7 @@ word must not print `ok` over words nobody agreed to.
 compiled into the binary — `engr protocol` prints the copy that matches the
 build you are running, which is what makes "where this document and the
 implementation disagree" a question you can settle without a checkout.
-Forty-three tests cover the gate, the record and the command line.
+The tests cover the gate, the record, unresolved staging and the command line.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a

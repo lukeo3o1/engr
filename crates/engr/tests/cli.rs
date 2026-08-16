@@ -1768,6 +1768,182 @@ fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
     assert_eq!(stored.sections[0].produced.len(), 1);
 }
 
+/// Three different failures, three different exit codes. Phase 1 fixed that
+/// boundary for the record; staging has to keep it, or a script cannot tell a
+/// typo from a corrupted workspace.
+#[test]
+fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let item = engr::backlog::create(root, "topic", "unresolved", Vec::new())
+        .expect("stage")
+        .id;
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&item).expect("uuid is a uuid"));
+    let absent =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&engr::model::new_id()).expect("uuid"));
+
+    let code = |args: &[&str]| run_engr(root, args).status.code();
+
+    // Legal syntax, wrong shape for the command: usage.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{compact}:1")]),
+        Some(engr::EXIT_USAGE),
+        "every backlog command addresses a whole item"
+    );
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:obj:{compact}")]),
+        Some(engr::EXIT_USAGE),
+        "and a backlog command does not address an Object"
+    );
+    // Malformed canonical reference the person typed: usage, not schema.
+    for malformed in ["engr:backlog:not-a-compact-uuid", "engr:nonsense:abc"] {
+        assert_eq!(
+            code(&["backlog", "show", malformed]),
+            Some(engr::EXIT_USAGE),
+            "{malformed}"
+        );
+    }
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            "engr:obj:not-a-compact-uuid",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "a malformed --subject is a mistyped argument"
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            &format!("engr:collection:{compact}"),
+        ]),
+        Some(engr::EXIT_USAGE)
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject-file",
+            "../outside.rs",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "and so is a path that is not repository-relative"
+    );
+
+    // Well-formed, but there is no such item: not found.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{absent}")]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+    assert_eq!(
+        code(&["backlog", "show", "0198ffff"]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+
+    // The stored file itself is wrong: schema, reached through a valid argument.
+    let path = engr::backlog::item_path(root, &item);
+    let mut stored: Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["updated_at"] = Value::String("last tuesday".to_owned());
+    store::write_json(&path, &stored).expect("corrupt the stored item");
+    assert_eq!(
+        code(&["backlog", "show", &item]),
+        Some(engr::EXIT_SCHEMA),
+        "a malformed workspace is not the caller's argument being wrong"
+    );
+    assert_eq!(code(&["backlog", "ls"]), Some(engr::EXIT_SCHEMA));
+}
+
+/// The confirmation screen names which unresolved point gets consumed, so two
+/// different points may never print the same identifier on it. Backlog ids
+/// abbreviate against Backlog ids: borrowing the Object width is how two
+/// distinct sources become indistinguishable exactly where it matters.
+#[test]
+fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    // Two backlog items differing only in their last character. One object, so
+    // the Object width is 8 — which would render both of these identically.
+    let ids = [
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6a",
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6b",
+    ];
+    for id in ids {
+        let item = serde_json::json!({
+            "id": id,
+            "topic": format!("unresolved point in {id}"),
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": "still open",
+                "updated_at": "2026-08-17T00:00:00Z",
+                "subjects": [],
+            }],
+        });
+        store::write_json(&engr::backlog::item_path(root, id), &item).expect("stage");
+    }
+    assert_eq!(engr::view::width(root), 8, "the object namespace is narrow");
+
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+        ids.iter()
+            .map(|id| gate::SourceRequest {
+                item: (*id).to_owned(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: false,
+            })
+            .collect(),
+    )
+    .expect("prepare from two staged points");
+
+    let shown = run_engr(root, &["candidate", &prepared.candidate.challenge]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    let rendered: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| line.strip_prefix("Backlog    "))
+        .map(|line| line.split_whitespace().next().expect("an id"))
+        .collect();
+    assert_eq!(rendered.len(), 2, "both sources are shown: {shown:?}");
+    assert_ne!(
+        rendered[0], rendered[1],
+        "two unresolved points must not render identically: {shown:?}"
+    );
+    for (id, printed) in ids.iter().zip(&rendered) {
+        assert!(
+            id.starts_with(printed),
+            "{printed} does not abbreviate {id}"
+        );
+    }
+}
+
 /// Backlog CRUD through the command line, including the one refusal that keeps
 /// a subject from claiming provenance it does not have.
 #[test]

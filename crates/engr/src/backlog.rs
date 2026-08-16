@@ -96,7 +96,7 @@ impl Subject {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         match self {
             Subject::Engr { reference } => {
                 canonical_embedded(
@@ -163,12 +163,27 @@ impl Produced {
     /// Backlog, Collection, file and symbol targets are refused: `produced[]`
     /// answers "what did the record gain", and nothing outside the record can.
     pub fn validate(&self) -> Result<()> {
-        canonical_embedded(
+        self.target().map(|_| ())
+    }
+
+    /// The authoritative Object, and the Section where one is named.
+    ///
+    /// Whether that Object still exists is a separate question, and one this
+    /// deliberately does not ask. An outcome recorded when it was real must not
+    /// stop the staging around it loading years later because the Object was
+    /// since deleted — `produced[]` is a record of what happened, not a
+    /// referential-integrity constraint. Admission checks existence; loading
+    /// checks shape.
+    pub fn target(&self) -> Result<(String, Option<u64>)> {
+        let canonical = canonical_embedded(
             &self.target.reference,
             &[ResourceKind::Object],
             "a produced outcome",
         )?;
-        Ok(())
+        Ok((
+            crate::reference::decode_uuid(canonical.id())?.to_string(),
+            canonical.section(),
+        ))
     }
 }
 
@@ -200,6 +215,26 @@ impl Section {
 
     fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
+        // What the write path refuses, a stored file may not contain. Two
+        // validations that disagree mean the stricter one is decorative: the
+        // shape only has to survive one hand-edit to stop being true.
+        ensure!(
+            !self.text.trim().is_empty(),
+            EXIT_SCHEMA,
+            "§{}: a backlog section needs text",
+            self.id
+        );
+        ensure!(
+            time::OffsetDateTime::parse(
+                &self.updated_at,
+                &time::format_description::well_known::Rfc3339
+            )
+            .is_ok(),
+            EXIT_SCHEMA,
+            "§{}: updated_at {:?} is not an RFC3339 timestamp",
+            self.id,
+            self.updated_at
+        );
         let mut seen = BTreeSet::new();
         for subject in &self.subjects {
             subject.validate()?;
@@ -281,6 +316,18 @@ impl Item {
             !self.topic.trim().is_empty(),
             EXIT_SCHEMA,
             "{}: a backlog item needs a topic",
+            self.id
+        );
+        ensure!(
+            !self.topic.contains('\n'),
+            EXIT_SCHEMA,
+            "{}: a stored topic cannot span lines",
+            self.id
+        );
+        ensure!(
+            self.topic.chars().count() <= TOPIC_MAX,
+            EXIT_SCHEMA,
+            "{}: a stored topic cannot exceed {TOPIC_MAX} characters",
             self.id
         );
         ensure!(

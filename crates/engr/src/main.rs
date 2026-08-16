@@ -182,6 +182,10 @@ impl SubjectArgs {
     fn build(&self, root: &Path) -> Result<Vec<Subject>> {
         let revision = self.subject_commit.as_deref();
         let mut subjects = Vec::new();
+        // Validated here rather than left to storage. A subject the domain
+        // would refuse is a person mistyping an argument, and it has to read as
+        // that — deferring it turns a typo into a report that the workspace is
+        // malformed.
         for spec in &self.subject {
             let relative = spec.strip_prefix("engr:").ok_or_else(|| {
                 Error::new(
@@ -189,11 +193,16 @@ impl SubjectArgs {
                     format!("--subject {spec:?} must be an engr: reference"),
                 )
             })?;
-            subjects.push(Subject::engr(relative.to_owned()));
+            let subject = Subject::engr(relative.to_owned());
+            subject
+                .validate()
+                .map_err(|error| malformed_argument("--subject", spec, error))?;
+            subjects.push(subject);
         }
         for path in &self.subject_file {
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)?,
+                commit: backlog::pin(root, path, revision)
+                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
                 path: path.clone(),
             });
         }
@@ -204,11 +213,16 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
-            subjects.push(Subject::Symbol {
-                commit: backlog::pin(root, path, revision)?,
+            let subject = Subject::Symbol {
+                commit: backlog::pin(root, path, revision)
+                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
                 path: path.clone(),
                 symbol: symbol.clone(),
-            });
+            };
+            subject
+                .validate()
+                .map_err(|error| malformed_argument("--subject-symbol", symbol, error))?;
+            subjects.push(subject);
         }
         Ok(subjects)
     }
@@ -429,7 +443,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             Ok(())
         }
         Backlog::Show { item, format } => {
-            let item = backlog::load(root, &backlog::resolve_id(root, &item)?)?;
+            let item = backlog::load(root, &resolve_backlog_argument(root, "backlog", &item)?)?;
             if format == Format::Json {
                 println!("{}", view::render_backlog_json(&item)?);
             } else {
@@ -438,7 +452,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             Ok(())
         }
         Backlog::Rename { item, topic } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             let item = backlog::rename(root, &id, &topic)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
@@ -448,7 +462,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             text,
             subjects,
         } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
             println!("added §{section}");
             Ok(())
@@ -458,7 +472,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             section,
             text,
         } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             backlog::revise_section(root, &id, section, &text.read()?)?;
             println!("revised §{section}");
             Ok(())
@@ -468,7 +482,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             section,
             subjects,
         } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
             backlog::set_subjects(root, &id, section, subjects)?;
@@ -481,7 +495,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             text,
             subjects,
         } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             let section = backlog::merge_sections(
                 root,
                 &id,
@@ -493,7 +507,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             Ok(())
         }
         Backlog::Rm { item, section } => {
-            let id = backlog::resolve_id(root, &item)?;
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
             match section {
                 Some(section) => {
                     if backlog::delete_section(root, &id, section)? {
@@ -613,7 +627,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
     print!(
         "{}",
-        render_candidate(&prepared.candidate, view::width(root), &prepared.notes)
+        render_candidate(root, &prepared.candidate, &prepared.notes)
     );
     for code in &prepared.superseded {
         println!("(candidate {code} was superseded by this one)");
@@ -621,9 +635,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     Ok(())
 }
 
-/// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
-/// so the caller cannot pin something the target never said.
-fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
+/// The shared parser and the domain both report a malformed value as a schema
+/// error, because both also run against stored authority. Typed at a command
+/// line the same value is a person getting an argument wrong, and the two must
+/// not share an exit code: one says "your input is invalid", the other says
+/// "the workspace on disk is". Translated here, at that boundary, and nowhere
+/// deeper — a missing resource stays not-found, and a malformed stored file
+/// reached through a valid argument stays schema.
+fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
     if error.code == EXIT_SCHEMA {
         Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
     } else {
@@ -631,13 +650,10 @@ fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
     }
 }
 
-/// The shared `engr:` parser treats malformed values as schema errors because
-/// it is also used for stored authority. At the command line they are a person
-/// supplying an invalid argument, so translate only at this boundary.
 fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
-            .map_err(|error| malformed_engr_reference(field, spec, error))?;
+            .map_err(|error| malformed_argument(field, spec, error))?;
         if reference.kind() != engr::reference::ResourceKind::Object
             || reference.section().is_some()
             || reference.snapshot_selector().is_some()
@@ -648,13 +664,33 @@ fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<Strin
             ));
         }
     }
-    store::resolve_id(root, spec).map_err(|error| malformed_engr_reference(field, spec, error))
+    store::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
+}
+
+/// The same boundary for the Backlog namespace. Every `engr backlog` command
+/// addresses a whole item, so a Section reference is a legal thing to write and
+/// the wrong thing to write here — a usage error, not a missing resource.
+fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_argument(field, spec, error))?;
+        if reference.kind() != engr::reference::ResourceKind::Backlog
+            || reference.section().is_some()
+            || reference.snapshot_selector().is_some()
+        {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("{field} {spec:?} must identify a current whole Backlog item"),
+            ));
+        }
+    }
+    backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+            .map_err(|error| malformed_argument("--ref", spec, error))?;
         if reference.kind() != engr::reference::ResourceKind::Object
             || reference.section().is_none()
         {
@@ -665,9 +701,9 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         }
         let canonical = reference
             .canonicalize(|revision| git::resolve(root, revision))
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+            .map_err(|error| malformed_argument("--ref", spec, error))?;
         let id = engr::reference::decode_uuid(canonical.id())
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?
+            .map_err(|error| malformed_argument("--ref", spec, error))?
             .to_string();
         let section = canonical
             .section()
@@ -737,7 +773,14 @@ fn render_basis(basis: Option<&str>) -> String {
         .unwrap_or_else(|| "none (explicit)".to_owned())
 }
 
-fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::Note]) -> String {
+/// Two namespaces, two abbreviation widths. An id is only short enough when it
+/// is still unique among its own kind, and Backlog ids abbreviate against
+/// Backlog ids — borrowing the Object width can print two different unresolved
+/// points identically on the one screen that says which of them confirming
+/// consumes.
+fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
+    let width = view::width(root);
+    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     out.push_str(&format!(
         "Candidate  {}\nObject     {}\n",
@@ -792,7 +835,7 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
     for source in &candidate.context.backlog {
         out.push_str(&format!(
             "Backlog    {} §{}  {}\n",
-            shorten(&source.item, width),
+            shorten(&source.item, backlog_width),
             source.section,
             if source.resolves {
                 "resolved by this — will be consumed"
@@ -851,10 +894,7 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
         Some(code) => {
             let candidate = gate::find(root, code)?;
             let notes = gate::notes_for(root, &candidate);
-            print!(
-                "{}",
-                render_candidate(&candidate, view::width(root), &notes)
-            );
+            print!("{}", render_candidate(root, &candidate, &notes));
             match gate::candidate_state(root, &candidate)? {
                 gate::CandidateState::Pending => {}
                 gate::CandidateState::AlreadyApplied(_) => println!(

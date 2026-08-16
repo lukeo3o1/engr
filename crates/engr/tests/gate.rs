@@ -862,6 +862,65 @@ fn a_candidate_envelope_without_integrity_is_refused_rather_than_trusted() {
     assert_eq!(ops::effective(&root, &id).expect("object").rev, 1);
 }
 
+/// The code a candidate names has to be the code that admits it.
+///
+/// Two live candidates, and A's stored challenge rewritten to B's code. Every
+/// other check still passes — both files are internally consistent — so without
+/// binding the challenge, `engr candidate A` renders A's change and tells the
+/// human to type `CONFIRM B`, and B's change is what enters the record. That is
+/// the one property the whole design exists for, inverted.
+#[test]
+fn a_candidate_cannot_redirect_a_human_to_another_candidates_code() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "the change they read");
+    let second = new_object(&root, "the change they did not");
+    let a = gate::prepare(&root, payload(Action::SectionAdded, &first, "wording A"))
+        .expect("prepare A");
+    let b = gate::prepare(&root, payload(Action::SectionAdded, &second, "wording B"))
+        .expect("prepare B");
+    let (a_code, b_code) = (a.candidate.challenge.clone(), b.candidate.challenge.clone());
+    assert_ne!(a_code, b_code);
+
+    let a_path = store::candidate_path(&root, &a_code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&a_path).expect("candidate A");
+    stored["challenge"] = serde_json::json!(b_code);
+    store::write_json(&a_path, &stored).expect("redirect A at B");
+
+    // A cannot be rendered, so no screen can ever pair A's change with B's code.
+    let error = gate::find(&root, &a_code).expect_err("a redirect is not a candidate");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        gate::confirm(&root, &format!("CONFIRM {a_code}")).is_err(),
+        "and its own code admits nothing"
+    );
+    // Both files are still there to be found and cleaned up; it is loading the
+    // rewritten one that fails, not noticing it.
+    assert_eq!(
+        gate::pending_codes(&root).expect("codes").len(),
+        2,
+        "the rewritten file is not hidden, it is refused"
+    );
+    gate::find(&root, &b_code).expect("B still loads");
+
+    assert_eq!(
+        ops::effective(&root, &first).expect("first").sections.len(),
+        0,
+        "neither mutation may have been admitted"
+    );
+    assert_eq!(
+        ops::effective(&root, &second)
+            .expect("second")
+            .sections
+            .len(),
+        0
+    );
+
+    // B is untouched and still admits exactly what B says.
+    let admitted = gate::confirm(&root, &format!("CONFIRM {b_code}")).expect("B is unaffected");
+    assert_eq!(admitted.object.id, second);
+    assert_eq!(admitted.object.sections[0].text, "wording B");
+}
+
 /// A candidate this build refuses is one file, not a broken workspace. It must
 /// not take the listing down with it, must not stop anything else being
 /// prepared, and must still be superseded when its own object is proposed

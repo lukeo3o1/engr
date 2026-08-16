@@ -145,16 +145,25 @@ cannot be confirmed.
 A candidate stores two fingerprints. `payload_sha256` identifies the mutation:
 it travels into the confirmed event, and an already-applied retry is recognised
 by it, so **its input may never widen**. `integrity_sha256` covers that value
-together with the whole prepared context — the binding, the previous wording a
-revision is diffed against, and any backlog declarations. Every load of a
-candidate MUST check both, not only admission: re-rendering a candidate hours
-later is as much a use of its prepared context as confirming it is.
+together with the challenge and the whole prepared context — the binding, the
+previous wording a revision is diffed against, and any backlog declarations.
+Every load of a candidate MUST check both, not only admission: re-rendering a
+candidate hours later is as much a use of its prepared context as confirming it
+is.
 
 Without the second value those fields sit outside every check while still
 deciding what the human is shown and what confirmation does. This is **not** a
 boundary against someone who controls the machine — the file is on that machine
 and so is the binary. It is the narrower guarantee that a candidate rewritten on
 disk cannot present or bind a different confirmation context and still pass.
+
+The challenge is covered because it is the link between the two halves of the
+gate: what a human is shown, and what their answer admits. A candidate MUST
+additionally be refused unless the challenge it stores is the one it was looked
+up by. Otherwise, with two candidates live, rewriting one file's challenge to
+the other's code makes it render its own change while naming the other's answer
+— and both files remain internally consistent, so nothing else catches it. What
+enters the record would then be a change nobody read.
 
 An envelope that cannot carry that guarantee MUST be refused and re-prepared,
 never read as if absence meant protection. Candidates are local, uncommitted and
@@ -302,6 +311,15 @@ outside the record entirely.
 Committing backlog means only *this was the working thought stored here at that
 point*. It never means anyone agreed to it.
 
+Weak guarantees are not absent ones. Backlog storage is schema-validated, and
+loading MUST enforce everything writing enforces: a topic that is present,
+single-line and label-sized, section text that is not blank, an `updated_at`
+that is a real RFC3339 timestamp, and the id rules below. Two validations that
+disagree mean the stricter one is decorative — staging is hand-edited by design,
+and the shape only has to survive one edit to stop being true. Malformed stored
+data is a schema fault; the same value typed at a command line is a usage one,
+and the two MUST NOT share an exit code.
+
 ```text
 backlog item
 ├── id                  uuidv7
@@ -390,6 +408,18 @@ sessions and still have work left in it. They MUST NOT be forced into one batch
 confirmation so the point can be consumed. An agent resuming work should read
 the text, the subjects and the produced outcomes together before deciding what
 is left — that is what stops it re-solving what an earlier session settled.
+
+A declared outcome asserts that authority exists, so `prepare` MUST refuse one
+that names an Object or Section which will not exist once the candidate is
+admitted. The check is against the **projected** state, not the stored one: the
+usual outcome of working on an unresolved point is the very Object or Section
+the candidate creates, and refusing that would make the field useless for its
+own case. The candidate pins `expected_rev`, so that projection is exact.
+
+Existence is checked when the claim is made and never again. Loading backlog
+MUST NOT depend on a recorded outcome still existing: an Object deleted through
+the gate afterwards is history, and history cannot be allowed to make the
+staging around it unreadable.
 
 ### Resolution basis
 

@@ -17,10 +17,16 @@ pub const CHALLENGE_LEN: usize = 6;
 /// Two fingerprints, because they answer different questions. `payload_sha256`
 /// is the mutation's own identity: it travels into the confirmed Event and is
 /// what an already-applied retry matches against, so its input may never widen.
-/// `integrity_sha256` covers that value together with the prepared binding and
-/// whatever context the domain stored — the state that decides what the human
-/// is shown and what admission will do besides mutating. Without it those
-/// fields sit outside every check while still steering the confirmation.
+/// `integrity_sha256` covers that value together with the challenge, the
+/// prepared binding, and whatever context the domain stored — the state that
+/// decides what the human is shown and which mutation their answer admits.
+/// Without it those fields sit outside every check while still steering the
+/// confirmation.
+///
+/// The challenge is in there because it is the *link* between the two. A
+/// candidate that renders one mutation while naming another candidate's code
+/// tells a human to type an answer to a question they were never shown, and
+/// every other check passes: both files are internally consistent.
 ///
 /// This is not a boundary against someone who controls the machine: the file it
 /// protects is on that machine, and so is this binary. It is the narrower
@@ -47,6 +53,7 @@ pub struct Candidate<M, B> {
 /// map, so the covered set is one declaration a reader can check against.
 #[derive(Serialize)]
 struct Integrity<'a, B, C> {
+    challenge: &'a str,
     payload_sha256: &'a str,
     binding: &'a B,
     context: &'a C,
@@ -72,9 +79,10 @@ impl<M: Serialize, B: Serialize> Candidate<M, B> {
         fingerprint: impl FnOnce(&M) -> Result<String>,
     ) -> Result<Self> {
         let payload_sha256 = fingerprint(&payload)?;
-        let integrity_sha256 = integrity(&payload_sha256, &binding, context)?;
+        let challenge = mint(taken);
+        let integrity_sha256 = integrity(&challenge, &payload_sha256, &binding, context)?;
         Ok(Self {
-            challenge: mint(taken),
+            challenge,
             created_at,
             binding,
             payload,
@@ -105,7 +113,13 @@ impl<M: Serialize, B: Serialize> Candidate<M, B> {
     /// again is as much a use of the prepared context as admitting it is.
     pub fn verify_integrity(&self, context: &impl Serialize) -> Result<()> {
         ensure!(
-            self.integrity_sha256 == integrity(&self.payload_sha256, &self.binding, context)?,
+            self.integrity_sha256
+                == integrity(
+                    &self.challenge,
+                    &self.payload_sha256,
+                    &self.binding,
+                    context
+                )?,
             EXIT_SCHEMA,
             "candidate {} does not match its own integrity hash; prepare it again",
             self.challenge
@@ -115,11 +129,13 @@ impl<M: Serialize, B: Serialize> Candidate<M, B> {
 }
 
 pub fn integrity(
+    challenge: &str,
     payload_sha256: &str,
     binding: &impl Serialize,
     context: &impl Serialize,
 ) -> Result<String> {
     fingerprint(&Integrity {
+        challenge,
         payload_sha256,
         binding,
         context,

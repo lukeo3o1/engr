@@ -150,6 +150,17 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
         "no candidate awaiting {challenge}"
     );
     let candidate: Candidate = store::read_json(&path)?;
+    // The code a candidate names is the code it will be admitted by, so a file
+    // that names a different one is not a candidate to render — it is a
+    // redirect. Rendering it would show one mutation and ask for the answer to
+    // another, which is the exact thing the gate exists to prevent, and both
+    // files would pass every check of their own.
+    ensure!(
+        candidate.challenge == challenge,
+        EXIT_SCHEMA,
+        "candidate {challenge} names challenge {}; it would show one change and admit another",
+        candidate.challenge
+    );
     validate_candidate(&candidate)?;
     Ok(candidate)
 }
@@ -444,7 +455,50 @@ pub fn prepare_from_backlog(
 /// Refused up front, like every other precondition at this gate: a candidate
 /// naming an unresolved point that does not exist cannot reconcile later, and
 /// the moment to say so is before a human is holding a code.
-fn pin_sources(root: &Path, requests: Vec<SourceRequest>) -> Result<Vec<backlog::Source>> {
+/// Whether a declared outcome names authority that will exist once this
+/// candidate is admitted.
+///
+/// Checked against the projected object rather than the stored one, because the
+/// usual outcome of working on an unresolved point is the very Object or Section
+/// this candidate creates — refusing that would make the field useless for the
+/// case it was designed for. The projection is exact: the candidate pins
+/// `expected_rev`, so the state confirmation applies to is the state this saw.
+fn produced_outcome_exists(
+    root: &Path,
+    projected: &Object,
+    outcome: &backlog::Produced,
+) -> Result<()> {
+    let (target, section) = outcome.target()?;
+    let authority = if target == projected.id {
+        projected.clone()
+    } else {
+        ops::effective(root, &target).map_err(|error| {
+            if error.code == EXIT_NOT_FOUND {
+                Error::new(
+                    EXIT_NOT_FOUND,
+                    format!("produced outcome names object {target}, which does not exist"),
+                )
+            } else {
+                error
+            }
+        })?
+    };
+    if let Some(section) = section {
+        authority.section(section).map_err(|_| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!("produced outcome names {target} §{section}, which does not exist"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn pin_sources(
+    root: &Path,
+    requests: Vec<SourceRequest>,
+    projected: &Object,
+) -> Result<Vec<backlog::Source>> {
     let mut sources: Vec<backlog::Source> = Vec::new();
     for request in requests {
         let item = backlog::resolve_id(root, &request.item)?;
@@ -462,6 +516,7 @@ fn pin_sources(root: &Path, requests: Vec<SourceRequest>) -> Result<Vec<backlog:
         let mut produced: Vec<backlog::Produced> = Vec::new();
         for outcome in request.produced {
             outcome.validate()?;
+            produced_outcome_exists(root, projected, &outcome)?;
             ensure!(
                 !produced.contains(&outcome),
                 EXIT_USAGE,
@@ -556,14 +611,20 @@ fn prepare_locked(
     };
 
     // Preflight the reducer so a candidate that cannot possibly apply never
-    // reaches a human.
-    if let Some(object) = &object {
-        let mut trial = object.clone();
+    // reaches a human. The result is kept rather than thrown away: it is the
+    // authority this candidate will produce, and declared Backlog outcomes are
+    // checked against that rather than against a state the confirmation is
+    // about to replace.
+    let projected = {
+        let mut trial = match &object {
+            Some(object) => object.clone(),
+            None => Object::new(payload.object.clone(), String::new())?,
+        };
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
             version: EVENT_ENVELOPE_VERSION_V0,
             event_id: String::new(),
-            rev: object.rev + 1,
+            rev: trial.rev + 1,
             time: now(),
             payload: payload.clone(),
             confirmation: Confirmation {
@@ -572,7 +633,8 @@ fn prepare_locked(
             },
         };
         project(&mut trial, &probe)?;
-    }
+        trial
+    };
 
     validate_refs(root, &payload)?;
 
@@ -583,7 +645,7 @@ fn prepare_locked(
         previous_based_on,
         previous_refs,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
-        backlog: pin_sources(root, sources)?,
+        backlog: pin_sources(root, sources, &projected)?,
     };
     let gate = crate::confirmation::Candidate::prepare_with(
         payload,

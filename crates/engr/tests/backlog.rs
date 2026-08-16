@@ -203,6 +203,70 @@ fn a_stored_item_with_duplicate_or_impossible_section_ids_is_refused() {
     assert!(error.message.contains("does not match its filename"));
 }
 
+/// What the write path refuses, a stored file may not contain.
+///
+/// Two validations that disagree mean the stricter one is decorative: the shape
+/// only has to survive one hand-edit to stop being true, and staging is
+/// hand-edited by design. These are stored-data faults, so they are EXIT_SCHEMA
+/// — not the EXIT_USAGE a person gets for typing the same thing at the CLI.
+#[test]
+fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    let path = backlog::item_path(&root, &id);
+    let pristine: serde_json::Value = store::read_json(&path).expect("item");
+
+    for (name, corrupt) in [
+        (
+            "a blank topic",
+            Box::new(|value: &mut serde_json::Value| value["topic"] = serde_json::json!("   "))
+                as Box<dyn Fn(&mut serde_json::Value)>,
+        ),
+        (
+            "a topic spanning lines",
+            Box::new(|value: &mut serde_json::Value| {
+                value["topic"] = serde_json::json!("a topic\nwith a body under it")
+            }),
+        ),
+        (
+            "a topic that is really a body",
+            Box::new(|value: &mut serde_json::Value| {
+                value["topic"] = serde_json::json!("x".repeat(121))
+            }),
+        ),
+        (
+            "blank section text",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["text"] = serde_json::json!("  \n ")
+            }),
+        ),
+        (
+            "an updated_at that is not a timestamp",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["updated_at"] = serde_json::json!("last tuesday")
+            }),
+        ),
+        (
+            "an updated_at that is not RFC3339",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["updated_at"] = serde_json::json!("2026-08-17 00:00:00")
+            }),
+        ),
+    ] {
+        let mut value = pristine.clone();
+        corrupt(&mut value);
+        store::write_json(&path, &value).expect("write corrupt item");
+        let error = backlog::load(&root, &id).expect_err(name);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+    }
+
+    // A topic exactly at the limit is fine; the boundary is not off by one.
+    let mut value = pristine;
+    value["topic"] = serde_json::json!("x".repeat(120));
+    store::write_json(&path, &value).expect("write");
+    backlog::load(&root, &id).expect("120 characters is a topic, not a body");
+}
+
 #[test]
 fn removing_the_last_unresolved_point_removes_the_item() {
     let (_dir, root) = workspace();
@@ -645,6 +709,138 @@ fn produced_targets_are_authoritative_objects_and_sections_only() {
     ] {
         assert!(serde_json::from_value::<Produced>(target).is_err());
     }
+}
+
+/// `produced[]` claims authoritative knowledge already exists. A syntactically
+/// perfect reference to an Object nobody ever created is that claim being
+/// false, so it is refused before a challenge is minted — while an outcome the
+/// candidate itself brings into being is exactly the case the field is for.
+#[test]
+fn a_declared_outcome_must_name_authority_this_candidate_leaves_behind() {
+    let (_dir, root) = workspace();
+    let staging = item(&root, "outcomes", "unresolved");
+    let object = new_object(&root, "the object");
+    let existing = compact(&object);
+    let absent = compact(&engr::model::new_id());
+
+    let refuse = |outcome: Produced, action: Action, target: &str| {
+        let error = gate::prepare_from_backlog(
+            &root,
+            payload(action, target, "some wording"),
+            vec![gate::SourceRequest {
+                item: staging.clone(),
+                section: 1,
+                produced: vec![outcome],
+                resolves: false,
+            }],
+        )
+        .expect_err("an outcome that will not exist is refused");
+        assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+        assert!(
+            gate::pending(&root).expect("candidates").is_empty(),
+            "and no code is minted for it"
+        );
+        error
+    };
+
+    let error = refuse(
+        Produced::object(format!("obj:{absent}")),
+        Action::SectionAdded,
+        &object,
+    );
+    assert!(error.message.contains("does not exist"));
+    let error = refuse(
+        Produced::object(format!("obj:{existing}:9")),
+        Action::SectionAdded,
+        &object,
+    );
+    assert!(error.message.contains("§9"));
+
+    // An existing Object, and an existing Section of it, are both accepted.
+    admit(&root, payload(Action::SectionAdded, &object, "section one"));
+    for reference in [format!("obj:{existing}"), format!("obj:{existing}:1")] {
+        let prepared = gate::prepare_from_backlog(
+            &root,
+            payload(Action::SectionAdded, &object, "another"),
+            vec![gate::SourceRequest {
+                item: staging.clone(),
+                section: 1,
+                produced: vec![Produced::object(&reference)],
+                resolves: false,
+            }],
+        )
+        .expect("an outcome that exists");
+        gate::discard(&root, &prepared.candidate.challenge).expect("clean up");
+    }
+
+    // And so is one the candidate itself creates: a whole new Object, and the
+    // Section this very action appends.
+    let minted = engr::model::new_id();
+    let outcomes = admit_from(
+        &root,
+        payload(Action::ObjectCreated, &minted, "created by this candidate"),
+        vec![gate::SourceRequest {
+            item: staging.clone(),
+            section: 1,
+            produced: vec![Produced::object(format!("obj:{}", compact(&minted)))],
+            resolves: false,
+        }],
+    );
+    assert!(matches!(
+        outcomes[0].result,
+        Reconciliation::Recorded { added: 1 }
+    ));
+
+    let next = ops::effective(&root, &object)
+        .expect("object")
+        .next_section_id;
+    let outcomes = admit_from(
+        &root,
+        payload(Action::SectionAdded, &object, "the section this produces"),
+        vec![gate::SourceRequest {
+            item: staging.clone(),
+            section: 1,
+            produced: vec![Produced::object(format!("obj:{existing}:{next}"))],
+            resolves: false,
+        }],
+    );
+    assert!(matches!(
+        outcomes[0].result,
+        Reconciliation::Recorded { added: 1 }
+    ));
+}
+
+/// Existence is checked when the claim is made, never again. An outcome that
+/// was real when it was recorded and has since been deleted through the gate is
+/// history, and history must not make the staging around it unreadable.
+#[test]
+fn deleting_a_recorded_outcome_does_not_make_staging_unreadable() {
+    let (_dir, root) = workspace();
+    let staging = item(&root, "outcomes outlive their targets", "unresolved");
+    let object = new_object(&root, "the object");
+    admit(&root, payload(Action::SectionAdded, &object, "section one"));
+
+    admit_from(
+        &root,
+        payload(Action::SectionAdded, &object, "the outcome"),
+        vec![gate::SourceRequest {
+            item: staging.clone(),
+            section: 1,
+            produced: vec![Produced::object(format!("obj:{}:1", compact(&object)))],
+            resolves: false,
+        }],
+    );
+    admit(
+        &root,
+        payload(Action::SectionDeleted { section: 1 }, &object, ""),
+    );
+    assert!(ops::effective(&root, &object)
+        .expect("object")
+        .section(1)
+        .is_err());
+
+    let stored = backlog::load(&root, &staging).expect("staging still loads");
+    assert_eq!(stored.sections[0].produced.len(), 1);
 }
 
 #[test]
