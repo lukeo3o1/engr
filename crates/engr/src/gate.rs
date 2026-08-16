@@ -124,6 +124,13 @@ pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     Ok(codes)
 }
 
+/// Every pending candidate, fully loaded and checked.
+///
+/// The strict half of the pair: one file this build refuses fails the whole
+/// call. That is right for a caller that wants candidates, and wrong for a
+/// listing — which is why the listing walks [`pending_codes`] and loads each
+/// one on its own, so a file it cannot read becomes a line rather than the
+/// absence of every other line.
 pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
     for code in pending_codes(root)? {
