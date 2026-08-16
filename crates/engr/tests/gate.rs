@@ -209,6 +209,23 @@ fn references_are_checked_at_the_gate() {
         .clone();
     let commit = commit_all(&root, "record target");
 
+    let mut tampered = store::load_object(&root, &target).expect("target");
+    tampered.sections[0].text = "edited outside the gate".to_owned();
+    store::save_object(&root, &tampered).expect("tamper target");
+    let mut forged_current = payload(Action::SectionAdded, &source, "depends on forged wording");
+    forged_current.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned.clone(),
+        commit: commit.clone(),
+    }];
+    let error = gate::prepare(&root, forged_current)
+        .expect_err("a reference cannot trust a stale stored target hash");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("current wording"));
+    tampered.sections[0].text = "depended upon".to_owned();
+    store::save_object(&root, &tampered).expect("restore target");
+
     let revised = admit(
         &root,
         payload(
@@ -323,6 +340,30 @@ fn sibling_references_are_allowed_but_direct_self_reference_is_not() {
     let error = gate::prepare(&root, direct).expect_err("a direct self reference is refused");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("cannot directly reference itself"));
+}
+
+#[test]
+fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "legacy candidate");
+    admit(&root, payload(Action::SectionAdded, &id, "old wording"));
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
+    )
+    .expect("prepare");
+    let path = store::candidate_path(&root, &prepared.candidate.challenge);
+    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+    stored
+        .as_object_mut()
+        .expect("candidate object")
+        .remove("previous_semantics_recorded");
+    store::write_json(&path, &stored).expect("legacy candidate");
+
+    let error = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect_err("semantic history is required");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("prepare it again"));
 }
 
 /// The field is unforgiving — no rename, and the mistake only shows after

@@ -138,9 +138,12 @@ cannot be confirmed.
 
 ### What a human is shown
 
-The **change**, not the whole section again. Revisions use a unified line diff
-with limited unchanged context; omitted unchanged wording remains part of the
-complete candidate payload and confirmation hash.
+The **complete semantic change**, not the whole section again. Revisions use a
+unified line diff with limited unchanged context and separately show old/new
+`based_on` plus added and removed refs, including their pinned hashes and
+commits. An explicit absence of repository basis is displayed as such. Omitted
+unchanged wording remains part of the complete candidate payload and
+confirmation hash.
 
 ### Repository basis
 
@@ -152,7 +155,8 @@ a real commit with `--based-on` or explicitly assert no repository basis with
 `--no-based-on`. The latter omits the field; it is never encoded as `null` or a
 magic revision. Changes only under `.engr/**` do not make source context dirty.
 Outside a Git repository, omission cannot default to `HEAD`, so `--no-based-on`
-is required.
+is required. If engr cannot positively determine that source is clean, it also
+refuses an implicit basis rather than treating an unknown Git state as clean.
 
 ### Confirming
 

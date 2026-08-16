@@ -143,7 +143,8 @@ fn run(cli: Cli) -> Result<()> {
             println!("git          ok");
         } else {
             println!(
-                "git          not a repository — commit {}/objects to keep look-back working",
+                "git          not a repository — commit {}/objects and {}/events to preserve the record",
+                store::DIR,
                 store::DIR
             );
         }
@@ -337,6 +338,22 @@ fn shorten(id: &str, width: usize) -> &str {
     &id[..width.min(id.len())]
 }
 
+fn render_ref(reference: &Ref, width: usize) -> String {
+    format!(
+        "{} §{}  sha256 {}  commit {}",
+        shorten(&reference.object, width),
+        reference.section,
+        shorten(&reference.sha256, 8),
+        shorten(&reference.commit, 8)
+    )
+}
+
+fn render_basis(basis: Option<&str>) -> String {
+    basis
+        .map(|commit| shorten(commit, 8).to_owned())
+        .unwrap_or_else(|| "none (explicit)".to_owned())
+}
+
 fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::Note]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -348,21 +365,44 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
     // happened to be typed at says nothing about the change being confirmed.
     // It stays in the payload; it just does not belong on this screen, where
     // every line that means nothing is a line that trains people to skim.
-    let basis = candidate
-        .payload
-        .content
-        .based_on
-        .as_deref()
-        .filter(|_| !candidate.payload.action.carries_title());
-    if let Some(commit) = basis {
-        out.push_str(&format!("Based on   {}\n", &commit[..8.min(commit.len())]));
-    }
-    for reference in &candidate.payload.content.refs {
-        out.push_str(&format!(
-            "Ref        {} §{}\n",
-            shorten(&reference.object, width),
-            reference.section
-        ));
+    if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
+        if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
+            if !candidate.previous_semantics_recorded {
+                out.push_str(
+                    "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
+                );
+            }
+            if candidate.previous_based_on != candidate.payload.content.based_on {
+                out.push_str(&format!(
+                    "Based on - {}\nBased on + {}\n",
+                    render_basis(candidate.previous_based_on.as_deref()),
+                    render_basis(candidate.payload.content.based_on.as_deref())
+                ));
+            } else {
+                out.push_str(&format!(
+                    "Based on   {}\n",
+                    render_basis(candidate.payload.content.based_on.as_deref())
+                ));
+            }
+            for reference in &candidate.previous_refs {
+                if !candidate.payload.content.refs.contains(reference) {
+                    out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                }
+            }
+            for reference in &candidate.payload.content.refs {
+                if !candidate.previous_refs.contains(reference) {
+                    out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
+                }
+            }
+        } else {
+            out.push_str(&format!(
+                "Based on   {}\n",
+                render_basis(candidate.payload.content.based_on.as_deref())
+            ));
+            for reference in &candidate.payload.content.refs {
+                out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
+            }
+        }
     }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
@@ -537,7 +577,8 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
 fn warn_uncommitted(root: &Path, id: &str) {
     if git::uncommitted(root, &store::object_path(root, id)) == Some(true) {
         println!(
-            "note       commit {}/objects to keep look-back working",
+            "note       commit {}/objects and {}/events to preserve history and look-back",
+            store::DIR,
             store::DIR
         );
     }

@@ -159,6 +159,195 @@ fn revision_candidate_renders_a_contextual_unified_diff() {
         !rendered.contains(" line 1\n"),
         "distant context was not omitted"
     );
+
+    let appended = format!("{old}\nline 21");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &appended,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("+line 21"));
+
+    let removed = old.replace("line 10\n", "");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &removed,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("-line 10"));
+}
+
+#[test]
+fn revision_candidate_renders_basis_and_reference_changes() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "workspace",
+        ],
+    );
+    let basis = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8");
+    let basis = basis.trim();
+
+    let target = prepare(root, &["prepare", "--new", "--text", "target"]);
+    confirm(root, &target);
+    let target_id = target["object"].as_str().expect("target id");
+    let target_section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            target_id,
+            "--add",
+            "--text",
+            "pinned wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &target_section);
+    git(root, &["add", ".engr"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "target wording",
+        ],
+    );
+
+    let source = prepare(root, &["prepare", "--new", "--text", "source"]);
+    confirm(root, &source);
+    let source_id = source["object"].as_str().expect("source id");
+    let source_section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--add",
+            "--text",
+            "dependent wording",
+            "--based-on",
+            basis,
+        ],
+    );
+    confirm(root, &source_section);
+
+    let reference = format!("{target_id}:1");
+    let added_ref = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--revise",
+            "1",
+            "--text",
+            "dependent wording",
+            "--no-based-on",
+            "--ref",
+            &reference,
+        ],
+    );
+    let code = added_ref["challenge"].as_str().expect("challenge");
+    let rendered = run_engr(root, &["candidate", code]);
+    let rendered = String::from_utf8_lossy(&rendered.stdout);
+    assert!(rendered.contains("Based on -"));
+    assert!(rendered.contains("Based on + none (explicit)"));
+    assert!(rendered.contains("Ref      +"));
+    assert!(rendered.contains("sha256"));
+    assert!(rendered.contains("commit"));
+    confirm(root, &added_ref);
+
+    let removed_ref = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            source_id,
+            "--revise",
+            "1",
+            "--text",
+            "dependent wording",
+            "--no-based-on",
+        ],
+    );
+    let code = removed_ref["challenge"].as_str().expect("challenge");
+    let rendered = run_engr(root, &["candidate", code]);
+    assert!(String::from_utf8_lossy(&rendered.stdout).contains("Ref      -"));
+}
+
+#[test]
+fn implicit_head_fails_when_source_cleanliness_is_unknown() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+    );
+    let created = prepare(root, &["prepare", "--new", "--text", "unknown clean state"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    std::fs::write(root.join(".git/index"), "not an index").expect("corrupt index");
+
+    let output = run_engr(
+        root,
+        &["prepare", "--object", id, "--add", "--text", "wording"],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not determine"));
 }
 
 fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {

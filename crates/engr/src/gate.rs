@@ -33,6 +33,18 @@ pub struct Candidate {
     /// What the human is shown when the candidate carries a change to existing
     /// wording, so they read the change rather than the whole section again.
     pub previous_text: Option<String>,
+    /// Previous semantic content for revisions. These remain separate from
+    /// `previous_text` so candidates minted by older builds still load; the
+    /// action tells the renderer whether absence means "no basis" or "not a
+    /// section revision".
+    #[serde(default)]
+    pub previous_based_on: Option<String>,
+    #[serde(default)]
+    pub previous_refs: Vec<crate::model::Ref>,
+    /// Distinguishes a new revision with no old basis/refs from a legacy
+    /// candidate that never captured those values at all.
+    #[serde(default)]
+    pub previous_semantics_recorded: bool,
 }
 
 fn now() -> String {
@@ -218,22 +230,29 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         (_, Some(_)) => {}
     }
 
-    let previous_text = match (&payload.action, &object) {
-        (Action::ObjectRenamed, Some(object)) => Some(object.title.clone()),
+    let (previous_text, previous_based_on, previous_refs) = match (&payload.action, &object) {
+        (Action::ObjectRenamed, Some(object)) => (Some(object.title.clone()), None, Vec::new()),
         (Action::SectionRevised { section }, Some(object)) => {
-            Some(object.section(*section)?.text.clone())
+            let section = object.section(*section)?;
+            (
+                Some(section.text.clone()),
+                section.based_on.clone(),
+                section.refs.clone(),
+            )
         }
-        (Action::SectionDeleted { section }, Some(object)) => {
-            Some(object.section(*section)?.text.clone())
-        }
+        (Action::SectionDeleted { section }, Some(object)) => (
+            Some(object.section(*section)?.text.clone()),
+            None,
+            Vec::new(),
+        ),
         (Action::SectionMerged { absorbs }, Some(object)) => {
             let mut parts = Vec::new();
             for id in absorbs {
                 parts.push(format!("§{id}: {}", object.section(*id)?.text.trim_end()));
             }
-            Some(parts.join("\n"))
+            (Some(parts.join("\n")), None, Vec::new())
         }
-        _ => None,
+        _ => (None, None, Vec::new()),
     };
 
     // Preflight the reducer so a candidate that cannot possibly apply never
@@ -270,6 +289,7 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         .map(|candidate| candidate.challenge)
         .collect();
     let challenge = mint_challenge(&taken);
+    let previous_semantics_recorded = matches!(payload.action, Action::SectionRevised { .. });
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
         version: FORMAT_VERSION,
@@ -279,6 +299,9 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         payload_sha256: payload.sha256()?,
         payload,
         previous_text,
+        previous_based_on,
+        previous_refs,
+        previous_semantics_recorded,
     };
 
     // One live candidate per object: a second proposal supersedes the first, so
@@ -341,6 +364,13 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
             reference.section,
             &reference.sha256[..8.min(reference.sha256.len())],
             &section.sha256[..8.min(section.sha256.len())]
+        );
+        ensure!(
+            section.recomputed_sha256()? == reference.sha256,
+            EXIT_INVARIANT,
+            "reference target {} §{} current wording does not match its recorded hash",
+            reference.object,
+            reference.section
         );
         let committed = git::object_at(root, &reference.commit, &reference.object)
             .and_then(|object| object.section(reference.section).ok().cloned())
@@ -417,6 +447,12 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     }
 
     let candidate = find(root, code)?;
+    ensure!(
+        !matches!(candidate.payload.action, Action::SectionRevised { .. })
+            || candidate.previous_semantics_recorded,
+        EXIT_SCHEMA,
+        "candidate {code} predates complete semantic revision rendering; prepare it again"
+    );
     ensure!(
         candidate.payload_sha256 == candidate.payload.sha256()?,
         EXIT_SCHEMA,
@@ -495,18 +531,26 @@ pub fn content(
             )
         })?),
         None if no_based_on => None,
-        None if text.is_some() && git::source_dirty(root) == Some(true) => {
-            return Err(Error::new(
-                EXIT_INVARIANT,
-                "source files have uncommitted changes; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on",
-            ));
-        }
-        None if text.is_some() => Some(git::head(root).ok_or_else(|| {
-            Error::new(
-                EXIT_INVARIANT,
-                "there is no repository HEAD to use as a basis; explicitly choose no repository basis with --no-based-on",
-            )
-        })?),
+        None if text.is_some() => match git::source_dirty(root) {
+            Some(false) => Some(git::head(root).ok_or_else(|| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    "there is no repository HEAD to use as a basis; explicitly choose no repository basis with --no-based-on",
+                )
+            })?),
+            Some(true) => {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    "source files have uncommitted changes; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on",
+                ));
+            }
+            None => {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    "could not determine whether source files are clean; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on",
+                ));
+            }
+        },
         None => None,
     };
     Ok(Content {
