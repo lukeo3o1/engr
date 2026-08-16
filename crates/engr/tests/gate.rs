@@ -248,6 +248,99 @@ fn one_live_candidate_per_object() {
 }
 
 #[test]
+fn direct_gate_callers_cannot_persist_non_v7_object_identities() {
+    let (_dir, root) = workspace();
+    for id in ["not-a-uuid", "550e8400-e29b-41d4-a716-446655440000"] {
+        let error = gate::prepare(
+            &root,
+            payload(Action::ObjectCreated, id, "invalid identity"),
+        )
+        .expect_err("a direct caller cannot bypass Object identity validation");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{id}");
+    }
+
+    let source = new_object(&root, "source");
+    let mut invalid_ref = payload(Action::SectionAdded, &source, "invalid dependency");
+    invalid_ref.content.refs = vec![Ref {
+        object: "not-a-uuid".to_owned(),
+        section: 1,
+        sha256: "0".repeat(64),
+        commit: "HEAD".to_owned(),
+    }];
+    let error =
+        gate::prepare(&root, invalid_ref).expect_err("a Ref Object identity is persisted data too");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        gate::pending(&root).expect("pending candidates").is_empty(),
+        "rejected direct inputs must not leave a candidate behind"
+    );
+}
+
+#[test]
+fn direct_gate_callers_canonicalize_git_anchors_before_confirmation() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "target");
+    let source = new_object(&root, "source");
+    let target = admit(
+        &root,
+        payload(Action::SectionAdded, &target, "target wording"),
+    );
+    let target_id = target.id;
+    let pinned = store::load_object(&root, &target_id)
+        .expect("target")
+        .section(1)
+        .expect("target section")
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target wording");
+
+    let mut direct = payload(
+        Action::SectionAdded,
+        &source.to_ascii_uppercase(),
+        "dependent wording",
+    );
+    direct.content.based_on = Some("HEAD".to_owned());
+    direct.content.refs = vec![Ref {
+        object: target_id.to_ascii_uppercase(),
+        section: 1,
+        sha256: pinned,
+        commit: commit[..12].to_owned(),
+    }];
+
+    let prepared = gate::prepare(&root, direct).expect("direct payload is canonicalized");
+    assert_eq!(prepared.candidate.payload.object, source);
+    assert_eq!(
+        prepared.candidate.payload.content.based_on.as_deref(),
+        Some(commit.as_str())
+    );
+    assert_eq!(prepared.candidate.payload.content.refs[0].object, target_id);
+    assert_eq!(prepared.candidate.payload.content.refs[0].commit, commit);
+    assert_eq!(
+        prepared.candidate.payload_sha256,
+        prepared
+            .candidate
+            .payload
+            .sha256()
+            .expect("canonical payload hash"),
+        "the human's candidate hash covers the resolved values"
+    );
+
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    let (event, _) = gate::confirm(&root, &response).expect("confirm canonical candidate");
+    assert_eq!(
+        event.payload.content.based_on.as_deref(),
+        Some(commit.as_str())
+    );
+    assert_eq!(event.payload.content.refs[0].commit, commit);
+    assert!(
+        !serde_json::to_string(&event)
+            .expect("event JSON")
+            .contains("HEAD"),
+        "symbolic input must never reach the Event"
+    );
+}
+
+#[test]
 fn references_are_checked_at_the_gate() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "the target");
@@ -262,7 +355,7 @@ fn references_are_checked_at_the_gate() {
     let commit = commit_all(&root, "record target");
 
     let mut tampered = store::load_object(&root, &target).expect("target");
-    tampered.sections[0].text = "edited outside the gate".to_owned();
+    "edited outside the gate".clone_into(&mut tampered.sections[0].text);
     store::save_object(&root, &tampered).expect("tamper target");
     let mut forged_current = payload(Action::SectionAdded, &source, "depends on forged wording");
     forged_current.content.refs = vec![Ref {
@@ -275,7 +368,7 @@ fn references_are_checked_at_the_gate() {
         .expect_err("a reference cannot trust a stale stored target hash");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("current wording"));
-    tampered.sections[0].text = "depended upon".to_owned();
+    "depended upon".clone_into(&mut tampered.sections[0].text);
     store::save_object(&root, &tampered).expect("restore target");
 
     let revised = admit(

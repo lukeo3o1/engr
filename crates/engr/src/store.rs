@@ -384,6 +384,7 @@ pub fn load_object(root: &Path, id: &str) -> Result<Object> {
 
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
+    object.validate()?;
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -439,7 +440,7 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
                 EXIT_SCHEMA,
                 "{id}: event rev 1 cannot reconstruct a missing object"
             );
-            Object::new(id.to_owned(), String::new())
+            Object::new(id.to_owned(), String::new())?
         }
     };
     while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {

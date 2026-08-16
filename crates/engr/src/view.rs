@@ -8,7 +8,7 @@
 
 use crate::git;
 use crate::model::{Object, Ref, Status};
-use crate::{store, Result};
+use crate::{ops, store, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -114,7 +114,7 @@ pub fn width(root: &Path) -> usize {
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let target = store::load_object(root, &reference.object)
+    let target = ops::effective(root, &reference.object)
         .ok()
         .and_then(|target| target.section(reference.section).ok().cloned());
     let target_tampered = target.as_ref().map(tampered).unwrap_or(false);

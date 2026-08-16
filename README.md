@@ -12,10 +12,12 @@ Current workspaces use `.engr/format.json` as their sole schema authority.
 Legacy v0 workspaces without it remain readable; run `engr migrate` explicitly
 before changing them. engr refuses to mutate unknown or newer versions.
 
-Canonical Object references are `engr:obj:<compact-id>` (optionally followed by
-`:<section>` and `@<commit>`). The compact ID is the UUID's exact 128 bits encoded
-as 26 lowercase Crockford Base32 characters; stored identity and filenames
-remain standard UUID strings.
+Canonical Object references are `engr:obj:<compact-id>`. The compact ID is the
+UUID's exact 128 bits encoded as 26 lowercase Crockford Base32 characters;
+stored identity and filenames remain standard UUID strings. `show`, `verify`,
+and `--object` select the current workspace Object with that form only. `--ref`
+may additionally carry `:<section>` and `@<commit>` to pin wording in a new
+section; it does not make `show` a historical-object lookup.
 
 An abbreviated or symbolic `@<commit>` is accepted only as input. Canonical
 reference output resolves it to the full Git object ID.

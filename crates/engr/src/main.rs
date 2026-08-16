@@ -1,7 +1,7 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use engr::model::{self, Action, Payload, Ref};
 use engr::{gate, git, ops, store, view};
-use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_USAGE};
+use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -163,7 +163,7 @@ fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    store::validate_format(&root)?;
+    let workspace_format = store::validate_format(&root)?;
 
     match cli.command {
         Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
@@ -191,8 +191,12 @@ fn run(cli: Cli) -> Result<()> {
             stale,
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
-            let id = store::resolve_id(&root, &object)?;
-            let object = store::with_lock(&root, || ops::reconcile(&root, &id))?;
+            let id = resolve_object_argument(&root, "show", &object)?;
+            let object = if workspace_format == store::WorkspaceFormat::Current {
+                store::with_lock(&root, || ops::reconcile(&root, &id))?
+            } else {
+                ops::effective(&root, &id)?
+            };
             if format == Format::Json {
                 println!("{}", view::render_show_json(&root, &object)?);
             } else {
@@ -243,7 +247,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             ))
         }
         (Action::ObjectCreated, None) => model::new_id(),
-        (_, Some(prefix)) => store::resolve_id(root, prefix)?,
+        (_, Some(prefix)) => resolve_object_argument(root, "--object", prefix)?,
         (_, None) => {
             return Err(Error::new(
                 EXIT_USAGE,
@@ -319,9 +323,25 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 
 /// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
 /// so the caller cannot pin something the target never said.
+fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
+    if error.code == EXIT_SCHEMA {
+        Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
+    } else {
+        error
+    }
+}
+
+/// The shared `engr:` parser treats malformed values as schema errors because
+/// it is also used for stored authority. At the command line they are a person
+/// supplying an invalid argument, so translate only at this boundary.
+fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
+    store::resolve_id(root, spec).map_err(|error| malformed_engr_reference(field, spec, error))
+}
+
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     if spec.starts_with("engr:") {
-        let reference = engr::reference::EngrRef::parse_standalone(spec)?;
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
         if reference.kind() != engr::reference::ResourceKind::Object
             || reference.section().is_none()
         {
@@ -330,8 +350,12 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
                 format!("--ref {spec:?} must identify an Object section"),
             ));
         }
-        let canonical = reference.canonicalize(|revision| git::resolve(root, revision))?;
-        let id = engr::reference::decode_uuid(canonical.id())?.to_string();
+        let canonical = reference
+            .canonicalize(|revision| git::resolve(root, revision))
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+        let id = engr::reference::decode_uuid(canonical.id())
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?
+            .to_string();
         let section = canonical
             .section()
             .expect("checked before canonicalization");
@@ -365,7 +389,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
             format!("--ref {spec:?}: section must be a number"),
         )
     })?;
-    let id = store::resolve_id(root, prefix)?;
+    let id = resolve_object_argument(root, "--ref", prefix)?;
     let target = store::load_object(root, &id)?;
     let target_section = target.section(section)?;
     let commit = git::head(root).ok_or_else(|| {
@@ -536,7 +560,7 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
 fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
     for id in store::object_ids(root)? {
-        let object = store::load_object(root, &id)?;
+        let object = ops::effective(root, &id)?;
         if all || object.state == engr::model::Status::Open {
             objects.push(object);
         }
@@ -576,7 +600,7 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
 
 fn verify(root: &Path, object: Option<&str>) -> Result<()> {
     let ids = match object {
-        Some(prefix) => vec![store::resolve_id(root, prefix)?],
+        Some(prefix) => vec![resolve_object_argument(root, "verify", prefix)?],
         None => store::object_ids(root)?,
     };
     if ids.is_empty() {

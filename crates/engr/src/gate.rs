@@ -4,7 +4,8 @@
 //! against the exact response. There is no unconfirmed write path.
 
 use crate::model::{
-    project, Action, Confirmation, Content, Event, Object, Payload, CANDIDATE_FORMAT, EVENT_FORMAT,
+    canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
+    CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::{
     ensure, git, ops, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND,
@@ -76,6 +77,7 @@ pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
             "{}: not an engr candidate",
             path.display()
         );
+        validate_candidate(&candidate)?;
         found.push(candidate);
     }
     found.sort_by(|left, right| left.created_at.cmp(&right.created_at));
@@ -89,12 +91,24 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
         EXIT_NOT_FOUND,
         "no candidate awaiting {challenge}"
     );
-    store::read_json(&path)
+    let candidate: Candidate = store::read_json(&path)?;
+    validate_candidate(&candidate)?;
+    Ok(candidate)
+}
+
+fn validate_candidate(candidate: &Candidate) -> Result<()> {
+    ensure!(
+        candidate.format == CANDIDATE_FORMAT && candidate.version == FORMAT_VERSION,
+        EXIT_SCHEMA,
+        "candidate {} has an unsupported format",
+        candidate.challenge
+    );
+    candidate.payload.validate()
 }
 
 /// Whether a pending candidate can still be confirmed, or was overtaken.
 pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
-    match store::load_object(root, &candidate.payload.object) {
+    match ops::effective(root, &candidate.payload.object) {
         Ok(object) => object.rev == candidate.binding.expected_rev,
         Err(_) => candidate.binding.expected_rev == 0,
     }
@@ -145,6 +159,52 @@ fn check_title(flag: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// A direct domain caller has no CLI adapter to normalize its values. Resolve
+/// every semantic identifier before the payload is hashed, so the candidate the
+/// human reads is byte-for-byte the one that becomes the Event.
+fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
+    payload.object = canonical_object_id(&payload.object)?;
+    if let Some(based_on) = payload.content.based_on.clone() {
+        payload.content.based_on = Some(resolve_commit(root, "based_on", &based_on)?);
+    }
+    for reference in &mut payload.content.refs {
+        reference.object = canonical_object_id(&reference.object)?;
+        reference.commit = resolve_commit(root, "reference commit", &reference.commit)?;
+    }
+    payload.validate()
+}
+
+/// Confirmed payloads must already be canonical; retries must never use this to
+/// silently change what an earlier human confirmed.
+fn validate_persisted_payload(root: &Path, payload: &Payload) -> Result<()> {
+    payload.validate()?;
+    if let Some(based_on) = &payload.content.based_on {
+        ensure!(
+            git::resolve(root, based_on).as_deref() == Some(based_on.as_str()),
+            EXIT_INVARIANT,
+            "based_on {based_on} is not a commit in this repository"
+        );
+    }
+    for reference in &payload.content.refs {
+        ensure!(
+            git::resolve(root, &reference.commit).as_deref() == Some(reference.commit.as_str()),
+            EXIT_INVARIANT,
+            "reference commit {} is not a commit in this repository",
+            reference.commit
+        );
+    }
+    Ok(())
+}
+
+fn resolve_commit(root: &Path, field: &str, revision: &str) -> Result<String> {
+    git::resolve(root, revision).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!("{field} {revision} is not a commit in this repository"),
+        )
+    })
+}
+
 /// Recomputed rather than stored, so `engr candidate <code>` shows the same
 /// notes as `prepare` did — that screen is where a human reads before typing,
 /// and a note absent from it is a note that missed its moment.
@@ -175,7 +235,7 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
         .ok()?
         .iter()
         .filter(|id| id.as_str() != excluding)
-        .filter_map(|id| store::load_object(root, id).ok())
+        .filter_map(|id| ops::effective(root, id).ok())
         .find(|object| object.title.trim().to_lowercase() == needle)
         .map(|object| object.id)
 }
@@ -186,6 +246,7 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     store::require_current(root)?;
+    canonicalize_payload(root, &mut payload)?;
     // A title is the line a listing prints, so whitespace around it is never
     // meaningful and always visible — it pushes one row out of column. The
     // duplicate check already ignores it; storing what that check ignores is how
@@ -193,9 +254,10 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     // Normalised here, before the candidate is minted, so the human confirms the
     // exact string that will be stored.
     if payload.action.carries_title() {
-        payload.content.text = payload.content.text.trim().to_owned();
+        std::mem::take(&mut payload.content.text)
+            .trim()
+            .clone_into(&mut payload.content.text);
     }
-    payload.validate()?;
     let object = match ops::reconcile(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
@@ -268,13 +330,6 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     }
 
     validate_refs(root, &payload)?;
-    if let Some(commit) = &payload.content.based_on {
-        ensure!(
-            git::exists(root, commit),
-            EXIT_INVARIANT,
-            "based_on {commit} is not a commit in this repository"
-        );
-    }
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
     let taken: Vec<String> = pending(root)?
@@ -425,11 +480,12 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
         "candidate {code} predates complete semantic revision rendering; prepare it again"
     );
     candidate.verify_payload_with(Payload::sha256)?;
+    validate_persisted_payload(root, &candidate.payload)?;
 
     let mut object = match ops::reconcile(root, &candidate.payload.object) {
         Ok(object) => object,
         Err(error) if error.code == EXIT_NOT_FOUND => {
-            Object::new(candidate.payload.object.clone(), String::new())
+            Object::new(candidate.payload.object.clone(), String::new())?
         }
         Err(error) => return Err(error),
     };

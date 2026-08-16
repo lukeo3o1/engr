@@ -4,12 +4,10 @@ use crate::model::{project, Action, Object};
 use crate::{ensure, git, store, Result, EXIT_INVARIANT, EXIT_NOT_FOUND};
 use std::path::Path;
 
-/// Close the window between appending an event and saving the projection.
-///
-/// `confirm` writes the event first, then the object. A crash in between leaves
-/// an event whose rev is ahead of the object; replaying the tail here makes the
-/// two agree instead of leaving the workspace wedged.
-pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
+/// Replay the recoverable tail without choosing whether it may be persisted.
+/// Reads need the same effective Object as a repaired current workspace, while
+/// a legacy workspace must remain byte-for-byte read-only until migration.
+fn replay(root: &Path, id: &str) -> Result<(Object, bool)> {
     let events = store::load_events(root, id)?;
     let mut object = match store::load_object(root, id) {
         Ok(object) => object,
@@ -21,7 +19,7 @@ pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
                 EXIT_INVARIANT,
                 "{id}: event rev 1 cannot reconstruct a missing object"
             );
-            Object::new(id.to_owned(), String::new())
+            Object::new(id.to_owned(), String::new())?
         }
         Err(error) => return Err(error),
     };
@@ -31,7 +29,23 @@ pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
         project(&mut object, event)?;
         applied = true;
     }
-    if applied {
+    Ok((object, applied))
+}
+
+/// Read the effective authority after applying any recoverable crash tail in
+/// memory. Unlike [`reconcile`], this never writes a projection.
+pub fn effective(root: &Path, id: &str) -> Result<Object> {
+    Ok(replay(root, id)?.0)
+}
+
+/// Close the window between appending an event and saving the projection.
+///
+/// Current workspaces persist crash repair. Legacy workspaces expose the same
+/// effective Object in memory, because requiring a write here would make a
+/// valid old workspace unreadable before its explicit migration.
+pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
+    let (object, applied) = replay(root, id)?;
+    if applied && store::validate_format(root)? == store::WorkspaceFormat::Current {
         store::save_object(root, &object)?;
     }
     Ok(object)
@@ -76,7 +90,7 @@ impl Report {
 /// preserve confirmed evidence, while committed git history remains an
 /// additional tamper anchor. That is why an uncommitted object file is reported.
 pub fn verify(root: &Path, id: &str) -> Result<Report> {
-    let object = store::load_object(root, id)?;
+    let object = effective(root, id)?;
     let events = store::load_events(root, id)?;
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
@@ -85,7 +99,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             tampered.push(section.id);
         }
         for reference in &section.refs {
-            let Ok(target) = store::load_object(root, &reference.object) else {
+            let Ok(target) = effective(root, &reference.object) else {
                 continue;
             };
             let Ok(target_section) = target.section(reference.section) else {

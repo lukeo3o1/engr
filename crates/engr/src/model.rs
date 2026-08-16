@@ -8,12 +8,58 @@
 use crate::FORMAT_VERSION;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// uuidv7: time-ordered, and with no date welded into a human-facing id — the
 /// previous scheme put one there and could not represent anything backdated, nor
 /// more than a hundred records a day.
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Turn input into the stable Object identity stored in records and filenames.
+/// The compact reference codec is deliberately separate; the record itself
+/// keeps standard UUID text so a file can be identified without a resolver.
+pub fn canonical_object_id(value: &str) -> Result<String> {
+    let id = uuid::Uuid::parse_str(value)
+        .map_err(|_| Error::new(EXIT_SCHEMA, format!("object id {value:?} is not a UUID")))?;
+    ensure!(
+        id.get_version() == Some(uuid::Version::SortRand),
+        EXIT_SCHEMA,
+        "object id {value:?} must be UUIDv7"
+    );
+    Ok(id.to_string())
+}
+
+/// Stored ids are not just UUID-shaped: they use the one canonical UUIDv7
+/// spelling. Gate input may be normalized first, but loaded authority may not
+/// quietly preserve an alternative spelling.
+pub fn validate_object_id(value: &str) -> Result<()> {
+    let canonical = canonical_object_id(value)?;
+    ensure!(
+        canonical == value,
+        EXIT_SCHEMA,
+        "object id {value:?} must be a canonical UUIDv7"
+    );
+    Ok(())
+}
+
+/// Git resolves selectors such as `HEAD` for input, but confirmed records pin
+/// the immutable object id it produced. Accept SHA-1 and SHA-256 repositories.
+pub fn is_canonical_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_git_oid(field: &str, value: &str) -> Result<()> {
+    ensure!(
+        is_canonical_git_oid(value),
+        EXIT_SCHEMA,
+        "{field} must be a full resolved Git object id"
+    );
+    Ok(())
 }
 
 pub const OBJECT_FORMAT: &str = "engr-object";
@@ -47,6 +93,13 @@ pub struct Ref {
     pub commit: String,
 }
 
+impl Ref {
+    fn validate(&self) -> Result<()> {
+        validate_object_id(&self.object)?;
+        validate_git_oid("reference commit", &self.commit)
+    }
+}
+
 /// The part of a section a human actually reads and assents to.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Content {
@@ -62,6 +115,16 @@ impl Content {
     /// through `Value` sorts keys and the digest is independent of field order.
     pub fn sha256(&self) -> Result<String> {
         canonical_sha256_with_basis(self)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(based_on) = &self.based_on {
+            validate_git_oid("based_on", based_on)?;
+        }
+        for reference in &self.refs {
+            reference.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -96,6 +159,11 @@ impl Section {
     pub fn recomputed_sha256(&self) -> Result<String> {
         self.content().sha256()
     }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
+        self.content().validate()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -122,8 +190,8 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(id: String, title: String) -> Self {
-        Self {
+    pub fn new(id: String, title: String) -> Result<Self> {
+        let object = Self {
             legacy_format: None,
             legacy_version: None,
             id,
@@ -132,7 +200,9 @@ impl Object {
             rev: 0,
             next_section_id: 1,
             sections: Vec::new(),
-        }
+        };
+        object.validate()?;
+        Ok(object)
     }
 
     pub fn section(&self, id: u64) -> Result<&Section> {
@@ -152,6 +222,7 @@ impl Object {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_object_id(&self.id)?;
         if let Some(format) = &self.legacy_format {
             ensure!(
                 format == OBJECT_FORMAT,
@@ -164,6 +235,31 @@ impl Object {
                 version == FORMAT_VERSION,
                 EXIT_SCHEMA,
                 "unsupported legacy object version {version}"
+            );
+        }
+        ensure!(
+            self.next_section_id > 0,
+            EXIT_SCHEMA,
+            "{}: next_section_id must start at 1",
+            self.id
+        );
+        let mut ids = BTreeSet::new();
+        for section in &self.sections {
+            section.validate()?;
+            ensure!(
+                ids.insert(section.id),
+                EXIT_SCHEMA,
+                "{}: section §{} appears more than once",
+                self.id,
+                section.id
+            );
+            ensure!(
+                section.id < self.next_section_id,
+                EXIT_SCHEMA,
+                "{}: next_section_id {} would reuse live section §{}",
+                self.id,
+                self.next_section_id,
+                section.id
             );
         }
         Ok(())
@@ -234,6 +330,8 @@ impl Payload {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_object_id(&self.object)?;
+        self.content.validate()?;
         if self.action.carries_content() {
             ensure!(
                 !self.content.text.trim().is_empty(),
@@ -313,7 +411,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                 EXIT_INVARIANT,
                 "object.created must be the first action"
             );
-            object.title = content.text.clone();
+            object.title.clone_from(&content.text);
         }
         // Open, like everything else that changes the object. A title is part of
         // what settled, so allowing it through on a closed object would make
@@ -322,11 +420,11 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         // settled.
         Action::ObjectRenamed => {
             object.require_open("object.renamed")?;
-            object.title = content.text.clone();
+            object.title.clone_from(&content.text);
         }
         Action::SectionAdded => {
             object.require_open("section.added")?;
-            let id = take_id(object);
+            let id = take_id(object)?;
             object.sections.push(section_from(id, event)?);
         }
         Action::SectionRevised { section } => {
@@ -345,7 +443,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             for id in absorbs {
                 object.section(*id)?;
             }
-            let id = take_id(object);
+            let id = take_id(object)?;
             object
                 .sections
                 .retain(|section| !absorbs.contains(&section.id));
@@ -374,10 +472,15 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     Ok(())
 }
 
-fn take_id(object: &mut Object) -> u64 {
+fn take_id(object: &mut Object) -> Result<u64> {
     let id = object.next_section_id;
-    object.next_section_id += 1;
-    id
+    object.next_section_id = object.next_section_id.checked_add(1).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!("{} has no remaining section ids", object.id),
+        )
+    })?;
+    Ok(id)
 }
 
 fn section_from(id: u64, event: &Event) -> Result<Section> {
