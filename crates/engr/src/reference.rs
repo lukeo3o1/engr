@@ -21,21 +21,6 @@ impl ResourceKind {
     }
 }
 
-/// Read-only validated fields of a parsed engr reference.
-///
-/// The fields are exposed through [`EngrRef`]'s immutable `Deref` only to keep
-/// existing callers ergonomic. Constructing this value does not construct an
-/// `EngrRef`; the validated wrapper itself can only be created by the parser.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EngrRefFields {
-    pub kind: ResourceKind,
-    pub id: String,
-    pub section: Option<u64>,
-    /// Input selector only. It may be abbreviated or symbolic and must be
-    /// resolved before a canonical reference can be emitted.
-    pub snapshot_selector: Option<String>,
-}
-
 /// Parsed reference input. Its invariant-bearing state cannot be constructed or
 /// mutated directly by callers.
 ///
@@ -51,56 +36,49 @@ pub struct EngrRefFields {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngrRef {
-    fields: EngrRefFields,
-}
-
-impl std::ops::Deref for EngrRef {
-    type Target = EngrRefFields;
-
-    fn deref(&self) -> &Self::Target {
-        &self.fields
-    }
-}
-
-/// Read-only validated identity/selector fields of a canonical engr reference.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalEngrRefFields {
-    pub kind: ResourceKind,
-    pub id: String,
-    pub section: Option<u64>,
+    kind: ResourceKind,
+    id: String,
+    section: Option<u64>,
+    /// Input selector only. It may be abbreviated or symbolic and must be
+    /// resolved before a canonical reference can be emitted.
+    snapshot_selector: Option<String>,
 }
 
 /// A reference that has passed canonicalization.
 ///
-/// The identity-bearing fields are opaque and read-only. `snapshot` remains an
-/// owned field so existing callers may consume the resolved OID without cloning;
-/// every canonical output path revalidates it, so replacing it with an
-/// abbreviated/symbolic selector cannot emit a canonical-looking reference.
-///
-/// Direct construction is impossible because `fields` is private:
+/// All invariant-bearing fields are private. A canonical reference can only be
+/// created by parsing validated input and resolving any snapshot selector.
 ///
 /// ```compile_fail
 /// use engr::reference::{CanonicalEngrRef, ResourceKind};
 ///
 /// let _ = CanonicalEngrRef {
 ///     kind: ResourceKind::Object,
-///     id: "01h47kwz2mfk0v47mffcnstqva".to_owned(),
+///     id: "not-a-compact-uuid".to_owned(),
 ///     section: None,
 ///     snapshot: Some("abc123".to_owned()),
 /// };
 /// ```
+///
+/// Its resolved snapshot cannot be replaced after construction:
+///
+/// ```compile_fail
+/// use engr::reference::EngrRef;
+///
+/// let mut reference = EngrRef::parse_standalone(
+///     "engr:obj:01h47kwz2mfk0v47mffcnstqva@main",
+/// )
+/// .unwrap()
+/// .canonicalize(|_| Some("0123456789abcdef0123456789abcdef01234567".to_owned()))
+/// .unwrap();
+/// reference.snapshot = Some("abc123".to_owned());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalEngrRef {
-    fields: CanonicalEngrRefFields,
-    pub snapshot: Option<String>,
-}
-
-impl std::ops::Deref for CanonicalEngrRef {
-    type Target = CanonicalEngrRefFields;
-
-    fn deref(&self) -> &Self::Target {
-        &self.fields
-    }
+    kind: ResourceKind,
+    id: String,
+    section: Option<u64>,
+    snapshot: Option<String>,
 }
 
 impl EngrRef {
@@ -152,41 +130,39 @@ impl EngrRef {
             })
             .transpose()?;
         Ok(Self {
-            fields: EngrRefFields {
-                kind,
-                id: id.to_owned(),
-                section,
-                snapshot_selector: snapshot,
-            },
+            kind,
+            id: id.to_owned(),
+            section,
+            snapshot_selector: snapshot,
         })
     }
 
     pub fn kind(&self) -> ResourceKind {
-        self.fields.kind
+        self.kind
     }
 
     pub fn id(&self) -> &str {
-        &self.fields.id
+        &self.id
     }
 
     pub fn section(&self) -> Option<u64> {
-        self.fields.section
+        self.section
     }
 
     pub fn snapshot_selector(&self) -> Option<&str> {
-        self.fields.snapshot_selector.as_deref()
+        self.snapshot_selector.as_deref()
     }
 
     pub fn canonicalize(
         self,
         resolve_snapshot: impl FnOnce(&str) -> Option<String>,
     ) -> Result<CanonicalEngrRef> {
-        let EngrRefFields {
+        let Self {
             kind,
             id,
             section,
             snapshot_selector,
-        } = self.fields;
+        } = self;
 
         // Keep canonicalization independently defensive even though the parser
         // already validates ids: future constructors inside this module must not
@@ -213,7 +189,9 @@ impl EngrRef {
             );
         }
         Ok(CanonicalEngrRef {
-            fields: CanonicalEngrRefFields { kind, id, section },
+            kind,
+            id,
+            section,
             snapshot,
         })
     }
@@ -221,31 +199,22 @@ impl EngrRef {
 
 impl CanonicalEngrRef {
     pub fn kind(&self) -> ResourceKind {
-        self.fields.kind
+        self.kind
     }
 
     pub fn id(&self) -> &str {
-        &self.fields.id
+        &self.id
     }
 
     pub fn section(&self) -> Option<u64> {
-        self.fields.section
+        self.section
     }
 
     pub fn snapshot(&self) -> Option<&str> {
         self.snapshot.as_deref()
     }
 
-    pub fn embedded(&self) -> Result<String> {
-        validate_id(self.kind, &self.id)?;
-        if let Some(snapshot) = &self.snapshot {
-            ensure!(
-                is_full_git_oid(snapshot),
-                EXIT_SCHEMA,
-                "canonical Git snapshot must be a full 40- or 64-character object id"
-            );
-        }
-
+    pub fn embedded(&self) -> String {
         let mut value = format!("{}:{}", self.kind.token(), self.id);
         if let Some(section) = self.section {
             value.push_str(&format!(":{section}"));
@@ -254,14 +223,13 @@ impl CanonicalEngrRef {
             value.push('@');
             value.push_str(snapshot);
         }
-        Ok(value)
+        value
     }
 }
 
 impl std::fmt::Display for CanonicalEngrRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let embedded = self.embedded().map_err(|_| std::fmt::Error)?;
-        write!(formatter, "engr:{embedded}")
+        write!(formatter, "engr:{}", self.embedded())
     }
 }
 
@@ -384,12 +352,26 @@ mod tests {
     }
 
     #[test]
-    fn canonical_output_revalidates_owned_snapshot_before_rendering() {
-        let mut canonical =
-            EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123")
-                .expect("input")
-                .canonicalize(|_| Some("0123456789ABCDEF0123456789ABCDEF01234567".to_owned()))
-                .expect("canonical");
+    fn invalid_identifiers_and_resolved_snapshots_cannot_be_canonicalized() {
+        for input in [
+            "engr:obj:not-a-compact-uuid",
+            "engr:backlog:01h47kwz2mfk0v47mffcnstqvi",
+            "engr:collection:abcdefghij",
+        ] {
+            assert!(EngrRef::parse_standalone(input).is_err(), "{input}");
+        }
+
+        let parsed = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva@main")
+            .expect("input reference");
+        assert!(parsed.canonicalize(|_| Some("g".repeat(40))).is_err());
+    }
+
+    #[test]
+    fn canonicalization_normalizes_a_full_resolved_snapshot() {
+        let canonical = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123")
+            .expect("input")
+            .canonicalize(|_| Some("0123456789ABCDEF0123456789ABCDEF01234567".to_owned()))
+            .expect("canonical");
         assert_eq!(canonical.kind(), ResourceKind::Object);
         assert_eq!(canonical.id(), "01h47kwz2mfk0v47mffcnstqva");
         assert_eq!(canonical.section(), Some(3));
@@ -397,8 +379,9 @@ mod tests {
             canonical.snapshot(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
-
-        canonical.snapshot = Some("abc123".to_owned());
-        assert!(canonical.embedded().is_err());
+        assert_eq!(
+            canonical.embedded(),
+            "obj:01h47kwz2mfk0v47mffcnstqva:3@0123456789abcdef0123456789abcdef01234567"
+        );
     }
 }

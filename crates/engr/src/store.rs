@@ -357,13 +357,13 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     if prefix.starts_with("engr:") {
         let reference = crate::reference::EngrRef::parse_standalone(prefix)?;
         ensure!(
-            reference.kind == crate::reference::ResourceKind::Object
-                && reference.section.is_none()
-                && reference.snapshot_selector.is_none(),
+            reference.kind() == crate::reference::ResourceKind::Object
+                && reference.section().is_none()
+                && reference.snapshot_selector().is_none(),
             EXIT_NOT_FOUND,
             "{prefix:?} is not a current Object reference"
         );
-        return Ok(crate::reference::decode_uuid(&reference.id)?.to_string());
+        return Ok(crate::reference::decode_uuid(reference.id())?.to_string());
     }
     if prefix.len() == 26 {
         if let Ok(id) = crate::reference::decode_uuid(prefix) {

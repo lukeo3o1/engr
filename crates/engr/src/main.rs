@@ -322,19 +322,23 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)?;
-        if reference.kind != engr::reference::ResourceKind::Object || reference.section.is_none() {
+        if reference.kind() != engr::reference::ResourceKind::Object
+            || reference.section().is_none()
+        {
             return Err(Error::new(
                 EXIT_USAGE,
                 format!("--ref {spec:?} must identify an Object section"),
             ));
         }
         let canonical = reference.canonicalize(|revision| git::resolve(root, revision))?;
-        let id = engr::reference::decode_uuid(&canonical.id)?.to_string();
-        let section = canonical.section.expect("checked before canonicalization");
+        let id = engr::reference::decode_uuid(canonical.id())?.to_string();
+        let section = canonical
+            .section()
+            .expect("checked before canonicalization");
         let target = store::load_object(root, &id)?;
         let target_section = target.section(section)?;
-        let commit = match canonical.snapshot {
-            Some(commit) => commit,
+        let commit = match canonical.snapshot() {
+            Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
                 Error::new(
                     engr::EXIT_INVARIANT,
