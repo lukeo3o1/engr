@@ -35,6 +35,16 @@ right about what the tool does — say so rather than working around it.
 
 ## The one rule
 
+If engr reports a legacy workspace, reading remains safe but mutation is
+blocked. Get explicit human direction before running `engr migrate`; never
+silently create `.engr/format.json` or rewrite stored records. Never change an
+unknown or newer workspace version.
+
+Use canonical `engr:obj:<26-character-id>` references outside workspace
+commands. Embedded targets use `kind: engr` with a namespace-relative `ref`;
+shared syntax does not make different reference-bearing fields semantically
+equivalent.
+
 **You propose. A human admits.**
 
 `engr prepare` puts a change up and prints a challenge code. That code exists so

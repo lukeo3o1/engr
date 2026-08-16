@@ -105,11 +105,16 @@ impl Section {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Object {
-    pub format: String,
-    pub version: u32,
+    /// Retained when a migrated v0 object carried redundant resource schema
+    /// markers. New objects rely only on the workspace authority.
+    #[serde(rename = "format", skip_serializing_if = "Option::is_none")]
+    pub legacy_format: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub legacy_version: Option<u32>,
     pub id: String,
     pub title: String,
-    pub status: Status,
+    #[serde(alias = "status")]
+    pub state: Status,
     /// Increments on every confirmed action. Candidates pin it, so one prepared
     /// against an older state cannot be confirmed after the object moved.
     pub rev: u64,
@@ -124,11 +129,11 @@ pub struct Object {
 impl Object {
     pub fn new(id: String, title: String) -> Self {
         Self {
-            format: OBJECT_FORMAT.to_owned(),
-            version: FORMAT_VERSION,
+            legacy_format: None,
+            legacy_version: None,
             id,
             title,
-            status: Status::Open,
+            state: Status::Open,
             rev: 0,
             next_section_id: 1,
             sections: Vec::new(),
@@ -144,7 +149,7 @@ impl Object {
 
     fn require_open(&self, what: &str) -> Result<()> {
         ensure!(
-            self.status == Status::Open,
+            self.state == Status::Open,
             EXIT_INVARIANT,
             "{what} requires an open object; reopen it first"
         );
@@ -152,18 +157,20 @@ impl Object {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.format == OBJECT_FORMAT,
-            EXIT_SCHEMA,
-            "not an engr object: format is {:?}",
-            self.format
-        );
-        ensure!(
-            self.version == FORMAT_VERSION,
-            EXIT_SCHEMA,
-            "unsupported object version {}",
-            self.version
-        );
+        if let Some(format) = &self.legacy_format {
+            ensure!(
+                format == OBJECT_FORMAT,
+                EXIT_SCHEMA,
+                "not an engr object: format is {format:?}"
+            );
+        }
+        if let Some(version) = self.legacy_version {
+            ensure!(
+                version == FORMAT_VERSION,
+                EXIT_SCHEMA,
+                "unsupported legacy object version {version}"
+            );
+        }
         Ok(())
     }
 }
@@ -356,15 +363,15 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         }
         Action::ObjectClosed => {
             object.require_open("object.closed")?;
-            object.status = Status::Closed;
+            object.state = Status::Closed;
         }
         Action::ObjectReopened => {
             ensure!(
-                object.status == Status::Closed,
+                object.state == Status::Closed,
                 EXIT_INVARIANT,
                 "object.reopened requires a closed object"
             );
-            object.status = Status::Open;
+            object.state = Status::Open;
         }
     }
     object.sections.sort_by_key(|section| section.id);

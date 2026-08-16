@@ -17,7 +17,7 @@ An **object** is an aggregate. It holds **sections**, each carrying text.
 object
 ├── id                        uuidv7
 ├── title
-├── status                    open | closed
+├── state                     open | closed
 ├── rev                       increments on every confirmed action
 ├── next_section_id           monotonic, never reset
 └── sections[]
@@ -74,8 +74,8 @@ Eight. All of them gated.
 | `section_revised` | `section` | Replaces that section's content; id unchanged |
 | `section_merged` | `absorbs[]` | New id carrying the confirmed wording; absorbed sections removed |
 | `section_deleted` | `section` | Removes the section |
-| `object_closed` | — | `status` → `closed` |
-| `object_reopened` | — | `status` → `open` |
+| `object_closed` | — | `state` → `closed` |
+| `object_reopened` | — | `state` → `open` |
 
 `object_created`, `object_renamed`, `section_added`, `section_revised` and
 `section_merged` carry content; the others must carry none.
@@ -86,7 +86,7 @@ would not mean "this has settled". A title is part of what settled, so exempting
 it would narrow `closed` to "the sections have settled" rather than the whole
 object.
 
-Sections have no `status` field. Deletion deletes and merging merges, so every
+Sections have no `state` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
 
 A merge must absorb at least two distinct sections.
@@ -297,6 +297,14 @@ otherwise would only obscure the second.
 
 ## Layout
 
+`.engr/format.json` is the sole schema/version authority for a current
+workspace. New resource files do not repeat those fields. A workspace without
+that authority may be recognized as legacy v0 for reading, but remains
+read-only until `engr migrate` is explicitly run. Migration changes only
+incompatible representation (`Object.status` to `Object.state`) and preserves
+compatible legacy markers and confirmed Event envelopes. Unknown or newer
+workspace versions are never mutated.
+
 ```text
 .engr/
   format.json              workspace format and version
@@ -315,6 +323,21 @@ The exclusion MUST NOT cover `objects/`, since look-back is delegated to git.
 
 Events are safe to commit. The challenge codes they carry have been spent, and a
 spent code resolves to no candidate.
+
+## References
+
+Object and future Backlog identities remain UUIDv7 values persisted as standard
+UUID strings. Their reference form encodes the canonical 128 UUID bits as
+exactly 26 lowercase Crockford Base32 characters using
+`0123456789abcdefghjkmnpqrstvwxyz`, without padding.
+
+Local standalone forms are `engr:obj:<id>`,
+`engr:obj:<id>:<section>`, and `engr:backlog:<id>`. A Git snapshot selector may
+follow as `@<commit>`; it selects an as-of snapshot and is not identity.
+Embedded references omit `engr:` and pair their namespace-relative `ref` with
+`kind: "engr"`. The shared parser owns syntax only: each caller decides which
+resources and selectors are legal and what they mean. Repository-qualified
+resolution is deferred.
 
 ## Exit codes
 

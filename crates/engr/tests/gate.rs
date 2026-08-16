@@ -168,7 +168,7 @@ fn a_closed_object_refuses_section_changes() {
     let id = new_object(&root, "closing");
     admit(&root, payload(Action::SectionAdded, &id, "one"));
     let object = admit(&root, empty(Action::ObjectClosed, &id));
-    assert_eq!(object.status, Status::Closed);
+    assert_eq!(object.state, Status::Closed);
 
     let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "two"))
         .expect_err("a closed object is sealed");

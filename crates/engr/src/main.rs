@@ -22,6 +22,8 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
+    /// Explicitly upgrade a recognized legacy v0 workspace
+    Migrate,
     /// Print the protocol this build implements
     Protocol,
     /// Put a change up for a human to confirm
@@ -152,13 +154,26 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let root = store::find_root(cli.root.as_deref())?;
+    if matches!(cli.command, Command::Migrate) {
+        store::with_lock(&root, || store::migrate(&root))?;
+        println!(
+            "migrated {} to workspace version {}",
+            store::engr_dir(&root).display(),
+            engr::FORMAT_VERSION
+        );
+        return Ok(());
+    }
     store::validate_format(&root)?;
 
     match cli.command {
-        Command::Init | Command::Protocol => unreachable!("handled above"),
-        Command::Prepare(command) => prepare(&root, command),
+        Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
+        Command::Prepare(command) => {
+            store::require_current(&root)?;
+            prepare(&root, command)
+        }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
+            store::require_current(&root)?;
             let (event, object) = store::with_lock(&root, || gate::confirm(&root, &response))?;
             println!(
                 "CONFIRMED  {}  {}  rev {}",
@@ -305,6 +320,39 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 /// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
 /// so the caller cannot pin something the target never said.
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)?;
+        if reference.kind != engr::reference::ResourceKind::Object || reference.section.is_none() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("--ref {spec:?} must identify an Object section"),
+            ));
+        }
+        let id = engr::reference::decode_uuid(&reference.id)?.to_string();
+        let section = reference.section.expect("checked above");
+        let target = store::load_object(root, &id)?;
+        let target_section = target.section(section)?;
+        let commit = match reference.snapshot {
+            Some(revision) => git::resolve(root, &revision).ok_or_else(|| {
+                Error::new(
+                    engr::EXIT_INVARIANT,
+                    format!("snapshot {revision} is not a commit in this repository"),
+                )
+            })?,
+            None => git::head(root).ok_or_else(|| {
+                Error::new(
+                    engr::EXIT_INVARIANT,
+                    "a reference records the commit it was read at, which needs a git repository",
+                )
+            })?,
+        };
+        return Ok(Ref {
+            object: id,
+            section,
+            sha256: target_section.sha256.clone(),
+            commit,
+        });
+    }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
             EXIT_USAGE,
@@ -489,7 +537,7 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
     for id in store::object_ids(root)? {
         let object = store::load_object(root, &id)?;
-        if all || object.status == engr::model::Status::Open {
+        if all || object.state == engr::model::Status::Open {
             objects.push(object);
         }
     }

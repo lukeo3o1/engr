@@ -8,16 +8,11 @@ use crate::model::{
 };
 use crate::{
     ensure, git, ops, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND,
-    EXIT_SCHEMA, EXIT_STALE, EXIT_USAGE, FORMAT_VERSION,
+    EXIT_SCHEMA, EXIT_USAGE, FORMAT_VERSION,
 };
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-
-/// Excludes the characters people misread aloud or mistype: 0/O, 1/I.
-const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-const CHALLENGE_LEN: usize = 6;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Candidate {
@@ -51,18 +46,6 @@ fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .expect("formatting a timestamp cannot fail")
-}
-
-fn mint_challenge(taken: &[String]) -> String {
-    let mut rng = rand::thread_rng();
-    loop {
-        let code: String = (0..CHALLENGE_LEN)
-            .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
-            .collect();
-        if !taken.contains(&code) {
-            return code;
-        }
-    }
 }
 
 pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
@@ -288,7 +271,7 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         .into_iter()
         .map(|candidate| candidate.challenge)
         .collect();
-    let challenge = mint_challenge(&taken);
+    let challenge = crate::confirmation::mint(&taken);
     let previous_semantics_recorded = matches!(payload.action, Action::SectionRevised { .. });
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
@@ -411,40 +394,33 @@ pub fn discard(root: &Path, challenge: &str) -> Result<()> {
 /// candidate. Accepting a bare code instead would put the agent in the position
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
 pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
-    let mut words = response.split(' ');
-    let head = words.next().unwrap_or_default();
-    let code = words.next().unwrap_or_default();
-    let exact = head == "CONFIRM"
-        && words.next().is_none()
-        && code.len() == CHALLENGE_LEN
-        && code.bytes().all(|byte| ALPHABET.contains(&byte));
-
-    if !exact {
-        // Words beyond the code are commentary — "yes, but reword the second
-        // line" is not assent, and letting it through would make the agent the
-        // judge of whether a qualified yes counted. That discards the candidate.
-        // A whitespace or casing slip is a typo, not a qualification, so it is
-        // merely rejected and the candidate survives to be confirmed properly.
-        if let Some(rest) = response.strip_prefix("CONFIRM ") {
-            let mut words = rest.split_whitespace();
-            if let Some(first) = words.next() {
-                let qualified = words.next().is_some();
-                if qualified && store::candidate_path(root, first).exists() {
-                    discard(root, first)?;
-                    return Err(Error::new(
-                        EXIT_USAGE,
-                        format!(
-                            "`CONFIRM {first}` carried commentary, so it is a qualified yes rather than assent; candidate {first} was discarded"
-                        ),
-                    ));
-                }
+    let code = match crate::confirmation::response(response) {
+        crate::confirmation::Response::Exact(code) => code,
+        crate::confirmation::Response::Qualified(first) => {
+            if store::candidate_path(root, first).exists() {
+                discard(root, first)?;
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    format!("`CONFIRM {first}` carried commentary, so it is a qualified yes rather than assent; candidate {first} was discarded"),
+                ));
             }
+            return Err(Error::new(
+                EXIT_USAGE,
+                "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
+            ));
         }
-        return Err(Error::new(
-            EXIT_USAGE,
-            "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
-        ));
-    }
+        crate::confirmation::Response::Invalid => {
+            // Words beyond the code are commentary — "yes, but reword the second
+            // line" is not assent, and letting it through would make the agent the
+            // judge of whether a qualified yes counted. That discards the candidate.
+            // A whitespace or casing slip is a typo, not a qualification, so it is
+            // merely rejected and the candidate survives to be confirmed properly.
+            return Err(Error::new(
+                EXIT_USAGE,
+                "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
+            ));
+        }
+    };
 
     let candidate = find(root, code)?;
     ensure!(
@@ -482,13 +458,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
         }
     }
 
-    ensure!(
-        object.rev == candidate.expected_rev,
-        EXIT_STALE,
-        "the object moved to rev {} after this candidate was prepared at rev {}; prepare it again",
-        object.rev,
-        candidate.expected_rev
-    );
+    crate::confirmation::ensure_fresh(&candidate.expected_rev, &object.rev, "the object revision")?;
 
     // Re-check references at the moment of admission, not only at prepare: a
     // target may have been revised while the human was reading.

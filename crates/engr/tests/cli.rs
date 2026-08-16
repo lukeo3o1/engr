@@ -61,6 +61,80 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 #[test]
+fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "legacy object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let object_path = store::object_path(root, id);
+    let mut object: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    object["format"] = Value::String("engr-object".to_owned());
+    object["version"] = Value::from(1);
+    let state = object
+        .as_object_mut()
+        .expect("object")
+        .remove("state")
+        .expect("state");
+    object["status"] = state;
+    std::fs::write(
+        &object_path,
+        serde_json::to_vec_pretty(&object).expect("json"),
+    )
+    .expect("legacy object");
+    std::fs::remove_file(store::engr_dir(root).join("format.json")).expect("remove authority");
+
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        shown.status.success(),
+        "legacy read: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let refused = run_engr(root, &["prepare", "--object", id, "--close"]);
+    assert_eq!(refused.status.code(), Some(engr::EXIT_SCHEMA));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("engr migrate"));
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated_object: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    assert_eq!(migrated_object["state"], "open");
+    assert!(migrated_object.get("status").is_none());
+    assert_eq!(
+        migrated_object["format"], "engr-object",
+        "compatible legacy marker is preserved"
+    );
+    assert_eq!(migrated_object["version"], 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &std::fs::read(store::engr_dir(root).join("format.json")).expect("format")
+        )
+        .expect("json")["version"],
+        1
+    );
+}
+
+#[test]
+fn unknown_workspace_version_refuses_mutation() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::write(
+        store::engr_dir(root).join("format.json"),
+        r#"{"format":"engr-workspace","version":99}"#,
+    )
+    .expect("format");
+    let output = run_engr(root, &["prepare", "--new", "--text", "no guessing"]);
+    assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
+}
+
+#[test]
 fn dirty_source_requires_an_explicit_repository_basis_choice() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
