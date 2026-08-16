@@ -392,12 +392,10 @@ mod tests {
 
     #[test]
     fn canonical_output_exposes_only_validated_read_only_fields() {
-        let canonical = EngrRef::parse_standalone(
-            "engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123",
-        )
-        .expect("input")
-        .canonicalize(|_| Some("0123456789ABCDEF0123456789ABCDEF01234567".to_owned()))
-        .expect("canonical");
+        let canonical = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva:3@abc123")
+            .expect("input")
+            .canonicalize(|_| Some("0123456789ABCDEF0123456789ABCDEF01234567".to_owned()))
+            .expect("canonical");
         assert_eq!(canonical.kind(), ResourceKind::Object);
         assert_eq!(canonical.id(), "01h47kwz2mfk0v47mffcnstqva");
         assert_eq!(canonical.section(), Some(3));
