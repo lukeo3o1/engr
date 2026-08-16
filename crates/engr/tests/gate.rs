@@ -125,6 +125,57 @@ fn hedged_assent_discards_the_candidate() {
 }
 
 #[test]
+fn direct_confirmation_refuses_a_legacy_workspace_without_partial_mutation() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "legacy boundary");
+    let prepared = gate::prepare(&root, empty(Action::ObjectClosed, &id)).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let object_path = store::object_path(&root, &id);
+    let candidate_path = store::candidate_path(&root, &code);
+    let events_path = store::events_path(&root, &id);
+
+    let mut object: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    object["format"] = serde_json::Value::String("engr-object".to_owned());
+    object["version"] = serde_json::Value::from(1);
+    let state = object
+        .as_object_mut()
+        .expect("object")
+        .remove("state")
+        .expect("state");
+    object["status"] = state;
+    std::fs::write(
+        &object_path,
+        serde_json::to_vec_pretty(&object).expect("json"),
+    )
+    .expect("legacy object");
+
+    let object_before = std::fs::read(&object_path).expect("object snapshot");
+    let events_before = std::fs::read(&events_path).expect("events snapshot");
+    let candidate_before = std::fs::read(&candidate_path).expect("candidate snapshot");
+    for response in [
+        format!("CONFIRM {code} but leave it open"),
+        format!("CONFIRM {code}"),
+    ] {
+        let error = gate::confirm(&root, &response).expect_err("legacy confirmation is refused");
+        assert_eq!(error.code, engr::EXIT_SCHEMA);
+        assert!(error.message.contains("engr migrate"));
+        assert_eq!(
+            std::fs::read(&object_path).expect("object after refusal"),
+            object_before
+        );
+        assert_eq!(
+            std::fs::read(&events_path).expect("events after refusal"),
+            events_before
+        );
+        assert_eq!(
+            std::fs::read(&candidate_path).expect("candidate after refusal"),
+            candidate_before
+        );
+    }
+}
+
+#[test]
 fn section_ids_are_never_reused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "ids");
@@ -306,6 +357,102 @@ fn references_are_checked_at_the_gate() {
         commit,
     }];
     gate::prepare(&root, good).expect("a well-formed reference is admitted");
+}
+
+#[test]
+fn historical_references_decode_the_snapshot_workspace_format() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "historical target");
+    let source = new_object(&root, "historical source");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "historical wording"),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let current_commit = commit_all(&root, "current historical snapshot");
+    assert_eq!(
+        engr::git::object_at(&root, &current_commit, &target)
+            .expect("current snapshot format")
+            .expect("current target")
+            .section(1)
+            .expect("current section")
+            .sha256,
+        pinned
+    );
+
+    let format_path = store::engr_dir(&root).join("format.json");
+    let format_before = std::fs::read(&format_path).expect("format");
+    let objects_before: Vec<_> = store::object_ids(&root)
+        .expect("object ids")
+        .into_iter()
+        .map(|id| {
+            let path = store::object_path(&root, &id);
+            (path.clone(), std::fs::read(path).expect("object"))
+        })
+        .collect();
+    for (path, _) in &objects_before {
+        let mut object: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("object")).expect("json");
+        object["format"] = serde_json::Value::String("engr-object".to_owned());
+        object["version"] = serde_json::Value::from(1);
+        let state = object
+            .as_object_mut()
+            .expect("object")
+            .remove("state")
+            .expect("state");
+        object["status"] = state;
+        std::fs::write(path, serde_json::to_vec_pretty(&object).expect("json"))
+            .expect("legacy object");
+    }
+    std::fs::remove_file(&format_path).expect("remove workspace authority");
+    let legacy_commit = commit_all(&root, "legacy v0 historical snapshot");
+    assert_eq!(
+        engr::git::object_at(&root, &legacy_commit, &target)
+            .expect("recognized legacy snapshot")
+            .expect("legacy target")
+            .section(1)
+            .expect("legacy section")
+            .sha256,
+        pinned
+    );
+
+    for (path, bytes) in &objects_before {
+        std::fs::write(path, bytes).expect("restore object");
+    }
+    std::fs::write(&format_path, &format_before).expect("restore workspace authority");
+    let mut legacy_reference = payload(Action::SectionAdded, &source, "uses old wording");
+    legacy_reference.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned.clone(),
+        commit: legacy_commit,
+    }];
+    let prepared = gate::prepare(&root, legacy_reference).expect("legacy ref is admitted");
+    gate::discard(&root, &prepared.candidate.challenge).expect("discard test candidate");
+
+    commit_all(&root, "restore canonical historical snapshot");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#)
+        .expect("unsupported workspace authority");
+    let unsupported_commit = commit_all(&root, "unsupported historical snapshot");
+    std::fs::write(&format_path, &format_before).expect("restore current workspace authority");
+    let error = engr::git::object_at(&root, &unsupported_commit, &target)
+        .expect_err("an unknown historical workspace version is refused");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("workspace version 99"));
+
+    let mut unsupported_reference = payload(Action::SectionAdded, &source, "must not guess");
+    unsupported_reference.content.refs = vec![Ref {
+        object: target,
+        section: 1,
+        sha256: pinned,
+        commit: unsupported_commit,
+    }];
+    let error = gate::prepare(&root, unsupported_reference)
+        .expect_err("a reference cannot decode an unsupported historical workspace");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("workspace version 99"));
 }
 
 #[test]

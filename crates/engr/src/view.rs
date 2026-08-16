@@ -347,7 +347,7 @@ struct JsonSummary {
 struct JsonObject<'a> {
     id: &'a str,
     title: &'a str,
-    status: &'static str,
+    state: &'static str,
     rev: u64,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
@@ -382,7 +382,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
     let value = JsonObject {
         id: &object.id,
         title: &object.title,
-        status: object.state.as_str(),
+        state: object.state.as_str(),
         rev: object.rev,
         summary: JsonSummary {
             sections: tally.total,

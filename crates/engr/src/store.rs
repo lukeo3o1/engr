@@ -9,15 +9,17 @@
 //!   candidates/<CODE>.json   awaiting a human
 //! ```
 
-use crate::model::{Event, Object, EVENT_FORMAT};
+use crate::model::{project, Action, Event, Object, EVENT_FORMAT};
 use crate::{ensure, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, FORMAT_VERSION};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DIR: &str = ".engr";
+pub const WORKSPACE_FORMAT: &str = "engr-workspace";
 
 pub fn engr_dir(root: &Path) -> PathBuf {
     root.join(DIR)
@@ -117,7 +119,7 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     write_json(
         &dir.join("format.json"),
         &Format {
-            format: "engr-workspace".to_owned(),
+            format: WORKSPACE_FORMAT.to_owned(),
             version: FORMAT_VERSION,
         },
     )?;
@@ -139,7 +141,7 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
     }
     let format: Format = read_json(&path)?;
     ensure!(
-        format.format == "engr-workspace",
+        format.format == WORKSPACE_FORMAT,
         EXIT_SCHEMA,
         "{}: not an engr workspace",
         path.display()
@@ -210,46 +212,126 @@ pub fn require_current(root: &Path) -> Result<()> {
     Ok(())
 }
 
+struct MigrationEntry {
+    id: String,
+    path: PathBuf,
+    object: Object,
+    migrated: Option<serde_json::Value>,
+}
+
+fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
+    let object: Object = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    object.validate()?;
+    ensure!(
+        object.id == id,
+        EXIT_SCHEMA,
+        "{}: object id {:?} does not match its filename",
+        path.display(),
+        object.id
+    );
+    Ok(object)
+}
+
+/// Validate every retained representation before moving any one Object. A
+/// malformed legacy workspace must remain exactly legacy rather than becoming a
+/// mixture of old and new files because a later entry was invalid.
+fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
+    let mut entries = Vec::new();
+    for id in object_ids(root)? {
+        let path = object_path(root, &id);
+        let value: serde_json::Value = read_json(&path)?;
+        let object = value.as_object().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: object must be a JSON object", path.display()),
+            )
+        })?;
+        ensure!(
+            !(object.contains_key("status") && object.contains_key("state")),
+            EXIT_SCHEMA,
+            "{}: contains both legacy status and canonical state",
+            path.display()
+        );
+        ensure!(
+            object.contains_key("status") || object.contains_key("state"),
+            EXIT_SCHEMA,
+            "{}: legacy object has neither status nor state",
+            path.display()
+        );
+
+        // Deserialize the stored form, not just its lifecycle key. This catches
+        // missing required fields and illegal legacy status values before any
+        // neighboring file is rewritten.
+        let stored = decode_object(&path, &id, value.clone())?;
+        let needs_state_conversion = object.contains_key("status");
+        let (object, migrated) = if needs_state_conversion {
+            let mut planned = value;
+            let planned_object = planned.as_object_mut().ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{}: object must be a JSON object", path.display()),
+                )
+            })?;
+            let status = planned_object.remove("status").ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{}: legacy object has no status", path.display()),
+                )
+            })?;
+            planned_object.insert("state".to_owned(), status);
+            (decode_object(&path, &id, planned.clone())?, Some(planned))
+        } else {
+            (stored, None)
+        };
+        entries.push(MigrationEntry {
+            id,
+            path,
+            object,
+            migrated,
+        });
+    }
+    let objects = entries
+        .iter()
+        .map(|entry| (entry.id.clone(), entry.object.clone()))
+        .collect();
+    validate_retained_events(root, &objects)?;
+    Ok(entries)
+}
+
 pub fn migrate(root: &Path) -> Result<()> {
     ensure!(
         validate_format(root)? == WorkspaceFormat::LegacyV0,
         EXIT_SCHEMA,
         "workspace does not require migration"
     );
-    for id in object_ids(root)? {
-        let path = object_path(root, &id);
-        let mut value: serde_json::Value = read_json(&path)?;
-        let object = value.as_object_mut().ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}: object must be a JSON object", path.display()),
-            )
-        })?;
-        if let Some(status) = object.remove("status") {
-            ensure!(
-                !object.contains_key("state"),
-                EXIT_SCHEMA,
-                "{}: contains both legacy status and canonical state",
-                path.display()
-            );
-            object.insert("state".to_owned(), status);
-            write_json(&path, &value)?;
-        } else {
-            ensure!(
-                object.contains_key("state"),
-                EXIT_SCHEMA,
-                "{}: legacy object has neither status nor state",
-                path.display()
-            );
+    let entries = preflight_migration(root)?;
+    for entry in entries {
+        if let Some(value) = entry.migrated {
+            write_json(&entry.path, &value)?;
         }
     }
-    write_json(
-        &engr_dir(root).join("format.json"),
-        &Format {
-            format: "engr-workspace".to_owned(),
-            version: FORMAT_VERSION,
-        },
-    )
+    let format_path = engr_dir(root).join("format.json");
+    if !format_path.exists() {
+        write_json(
+            &format_path,
+            &Format {
+                format: WORKSPACE_FORMAT.to_owned(),
+                version: FORMAT_VERSION,
+            },
+        )?;
+    }
+    ensure!(
+        validate_format(root)? == WorkspaceFormat::Current,
+        EXIT_SCHEMA,
+        "workspace migration did not produce the current format"
+    );
+    let mut objects = BTreeMap::new();
+    for id in object_ids(root)? {
+        objects.insert(id.clone(), load_object(root, &id)?);
+    }
+    validate_retained_events(root, &objects)?;
+    Ok(())
 }
 
 /// Hold the workspace write lock for the duration of `body`.
@@ -296,16 +378,8 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     let path = object_path(root, id);
-    let object: Object = read_json(&path)?;
-    object.validate()?;
-    ensure!(
-        object.id == id,
-        EXIT_SCHEMA,
-        "{}: object id {:?} does not match its filename",
-        path.display(),
-        object.id
-    );
-    Ok(object)
+    let value: serde_json::Value = read_json(&path)?;
+    decode_object(&path, id, value)
 }
 
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
@@ -328,6 +402,69 @@ pub fn object_ids(root: &Path) -> Result<Vec<String>> {
     }
     ids.sort();
     Ok(ids)
+}
+
+fn event_ids(root: &Path) -> Result<Vec<String>> {
+    let dir = events_dir(root);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
+        let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(id) = name.strip_suffix(".jsonl") {
+            ids.push(id.to_owned());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+/// Confirm that any event tail which reconciliation could apply is safe to
+/// replay. Events are a recovery buffer rather than a second authority, so a
+/// completed projection need not replay its older history here.
+fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event]) -> Result<()> {
+    let mut object = match object {
+        Some(object) => object,
+        None => {
+            let created = events.iter().find(|event| event.rev == 1).ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{id}: event buffer cannot reconstruct a missing object"),
+                )
+            })?;
+            ensure!(
+                matches!(&created.payload.action, Action::ObjectCreated),
+                EXIT_SCHEMA,
+                "{id}: event rev 1 cannot reconstruct a missing object"
+            );
+            Object::new(id.to_owned(), String::new())
+        }
+    };
+    while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {
+        let object_rev = object.rev;
+        project(&mut object, event).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{id}: event rev {} cannot reconcile with object rev {object_rev}: {}",
+                    event.rev, error.message
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Retained events can be replayed after a crash. Check that relationship
+/// before migration commits the only representation change it makes.
+fn validate_retained_events(root: &Path, objects: &BTreeMap<String, Object>) -> Result<()> {
+    for id in event_ids(root)? {
+        let events = load_events(root, &id)?;
+        validate_recoverable_tail(&id, objects.get(&id).cloned(), &events)?;
+    }
+    Ok(())
 }
 
 /// Shortest prefix length at which every id is distinct, floored at 8.

@@ -6,6 +6,9 @@
 //! breaking the tool — but `engr init` warns, because silently losing look-back
 //! is worse than a noisy start.
 
+use crate::model::{Object, OBJECT_FORMAT};
+use crate::{ensure, Error, Result, EXIT_SCHEMA, FORMAT_VERSION};
+use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
@@ -49,14 +52,123 @@ pub fn source_dirty(root: &Path) -> Option<bool> {
     Some(!status.trim().is_empty())
 }
 
+#[derive(Deserialize)]
+struct HistoricalWorkspaceFormat {
+    format: String,
+    version: u32,
+}
+
+fn historical_path(commit: &str, path: &str) -> String {
+    format!("{commit}:{path}")
+}
+
+fn validate_historical_format(path: &str, text: &str) -> Result<()> {
+    let format: HistoricalWorkspaceFormat = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+    ensure!(
+        format.format == crate::store::WORKSPACE_FORMAT,
+        EXIT_SCHEMA,
+        "{path}: not an engr workspace"
+    );
+    ensure!(
+        format.version == FORMAT_VERSION,
+        EXIT_SCHEMA,
+        "{path}: workspace version {} is not supported by engr {}",
+        format.version,
+        crate::IMPLEMENTATION_VERSION
+    );
+    Ok(())
+}
+
+/// A format-less snapshot predates the workspace authority. It is readable only
+/// when every flat Object file carries the old per-resource markers, matching
+/// the live legacy detector rather than guessing from whatever the target JSON
+/// happens to deserialize as today.
+fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
+    let objects = format!("{}/objects", crate::store::DIR);
+    let paths = run(
+        root,
+        &["ls-tree", "-r", "--name-only", commit, "--", &objects],
+    )
+    .ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("could not inspect historical workspace at commit {commit}"),
+        )
+    })?;
+    let prefix = format!("{objects}/");
+    let mut found = false;
+    for path in paths.lines() {
+        let Some(name) = path.strip_prefix(&prefix) else {
+            continue;
+        };
+        if name.contains('/') || !name.ends_with(".json") {
+            continue;
+        }
+        found = true;
+        let text = run(root, &["show", &historical_path(commit, path)]).ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("could not read historical object {path} at commit {commit}"),
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+        let object_value = value.as_object().ok_or_else(|| {
+            Error::new(EXIT_SCHEMA, format!("{path}: object must be a JSON object"))
+        })?;
+        ensure!(
+            object_value.get("format").and_then(|value| value.as_str()) == Some(OBJECT_FORMAT)
+                && object_value.get("version").and_then(|value| value.as_u64())
+                    == Some(FORMAT_VERSION.into()),
+            EXIT_SCHEMA,
+            "{path}: not a recognized legacy v0 object"
+        );
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let object: Object = serde_json::from_value(value)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+        object.validate()?;
+        ensure!(
+            object.id == id,
+            EXIT_SCHEMA,
+            "{path}: object id {:?} does not match its filename",
+            object.id
+        );
+    }
+    ensure!(
+        found,
+        EXIT_SCHEMA,
+        "historical workspace at commit {commit} has no format.json and is not a recognized legacy v0 workspace"
+    );
+    Ok(())
+}
+
 /// Read one object exactly as a commit contains it. References use this rather
-/// than pairing the worktree's wording with an unrelated HEAD.
-pub fn object_at(root: &Path, commit: &str, id: &str) -> Option<crate::model::Object> {
+/// than pairing the worktree's wording with an unrelated HEAD. The snapshot's
+/// own workspace authority decides which representation may be decoded.
+pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> {
+    let format_path = format!("{}/format.json", crate::store::DIR);
+    match run(root, &["show", &historical_path(commit, &format_path)]) {
+        Some(text) => validate_historical_format(&format_path, &text)?,
+        None => validate_legacy_workspace_at(root, commit)?,
+    }
+
     let path = format!("{}/objects/{id}.json", crate::store::DIR);
-    let text = run(root, &["show", &format!("{commit}:{path}")])?;
-    let object: crate::model::Object = serde_json::from_str(&text).ok()?;
-    object.validate().ok()?;
-    (object.id == id).then_some(object)
+    let Some(text) = run(root, &["show", &historical_path(commit, &path)]) else {
+        return Ok(None);
+    };
+    let object: Object = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+    object.validate()?;
+    ensure!(
+        object.id == id,
+        EXIT_SCHEMA,
+        "{path}: object id {:?} does not match its filename",
+        object.id
+    );
+    Ok(Some(object))
 }
 
 /// Keeping the record is not the world moving.

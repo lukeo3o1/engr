@@ -60,6 +60,69 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+    let path = store::object_path(root, id);
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    update(value.as_object_mut().expect("object"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("object");
+}
+
+fn mark_legacy(root: &Path, id: &str) {
+    rewrite_object(root, id, |object| {
+        object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
+        object.insert("version".to_owned(), Value::from(1));
+        let state = object.remove("state").expect("state");
+        object.insert("status".to_owned(), state);
+    });
+}
+
+fn assert_migration_preflight_refuses(corrupt: impl FnOnce(&Path, &str, &str)) {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let first = prepare(root, &["prepare", "--new", "--text", "first legacy object"]);
+    confirm(root, &first);
+    let first_id = first["object"].as_str().expect("object");
+    let second = prepare(
+        root,
+        &["prepare", "--new", "--text", "second legacy object"],
+    );
+    confirm(root, &second);
+    let second_id = second["object"].as_str().expect("object");
+    mark_legacy(root, first_id);
+    mark_legacy(root, second_id);
+    corrupt(root, first_id, second_id);
+
+    let paths = vec![
+        store::engr_dir(root).join("format.json"),
+        store::object_path(root, first_id),
+        store::object_path(root, second_id),
+        store::events_path(root, first_id),
+        store::events_path(root, second_id),
+    ];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| (path.clone(), std::fs::read(path).expect("snapshot")))
+        .collect();
+
+    let output = run_engr(root, &["migrate"]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "migration unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (path, expected) in before {
+        assert_eq!(
+            std::fs::read(&path).expect("snapshot after refusal"),
+            expected,
+            "{} changed despite a failed migration",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     let workspace = TempDir::new().expect("temp dir");
@@ -68,7 +131,17 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     let created = prepare(root, &["prepare", "--new", "--text", "legacy object"]);
     confirm(root, &created);
     let id = created["object"].as_str().expect("object id");
+    let current = prepare(root, &["prepare", "--new", "--text", "already current"]);
+    confirm(root, &current);
+    let current_id = current["object"].as_str().expect("current object id");
     let object_path = store::object_path(root, id);
+    let current_path = store::object_path(root, current_id);
+    let current_before = std::fs::read(&current_path).expect("current object");
+    let events_path = store::events_path(root, id);
+    let events_before = std::fs::read(&events_path).expect("events");
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    let format_before = std::fs::read(&format_path).expect("format");
     let mut object: Value =
         serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
     object["format"] = Value::String("engr-object".to_owned());
@@ -85,7 +158,7 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     )
     .expect("legacy object");
     assert!(
-        store::engr_dir(root).join("format.json").exists(),
+        format_path.exists(),
         "Phase 0 already had the version 1 workspace authority"
     );
     let shown = run_engr(root, &["show", id]);
@@ -113,17 +186,122 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     assert_eq!(migrated_object["state"], "open");
     assert!(migrated_object.get("status").is_none());
     assert_eq!(
+        std::fs::read(&current_path).expect("current object after migration"),
+        current_before,
+        "an already current Object is not cosmetically rewritten"
+    );
+    assert_eq!(
+        std::fs::read(&events_path).expect("events after migration"),
+        events_before,
+        "compatible retained Event history is not rewritten"
+    );
+    assert_eq!(
+        std::fs::read(&format_path).expect("format after migration"),
+        format_before,
+        "a valid workspace authority is not rewritten"
+    );
+    assert_eq!(
         migrated_object["format"], "engr-object",
         "compatible legacy marker is preserved"
     );
     assert_eq!(migrated_object["version"], 1);
     assert_eq!(
-        serde_json::from_slice::<Value>(
-            &std::fs::read(store::engr_dir(root).join("format.json")).expect("format")
-        )
-        .expect("json")["version"],
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
         1
     );
+}
+
+#[test]
+fn migration_refuses_an_invalid_legacy_status_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("status".to_owned(), Value::String("waiting".to_owned()));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_legacy_filename_id_mismatch_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("id".to_owned(), Value::String(first.to_owned()));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_legacy_object_missing_a_required_field_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.remove("title");
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_unreadable_retained_events_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        let path = store::events_path(root, second);
+        let mut event: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("event")).expect("json");
+        event["version"] = Value::from(99);
+        std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
+    });
+}
+
+#[test]
+fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("rev".to_owned(), Value::from(0));
+        });
+        let path = store::events_path(root, second);
+        let mut event: Event =
+            serde_json::from_slice(&std::fs::read(&path).expect("event")).expect("json");
+        event.payload.action = Action::SectionDeleted { section: 1 };
+        event.payload.content = Content {
+            text: String::new(),
+            based_on: None,
+            refs: Vec::new(),
+        };
+        event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+        std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
+    });
+}
+
+#[test]
+fn show_json_uses_state_for_the_object_and_status_for_each_section() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "json contract"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object");
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "checked section",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    let output = run_engr(root, &["show", id, "--format", "json"]);
+    assert!(
+        output.status.success(),
+        "show json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&output.stdout).expect("show JSON");
+    assert_eq!(shown["state"], "open");
+    assert!(shown.get("status").is_none());
+    assert_eq!(shown["sections"][0]["status"], "ok");
 }
 
 #[test]

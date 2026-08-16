@@ -35,7 +35,8 @@ holding.**
 
 Read state with `engr show <id>`. Each section is annotated with how far it can be
 trusted and what to do about it; that is not a separate report to fetch. Use
-`--format json` when you want structure. `status` there is computed, not stored.
+`--format json` when you want structure: an Object's lifecycle is `state`, while
+each Section's `status` is computed, not stored.
 
 When `show` says a section's basis or a dependency moved, do not quietly reason
 from it. Recover the old wording with the `git show` command it hands you, decide

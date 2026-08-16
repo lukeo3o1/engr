@@ -185,6 +185,7 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
+    store::require_current(root)?;
     // A title is the line a listing prints, so whitespace around it is never
     // meaningful and always visible — it pushes one row out of column. The
     // duplicate check already ignores it; storing what that check ignores is how
@@ -369,7 +370,7 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
             reference.object,
             reference.section
         );
-        let committed = git::object_at(root, &reference.commit, &reference.object)
+        let committed = git::object_at(root, &reference.commit, &reference.object)?
             .and_then(|object| object.section(reference.section).ok().cloned())
             .ok_or_else(|| Error::new(
                 EXIT_INVARIANT,
@@ -391,6 +392,7 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
 }
 
 pub fn discard(root: &Path, challenge: &str) -> Result<()> {
+    store::require_current(root)?;
     let path = store::candidate_path(root, challenge);
     ensure!(
         path.exists(),
@@ -408,6 +410,7 @@ pub fn discard(root: &Path, challenge: &str) -> Result<()> {
 /// candidate. Accepting a bare code instead would put the agent in the position
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
 pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
+    store::require_current(root)?;
     let code = crate::confirmation::authorize(
         response,
         |code| store::candidate_path(root, code).exists(),
