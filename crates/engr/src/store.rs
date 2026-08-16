@@ -9,7 +9,7 @@
 //!   candidates/<CODE>.json   awaiting a human
 //! ```
 
-use crate::model::{project, Action, Event, Object, EVENT_FORMAT};
+use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
 use crate::{ensure, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, FORMAT_VERSION};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -426,7 +426,7 @@ fn event_ids(root: &Path) -> Result<Vec<String>> {
 /// replay. Events are a recovery buffer rather than a second authority, so a
 /// completed projection need not replay its older history here.
 fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event]) -> Result<()> {
-    let mut object = match object {
+    let object = match object {
         Some(object) => object,
         None => {
             let created = events.iter().find(|event| event.rev == 1).ok_or_else(|| {
@@ -443,19 +443,14 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
             Object::new(id.to_owned(), String::new())?
         }
     };
-    while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {
-        let object_rev = object.rev;
-        project(&mut object, event).map_err(|error| {
+    replay_recoverable_tail(object, events)
+        .map(|_| ())
+        .map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
-                format!(
-                    "{id}: event rev {} cannot reconcile with object rev {object_rev}: {}",
-                    event.rev, error.message
-                ),
+                format!("{id}: event tail cannot reconcile: {}", error.message),
             )
-        })?;
-    }
-    Ok(())
+        })
 }
 
 /// Retained events can be replayed after a crash. Check that relationship

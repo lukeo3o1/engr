@@ -106,12 +106,71 @@ fn validate_candidate(candidate: &Candidate) -> Result<()> {
     candidate.payload.validate()
 }
 
-/// Whether a pending candidate can still be confirmed, or was overtaken.
-pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
+/// The actionable state of an outstanding candidate.
+///
+/// A candidate can survive the narrow crash window after its Event/projection
+/// are durable but before its file is deleted. That is retryable, not stale:
+/// the same exact confirmation must finish cleanup without applying again.
+#[derive(Debug)]
+pub enum CandidateState {
+    Pending,
+    AlreadyApplied(Box<Event>),
+    Stale { current_rev: u64 },
+}
+
+/// Classify a candidate from the same effective projection and durable Event
+/// evidence used by confirmation. Read surfaces and admission must agree about
+/// whether a code is still actionable.
+pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateState> {
     match ops::effective(root, &candidate.payload.object) {
-        Ok(object) => object.rev == candidate.binding.expected_rev,
-        Err(_) => candidate.binding.expected_rev == 0,
+        Ok(object) => {
+            if object.rev > candidate.binding.expected_rev {
+                let applied_rev =
+                    candidate
+                        .binding
+                        .expected_rev
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            Error::new(EXIT_INVARIANT, "candidate revision cannot advance")
+                        })?;
+                if let Some(event) = store::load_events(root, &candidate.payload.object)?
+                    .into_iter()
+                    .find(|event| {
+                        event.rev == applied_rev
+                            && event.confirmation.payload_sha256 == candidate.payload_sha256
+                    })
+                {
+                    return Ok(CandidateState::AlreadyApplied(Box::new(event)));
+                }
+            }
+            if object.rev == candidate.binding.expected_rev {
+                Ok(CandidateState::Pending)
+            } else {
+                Ok(CandidateState::Stale {
+                    current_rev: object.rev,
+                })
+            }
+        }
+        Err(error) if error.code == EXIT_NOT_FOUND => {
+            if candidate.binding.expected_rev == 0
+                && store::load_events(root, &candidate.payload.object)?.is_empty()
+            {
+                Ok(CandidateState::Pending)
+            } else {
+                Ok(CandidateState::Stale { current_rev: 0 })
+            }
+        }
+        Err(error) => Err(error),
     }
+}
+
+/// Whether a pending candidate can still be acted on. An already-applied
+/// candidate remains live only for its idempotent cleanup retry.
+pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
+    matches!(
+        candidate_state(root, candidate),
+        Ok(CandidateState::Pending | CandidateState::AlreadyApplied(_))
+    )
 }
 
 /// Something worth weighing before typing the code, but not grounds to refuse.
@@ -387,28 +446,21 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
                 "section §{section} cannot directly reference itself"
             );
         }
-        let target = store::load_object(root, &reference.object).map_err(|error| {
-            if error.code == EXIT_NOT_FOUND {
-                Error::new(
-                    EXIT_NOT_FOUND,
-                    format!(
-                        "reference target object {} does not exist",
-                        reference.object
-                    ),
-                )
-            } else {
-                error
-            }
-        })?;
-        let section = target.section(reference.section).map_err(|_| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!(
-                    "reference target {} §{} does not exist",
-                    reference.object, reference.section
-                ),
-            )
-        })?;
+        let section = ops::effective_section(root, &reference.object, reference.section).map_err(
+            |error| {
+                if error.code == EXIT_NOT_FOUND {
+                    Error::new(
+                        EXIT_NOT_FOUND,
+                        format!(
+                            "reference target object {} does not exist",
+                            reference.object
+                        ),
+                    )
+                } else {
+                    error
+                }
+            },
+        )?;
         ensure!(
             section.sha256 == reference.sha256,
             EXIT_INVARIANT,
@@ -482,40 +534,35 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     candidate.verify_payload_with(Payload::sha256)?;
     validate_persisted_payload(root, &candidate.payload)?;
 
-    let mut object = match ops::reconcile(root, &candidate.payload.object) {
-        Ok(object) => object,
-        Err(error) if error.code == EXIT_NOT_FOUND => {
-            Object::new(candidate.payload.object.clone(), String::new())?
+    let mut object = match candidate_state(root, &candidate)? {
+        CandidateState::AlreadyApplied(applied) => {
+            let object = ops::reconcile(root, &candidate.payload.object)?;
+            discard(root, code)?;
+            return Ok((*applied, object));
         }
-        Err(error) => return Err(error),
+        CandidateState::Stale { current_rev } => {
+            crate::confirmation::admission(
+                &candidate.binding.expected_rev,
+                &current_rev,
+                false,
+                "the object revision",
+            )?;
+            unreachable!("a stale candidate cannot be admitted")
+        }
+        CandidateState::Pending => match ops::reconcile(root, &candidate.payload.object) {
+            Ok(object) => object,
+            Err(error) if error.code == EXIT_NOT_FOUND => {
+                Object::new(candidate.payload.object.clone(), String::new())?
+            }
+            Err(error) => return Err(error),
+        },
     };
-    // Idempotent recovery. `confirm` appends the event, saves the projection,
-    // then clears the candidate; a crash in the middle leaves the change applied
-    // and the candidate still pending. Re-confirming the same code must report
-    // what already happened rather than apply it a second time.
-    let already_applied = if object.rev > candidate.binding.expected_rev {
-        let events = store::load_events(root, &candidate.payload.object)?;
-        events.into_iter().find(|event| {
-            event.rev == candidate.binding.expected_rev + 1
-                && event.confirmation.payload_sha256 == candidate.payload_sha256
-        })
-    } else {
-        None
-    };
-
-    match crate::confirmation::admission(
+    crate::confirmation::admission(
         &candidate.binding.expected_rev,
         &object.rev,
-        already_applied.is_some(),
+        false,
         "the object revision",
-    )? {
-        crate::confirmation::Admission::AlreadyApplied => {
-            let applied = already_applied.expect("the shared gate classified this as applied");
-            discard(root, code)?;
-            return Ok((applied, object));
-        }
-        crate::confirmation::Admission::Apply => {}
-    }
+    )?;
 
     // Re-check references at the moment of admission, not only at prepare: a
     // target may have been revised while the human was reading.

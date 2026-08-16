@@ -1,8 +1,9 @@
 //! What the command line promises the outside world.
 
 use engr::{
+    gate,
     model::{Action, Confirmation, Content, Event, Object, Payload, EVENT_FORMAT},
-    store,
+    ops, store,
 };
 use serde_json::Value;
 use std::fs::OpenOptions;
@@ -134,6 +135,286 @@ fn assert_migration_preflight_refuses(corrupt: impl FnOnce(&Path, &str, &str)) {
             path.display()
         );
     }
+}
+
+#[test]
+fn reference_admission_uses_the_effective_target_projection() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    store::init(root).expect("init");
+
+    let target = engr::model::new_id();
+    let create_target = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: target.clone(),
+            content: Content {
+                text: "target".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare target");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", create_target.candidate.challenge),
+    )
+    .expect("confirm target");
+    let initial_section = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: target.clone(),
+            content: Content {
+                text: "projection wording".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare section");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", initial_section.candidate.challenge),
+    )
+    .expect("confirm section");
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record projected target"]);
+    let old_commit = engr::git::head(root).expect("head");
+    let raw = store::load_object(root, &target)
+        .expect("raw target")
+        .section(1)
+        .expect("raw section")
+        .clone();
+
+    let revision = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionRevised { section: 1 },
+            object: target.clone(),
+            content: Content {
+                text: "effective crash-tail wording".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare revision");
+    let revision_event = Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::FORMAT_VERSION,
+        event_id: engr::model::new_id(),
+        rev: revision.candidate.binding.expected_rev + 1,
+        time: "2026-08-17T00:00:00Z".to_owned(),
+        payload: revision.candidate.payload.clone(),
+        confirmation: Confirmation {
+            challenge: revision.candidate.challenge.clone(),
+            payload_sha256: revision.candidate.payload_sha256.clone(),
+        },
+    };
+    store::append_event(root, &revision_event).expect("append without projection");
+    let effective = ops::effective_section(root, &target, 1).expect("effective target section");
+    assert_ne!(effective.sha256, raw.sha256);
+
+    let source = engr::model::new_id();
+    let create_source = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: source.clone(),
+            content: Content {
+                text: "source".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare source");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", create_source.candidate.challenge),
+    )
+    .expect("confirm source");
+
+    let stale_projection_ref = Payload {
+        action: Action::SectionAdded,
+        object: source.clone(),
+        content: Content {
+            text: "cannot pin stale projection".to_owned(),
+            based_on: None,
+            refs: vec![engr::model::Ref {
+                object: target.clone(),
+                section: 1,
+                sha256: raw.sha256,
+                commit: old_commit.clone(),
+            }],
+        },
+    };
+    let error = gate::prepare(root, stale_projection_ref)
+        .expect_err("gate must reject a stale raw projection reference");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("that section is now"));
+
+    let cli = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &source,
+            "--add",
+            "--text",
+            "CLI must use effective wording",
+            "--no-based-on",
+            "--ref",
+            &format!("{target}:1"),
+        ],
+    );
+    assert_eq!(cli.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(
+        String::from_utf8_lossy(&cli.stderr).contains("commit the target wording first"),
+        "CLI must not hash the stale projection: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+
+    store::save_object(
+        root,
+        &ops::effective(root, &target).expect("effective object"),
+    )
+    .expect("repair projection");
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record recovered target"]);
+    let committed_effective = engr::git::head(root).expect("new head");
+    gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: source,
+            content: Content {
+                text: "historically verified effective wording".to_owned(),
+                based_on: None,
+                refs: vec![engr::model::Ref {
+                    object: target,
+                    section: 1,
+                    sha256: effective.sha256,
+                    commit: committed_effective,
+                }],
+            },
+        },
+    )
+    .expect("the committed effective wording remains referenceable");
+}
+
+#[test]
+fn candidate_display_distinguishes_retryable_from_stale() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let id = engr::model::new_id();
+    let created = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: id.clone(),
+            content: Content {
+                text: "candidate state".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare object");
+    gate::confirm(root, &format!("CONFIRM {}", created.candidate.challenge))
+        .expect("confirm object");
+
+    let retryable = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id.clone(),
+            content: Content {
+                text: "apply once".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare retryable candidate");
+    let retry_code = retryable.candidate.challenge.clone();
+    gate::confirm(root, &format!("CONFIRM {retry_code}")).expect("apply candidate");
+    store::write_json(
+        &store::candidate_path(root, &retry_code),
+        &retryable.candidate,
+    )
+    .expect("restore candidate after deletion crash");
+
+    let shown = run_engr(root, &["candidate", &retry_code]);
+    assert!(shown.status.success());
+    let shown_text = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown_text.contains("already applied"));
+    assert!(!shown_text.contains("dead"));
+    assert!(!shown_text.contains("Prepare again"));
+    let listed = run_engr(root, &["candidate"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("retry"));
+
+    let confirmation = run_engr(root, &["confirm", &format!("CONFIRM {retry_code}")]);
+    assert!(
+        confirmation.status.success(),
+        "retry: {}",
+        String::from_utf8_lossy(&confirmation.stderr)
+    );
+    assert_eq!(
+        store::load_events(root, &id).expect("events").len(),
+        2,
+        "idempotent retry must not append another event"
+    );
+    assert_eq!(
+        ops::effective(root, &id).expect("object").sections.len(),
+        1,
+        "idempotent retry must not add another section"
+    );
+
+    let stale = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id.clone(),
+            content: Content {
+                text: "stale candidate".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare stale candidate");
+    let stale_code = stale.candidate.challenge.clone();
+    let overtaking = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id,
+            content: Content {
+                text: "overtaking mutation".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare overtaking candidate");
+    gate::confirm(root, &format!("CONFIRM {}", overtaking.candidate.challenge))
+        .expect("confirm overtaking candidate");
+    store::write_json(&store::candidate_path(root, &stale_code), &stale.candidate)
+        .expect("restore overtaken candidate");
+
+    let stale_view = run_engr(root, &["candidate", &stale_code]);
+    assert!(stale_view.status.success());
+    assert!(String::from_utf8_lossy(&stale_view.stdout).contains("dead"));
+    let stale_list = run_engr(root, &["candidate"]);
+    assert!(String::from_utf8_lossy(&stale_list.stdout).contains("stale"));
 }
 
 #[test]
@@ -408,6 +689,57 @@ fn legacy_crash_tail_reads_the_effective_object_without_writing() {
             std::fs::read(&path).expect("snapshot after read"),
             expected,
             "{} changed while reading a legacy crash tail",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn runtime_and_migration_reject_the_same_future_event_gap() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "gap object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    mark_legacy(root, id);
+
+    let events_path = store::events_path(root, id);
+    let mut event: Event =
+        serde_json::from_slice(&std::fs::read(&events_path).expect("event")).expect("json");
+    event.rev = 3;
+    std::fs::write(&events_path, serde_json::to_vec(&event).expect("json")).expect("event");
+    let object_path = store::object_path(root, id);
+    let format_path = store::engr_dir(root).join("format.json");
+    let before = [
+        (
+            object_path.clone(),
+            std::fs::read(&object_path).expect("object"),
+        ),
+        (
+            events_path.clone(),
+            std::fs::read(&events_path).expect("events"),
+        ),
+        (
+            format_path.clone(),
+            std::fs::read(&format_path).expect("format"),
+        ),
+    ];
+
+    let read = run_engr(root, &["show", id]);
+    assert_eq!(
+        read.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "a future revision gap is corrupt stored recovery data: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let migrate = run_engr(root, &["migrate"]);
+    assert_eq!(migrate.status.code(), Some(engr::EXIT_SCHEMA));
+    for (path, expected) in before {
+        assert_eq!(
+            std::fs::read(&path).expect("snapshot after refusal"),
+            expected,
+            "{} changed despite the rejected future gap",
             path.display()
         );
     }

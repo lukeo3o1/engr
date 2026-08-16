@@ -399,6 +399,48 @@ pub struct Event {
     pub confirmation: Confirmation,
 }
 
+/// Apply only the event suffix newer than the persisted projection.
+///
+/// Retained history may have been purged at its beginning, so events at or
+/// below the projection revision are evidence rather than replay input. Once a
+/// newer event exists, though, it must begin at the next revision and continue
+/// without a gap: otherwise a later confirmation could be inserted before an
+/// unreachable future event.
+pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(Object, bool)> {
+    let future: Vec<_> = events
+        .iter()
+        .filter(|event| event.rev > object.rev)
+        .collect();
+    if future.is_empty() {
+        return Ok((object, false));
+    }
+
+    let mut expected = object.rev.checked_add(1).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!("{} cannot advance past its highest revision", object.id),
+        )
+    })?;
+    for event in future {
+        ensure!(
+            event.rev == expected,
+            EXIT_INVARIANT,
+            "{}: recoverable event tail begins or continues at rev {}, not rev {}",
+            object.id,
+            event.rev,
+            expected
+        );
+        project(&mut object, event)?;
+        expected = object.rev.checked_add(1).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!("{} cannot advance past its highest revision", object.id),
+            )
+        })?;
+    }
+    Ok((object, true))
+}
+
 /// Apply a confirmed event to an object. Deterministic by construction: no
 /// clocks, no git, no interpretation of prose. Everything it needs is in the
 /// event.
@@ -493,4 +535,73 @@ fn section_from(id: u64, event: &Event) -> Result<Section> {
         refs: content.refs,
         confirmed_at: event.time.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section_added(id: &str, rev: u64, text: &str) -> Event {
+        let payload = Payload {
+            action: Action::SectionAdded,
+            object: id.to_owned(),
+            content: Content {
+                text: text.to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        };
+        Event {
+            format: EVENT_FORMAT.to_owned(),
+            version: FORMAT_VERSION,
+            event_id: new_id(),
+            rev,
+            time: "2026-08-17T00:00:00Z".to_owned(),
+            confirmation: Confirmation {
+                challenge: "TEST00".to_owned(),
+                payload_sha256: payload.sha256().expect("payload hash"),
+            },
+            payload,
+        }
+    }
+
+    #[test]
+    fn recoverable_tail_allows_purged_history_but_rejects_future_gaps() {
+        let id = new_id();
+        let mut completed = Object::new(id.clone(), "completed".to_owned()).expect("object");
+        completed.rev = 2;
+        assert!(
+            replay_recoverable_tail(completed, &[section_added(&id, 2, "old evidence")]).is_ok(),
+            "retained evidence at or below the projection may have a missing prefix"
+        );
+
+        let mut crashed = Object::new(id.clone(), "crashed".to_owned()).expect("object");
+        crashed.rev = 1;
+        let (recovered, applied) = replay_recoverable_tail(
+            crashed,
+            &[
+                section_added(&id, 2, "first recovery event"),
+                section_added(&id, 3, "second recovery event"),
+            ],
+        )
+        .expect("contiguous future tail");
+        assert!(applied);
+        assert_eq!(recovered.rev, 3);
+        assert_eq!(recovered.sections.len(), 2);
+
+        let mut projection = Object::new(id.clone(), "gap".to_owned()).expect("object");
+        projection.rev = 1;
+        assert!(
+            replay_recoverable_tail(projection.clone(), &[section_added(&id, 3, "gap")]).is_err(),
+            "the first future event must be exactly the next revision"
+        );
+        assert!(
+            replay_recoverable_tail(
+                projection,
+                &[section_added(&id, 2, "first"), section_added(&id, 4, "gap"),],
+            )
+            .is_err(),
+            "the future tail must remain contiguous"
+        );
+    }
 }

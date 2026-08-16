@@ -1,7 +1,7 @@
 //! Maintenance: crash reconciliation and verify.
 
-use crate::model::{project, Action, Object};
-use crate::{ensure, git, store, Result, EXIT_INVARIANT, EXIT_NOT_FOUND};
+use crate::model::{replay_recoverable_tail, Action, Object, Section};
+use crate::{ensure, git, store, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use std::path::Path;
 
 /// Replay the recoverable tail without choosing whether it may be persisted.
@@ -9,7 +9,7 @@ use std::path::Path;
 /// a legacy workspace must remain byte-for-byte read-only until migration.
 fn replay(root: &Path, id: &str) -> Result<(Object, bool)> {
     let events = store::load_events(root, id)?;
-    let mut object = match store::load_object(root, id) {
+    let object = match store::load_object(root, id) {
         Ok(object) => object,
         Err(error) if error.code == EXIT_NOT_FOUND => {
             let created = events.iter().find(|event| event.rev == 1).ok_or(error)?;
@@ -23,19 +23,25 @@ fn replay(root: &Path, id: &str) -> Result<(Object, bool)> {
         }
         Err(error) => return Err(error),
     };
-    let mut applied = false;
-    // Walk forward one rev at a time, which also refuses to skip a gap.
-    while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {
-        project(&mut object, event)?;
-        applied = true;
-    }
-    Ok((object, applied))
+    replay_recoverable_tail(object, &events).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{id}: event tail cannot reconcile: {}", error.message),
+        )
+    })
 }
 
 /// Read the effective authority after applying any recoverable crash tail in
 /// memory. Unlike [`reconcile`], this never writes a projection.
 pub fn effective(root: &Path, id: &str) -> Result<Object> {
     Ok(replay(root, id)?.0)
+}
+
+/// Read one current target section through the same effective authority used by
+/// every read surface. Reference admission must never pin a stale projection
+/// while a confirmed recovery tail already carries newer wording.
+pub fn effective_section(root: &Path, id: &str, section: u64) -> Result<Section> {
+    effective(root, id)?.section(section).cloned()
 }
 
 /// Close the window between appending an event and saving the projection.

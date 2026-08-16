@@ -236,7 +236,12 @@ impl std::fmt::Display for CanonicalEngrRef {
 fn validate_id(kind: ResourceKind, id: &str) -> Result<()> {
     match kind {
         ResourceKind::Object | ResourceKind::Backlog => {
-            decode_uuid(id)?;
+            let decoded = decode_uuid(id)?;
+            ensure!(
+                decoded.get_version() == Some(uuid::Version::SortRand),
+                EXIT_SCHEMA,
+                "Object and Backlog references must encode UUIDv7 identities"
+            );
         }
         ResourceKind::Collection => {
             ensure!(
@@ -364,6 +369,25 @@ mod tests {
         let parsed = EngrRef::parse_standalone("engr:obj:01h47kwz2mfk0v47mffcnstqva@main")
             .expect("input reference");
         assert!(parsed.canonicalize(|_| Some("g".repeat(40))).is_err());
+    }
+
+    #[test]
+    fn object_and_backlog_references_require_uuidv7() {
+        let v7 = "01h47kwz2mfk0v47mffcnstqva";
+        for kind in ["obj", "backlog"] {
+            EngrRef::parse_standalone(&format!("engr:{kind}:{v7}"))
+                .expect("a UUIDv7 compact reference");
+        }
+
+        let v4 = encode_uuid(
+            uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("fixed UUIDv4"),
+        );
+        for kind in ["obj", "backlog"] {
+            assert!(
+                EngrRef::parse_standalone(&format!("engr:{kind}:{v4}")).is_err(),
+                "{kind} must not accept a UUIDv4 compact identity"
+            );
+        }
     }
 
     #[test]

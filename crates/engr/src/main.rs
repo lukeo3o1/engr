@@ -359,8 +359,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         let section = canonical
             .section()
             .expect("checked before canonicalization");
-        let target = store::load_object(root, &id)?;
-        let target_section = target.section(section)?;
+        let target_section = ops::effective_section(root, &id, section)?;
         let commit = match canonical.snapshot() {
             Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
@@ -390,8 +389,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         )
     })?;
     let id = resolve_object_argument(root, "--ref", prefix)?;
-    let target = store::load_object(root, &id)?;
-    let target_section = target.section(section)?;
+    let target_section = ops::effective_section(root, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
@@ -524,10 +522,14 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                 "{}",
                 render_candidate(&candidate, view::width(root), &notes)
             );
-            if !gate::is_live(root, &candidate) {
-                println!(
+            match gate::candidate_state(root, &candidate)? {
+                gate::CandidateState::Pending => {}
+                gate::CandidateState::AlreadyApplied(_) => println!(
+                    "\nThis candidate was already applied. Retry the same confirmation to finish cleanup."
+                ),
+                gate::CandidateState::Stale { .. } => println!(
                     "\nThis candidate is dead — the object moved after it was prepared. Prepare again."
-                );
+                ),
             }
             Ok(())
         }
@@ -544,10 +546,10 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                     candidate.challenge,
                     candidate.payload.action.label(),
                     shorten(&candidate.payload.object, width),
-                    if gate::is_live(root, &candidate) {
-                        "pending"
-                    } else {
-                        "stale"
+                    match gate::candidate_state(root, &candidate)? {
+                        gate::CandidateState::Pending => "pending",
+                        gate::CandidateState::AlreadyApplied(_) => "retry",
+                        gate::CandidateState::Stale { .. } => "stale",
                     },
                     candidate.created_at
                 );
