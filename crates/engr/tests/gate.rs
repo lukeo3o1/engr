@@ -125,6 +125,110 @@ fn hedged_assent_discards_the_candidate() {
 }
 
 #[test]
+fn malformed_confirmation_codes_never_escape_candidates() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "confirmation paths");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let format_path = store::engr_dir(&root).join("format.json");
+    let object_path = store::object_path(&root, &id);
+    let outside_path = root.join("outside.json");
+    std::fs::write(&outside_path, "outside candidate storage").expect("outside fixture");
+    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
+    let before: Vec<_> = [&format_path, &object_path, &outside_path, &candidate_path]
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read(path).expect("snapshot")))
+        .collect();
+
+    for malformed in [
+        "../format".to_owned(),
+        format!("../objects/{id}"),
+        "../../outside".to_owned(),
+    ] {
+        let error = gate::confirm(&root, &format!("CONFIRM {malformed} commentary"))
+            .expect_err("a path-shaped response is not a qualified assent");
+        assert_eq!(error.code, engr::EXIT_USAGE);
+        for (path, expected) in &before {
+            assert_eq!(
+                std::fs::read(path).expect("snapshot after refusal"),
+                *expected
+            );
+        }
+    }
+    for malformed in ["../format", "../objects/not-an-object", "../../outside"] {
+        assert_eq!(
+            gate::find(&root, malformed)
+                .expect_err("candidate lookup must reject malformed paths")
+                .code,
+            engr::EXIT_USAGE
+        );
+        assert_eq!(
+            gate::discard(&root, malformed)
+                .expect_err("candidate discard must reject malformed paths")
+                .code,
+            engr::EXIT_USAGE
+        );
+    }
+
+    let error = gate::confirm(&root, &format!("CONFIRM {code} commentary"))
+        .expect_err("a qualified valid code is discarded without nested locking");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(gate::find(&root, &code).is_err());
+}
+
+#[test]
+fn direct_confirmation_refuses_a_legacy_workspace_without_partial_mutation() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "legacy boundary");
+    let prepared = gate::prepare(&root, empty(Action::ObjectClosed, &id)).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let object_path = store::object_path(&root, &id);
+    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
+    let events_path = store::events_path(&root, &id);
+
+    let mut object: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    object["format"] = serde_json::Value::String("engr-object".to_owned());
+    object["version"] = serde_json::Value::from(1);
+    let state = object
+        .as_object_mut()
+        .expect("object")
+        .remove("state")
+        .expect("state");
+    object["status"] = state;
+    std::fs::write(
+        &object_path,
+        serde_json::to_vec_pretty(&object).expect("json"),
+    )
+    .expect("legacy object");
+
+    let object_before = std::fs::read(&object_path).expect("object snapshot");
+    let events_before = std::fs::read(&events_path).expect("events snapshot");
+    let candidate_before = std::fs::read(&candidate_path).expect("candidate snapshot");
+    for response in [
+        format!("CONFIRM {code} but leave it open"),
+        format!("CONFIRM {code}"),
+    ] {
+        let error = gate::confirm(&root, &response).expect_err("legacy confirmation is refused");
+        assert_eq!(error.code, engr::EXIT_SCHEMA);
+        assert!(error.message.contains("engr migrate"));
+        assert_eq!(
+            std::fs::read(&object_path).expect("object after refusal"),
+            object_before
+        );
+        assert_eq!(
+            std::fs::read(&events_path).expect("events after refusal"),
+            events_before
+        );
+        assert_eq!(
+            std::fs::read(&candidate_path).expect("candidate after refusal"),
+            candidate_before
+        );
+    }
+}
+
+#[test]
 fn section_ids_are_never_reused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "ids");
@@ -168,7 +272,7 @@ fn a_closed_object_refuses_section_changes() {
     let id = new_object(&root, "closing");
     admit(&root, payload(Action::SectionAdded, &id, "one"));
     let object = admit(&root, empty(Action::ObjectClosed, &id));
-    assert_eq!(object.status, Status::Closed);
+    assert_eq!(object.state, Status::Closed);
 
     let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "two"))
         .expect_err("a closed object is sealed");
@@ -185,13 +289,206 @@ fn one_live_candidate_per_object() {
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first draft"))
         .expect("first")
         .candidate
-        .challenge;
+        .challenge
+        .clone();
     let second =
         gate::prepare(&root, payload(Action::SectionAdded, &id, "second draft")).expect("second");
     assert_eq!(second.superseded, vec![first.clone()]);
     assert!(
         gate::find(&root, &first).is_err(),
         "a human should never hold two codes for the same object"
+    );
+}
+
+#[test]
+fn direct_gate_callers_cannot_persist_non_v7_object_identities() {
+    let (_dir, root) = workspace();
+    for id in ["not-a-uuid", "550e8400-e29b-41d4-a716-446655440000"] {
+        let error = gate::prepare(
+            &root,
+            payload(Action::ObjectCreated, id, "invalid identity"),
+        )
+        .expect_err("a direct caller cannot bypass Object identity validation");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{id}");
+    }
+
+    let source = new_object(&root, "source");
+    let mut invalid_ref = payload(Action::SectionAdded, &source, "invalid dependency");
+    invalid_ref.content.refs = vec![Ref {
+        object: "not-a-uuid".to_owned(),
+        section: 1,
+        sha256: "0".repeat(64),
+        commit: "HEAD".to_owned(),
+    }];
+    let error =
+        gate::prepare(&root, invalid_ref).expect_err("a Ref Object identity is persisted data too");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        gate::pending(&root).expect("pending candidates").is_empty(),
+        "rejected direct inputs must not leave a candidate behind"
+    );
+}
+
+#[test]
+fn title_actions_cannot_carry_hidden_basis_or_references() {
+    let (_dir, root) = workspace();
+    let mut created = payload(Action::ObjectCreated, &engr::model::new_id(), "new title");
+    created.content.based_on = Some("HEAD".to_owned());
+    created.content.refs = vec![Ref {
+        object: engr::model::new_id(),
+        section: 1,
+        sha256: "0".repeat(64),
+        commit: "HEAD".to_owned(),
+    }];
+    let error = gate::prepare(&root, created).expect_err("a title has no hidden context");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(gate::pending(&root).expect("pending").is_empty());
+
+    let id = new_object(&root, "old title");
+    let mut renamed = payload(Action::ObjectRenamed, &id, "new title");
+    renamed.content.based_on = Some("HEAD".to_owned());
+    let error = gate::prepare(&root, renamed).expect_err("a renamed title has no basis");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        1,
+        "rejected title context must not enter Event history"
+    );
+}
+
+#[test]
+fn public_gate_mutations_serialize_direct_callers() {
+    use std::sync::{Arc, Barrier};
+
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "direct lock");
+    let first = payload(Action::SectionAdded, &id, "first proposal");
+    let second = payload(Action::SectionAdded, &id, "second proposal");
+    let start = Arc::new(Barrier::new(2));
+    let (first_prepare, second_prepare) = std::thread::scope(|scope| {
+        let first_start = Arc::clone(&start);
+        let second_start = Arc::clone(&start);
+        let first_root = &root;
+        let second_root = &root;
+        let first = scope.spawn(move || {
+            first_start.wait();
+            gate::prepare(first_root, first)
+        });
+        let second = scope.spawn(move || {
+            second_start.wait();
+            gate::prepare(second_root, second)
+        });
+        (
+            first.join().expect("first prepare"),
+            second.join().expect("second prepare"),
+        )
+    });
+    assert!(first_prepare.is_ok() && second_prepare.is_ok());
+    let candidates = gate::pending(&root).expect("one live candidate");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "direct prepares must supersede under one lock"
+    );
+
+    let response = format!("CONFIRM {}", candidates[0].challenge);
+    let start = Arc::new(Barrier::new(2));
+    let (first_confirm, second_confirm) = std::thread::scope(|scope| {
+        let first_start = Arc::clone(&start);
+        let second_start = Arc::clone(&start);
+        let first_root = &root;
+        let second_root = &root;
+        let first_response = response.clone();
+        let second_response = response.clone();
+        let first = scope.spawn(move || {
+            first_start.wait();
+            gate::confirm(first_root, &first_response)
+        });
+        let second = scope.spawn(move || {
+            second_start.wait();
+            gate::confirm(second_root, &second_response)
+        });
+        (
+            first.join().expect("first confirm"),
+            second.join().expect("second confirm"),
+        )
+    });
+    assert_eq!(
+        [first_confirm, second_confirm]
+            .iter()
+            .filter(|outcome| outcome.is_ok())
+            .count(),
+        1,
+        "one direct confirmation may admit the candidate"
+    );
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "concurrent confirmation must not append competing revision 2 events"
+    );
+}
+
+#[test]
+fn direct_gate_callers_canonicalize_git_anchors_before_confirmation() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "target");
+    let source = new_object(&root, "source");
+    let target = admit(
+        &root,
+        payload(Action::SectionAdded, &target, "target wording"),
+    );
+    let target_id = target.id;
+    let pinned = store::load_object(&root, &target_id)
+        .expect("target")
+        .section(1)
+        .expect("target section")
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target wording");
+
+    let mut direct = payload(
+        Action::SectionAdded,
+        &source.to_ascii_uppercase(),
+        "dependent wording",
+    );
+    direct.content.based_on = Some("HEAD".to_owned());
+    direct.content.refs = vec![Ref {
+        object: target_id.to_ascii_uppercase(),
+        section: 1,
+        sha256: pinned,
+        commit: commit[..12].to_owned(),
+    }];
+
+    let prepared = gate::prepare(&root, direct).expect("direct payload is canonicalized");
+    assert_eq!(prepared.candidate.payload.object, source);
+    assert_eq!(
+        prepared.candidate.payload.content.based_on.as_deref(),
+        Some(commit.as_str())
+    );
+    assert_eq!(prepared.candidate.payload.content.refs[0].object, target_id);
+    assert_eq!(prepared.candidate.payload.content.refs[0].commit, commit);
+    assert_eq!(
+        prepared.candidate.payload_sha256,
+        prepared
+            .candidate
+            .payload
+            .sha256()
+            .expect("canonical payload hash"),
+        "the human's candidate hash covers the resolved values"
+    );
+
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    let (event, _) = gate::confirm(&root, &response).expect("confirm canonical candidate");
+    assert_eq!(
+        event.payload.content.based_on.as_deref(),
+        Some(commit.as_str())
+    );
+    assert_eq!(event.payload.content.refs[0].commit, commit);
+    assert!(
+        !serde_json::to_string(&event)
+            .expect("event JSON")
+            .contains("HEAD"),
+        "symbolic input must never reach the Event"
     );
 }
 
@@ -210,7 +507,7 @@ fn references_are_checked_at_the_gate() {
     let commit = commit_all(&root, "record target");
 
     let mut tampered = store::load_object(&root, &target).expect("target");
-    tampered.sections[0].text = "edited outside the gate".to_owned();
+    "edited outside the gate".clone_into(&mut tampered.sections[0].text);
     store::save_object(&root, &tampered).expect("tamper target");
     let mut forged_current = payload(Action::SectionAdded, &source, "depends on forged wording");
     forged_current.content.refs = vec![Ref {
@@ -223,7 +520,7 @@ fn references_are_checked_at_the_gate() {
         .expect_err("a reference cannot trust a stale stored target hash");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("current wording"));
-    tampered.sections[0].text = "depended upon".to_owned();
+    "depended upon".clone_into(&mut tampered.sections[0].text);
     store::save_object(&root, &tampered).expect("restore target");
 
     let revised = admit(
@@ -308,6 +605,102 @@ fn references_are_checked_at_the_gate() {
 }
 
 #[test]
+fn historical_references_decode_the_snapshot_workspace_format() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "historical target");
+    let source = new_object(&root, "historical source");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "historical wording"),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let current_commit = commit_all(&root, "current historical snapshot");
+    assert_eq!(
+        engr::git::object_at(&root, &current_commit, &target)
+            .expect("current snapshot format")
+            .expect("current target")
+            .section(1)
+            .expect("current section")
+            .sha256,
+        pinned
+    );
+
+    let format_path = store::engr_dir(&root).join("format.json");
+    let format_before = std::fs::read(&format_path).expect("format");
+    let objects_before: Vec<_> = store::object_ids(&root)
+        .expect("object ids")
+        .into_iter()
+        .map(|id| {
+            let path = store::object_path(&root, &id);
+            (path.clone(), std::fs::read(path).expect("object"))
+        })
+        .collect();
+    for (path, _) in &objects_before {
+        let mut object: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("object")).expect("json");
+        object["format"] = serde_json::Value::String("engr-object".to_owned());
+        object["version"] = serde_json::Value::from(1);
+        let state = object
+            .as_object_mut()
+            .expect("object")
+            .remove("state")
+            .expect("state");
+        object["status"] = state;
+        std::fs::write(path, serde_json::to_vec_pretty(&object).expect("json"))
+            .expect("legacy object");
+    }
+    std::fs::remove_file(&format_path).expect("remove workspace authority");
+    let legacy_commit = commit_all(&root, "legacy v0 historical snapshot");
+    assert_eq!(
+        engr::git::object_at(&root, &legacy_commit, &target)
+            .expect("recognized legacy snapshot")
+            .expect("legacy target")
+            .section(1)
+            .expect("legacy section")
+            .sha256,
+        pinned
+    );
+
+    for (path, bytes) in &objects_before {
+        std::fs::write(path, bytes).expect("restore object");
+    }
+    std::fs::write(&format_path, &format_before).expect("restore workspace authority");
+    let mut legacy_reference = payload(Action::SectionAdded, &source, "uses old wording");
+    legacy_reference.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned.clone(),
+        commit: legacy_commit,
+    }];
+    let prepared = gate::prepare(&root, legacy_reference).expect("legacy ref is admitted");
+    gate::discard(&root, &prepared.candidate.challenge).expect("discard test candidate");
+
+    commit_all(&root, "restore canonical historical snapshot");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#)
+        .expect("unsupported workspace authority");
+    let unsupported_commit = commit_all(&root, "unsupported historical snapshot");
+    std::fs::write(&format_path, &format_before).expect("restore current workspace authority");
+    let error = engr::git::object_at(&root, &unsupported_commit, &target)
+        .expect_err("an unknown historical workspace version is refused");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("workspace version 99"));
+
+    let mut unsupported_reference = payload(Action::SectionAdded, &source, "must not guess");
+    unsupported_reference.content.refs = vec![Ref {
+        object: target,
+        section: 1,
+        sha256: pinned,
+        commit: unsupported_commit,
+    }];
+    let error = gate::prepare(&root, unsupported_reference)
+        .expect_err("a reference cannot decode an unsupported historical workspace");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("workspace version 99"));
+}
+
+#[test]
 fn sibling_references_are_allowed_but_direct_self_reference_is_not() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "self reference");
@@ -352,7 +745,7 @@ fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
         payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
     )
     .expect("prepare");
-    let path = store::candidate_path(&root, &prepared.candidate.challenge);
+    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
     let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
     stored
         .as_object_mut()
@@ -565,7 +958,11 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
 
     // Reinstate the candidate to stand in for a crash between saving the
     // projection and clearing it.
-    store::write_json(&store::candidate_path(&root, &code), &prepared.candidate).expect("rewrite");
+    store::write_json(
+        &store::candidate_path(&root, &code).expect("candidate path"),
+        &prepared.candidate,
+    )
+    .expect("rewrite");
 
     let (_, object) = gate::confirm(&root, &response).expect("recovery is idempotent");
     assert_eq!(object.rev, 2, "the event must not be applied a second time");
@@ -580,9 +977,9 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
-        rev: first.candidate.expected_rev + 1,
+        rev: first.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: first.candidate.payload.clone(),
         confirmation: engr::model::Confirmation {
@@ -597,7 +994,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     // purging can erase the first confirmed section.
     let second =
         gate::prepare(&root, payload(Action::SectionAdded, &id, "second")).expect("second");
-    assert_eq!(second.candidate.expected_rev, 2);
+    assert_eq!(second.candidate.binding.expected_rev, 2);
     let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge))
         .expect("confirm second")
         .1;
@@ -619,9 +1016,9 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     let code = prepared.candidate.challenge.clone();
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
-        rev: prepared.candidate.expected_rev + 1,
+        rev: prepared.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: prepared.candidate.payload.clone(),
         confirmation: engr::model::Confirmation {
@@ -651,7 +1048,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -663,7 +1060,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     };
     store::append_event(&root, &event).expect("append before the crash");
 
-    let code = prepared.candidate.challenge;
+    let code = prepared.candidate.challenge.clone();
     let (_, object) =
         gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
     assert_eq!(object.rev, 1);
@@ -713,7 +1110,7 @@ fn a_live_challenge_code_is_kept_out_of_git() {
     let id = engr::model::new_id();
     let prepared =
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
-    let code = &prepared.candidate.challenge;
+    let code = &prepared.candidate.challenge.clone();
 
     assert!(ignored(&root, ".engr/lock"));
     assert!(ignored(&root, &format!(".engr/candidates/{code}.json")));

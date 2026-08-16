@@ -1,7 +1,7 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use engr::model::{self, Action, Payload, Ref};
 use engr::{gate, git, ops, store, view};
-use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_USAGE};
+use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -22,6 +22,8 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
+    /// Explicitly upgrade a recognized legacy v0 workspace
+    Migrate,
     /// Print the protocol this build implements
     Protocol,
     /// Put a change up for a human to confirm
@@ -152,14 +154,27 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let root = store::find_root(cli.root.as_deref())?;
-    store::validate_format(&root)?;
+    if matches!(cli.command, Command::Migrate) {
+        store::with_lock(&root, || store::migrate(&root))?;
+        println!(
+            "migrated {} to workspace version {}",
+            store::engr_dir(&root).display(),
+            engr::WORKSPACE_VERSION
+        );
+        return Ok(());
+    }
+    let workspace_format = store::validate_format(&root)?;
 
     match cli.command {
-        Command::Init | Command::Protocol => unreachable!("handled above"),
-        Command::Prepare(command) => prepare(&root, command),
+        Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
+        Command::Prepare(command) => {
+            store::require_current(&root)?;
+            prepare(&root, command)
+        }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
-            let (event, object) = store::with_lock(&root, || gate::confirm(&root, &response))?;
+            store::require_current(&root)?;
+            let (event, object) = gate::confirm(&root, &response)?;
             println!(
                 "CONFIRMED  {}  {}  rev {}",
                 shorten(&object.id, view::width(&root)),
@@ -176,8 +191,12 @@ fn run(cli: Cli) -> Result<()> {
             stale,
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
-            let id = store::resolve_id(&root, &object)?;
-            let object = store::with_lock(&root, || ops::reconcile(&root, &id))?;
+            let id = resolve_object_argument(&root, "show", &object)?;
+            let object = if workspace_format == store::WorkspaceFormat::Current {
+                store::with_lock(&root, || ops::reconcile(&root, &id))?
+            } else {
+                ops::effective(&root, &id)?
+            };
             if format == Format::Json {
                 println!("{}", view::render_show_json(&root, &object)?);
             } else {
@@ -228,7 +247,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             ))
         }
         (Action::ObjectCreated, None) => model::new_id(),
-        (_, Some(prefix)) => store::resolve_id(root, prefix)?,
+        (_, Some(prefix)) => resolve_object_argument(root, "--object", prefix)?,
         (_, None) => {
             return Err(Error::new(
                 EXIT_USAGE,
@@ -252,16 +271,22 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         (None, None) => None,
     };
 
-    let mut references = Vec::new();
-    for spec in &command.references {
-        references.push(parse_ref(root, spec)?);
-    }
-
     if action.carries_title() && (command.based_on.is_some() || command.no_based_on) {
         return Err(Error::new(
             EXIT_USAGE,
             "a title has no repository basis; use --based-on or --no-based-on only for section wording",
         ));
+    }
+    if action.carries_title() && !command.references.is_empty() {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "a title has no references; use --ref only for section wording",
+        ));
+    }
+
+    let mut references = Vec::new();
+    for spec in &command.references {
+        references.push(parse_ref(root, spec)?);
     }
     if !action.carries_content() && command.no_based_on {
         return Err(Error::new(
@@ -282,7 +307,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         object,
         content,
     };
-    let prepared = store::with_lock(root, || gate::prepare(root, payload))?;
+    let prepared = gate::prepare(root, payload)?;
 
     if command.json {
         println!(
@@ -304,7 +329,72 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 
 /// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
 /// so the caller cannot pin something the target never said.
+fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
+    if error.code == EXIT_SCHEMA {
+        Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
+    } else {
+        error
+    }
+}
+
+/// The shared `engr:` parser treats malformed values as schema errors because
+/// it is also used for stored authority. At the command line they are a person
+/// supplying an invalid argument, so translate only at this boundary.
+fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_engr_reference(field, spec, error))?;
+        if reference.kind() != engr::reference::ResourceKind::Object
+            || reference.section().is_some()
+            || reference.snapshot_selector().is_some()
+        {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("{field} {spec:?} must identify a current whole Object"),
+            ));
+        }
+    }
+    store::resolve_id(root, spec).map_err(|error| malformed_engr_reference(field, spec, error))
+}
+
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+        if reference.kind() != engr::reference::ResourceKind::Object
+            || reference.section().is_none()
+        {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("--ref {spec:?} must identify an Object section"),
+            ));
+        }
+        let canonical = reference
+            .canonicalize(|revision| git::resolve(root, revision))
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+        let id = engr::reference::decode_uuid(canonical.id())
+            .map_err(|error| malformed_engr_reference("--ref", spec, error))?
+            .to_string();
+        let section = canonical
+            .section()
+            .expect("checked before canonicalization");
+        let target_section = ops::effective_section(root, &id, section)?;
+        let commit = match canonical.snapshot() {
+            Some(commit) => commit.to_owned(),
+            None => git::head(root).ok_or_else(|| {
+                Error::new(
+                    engr::EXIT_INVARIANT,
+                    "a reference records the commit it was read at, which needs a git repository",
+                )
+            })?,
+        };
+        return Ok(Ref {
+            object: id,
+            section,
+            sha256: target_section.sha256.clone(),
+            commit,
+        });
+    }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
             EXIT_USAGE,
@@ -317,9 +407,8 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
             format!("--ref {spec:?}: section must be a number"),
         )
     })?;
-    let id = store::resolve_id(root, prefix)?;
-    let target = store::load_object(root, &id)?;
-    let target_section = target.section(section)?;
+    let id = resolve_object_argument(root, "--ref", prefix)?;
+    let target_section = ops::effective_section(root, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
@@ -452,10 +541,14 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                 "{}",
                 render_candidate(&candidate, view::width(root), &notes)
             );
-            if !gate::is_live(root, &candidate) {
-                println!(
+            match gate::candidate_state(root, &candidate)? {
+                gate::CandidateState::Pending => {}
+                gate::CandidateState::AlreadyApplied(_) => println!(
+                    "\nThis candidate was already applied. Retry the same confirmation to finish cleanup."
+                ),
+                gate::CandidateState::Stale { .. } => println!(
                     "\nThis candidate is dead — the object moved after it was prepared. Prepare again."
-                );
+                ),
             }
             Ok(())
         }
@@ -472,10 +565,10 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                     candidate.challenge,
                     candidate.payload.action.label(),
                     shorten(&candidate.payload.object, width),
-                    if gate::is_live(root, &candidate) {
-                        "pending"
-                    } else {
-                        "stale"
+                    match gate::candidate_state(root, &candidate)? {
+                        gate::CandidateState::Pending => "pending",
+                        gate::CandidateState::AlreadyApplied(_) => "retry",
+                        gate::CandidateState::Stale { .. } => "stale",
                     },
                     candidate.created_at
                 );
@@ -488,8 +581,8 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
 fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
     for id in store::object_ids(root)? {
-        let object = store::load_object(root, &id)?;
-        if all || object.status == engr::model::Status::Open {
+        let object = ops::effective(root, &id)?;
+        if all || object.state == engr::model::Status::Open {
             objects.push(object);
         }
     }
@@ -528,7 +621,7 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
 
 fn verify(root: &Path, object: Option<&str>) -> Result<()> {
     let ids = match object {
-        Some(prefix) => vec![store::resolve_id(root, prefix)?],
+        Some(prefix) => vec![resolve_object_argument(root, "verify", prefix)?],
         None => store::object_ids(root)?,
     };
     if ids.is_empty() {

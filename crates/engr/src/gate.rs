@@ -4,32 +4,23 @@
 //! against the exact response. There is no unconfirmed write path.
 
 use crate::model::{
-    project, Action, Confirmation, Content, Event, Object, Payload, CANDIDATE_FORMAT, EVENT_FORMAT,
+    canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
+    CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::{
-    ensure, git, ops, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND,
-    EXIT_SCHEMA, EXIT_STALE, EXIT_USAGE, FORMAT_VERSION,
+    ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION_V0,
+    EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE,
 };
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-
-/// Excludes the characters people misread aloud or mistype: 0/O, 1/I.
-const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-const CHALLENGE_LEN: usize = 6;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Candidate {
     pub format: String,
     pub version: u32,
-    pub challenge: String,
-    pub created_at: String,
-    /// The object revision this was prepared against.
-    pub expected_rev: u64,
     #[serde(flatten)]
-    pub payload: Payload,
-    pub payload_sha256: String,
+    pub gate: crate::confirmation::Candidate<Payload, ObjectBinding>,
     /// What the human is shown when the candidate carries a change to existing
     /// wording, so they read the change rather than the whole section again.
     pub previous_text: Option<String>,
@@ -47,22 +38,24 @@ pub struct Candidate {
     pub previous_semantics_recorded: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ObjectBinding {
+    /// The object revision this was prepared against.
+    pub expected_rev: u64,
+}
+
+impl std::ops::Deref for Candidate {
+    type Target = crate::confirmation::Candidate<Payload, ObjectBinding>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.gate
+    }
+}
+
 fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .expect("formatting a timestamp cannot fail")
-}
-
-fn mint_challenge(taken: &[String]) -> String {
-    let mut rng = rand::thread_rng();
-    loop {
-        let code: String = (0..CHALLENGE_LEN)
-            .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
-            .collect();
-        if !taken.contains(&code) {
-            return code;
-        }
-    }
 }
 
 pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
@@ -84,6 +77,7 @@ pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
             "{}: not an engr candidate",
             path.display()
         );
+        validate_candidate(&candidate)?;
         found.push(candidate);
     }
     found.sort_by(|left, right| left.created_at.cmp(&right.created_at));
@@ -91,21 +85,104 @@ pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
 }
 
 pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
-    let path = store::candidate_path(root, challenge);
+    let path = store::candidate_path(root, challenge)?;
     ensure!(
         path.exists(),
         EXIT_NOT_FOUND,
         "no candidate awaiting {challenge}"
     );
-    store::read_json(&path)
+    let candidate: Candidate = store::read_json(&path)?;
+    validate_candidate(&candidate)?;
+    Ok(candidate)
 }
 
-/// Whether a pending candidate can still be confirmed, or was overtaken.
-pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
-    match store::load_object(root, &candidate.payload.object) {
-        Ok(object) => object.rev == candidate.expected_rev,
-        Err(_) => candidate.expected_rev == 0,
+fn validate_candidate(candidate: &Candidate) -> Result<()> {
+    ensure!(
+        candidate.format == CANDIDATE_FORMAT && candidate.version == CANDIDATE_ENVELOPE_VERSION_V0,
+        EXIT_SCHEMA,
+        "candidate {} has an unsupported format",
+        candidate.challenge
+    );
+    ensure!(
+        crate::confirmation::valid_challenge(&candidate.challenge),
+        EXIT_SCHEMA,
+        "candidate {} has an invalid challenge code",
+        candidate.challenge
+    );
+    candidate.payload.validate()?;
+    validate_title_context(&candidate.payload).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("candidate {}: {}", candidate.challenge, error.message),
+        )
+    })
+}
+
+/// The actionable state of an outstanding candidate.
+///
+/// A candidate can survive the narrow crash window after its Event/projection
+/// are durable but before its file is deleted. That is retryable, not stale:
+/// the same exact confirmation must finish cleanup without applying again.
+#[derive(Debug)]
+pub enum CandidateState {
+    Pending,
+    AlreadyApplied(Box<Event>),
+    Stale { current_rev: u64 },
+}
+
+/// Classify a candidate from the same effective projection and durable Event
+/// evidence used by confirmation. Read surfaces and admission must agree about
+/// whether a code is still actionable.
+pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateState> {
+    match ops::effective(root, &candidate.payload.object) {
+        Ok(object) => {
+            if object.rev > candidate.binding.expected_rev {
+                let applied_rev =
+                    candidate
+                        .binding
+                        .expected_rev
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            Error::new(EXIT_INVARIANT, "candidate revision cannot advance")
+                        })?;
+                if let Some(event) = store::load_events(root, &candidate.payload.object)?
+                    .into_iter()
+                    .find(|event| {
+                        event.rev == applied_rev
+                            && event.confirmation.payload_sha256 == candidate.payload_sha256
+                    })
+                {
+                    return Ok(CandidateState::AlreadyApplied(Box::new(event)));
+                }
+            }
+            if object.rev == candidate.binding.expected_rev {
+                Ok(CandidateState::Pending)
+            } else {
+                Ok(CandidateState::Stale {
+                    current_rev: object.rev,
+                })
+            }
+        }
+        Err(error) if error.code == EXIT_NOT_FOUND => {
+            if candidate.binding.expected_rev == 0
+                && store::load_events(root, &candidate.payload.object)?.is_empty()
+            {
+                Ok(CandidateState::Pending)
+            } else {
+                Ok(CandidateState::Stale { current_rev: 0 })
+            }
+        }
+        Err(error) => Err(error),
     }
+}
+
+/// Whether a pending candidate can still be acted on. An already-applied
+/// candidate remains live only for its idempotent cleanup retry.
+pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
+    matches!(
+        candidate_state(root, candidate),
+        Ok(CandidateState::Pending | CandidateState::AlreadyApplied(_))
+    )
 }
 
 /// Something worth weighing before typing the code, but not grounds to refuse.
@@ -153,6 +230,69 @@ fn check_title(flag: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// A direct domain caller has no CLI adapter to normalize its values. Resolve
+/// every semantic identifier before the payload is hashed, so the candidate the
+/// human reads is byte-for-byte the one that becomes the Event.
+fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
+    payload.object = canonical_object_id(&payload.object)?;
+    if let Some(based_on) = payload.content.based_on.clone() {
+        payload.content.based_on = Some(resolve_commit(root, "based_on", &based_on)?);
+    }
+    for reference in &mut payload.content.refs {
+        reference.object = canonical_object_id(&reference.object)?;
+        reference.commit = resolve_commit(root, "reference commit", &reference.commit)?;
+    }
+    payload.validate()
+}
+
+/// Titles name the Object; unlike section wording they are not assertions made
+/// against repository context or another section. Keeping that rule at
+/// admission prevents the renderer from hiding semantic fields a human never
+/// had a chance to read.
+fn validate_title_context(payload: &Payload) -> Result<()> {
+    if payload.action.carries_title() {
+        ensure!(
+            payload.content.based_on.is_none() && payload.content.refs.is_empty(),
+            EXIT_INVARIANT,
+            "{} titles cannot carry repository basis or references",
+            payload.action.label()
+        );
+    }
+    Ok(())
+}
+
+/// Confirmed payloads must already be canonical; retries must never use this to
+/// silently change what an earlier human confirmed.
+fn validate_persisted_payload(root: &Path, payload: &Payload) -> Result<()> {
+    payload.validate()?;
+    validate_title_context(payload)?;
+    if let Some(based_on) = &payload.content.based_on {
+        ensure!(
+            git::resolve(root, based_on).as_deref() == Some(based_on.as_str()),
+            EXIT_INVARIANT,
+            "based_on {based_on} is not a commit in this repository"
+        );
+    }
+    for reference in &payload.content.refs {
+        ensure!(
+            git::resolve(root, &reference.commit).as_deref() == Some(reference.commit.as_str()),
+            EXIT_INVARIANT,
+            "reference commit {} is not a commit in this repository",
+            reference.commit
+        );
+    }
+    Ok(())
+}
+
+fn resolve_commit(root: &Path, field: &str, revision: &str) -> Result<String> {
+    git::resolve(root, revision).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!("{field} {revision} is not a commit in this repository"),
+        )
+    })
+}
+
 /// Recomputed rather than stored, so `engr candidate <code>` shows the same
 /// notes as `prepare` did — that screen is where a human reads before typing,
 /// and a note absent from it is a note that missed its moment.
@@ -183,7 +323,7 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
         .ok()?
         .iter()
         .filter(|id| id.as_str() != excluding)
-        .filter_map(|id| store::load_object(root, id).ok())
+        .filter_map(|id| ops::effective(root, id).ok())
         .find(|object| object.title.trim().to_lowercase() == needle)
         .map(|object| object.id)
 }
@@ -192,7 +332,17 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// confirmation. References are checked here, at the gate — not in `verify`.
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
-pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
+pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
+    // Refuse legacy workspaces before opening the writer lock: even creating a
+    // lock file would violate their explicit read-only migration boundary.
+    store::require_current(root)?;
+    store::with_lock(root, move || prepare_locked(root, payload))
+}
+
+fn prepare_locked(root: &Path, mut payload: Payload) -> Result<Prepared> {
+    store::require_current(root)?;
+    validate_title_context(&payload)?;
+    canonicalize_payload(root, &mut payload)?;
     // A title is the line a listing prints, so whitespace around it is never
     // meaningful and always visible — it pushes one row out of column. The
     // duplicate check already ignores it; storing what that check ignores is how
@@ -200,9 +350,10 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     // Normalised here, before the candidate is minted, so the human confirms the
     // exact string that will be stored.
     if payload.action.carries_title() {
-        payload.content.text = payload.content.text.trim().to_owned();
+        std::mem::take(&mut payload.content.text)
+            .trim()
+            .clone_into(&mut payload.content.text);
     }
-    payload.validate()?;
     let object = match ops::reconcile(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
@@ -261,7 +412,7 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         let mut trial = object.clone();
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
-            version: FORMAT_VERSION,
+            version: EVENT_ENVELOPE_VERSION_V0,
             event_id: String::new(),
             rev: object.rev + 1,
             time: now(),
@@ -275,29 +426,24 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     }
 
     validate_refs(root, &payload)?;
-    if let Some(commit) = &payload.content.based_on {
-        ensure!(
-            git::exists(root, commit),
-            EXIT_INVARIANT,
-            "based_on {commit} is not a commit in this repository"
-        );
-    }
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
     let taken: Vec<String> = pending(root)?
         .into_iter()
-        .map(|candidate| candidate.challenge)
+        .map(|candidate| candidate.challenge.clone())
         .collect();
-    let challenge = mint_challenge(&taken);
     let previous_semantics_recorded = matches!(payload.action, Action::SectionRevised { .. });
+    let gate = crate::confirmation::Candidate::prepare_with(
+        payload,
+        ObjectBinding { expected_rev },
+        &taken,
+        now(),
+        Payload::sha256,
+    )?;
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
-        version: FORMAT_VERSION,
-        challenge: challenge.clone(),
-        created_at: now(),
-        expected_rev,
-        payload_sha256: payload.sha256()?,
-        payload,
+        version: CANDIDATE_ENVELOPE_VERSION_V0,
+        gate,
         previous_text,
         previous_based_on,
         previous_refs,
@@ -309,12 +455,15 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     let mut superseded = Vec::new();
     for existing in pending(root)? {
         if existing.payload.object == candidate.payload.object {
-            fs::remove_file(store::candidate_path(root, &existing.challenge))
+            fs::remove_file(store::candidate_path(root, &existing.challenge)?)
                 .map_err(|error| tool_error("discarding a superseded candidate", error))?;
-            superseded.push(existing.challenge);
+            superseded.push(existing.challenge.clone());
         }
     }
-    store::write_json(&store::candidate_path(root, &challenge), &candidate)?;
+    store::write_json(
+        &store::candidate_path(root, &candidate.challenge)?,
+        &candidate,
+    )?;
 
     let notes = notes_for(root, &candidate);
 
@@ -334,28 +483,21 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
                 "section §{section} cannot directly reference itself"
             );
         }
-        let target = store::load_object(root, &reference.object).map_err(|error| {
-            if error.code == EXIT_NOT_FOUND {
-                Error::new(
-                    EXIT_NOT_FOUND,
-                    format!(
-                        "reference target object {} does not exist",
-                        reference.object
-                    ),
-                )
-            } else {
-                error
-            }
-        })?;
-        let section = target.section(reference.section).map_err(|_| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!(
-                    "reference target {} §{} does not exist",
-                    reference.object, reference.section
-                ),
-            )
-        })?;
+        let section = ops::effective_section(root, &reference.object, reference.section).map_err(
+            |error| {
+                if error.code == EXIT_NOT_FOUND {
+                    Error::new(
+                        EXIT_NOT_FOUND,
+                        format!(
+                            "reference target object {} does not exist",
+                            reference.object
+                        ),
+                    )
+                } else {
+                    error
+                }
+            },
+        )?;
         ensure!(
             section.sha256 == reference.sha256,
             EXIT_INVARIANT,
@@ -372,7 +514,7 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
             reference.object,
             reference.section
         );
-        let committed = git::object_at(root, &reference.commit, &reference.object)
+        let committed = git::object_at(root, &reference.commit, &reference.object)?
             .and_then(|object| object.section(reference.section).ok().cloned())
             .ok_or_else(|| Error::new(
                 EXIT_INVARIANT,
@@ -394,7 +536,13 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
 }
 
 pub fn discard(root: &Path, challenge: &str) -> Result<()> {
-    let path = store::candidate_path(root, challenge);
+    store::require_current(root)?;
+    store::with_lock(root, || discard_locked(root, challenge))
+}
+
+fn discard_locked(root: &Path, challenge: &str) -> Result<()> {
+    store::require_current(root)?;
+    let path = store::candidate_path(root, challenge)?;
     ensure!(
         path.exists(),
         EXIT_NOT_FOUND,
@@ -411,40 +559,21 @@ pub fn discard(root: &Path, challenge: &str) -> Result<()> {
 /// candidate. Accepting a bare code instead would put the agent in the position
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
 pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
-    let mut words = response.split(' ');
-    let head = words.next().unwrap_or_default();
-    let code = words.next().unwrap_or_default();
-    let exact = head == "CONFIRM"
-        && words.next().is_none()
-        && code.len() == CHALLENGE_LEN
-        && code.bytes().all(|byte| ALPHABET.contains(&byte));
+    store::require_current(root)?;
+    store::with_lock(root, || confirm_locked(root, response))
+}
 
-    if !exact {
-        // Words beyond the code are commentary — "yes, but reword the second
-        // line" is not assent, and letting it through would make the agent the
-        // judge of whether a qualified yes counted. That discards the candidate.
-        // A whitespace or casing slip is a typo, not a qualification, so it is
-        // merely rejected and the candidate survives to be confirmed properly.
-        if let Some(rest) = response.strip_prefix("CONFIRM ") {
-            let mut words = rest.split_whitespace();
-            if let Some(first) = words.next() {
-                let qualified = words.next().is_some();
-                if qualified && store::candidate_path(root, first).exists() {
-                    discard(root, first)?;
-                    return Err(Error::new(
-                        EXIT_USAGE,
-                        format!(
-                            "`CONFIRM {first}` carried commentary, so it is a qualified yes rather than assent; candidate {first} was discarded"
-                        ),
-                    ));
-                }
-            }
-        }
-        return Err(Error::new(
-            EXIT_USAGE,
-            "the response must be exactly `CONFIRM <code>`, with nothing else on the line",
-        ));
-    }
+fn confirm_locked(root: &Path, response: &str) -> Result<(Event, Object)> {
+    store::require_current(root)?;
+    let code = crate::confirmation::authorize(
+        response,
+        |code| {
+            store::candidate_path(root, code)
+                .map(|path| path.exists())
+                .unwrap_or(false)
+        },
+        |code| discard_locked(root, code),
+    )?;
 
     let candidate = find(root, code)?;
     ensure!(
@@ -453,42 +582,38 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
         EXIT_SCHEMA,
         "candidate {code} predates complete semantic revision rendering; prepare it again"
     );
-    ensure!(
-        candidate.payload_sha256 == candidate.payload.sha256()?,
-        EXIT_SCHEMA,
-        "candidate {code} does not match its own hash"
-    );
+    candidate.verify_payload_with(Payload::sha256)?;
+    validate_persisted_payload(root, &candidate.payload)?;
 
-    let mut object = match ops::reconcile(root, &candidate.payload.object) {
-        Ok(object) => object,
-        Err(error) if error.code == EXIT_NOT_FOUND => {
-            Object::new(candidate.payload.object.clone(), String::new())
+    let mut object = match candidate_state(root, &candidate)? {
+        CandidateState::AlreadyApplied(applied) => {
+            let object = ops::reconcile(root, &candidate.payload.object)?;
+            discard_locked(root, code)?;
+            return Ok((*applied, object));
         }
-        Err(error) => return Err(error),
+        CandidateState::Stale { current_rev } => {
+            crate::confirmation::admission(
+                &candidate.binding.expected_rev,
+                &current_rev,
+                false,
+                "the object revision",
+            )?;
+            unreachable!("a stale candidate cannot be admitted")
+        }
+        CandidateState::Pending => match ops::reconcile(root, &candidate.payload.object) {
+            Ok(object) => object,
+            Err(error) if error.code == EXIT_NOT_FOUND => {
+                Object::new(candidate.payload.object.clone(), String::new())?
+            }
+            Err(error) => return Err(error),
+        },
     };
-    // Idempotent recovery. `confirm` appends the event, saves the projection,
-    // then clears the candidate; a crash in the middle leaves the change applied
-    // and the candidate still pending. Re-confirming the same code must report
-    // what already happened rather than apply it a second time.
-    if object.rev > candidate.expected_rev {
-        let events = store::load_events(root, &candidate.payload.object)?;
-        if let Some(applied) = events.iter().find(|event| {
-            event.rev == candidate.expected_rev + 1
-                && event.confirmation.payload_sha256 == candidate.payload_sha256
-        }) {
-            let applied = applied.clone();
-            discard(root, code)?;
-            return Ok((applied, object));
-        }
-    }
-
-    ensure!(
-        object.rev == candidate.expected_rev,
-        EXIT_STALE,
-        "the object moved to rev {} after this candidate was prepared at rev {}; prepare it again",
-        object.rev,
-        candidate.expected_rev
-    );
+    crate::confirmation::admission(
+        &candidate.binding.expected_rev,
+        &object.rev,
+        false,
+        "the object revision",
+    )?;
 
     // Re-check references at the moment of admission, not only at prepare: a
     // target may have been revised while the human was reading.
@@ -496,7 +621,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
 
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: FORMAT_VERSION,
+        version: EVENT_ENVELOPE_VERSION_V0,
         event_id: crate::model::new_id(),
         rev: object.rev + 1,
         time: now(),
@@ -510,7 +635,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     project(&mut object, &event)?;
     store::append_event(root, &event)?;
     store::save_object(root, &object)?;
-    discard(root, code)?;
+    discard_locked(root, code)?;
     Ok((event, object))
 }
 

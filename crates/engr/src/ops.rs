@@ -1,17 +1,15 @@
 //! Maintenance: crash reconciliation and verify.
 
-use crate::model::{project, Action, Object};
-use crate::{ensure, git, store, Result, EXIT_INVARIANT, EXIT_NOT_FOUND};
+use crate::model::{replay_recoverable_tail, Action, Object, Section};
+use crate::{ensure, git, store, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use std::path::Path;
 
-/// Close the window between appending an event and saving the projection.
-///
-/// `confirm` writes the event first, then the object. A crash in between leaves
-/// an event whose rev is ahead of the object; replaying the tail here makes the
-/// two agree instead of leaving the workspace wedged.
-pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
+/// Replay the recoverable tail without choosing whether it may be persisted.
+/// Reads need the same effective Object as a repaired current workspace, while
+/// a legacy workspace must remain byte-for-byte read-only until migration.
+fn replay(root: &Path, id: &str) -> Result<(Object, bool)> {
     let events = store::load_events(root, id)?;
-    let mut object = match store::load_object(root, id) {
+    let object = match store::load_object(root, id) {
         Ok(object) => object,
         Err(error) if error.code == EXIT_NOT_FOUND => {
             let created = events.iter().find(|event| event.rev == 1).ok_or(error)?;
@@ -21,17 +19,39 @@ pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
                 EXIT_INVARIANT,
                 "{id}: event rev 1 cannot reconstruct a missing object"
             );
-            Object::new(id.to_owned(), String::new())
+            Object::new(id.to_owned(), String::new())?
         }
         Err(error) => return Err(error),
     };
-    let mut applied = false;
-    // Walk forward one rev at a time, which also refuses to skip a gap.
-    while let Some(event) = events.iter().find(|event| event.rev == object.rev + 1) {
-        project(&mut object, event)?;
-        applied = true;
-    }
-    if applied {
+    replay_recoverable_tail(object, &events).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{id}: event tail cannot reconcile: {}", error.message),
+        )
+    })
+}
+
+/// Read the effective authority after applying any recoverable crash tail in
+/// memory. Unlike [`reconcile`], this never writes a projection.
+pub fn effective(root: &Path, id: &str) -> Result<Object> {
+    Ok(replay(root, id)?.0)
+}
+
+/// Read one current target section through the same effective authority used by
+/// every read surface. Reference admission must never pin a stale projection
+/// while a confirmed recovery tail already carries newer wording.
+pub fn effective_section(root: &Path, id: &str, section: u64) -> Result<Section> {
+    effective(root, id)?.section(section).cloned()
+}
+
+/// Close the window between appending an event and saving the projection.
+///
+/// Current workspaces persist crash repair. Legacy workspaces expose the same
+/// effective Object in memory, because requiring a write here would make a
+/// valid old workspace unreadable before its explicit migration.
+pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
+    let (object, applied) = replay(root, id)?;
+    if applied && store::validate_format(root)? == store::WorkspaceFormat::Current {
         store::save_object(root, &object)?;
     }
     Ok(object)
@@ -76,8 +96,18 @@ impl Report {
 /// preserve confirmed evidence, while committed git history remains an
 /// additional tamper anchor. That is why an uncommitted object file is reported.
 pub fn verify(root: &Path, id: &str) -> Result<Report> {
-    let object = store::load_object(root, id)?;
     let events = store::load_events(root, id)?;
+    let persisted = match store::load_object(root, id) {
+        Ok(object) => Some(object),
+        Err(error) if error.code == EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
+    // Replay remains a read-only recovery check, but verification must report
+    // the bytes actually persisted as the projection. Otherwise a valid Event
+    // tail could make an unrepaired Object look synchronized.
+    let recovered = effective(root, id)?;
+    let object = persisted.as_ref().unwrap_or(&recovered);
+    let projection_rev = persisted.as_ref().map_or(0, |object| object.rev);
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     for section in &object.sections {
@@ -106,7 +136,10 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         sections: object.sections.len(),
         tampered,
         standing_on_tampered,
-        unprojected: events.iter().filter(|event| event.rev > object.rev).count(),
+        unprojected: events
+            .iter()
+            .filter(|event| event.rev > projection_rev)
+            .count(),
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })
 }

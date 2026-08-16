@@ -1,8 +1,9 @@
 //! What the command line promises the outside world.
 
 use engr::{
+    gate,
     model::{Action, Confirmation, Content, Event, Object, Payload, EVENT_FORMAT},
-    store,
+    ops, store,
 };
 use serde_json::Value;
 use std::fs::OpenOptions;
@@ -58,6 +59,843 @@ fn git(root: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+    let path = store::object_path(root, id);
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    update(value.as_object_mut().expect("object"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("object");
+}
+
+fn mark_legacy(root: &Path, id: &str) {
+    rewrite_object(root, id, |object| {
+        object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
+        object.insert("version".to_owned(), Value::from(1));
+        let state = object.remove("state").expect("state");
+        object.insert("status".to_owned(), state);
+    });
+}
+
+fn assert_migration_preflight_refuses(corrupt: impl FnOnce(&Path, &str, &str)) {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let first = prepare(root, &["prepare", "--new", "--text", "first legacy object"]);
+    confirm(root, &first);
+    let first_id = first["object"].as_str().expect("object");
+    let first_section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            first_id,
+            "--add",
+            "--text",
+            "first retained section",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &first_section);
+    let second = prepare(
+        root,
+        &["prepare", "--new", "--text", "second legacy object"],
+    );
+    confirm(root, &second);
+    let second_id = second["object"].as_str().expect("object");
+    mark_legacy(root, first_id);
+    mark_legacy(root, second_id);
+    corrupt(root, first_id, second_id);
+
+    let paths = [
+        store::engr_dir(root).join("format.json"),
+        store::object_path(root, first_id),
+        store::object_path(root, second_id),
+        store::events_path(root, first_id),
+        store::events_path(root, second_id),
+    ];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| (path.clone(), std::fs::read(path).expect("snapshot")))
+        .collect();
+
+    let output = run_engr(root, &["migrate"]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "migration unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (path, expected) in before {
+        assert_eq!(
+            std::fs::read(&path).expect("snapshot after refusal"),
+            expected,
+            "{} changed despite a failed migration",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn reference_admission_uses_the_effective_target_projection() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    store::init(root).expect("init");
+
+    let target = engr::model::new_id();
+    let create_target = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: target.clone(),
+            content: Content {
+                text: "target".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare target");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", create_target.candidate.challenge),
+    )
+    .expect("confirm target");
+    let initial_section = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: target.clone(),
+            content: Content {
+                text: "projection wording".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare section");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", initial_section.candidate.challenge),
+    )
+    .expect("confirm section");
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record projected target"]);
+    let old_commit = engr::git::head(root).expect("head");
+    let raw = store::load_object(root, &target)
+        .expect("raw target")
+        .section(1)
+        .expect("raw section")
+        .clone();
+
+    let revision = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionRevised { section: 1 },
+            object: target.clone(),
+            content: Content {
+                text: "effective crash-tail wording".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare revision");
+    let revision_event = Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: revision.candidate.binding.expected_rev + 1,
+        time: "2026-08-17T00:00:00Z".to_owned(),
+        payload: revision.candidate.payload.clone(),
+        confirmation: Confirmation {
+            challenge: revision.candidate.challenge.clone(),
+            payload_sha256: revision.candidate.payload_sha256.clone(),
+        },
+    };
+    store::append_event(root, &revision_event).expect("append without projection");
+    let effective = ops::effective_section(root, &target, 1).expect("effective target section");
+    assert_ne!(effective.sha256, raw.sha256);
+
+    let source = engr::model::new_id();
+    let create_source = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: source.clone(),
+            content: Content {
+                text: "source".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare source");
+    gate::confirm(
+        root,
+        &format!("CONFIRM {}", create_source.candidate.challenge),
+    )
+    .expect("confirm source");
+
+    let stale_projection_ref = Payload {
+        action: Action::SectionAdded,
+        object: source.clone(),
+        content: Content {
+            text: "cannot pin stale projection".to_owned(),
+            based_on: None,
+            refs: vec![engr::model::Ref {
+                object: target.clone(),
+                section: 1,
+                sha256: raw.sha256,
+                commit: old_commit.clone(),
+            }],
+        },
+    };
+    let error = gate::prepare(root, stale_projection_ref)
+        .expect_err("gate must reject a stale raw projection reference");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("that section is now"));
+
+    let cli = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &source,
+            "--add",
+            "--text",
+            "CLI must use effective wording",
+            "--no-based-on",
+            "--ref",
+            &format!("{target}:1"),
+        ],
+    );
+    assert_eq!(cli.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(
+        String::from_utf8_lossy(&cli.stderr).contains("commit the target wording first"),
+        "CLI must not hash the stale projection: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+
+    store::save_object(
+        root,
+        &ops::effective(root, &target).expect("effective object"),
+    )
+    .expect("repair projection");
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record recovered target"]);
+    let committed_effective = engr::git::head(root).expect("new head");
+    gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: source,
+            content: Content {
+                text: "historically verified effective wording".to_owned(),
+                based_on: None,
+                refs: vec![engr::model::Ref {
+                    object: target,
+                    section: 1,
+                    sha256: effective.sha256,
+                    commit: committed_effective,
+                }],
+            },
+        },
+    )
+    .expect("the committed effective wording remains referenceable");
+}
+
+#[test]
+fn candidate_display_distinguishes_retryable_from_stale() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let id = engr::model::new_id();
+    let created = gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: id.clone(),
+            content: Content {
+                text: "candidate state".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare object");
+    gate::confirm(root, &format!("CONFIRM {}", created.candidate.challenge))
+        .expect("confirm object");
+
+    let retryable = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id.clone(),
+            content: Content {
+                text: "apply once".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare retryable candidate");
+    let retry_code = retryable.candidate.challenge.clone();
+    gate::confirm(root, &format!("CONFIRM {retry_code}")).expect("apply candidate");
+    store::write_json(
+        &store::candidate_path(root, &retry_code).expect("candidate path"),
+        &retryable.candidate,
+    )
+    .expect("restore candidate after deletion crash");
+
+    let shown = run_engr(root, &["candidate", &retry_code]);
+    assert!(shown.status.success());
+    let shown_text = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown_text.contains("already applied"));
+    assert!(!shown_text.contains("dead"));
+    assert!(!shown_text.contains("Prepare again"));
+    let listed = run_engr(root, &["candidate"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("retry"));
+
+    let confirmation = run_engr(root, &["confirm", &format!("CONFIRM {retry_code}")]);
+    assert!(
+        confirmation.status.success(),
+        "retry: {}",
+        String::from_utf8_lossy(&confirmation.stderr)
+    );
+    assert_eq!(
+        store::load_events(root, &id).expect("events").len(),
+        2,
+        "idempotent retry must not append another event"
+    );
+    assert_eq!(
+        ops::effective(root, &id).expect("object").sections.len(),
+        1,
+        "idempotent retry must not add another section"
+    );
+
+    let stale = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id.clone(),
+            content: Content {
+                text: "stale candidate".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare stale candidate");
+    let stale_code = stale.candidate.challenge.clone();
+    let overtaking = gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: id,
+            content: Content {
+                text: "overtaking mutation".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+    )
+    .expect("prepare overtaking candidate");
+    gate::confirm(root, &format!("CONFIRM {}", overtaking.candidate.challenge))
+        .expect("confirm overtaking candidate");
+    store::write_json(
+        &store::candidate_path(root, &stale_code).expect("candidate path"),
+        &stale.candidate,
+    )
+    .expect("restore overtaken candidate");
+
+    let stale_view = run_engr(root, &["candidate", &stale_code]);
+    assert!(stale_view.status.success());
+    assert!(String::from_utf8_lossy(&stale_view.stdout).contains("dead"));
+    let stale_list = run_engr(root, &["candidate"]);
+    assert!(String::from_utf8_lossy(&stale_list.stdout).contains("stale"));
+}
+
+#[test]
+fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "legacy object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let current = prepare(root, &["prepare", "--new", "--text", "already current"]);
+    confirm(root, &current);
+    let current_id = current["object"].as_str().expect("current object id");
+    let object_path = store::object_path(root, id);
+    let current_path = store::object_path(root, current_id);
+    let current_before = std::fs::read(&current_path).expect("current object");
+    let events_path = store::events_path(root, id);
+    let events_before = std::fs::read(&events_path).expect("events");
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    let format_before = std::fs::read(&format_path).expect("format");
+    let mut object: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    object["format"] = Value::String("engr-object".to_owned());
+    object["version"] = Value::from(1);
+    let state = object
+        .as_object_mut()
+        .expect("object")
+        .remove("state")
+        .expect("state");
+    object["status"] = state;
+    std::fs::write(
+        &object_path,
+        serde_json::to_vec_pretty(&object).expect("json"),
+    )
+    .expect("legacy object");
+    assert!(
+        format_path.exists(),
+        "Phase 0 already had the version 1 workspace authority"
+    );
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        shown.status.success(),
+        "legacy read: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let refused = run_engr(root, &["prepare", "--object", id, "--close"]);
+    assert_eq!(refused.status.code(), Some(engr::EXIT_SCHEMA));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("engr migrate"));
+    let still_legacy: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    assert_eq!(still_legacy["status"], "open");
+    assert!(still_legacy.get("state").is_none());
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated_object: Value =
+        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
+    assert_eq!(migrated_object["state"], "open");
+    assert!(migrated_object.get("status").is_none());
+    assert_eq!(
+        std::fs::read(&current_path).expect("current object after migration"),
+        current_before,
+        "an already current Object is not cosmetically rewritten"
+    );
+    assert_eq!(
+        std::fs::read(&events_path).expect("events after migration"),
+        events_before,
+        "compatible retained Event history is not rewritten"
+    );
+    assert_eq!(
+        std::fs::read(&format_path).expect("format after migration"),
+        format_before,
+        "a valid workspace authority is not rewritten"
+    );
+    assert_eq!(
+        migrated_object["format"], "engr-object",
+        "compatible legacy marker is preserved"
+    );
+    assert_eq!(migrated_object["version"], 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        1
+    );
+}
+
+#[test]
+fn migration_refuses_an_invalid_legacy_status_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("status".to_owned(), Value::String("waiting".to_owned()));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_legacy_filename_id_mismatch_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("id".to_owned(), Value::String(first.to_owned()));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_legacy_object_missing_a_required_field_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.remove("title");
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_malformed_legacy_object_id_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("id".to_owned(), Value::String("not-a-uuid".to_owned()));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_non_v7_legacy_object_id_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert(
+                "id".to_owned(),
+                Value::String("550e8400-e29b-41d4-a716-446655440000".to_owned()),
+            );
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_duplicate_legacy_section_ids_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, first, _second| {
+        rewrite_object(root, first, |object| {
+            let sections = object
+                .get_mut("sections")
+                .and_then(Value::as_array_mut)
+                .expect("sections");
+            let duplicate = sections.first().expect("first section").clone();
+            sections.push(duplicate);
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_a_legacy_section_counter_collision_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, first, _second| {
+        rewrite_object(root, first, |object| {
+            object.insert("next_section_id".to_owned(), Value::from(1));
+        });
+    });
+}
+
+#[test]
+fn migration_refuses_unreadable_retained_events_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        let path = store::events_path(root, second);
+        let mut event: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("event")).expect("json");
+        event["version"] = Value::from(99);
+        std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
+    });
+}
+
+#[test]
+fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewrites() {
+    assert_migration_preflight_refuses(|root, _first, second| {
+        rewrite_object(root, second, |object| {
+            object.insert("rev".to_owned(), Value::from(0));
+        });
+        let path = store::events_path(root, second);
+        let mut event: Event =
+            serde_json::from_slice(&std::fs::read(&path).expect("event")).expect("json");
+        event.payload.action = Action::SectionDeleted { section: 1 };
+        event.payload.content = Content {
+            text: String::new(),
+            based_on: None,
+            refs: Vec::new(),
+        };
+        event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+        std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
+    });
+}
+
+#[test]
+fn legacy_crash_tail_reads_the_effective_object_without_writing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "crash-tail object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "recovered confirmed wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &added);
+
+    mark_legacy(root, id);
+    rewrite_object(root, id, |object| {
+        object.insert("rev".to_owned(), Value::from(1));
+        object.insert("next_section_id".to_owned(), Value::from(1));
+        object.insert("sections".to_owned(), Value::Array(Vec::new()));
+    });
+
+    let format_path = store::engr_dir(root).join("format.json");
+    let object_path = store::object_path(root, id);
+    let events_path = store::events_path(root, id);
+    let before = [
+        (
+            format_path.clone(),
+            std::fs::read(&format_path).expect("format"),
+        ),
+        (
+            object_path.clone(),
+            std::fs::read(&object_path).expect("object"),
+        ),
+        (
+            events_path.clone(),
+            std::fs::read(&events_path).expect("events"),
+        ),
+    ];
+    let lock_path = store::engr_dir(root).join("lock");
+    if lock_path.exists() {
+        std::fs::remove_file(&lock_path).expect("remove old writer lock");
+    }
+
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        shown.status.success(),
+        "legacy crash-tail show failed: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("recovered confirmed wording"),
+        "show must render the confirmed recovery tail"
+    );
+    let listed = run_engr(root, &["ls", "--sections"]);
+    assert!(listed.status.success(), "legacy crash-tail ls failed");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("recovered confirmed wording"));
+    let verified = run_engr(root, &["verify", id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("FAIL"));
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains("1 events are not reflected"),
+        "a legacy read may recover in memory but verify must not call the raw projection synchronized"
+    );
+
+    assert!(
+        !lock_path.exists(),
+        "a legacy read must not create the workspace writer lock"
+    );
+    for (path, expected) in before {
+        assert_eq!(
+            std::fs::read(&path).expect("snapshot after read"),
+            expected,
+            "{} changed while reading a legacy crash tail",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn runtime_and_migration_reject_the_same_future_event_gap() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "gap object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    mark_legacy(root, id);
+
+    let events_path = store::events_path(root, id);
+    let mut event: Event =
+        serde_json::from_slice(&std::fs::read(&events_path).expect("event")).expect("json");
+    event.rev = 3;
+    std::fs::write(&events_path, serde_json::to_vec(&event).expect("json")).expect("event");
+    let object_path = store::object_path(root, id);
+    let format_path = store::engr_dir(root).join("format.json");
+    let before = [
+        (
+            object_path.clone(),
+            std::fs::read(&object_path).expect("object"),
+        ),
+        (
+            events_path.clone(),
+            std::fs::read(&events_path).expect("events"),
+        ),
+        (
+            format_path.clone(),
+            std::fs::read(&format_path).expect("format"),
+        ),
+    ];
+
+    let read = run_engr(root, &["show", id]);
+    assert_eq!(
+        read.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "a future revision gap is corrupt stored recovery data: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let migrate = run_engr(root, &["migrate"]);
+    assert_eq!(migrate.status.code(), Some(engr::EXIT_SCHEMA));
+    for (path, expected) in before {
+        assert_eq!(
+            std::fs::read(&path).expect("snapshot after refusal"),
+            expected,
+            "{} changed despite the rejected future gap",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn show_json_uses_state_for_the_object_and_status_for_each_section() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "json contract"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object");
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "checked section",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    let output = run_engr(root, &["show", id, "--format", "json"]);
+    assert!(
+        output.status.success(),
+        "show json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&output.stdout).expect("show JSON");
+    assert_eq!(shown["state"], "open");
+    assert!(shown.get("status").is_none());
+    assert_eq!(shown["sections"][0]["status"], "ok");
+}
+
+#[test]
+fn malformed_canonical_references_are_usage_errors_at_the_cli_boundary() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "reference input"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let malformed = "engr:obj:not-a-compact-uuid";
+
+    let show = run_engr(root, &["show", malformed]);
+    assert_eq!(show.status.code(), Some(engr::EXIT_USAGE));
+
+    let object = run_engr(root, &["prepare", "--object", malformed, "--close"]);
+    assert_eq!(object.status.code(), Some(engr::EXIT_USAGE));
+
+    let reference = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "dependent wording",
+            "--no-based-on",
+            "--ref",
+            malformed,
+        ],
+    );
+    assert_eq!(
+        reference.status.code(),
+        Some(engr::EXIT_USAGE),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+}
+
+#[test]
+fn whole_object_arguments_reject_valid_but_unsupported_selectors_as_usage() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "selector input"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let compact = engr::reference::encode_uuid(uuid::Uuid::parse_str(id).expect("uuid"));
+    let with_section = format!("engr:obj:{compact}:3");
+    let with_snapshot = format!("engr:obj:{compact}@{}", "a".repeat(40));
+
+    for spec in [&with_section, &with_snapshot] {
+        assert_eq!(
+            run_engr(root, &["show", spec]).status.code(),
+            Some(engr::EXIT_USAGE)
+        );
+        assert_eq!(
+            run_engr(root, &["prepare", "--object", spec, "--close"])
+                .status
+                .code(),
+            Some(engr::EXIT_USAGE)
+        );
+    }
+}
+
+#[test]
+fn title_actions_reject_references_as_cli_usage() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let created = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--text",
+            "title",
+            "--ref",
+            "not-a-reference",
+        ],
+    );
+    assert_eq!(created.status.code(), Some(engr::EXIT_USAGE));
+
+    let object = prepare(root, &["prepare", "--new", "--text", "existing title"]);
+    confirm(root, &object);
+    let id = object["object"].as_str().expect("object");
+    let renamed = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--rename",
+            "--text",
+            "renamed title",
+            "--ref",
+            "not-a-reference",
+        ],
+    );
+    assert_eq!(renamed.status.code(), Some(engr::EXIT_USAGE));
+}
+
+#[test]
+fn unknown_workspace_version_refuses_mutation() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::write(
+        store::engr_dir(root).join("format.json"),
+        r#"{"format":"engr-workspace","version":99}"#,
+    )
+    .expect("format");
+    let output = run_engr(root, &["prepare", "--new", "--text", "no guessing"]);
+    assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }
 
 #[test]
@@ -354,7 +1192,8 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path().to_path_buf();
     store::init(&root).expect("init");
-    let object = Object::new(engr::model::new_id(), "event validation".to_owned());
+    let object =
+        Object::new(engr::model::new_id(), "event validation".to_owned()).expect("new object");
     let id = object.id.clone();
     store::save_object(&root, &object).expect("save object");
     let payload = Payload {
@@ -369,7 +1208,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload_sha256 = payload.sha256().expect("payload hash");
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -546,7 +1385,8 @@ fn an_object_file_must_match_its_embedded_id() {
     let root = workspace.path();
     store::init(root).expect("init");
 
-    let object = Object::new(engr::model::new_id(), "mismatched storage key".to_owned());
+    let object = Object::new(engr::model::new_id(), "mismatched storage key".to_owned())
+        .expect("new object");
     store::write_json(&store::object_path(root, "wrong"), &object).expect("write object");
 
     let output = run_engr(root, &["show", "wrong"]);
@@ -584,7 +1424,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
-            version: engr::FORMAT_VERSION,
+            version: engr::EVENT_ENVELOPE_VERSION_V0,
             event_id: engr::model::new_id(),
             rev: 2,
             time: "2026-08-13T00:00:00Z".to_owned(),

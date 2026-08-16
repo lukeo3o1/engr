@@ -8,7 +8,7 @@
 
 use crate::git;
 use crate::model::{Object, Ref, Status};
-use crate::{store, Result};
+use crate::{ops, store, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -114,7 +114,7 @@ pub fn width(root: &Path) -> usize {
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let target = store::load_object(root, &reference.object)
+    let target = ops::effective(root, &reference.object)
         .ok()
         .and_then(|target| target.section(reference.section).ok().cloned());
     let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
@@ -208,7 +208,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
     out.push_str(&format!(
         "{}  {}  {}\n",
         abbrev(&object.id, w),
-        object.status.as_str(),
+        object.state.as_str(),
         object.title
     ));
     out.push_str(&format!("{} sections   {} ok", tally.total, tally.ok));
@@ -347,7 +347,7 @@ struct JsonSummary {
 struct JsonObject<'a> {
     id: &'a str,
     title: &'a str,
-    status: &'static str,
+    state: &'static str,
     rev: u64,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
@@ -382,7 +382,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
     let value = JsonObject {
         id: &object.id,
         title: &object.title,
-        status: object.status.as_str(),
+        state: object.state.as_str(),
         rev: object.rev,
         summary: JsonSummary {
             sections: tally.total,
@@ -428,7 +428,7 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
         out.push_str(&format!(
             "{}  {:<6}  {:>2} sections  {:<12}  {}\n",
             abbrev(&object.id, w),
-            object.status.as_str(),
+            object.state.as_str(),
             tally.total,
             note,
             object.title
@@ -470,7 +470,7 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
                 "{} §{:<3} {:<6}  {}\n",
                 abbrev(&object.id, w),
                 section.id,
-                object.status.as_str(),
+                object.state.as_str(),
                 section.text.replace('\n', " ").trim()
             ));
         }
@@ -489,7 +489,7 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
             if status.is_ok() {
                 continue;
             }
-            let closed = object.status == Status::Closed;
+            let closed = object.state == Status::Closed;
             let marker = if closed { "⚠" } else { "·" };
             let tail = if closed {
                 " — nobody is looking at this one"
@@ -500,7 +500,7 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
                 "{} {}  {:<6}  §{}  {}{}\n",
                 marker,
                 abbrev(&object.id, w),
-                object.status.as_str(),
+                object.state.as_str(),
                 id,
                 status.label(),
                 tail
