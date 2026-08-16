@@ -80,6 +80,12 @@ struct Format {
     version: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceFormat {
+    LegacyV0,
+    Current,
+}
+
 /// Written by [`init`], because `git add -A` is the normal way people stage a
 /// workspace and two of these files must never travel with it. A candidate's
 /// filename *is* its challenge code, so committing a live one hands the code to
@@ -120,8 +126,17 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn validate_format(root: &Path) -> Result<()> {
+pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
     let path = engr_dir(root).join("format.json");
+    if !path.exists() {
+        ensure!(
+            detect_legacy(root)?,
+            EXIT_SCHEMA,
+            "{} has no format.json and is not a recognized legacy v0 workspace",
+            engr_dir(root).display()
+        );
+        return Ok(WorkspaceFormat::LegacyV0);
+    }
     let format: Format = read_json(&path)?;
     ensure!(
         format.format == "engr-workspace",
@@ -136,7 +151,105 @@ pub fn validate_format(root: &Path) -> Result<()> {
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
+    if contains_legacy_objects(root)? {
+        return Ok(WorkspaceFormat::LegacyV0);
+    }
+    Ok(WorkspaceFormat::Current)
+}
+
+fn detect_legacy(root: &Path) -> Result<bool> {
+    let ids = object_ids(root)?;
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    for id in ids {
+        let value: serde_json::Value = read_json(&object_path(root, &id))?;
+        if value.get("format").and_then(|value| value.as_str()) != Some("engr-object")
+            || value.get("version").and_then(|value| value.as_u64()) != Some(1)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn contains_legacy_objects(root: &Path) -> Result<bool> {
+    let mut legacy = false;
+    for id in object_ids(root)? {
+        let path = object_path(root, &id);
+        let value: serde_json::Value = read_json(&path)?;
+        let object = value.as_object().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: object must be a JSON object", path.display()),
+            )
+        })?;
+        ensure!(
+            !(object.contains_key("status") && object.contains_key("state")),
+            EXIT_SCHEMA,
+            "{}: contains both legacy status and canonical state",
+            path.display()
+        );
+        ensure!(
+            object.contains_key("status") || object.contains_key("state"),
+            EXIT_SCHEMA,
+            "{}: object has neither status nor state",
+            path.display()
+        );
+        legacy |= object.contains_key("status");
+    }
+    Ok(legacy)
+}
+
+pub fn require_current(root: &Path) -> Result<()> {
+    ensure!(
+        validate_format(root)? == WorkspaceFormat::Current,
+        EXIT_SCHEMA,
+        "legacy v0 workspace is read-only; run `engr migrate` before mutation"
+    );
     Ok(())
+}
+
+pub fn migrate(root: &Path) -> Result<()> {
+    ensure!(
+        validate_format(root)? == WorkspaceFormat::LegacyV0,
+        EXIT_SCHEMA,
+        "workspace does not require migration"
+    );
+    for id in object_ids(root)? {
+        let path = object_path(root, &id);
+        let mut value: serde_json::Value = read_json(&path)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: object must be a JSON object", path.display()),
+            )
+        })?;
+        if let Some(status) = object.remove("status") {
+            ensure!(
+                !object.contains_key("state"),
+                EXIT_SCHEMA,
+                "{}: contains both legacy status and canonical state",
+                path.display()
+            );
+            object.insert("state".to_owned(), status);
+            write_json(&path, &value)?;
+        } else {
+            ensure!(
+                object.contains_key("state"),
+                EXIT_SCHEMA,
+                "{}: legacy object has neither status nor state",
+                path.display()
+            );
+        }
+    }
+    write_json(
+        &engr_dir(root).join("format.json"),
+        &Format {
+            format: "engr-workspace".to_owned(),
+            version: FORMAT_VERSION,
+        },
+    )
 }
 
 /// Hold the workspace write lock for the duration of `body`.
@@ -196,6 +309,7 @@ pub fn load_object(root: &Path, id: &str) -> Result<Object> {
 }
 
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
+    require_current(root)?;
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -240,6 +354,25 @@ pub fn abbrev_len(ids: &[String]) -> usize {
 /// Resolve a unique id prefix, the way `git` resolves a short commit. Keeps
 /// uuids out of the way without needing a separate alias registry.
 pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
+    if prefix.starts_with("engr:") {
+        let reference = crate::reference::EngrRef::parse_standalone(prefix)?;
+        ensure!(
+            reference.kind == crate::reference::ResourceKind::Object
+                && reference.section.is_none()
+                && reference.snapshot_selector.is_none(),
+            EXIT_NOT_FOUND,
+            "{prefix:?} is not a current Object reference"
+        );
+        return Ok(crate::reference::decode_uuid(&reference.id)?.to_string());
+    }
+    if prefix.len() == 26 {
+        if let Ok(id) = crate::reference::decode_uuid(prefix) {
+            let id = id.to_string();
+            if object_path(root, &id).exists() {
+                return Ok(id);
+            }
+        }
+    }
     let ids = object_ids(root)?;
     if ids.iter().any(|id| id == prefix) {
         return Ok(prefix.to_owned());

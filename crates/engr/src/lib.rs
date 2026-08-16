@@ -4,10 +4,12 @@
 //! are append-only history and audit evidence, projected immediately at confirm
 //! time. Git additionally preserves committed projections.
 
+pub mod confirmation;
 pub mod gate;
 pub mod git;
 pub mod model;
 pub mod ops;
+pub mod reference;
 pub mod store;
 pub mod view;
 
