@@ -12,6 +12,31 @@ fn workspace() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+fn commit_all(root: &Path, message: &str) -> String {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            message,
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success());
+    }
+    engr::git::head(root).expect("HEAD")
+}
+
 fn content(text: &str) -> Content {
     Content {
         text: text.to_owned(),
@@ -117,23 +142,6 @@ fn section_ids_are_never_reused() {
 }
 
 #[test]
-fn the_counter_survives_a_purge() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "purge and ids");
-    admit(&root, payload(Action::SectionAdded, &id, "first"));
-    admit(&root, empty(Action::SectionDeleted { section: 1 }, &id));
-
-    ops::purge(&root, &id).expect("purge");
-    assert!(store::load_events(&root, &id).expect("events").is_empty());
-
-    let object = admit(&root, payload(Action::SectionAdded, &id, "after the purge"));
-    assert_eq!(
-        object.sections[0].id, 2,
-        "a purge must not reset the id counter"
-    );
-}
-
-#[test]
 fn merging_produces_a_new_id_and_removes_what_it_absorbed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "merging");
@@ -199,13 +207,43 @@ fn references_are_checked_at_the_gate() {
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
         .sha256
         .clone();
+    let commit = commit_all(&root, "record target");
+
+    let revised = admit(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &target,
+            "new uncommitted wording",
+        ),
+    );
+    let mut uncommitted = payload(Action::SectionAdded, &source, "depends on new wording");
+    uncommitted.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: revised.section(1).expect("section").sha256.clone(),
+        commit: commit.clone(),
+    }];
+    let error = gate::prepare(&root, uncommitted)
+        .expect_err("a commit cannot be paired with newer uncommitted wording");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("commit the target wording first"));
+
+    admit(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &target,
+            "depended upon",
+        ),
+    );
 
     let mut with_missing_object = payload(Action::SectionAdded, &source, "depends");
     with_missing_object.content.refs = vec![Ref {
         object: engr::model::new_id(),
         section: 1,
         sha256: pinned.clone(),
-        commit: "0".repeat(40),
+        commit: commit.clone(),
     }];
     assert_eq!(
         gate::prepare(&root, with_missing_object)
@@ -219,7 +257,7 @@ fn references_are_checked_at_the_gate() {
         object: target.clone(),
         section: 99,
         sha256: pinned.clone(),
-        commit: "0".repeat(40),
+        commit: commit.clone(),
     }];
     assert_eq!(
         gate::prepare(&root, with_missing_section)
@@ -233,7 +271,7 @@ fn references_are_checked_at_the_gate() {
         object: target.clone(),
         section: 1,
         sha256: "0".repeat(64),
-        commit: "0".repeat(40),
+        commit: commit.clone(),
     }];
     assert_eq!(
         gate::prepare(&root, with_wrong_hash)
@@ -247,42 +285,44 @@ fn references_are_checked_at_the_gate() {
         object: target,
         section: 1,
         sha256: pinned,
-        commit: "0".repeat(40),
+        commit,
     }];
     gate::prepare(&root, good).expect("a well-formed reference is admitted");
 }
 
-/// Refusing is right; the old wording said "points at *another* object" to
-/// someone who had just pointed at the same one, and sent them hunting for a
-/// mistyped id that was not there.
 #[test]
-fn a_reference_inside_the_same_object_says_so() {
+fn sibling_references_are_allowed_but_direct_self_reference_is_not() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "self reference");
     admit(&root, payload(Action::SectionAdded, &id, "the first"));
     let pinned = store::load_object(&root, &id).expect("object").sections[0]
         .sha256
         .clone();
+    let commit = commit_all(&root, "record sibling");
 
     let mut inward = payload(Action::SectionAdded, &id, "the second");
     inward.content.refs = vec![Ref {
         object: id.clone(),
         section: 1,
         sha256: pinned,
-        commit: "0".repeat(40),
+        commit: commit.clone(),
     }];
-    let error = gate::prepare(&root, inward).expect_err("a self reference is refused");
+    admit(&root, inward);
+
+    let second = store::load_object(&root, &id).expect("object").sections[1]
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record dependent sibling");
+    let mut direct = payload(Action::SectionRevised { section: 2 }, &id, "self-dependent");
+    direct.content.refs = vec![Ref {
+        object: id,
+        section: 2,
+        sha256: second,
+        commit,
+    }];
+    let error = gate::prepare(&root, direct).expect_err("a direct self reference is refused");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(
-        error.message.contains("belongs to this object"),
-        "the message has to describe what was typed, not the invariant: {:?}",
-        error.message
-    );
-    assert!(
-        !error.message.contains("another object;"),
-        "still says the user pointed somewhere else: {:?}",
-        error.message
-    );
+    assert!(error.message.contains("cannot directly reference itself"));
 }
 
 /// The field is unforgiving — no rename, and the mistake only shows after
@@ -451,8 +491,7 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
     );
 }
 
-/// Closed has to mean the whole object settled, not just its sections —
-/// otherwise it cannot carry the weight of being the purge signal.
+/// Closed has to mean the whole object settled, not just its sections.
 #[test]
 fn a_closed_object_refuses_a_rename() {
     let (_dir, root) = workspace();
@@ -593,34 +632,6 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
         1,
         "retrying must not append a second rev 1 event"
     );
-    assert!(gate::find(&root, &code).is_err());
-}
-
-#[test]
-fn purge_keeps_the_event_needed_to_finish_crash_recovery() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "purge recovery");
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
-    let response = format!("CONFIRM {code}");
-    gate::confirm(&root, &response).expect("confirm");
-
-    // Stand in for a crash after saving the projection but before clearing the
-    // candidate. The matching event is the evidence confirm needs to recognize
-    // a retry as idempotent rather than applying it again.
-    store::write_json(&store::candidate_path(&root, &code), &prepared.candidate).expect("rewrite");
-
-    let error =
-        ops::purge(&root, &id).expect_err("purge must retain an event needed for crash recovery");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(
-        !store::load_events(&root, &id).expect("events").is_empty(),
-        "the recovery evidence must still be present"
-    );
-
-    let (_, object) = gate::confirm(&root, &response).expect("idempotent recovery");
-    assert_eq!(object.rev, 2, "the event must not be applied a second time");
     assert!(gate::find(&root, &code).is_err());
 }
 

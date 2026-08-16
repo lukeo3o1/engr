@@ -40,6 +40,25 @@ pub fn exists(root: &Path, revision: &str) -> bool {
     run(root, &["cat-file", "-e", &format!("{revision}^{{commit}}")]).is_some()
 }
 
+/// Whether source files have uncommitted changes. Record files are excluded:
+/// they describe assertions, rather than repository context those assertions
+/// may have been formed against.
+pub fn source_dirty(root: &Path) -> Option<bool> {
+    let spec = outside_the_record();
+    let status = run(root, &["status", "--porcelain", "--", &spec[0], &spec[1]])?;
+    Some(!status.trim().is_empty())
+}
+
+/// Read one object exactly as a commit contains it. References use this rather
+/// than pairing the worktree's wording with an unrelated HEAD.
+pub fn object_at(root: &Path, commit: &str, id: &str) -> Option<crate::model::Object> {
+    let path = format!("{}/objects/{id}.json", crate::store::DIR);
+    let text = run(root, &["show", &format!("{commit}:{path}")])?;
+    let object: crate::model::Object = serde_json::from_str(&text).ok()?;
+    object.validate().ok()?;
+    (object.id == id).then_some(object)
+}
+
 /// Keeping the record is not the world moving.
 ///
 /// `confirm` asks for the object file to be committed, so counting that commit
@@ -123,10 +142,8 @@ impl Distance {
     }
 }
 
-/// Whether a path has changes git has not recorded. Used to warn that
-/// look-back would be lost, and as the honest half of `verify`: once events are
-/// purged, a hash stored beside the content it covers only catches careless
-/// edits, so committed history is the real anchor.
+/// Whether a path has changes git has not recorded. Used to warn that current
+/// projections have not yet been committed as an additional tamper anchor.
 pub fn uncommitted(root: &Path, path: &Path) -> Option<bool> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let status = run(

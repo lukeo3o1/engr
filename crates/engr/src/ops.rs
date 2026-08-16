@@ -1,4 +1,4 @@
-//! Maintenance: crash reconciliation, purge, and verify.
+//! Maintenance: crash reconciliation and verify.
 
 use crate::model::{project, Action, Object};
 use crate::{ensure, git, store, Result, EXIT_INVARIANT, EXIT_NOT_FOUND};
@@ -37,52 +37,6 @@ pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
     Ok(object)
 }
 
-#[derive(Debug)]
-pub struct Purged {
-    pub events: usize,
-    pub commit: Option<String>,
-}
-
-/// Discard the event buffer for one object.
-///
-/// Not gated: it changes nothing a human confirmed, so it is garbage collection
-/// rather than a semantic act. The guard is mechanical instead — refuse unless
-/// every event being dropped is already reflected in the sections, because
-/// silently dropping an unprojected event would lose confirmed content.
-pub fn purge(root: &Path, id: &str) -> Result<Purged> {
-    let mut object = reconcile(root, id)?;
-    let events = store::load_events(root, id)?;
-    let unprojected = events.iter().filter(|event| event.rev > object.rev).count();
-    ensure!(
-        unprojected == 0,
-        EXIT_INVARIANT,
-        "{unprojected} events are not reflected in the sections yet; refusing to purge"
-    );
-    let recovery_events = crate::gate::pending(root)?
-        .iter()
-        .filter(|candidate| candidate.payload.object == object.id)
-        .filter(|candidate| {
-            events.iter().any(|event| {
-                event.rev == candidate.expected_rev + 1
-                    && event.confirmation.payload_sha256 == candidate.payload_sha256
-            })
-        })
-        .count();
-    ensure!(
-        recovery_events == 0,
-        EXIT_INVARIANT,
-        "{recovery_events} events are still needed to finish crash recovery; refusing to purge"
-    );
-    let count = events.len();
-    object.last_projection_commit = git::head(root);
-    store::save_object(root, &object)?;
-    store::discard_events(root, id)?;
-    Ok(Purged {
-        events: count,
-        commit: object.last_projection_commit.clone(),
-    })
-}
-
 /// A section here is sound, but a section it explicitly leans on is not.
 #[derive(Debug)]
 pub struct StandsOnTampered {
@@ -118,10 +72,9 @@ impl Report {
 /// it says something nobody agreed to. Only the section directly referenced is
 /// checked: the target's own `verify` covers what *it* stands on.
 ///
-/// None of this catches an edit that recomputes the hash too — once the events
-/// are purged the hash sits beside the content it covers, so committed git
-/// history is the real tamper anchor. That is why an uncommitted object file is
-/// reported here.
+/// None of this catches an edit that recomputes the hash too. Append-only events
+/// preserve confirmed evidence, while committed git history remains an
+/// additional tamper anchor. That is why an uncommitted object file is reported.
 pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let object = store::load_object(root, id)?;
     let events = store::load_events(root, id)?;

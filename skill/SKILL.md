@@ -82,6 +82,17 @@ the one they are holding.
 
 ## Reading the record
 
+At the start of engineering work, run `engr ls --stale`; it includes relevant
+objects outside the default attention set. Before making or revisiting a
+significant architectural or behavioral decision, search existing titles and
+section wording with `engr ls --all --sections` and an appropriate text search.
+Re-evaluate any relevant moved basis or dependency before relying on it.
+
+After a durable decision, constraint, assumption, or rationale is established,
+consider capturing it when a future agent would need it. Do not record transient
+task state, guesses, routine observations, or every thought merely because engr
+is available.
+
 ```bash
 engr ls                              # open objects
 engr show <id>                       # sections, and how far each can be trusted
@@ -146,15 +157,20 @@ every reference to it stays meaningful; delete-then-add breaks them, and the id
 is never reused.
 
 Give `--based-on` when the wording is about code as it stood at a specific
-commit; otherwise it defaults to HEAD, which is usually what you want.
+commit. With clean source files it defaults to HEAD. If source outside `.engr/`
+is dirty, engr refuses an omitted choice: select a committed basis, or use
+`--no-based-on` only when the assertion genuinely has no repository basis.
 
-Use `--ref <object>:<section>` when this wording depends on another record's
-wording. That is what makes drift detectable later — without it, nothing notices
-when the thing you relied on changes.
+Use `--ref <object>:<section>` when this wording depends on another section's
+wording, including a sibling section in the same object. Commit the target
+wording first: the reference's commit must actually contain its pinned hash.
+That is what makes drift detectable later — without it, nothing notices when the
+thing you relied on changes. A section cannot directly reference itself.
 
 ## Committing
 
-Objects live in the repository. **Remind the human to commit `.engr/objects`.**
+Objects and confirmed history live in the repository. **Remind the human to
+commit `.engr/objects` and `.engr/events`.**
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and

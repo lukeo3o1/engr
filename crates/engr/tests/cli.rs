@@ -60,6 +60,107 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+#[test]
+fn dirty_source_requires_an_explicit_repository_basis_choice() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    std::fs::write(root.join("source.txt"), "committed\n").expect("source");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+    );
+
+    let created = prepare(root, &["prepare", "--new", "--text", "basis choices"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    std::fs::write(root.join("source.txt"), "dirty\n").expect("source");
+
+    let rejected = run_engr(
+        root,
+        &["prepare", "--object", id, "--add", "--text", "assertion"],
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--no-based-on"));
+
+    let explicit = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "external assertion",
+            "--no-based-on",
+        ],
+    );
+    assert!(
+        explicit.get("based_on").is_none(),
+        "no basis is represented by an absent field"
+    );
+}
+
+#[test]
+fn revision_candidate_renders_a_contextual_unified_diff() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "diffs"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let old = (1..=20)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            &old,
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &added);
+    let revised = old.replace("line 10", "line ten");
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--revise",
+            "1",
+            "--text",
+            &revised,
+            "--no-based-on",
+        ],
+    );
+    assert!(output.status.success());
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(rendered.contains("@@"));
+    assert!(rendered.contains("-line 10"));
+    assert!(rendered.contains("+line ten"));
+    assert!(
+        !rendered.contains(" line 1\n"),
+        "distant context was not omitted"
+    );
+}
+
 fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path().to_path_buf();
@@ -388,7 +489,7 @@ fn duplicate_event_revisions_are_rejected() {
 }
 
 #[test]
-fn event_revisions_must_be_contiguous_within_the_buffer() {
+fn event_revisions_must_be_contiguous_within_history() {
     let (_workspace, root, event) = event_workspace();
     store::append_event(&root, &event).expect("write first event");
     let mut skipped = event.clone();

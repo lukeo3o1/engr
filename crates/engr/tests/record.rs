@@ -1,8 +1,8 @@
 //! What the record guarantees once it is written: that the wording is the
-//! wording that was confirmed, that a purge cannot lose content, and that drift
+//! wording that was confirmed, that confirmed history remains, and that drift
 //! is noticed.
 
-use engr::model::{Action, Content, Event, Payload, Ref};
+use engr::model::{Action, Content, Payload, Ref};
 use engr::{gate, ops, store, view};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,31 @@ fn workspace() -> (TempDir, PathBuf) {
     let root = dir.path().to_path_buf();
     store::init(&root).expect("init");
     (dir, root)
+}
+
+fn commit_all(root: &Path, message: &str) -> String {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            message,
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git")
+            .success());
+    }
+    engr::git::head(root).expect("HEAD")
 }
 
 fn payload(action: Action, object: &str, text: &str) -> Payload {
@@ -69,6 +94,22 @@ fn editing_a_sections_text_is_detected() {
 }
 
 #[test]
+fn every_confirmed_revision_remains_in_append_only_history() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "durable history");
+    admit(&root, payload(Action::SectionAdded, &id, "first wording"));
+    admit(
+        &root,
+        payload(Action::SectionRevised { section: 1 }, &id, "second wording"),
+    );
+
+    let events = store::load_events(&root, &id).expect("history");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1].payload.content.text, "first wording");
+    assert_eq!(events[2].payload.content.text, "second wording");
+}
+
+#[test]
 fn repointing_a_reference_is_detected() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "the target");
@@ -77,6 +118,7 @@ fn repointing_a_reference_is_detected() {
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
         .sha256
         .clone();
+    let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
     let mut with_ref = payload(Action::SectionAdded, &source, "depends on the first");
@@ -84,7 +126,7 @@ fn repointing_a_reference_is_detected() {
         object: target.clone(),
         section: 1,
         sha256: pinned,
-        commit: "0".repeat(40),
+        commit,
     }];
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
@@ -99,38 +141,6 @@ fn repointing_a_reference_is_detected() {
     assert!(
         !report.passed(),
         "a repointed reference must not pass verification"
-    );
-}
-
-#[test]
-fn purge_does_not_remove_a_malformed_event_buffer() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "purge safety");
-    let object = admit(&root, payload(Action::SectionAdded, &id, "one"));
-
-    // A gap cannot arise from one append, so stored data containing one is
-    // malformed rather than an event tail `reconcile` may safely replay.
-    let orphan = Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
-        event_id: engr::model::new_id(),
-        rev: object.rev + 5,
-        time: "2026-08-13T00:00:00Z".to_owned(),
-        payload: payload(Action::SectionAdded, &id, "never projected"),
-        confirmation: engr::model::Confirmation {
-            challenge: "AAAAAA".to_owned(),
-            payload_sha256: payload(Action::SectionAdded, &id, "never projected")
-                .sha256()
-                .expect("payload hash"),
-        },
-    };
-    store::append_event(&root, &orphan).expect("append");
-
-    let error = ops::purge(&root, &id).expect_err("purge must refuse");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(
-        store::events_path(&root, &id).exists(),
-        "nothing may be dropped when validation fails"
     );
 }
 
@@ -165,6 +175,7 @@ fn a_reference_is_drift_once_its_target_is_revised() {
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
         .sha256
         .clone();
+    let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
     let mut with_ref = payload(Action::SectionAdded, &source, "rests on the basis");
@@ -172,7 +183,7 @@ fn a_reference_is_drift_once_its_target_is_revised() {
         object: target.clone(),
         section: 1,
         sha256: pinned,
-        commit: "0".repeat(40),
+        commit,
     }];
     admit(&root, with_ref);
 
@@ -263,6 +274,7 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
         .sha256
         .clone();
+    let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(
@@ -274,7 +286,7 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
         object: target.clone(),
         section: 1,
         sha256: pinned.clone(),
-        commit: "0".repeat(40),
+        commit,
     }];
     admit(&root, with_ref);
 
@@ -351,20 +363,4 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
         content.sha256().expect("hash"),
         content.sha256().expect("hash")
     );
-}
-
-#[test]
-fn a_purge_outside_a_repository_records_no_watermark() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "no git here");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-
-    let purged = ops::purge(&root, &id).expect("purge");
-    assert_eq!(purged.events, 2);
-    assert!(
-        purged.commit.is_none(),
-        "there is no commit to record without a repository"
-    );
-    let object = store::load_object(&root, &id).expect("object");
-    assert_eq!(object.sections.len(), 1, "the sections are the authority");
 }

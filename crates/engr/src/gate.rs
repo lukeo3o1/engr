@@ -304,16 +304,13 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
 
 fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
     for reference in &payload.content.refs {
-        // Stated as a fact about what was typed, then what the flag is for. The
-        // previous wording described the invariant being checked ("points at
-        // another object") to someone who had just done the opposite, and sent
-        // them looking for a mistyped id that was not there.
-        ensure!(
-            reference.object != payload.object,
-            EXIT_INVARIANT,
-            "§{} belongs to this object; --ref is only for other objects",
-            reference.section
-        );
+        if let Action::SectionRevised { section } = payload.action {
+            ensure!(
+                reference.object != payload.object || reference.section != section,
+                EXIT_INVARIANT,
+                "section §{section} cannot directly reference itself"
+            );
+        }
         let target = store::load_object(root, &reference.object).map_err(|error| {
             if error.code == EXIT_NOT_FOUND {
                 Error::new(
@@ -344,6 +341,23 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
             reference.section,
             &reference.sha256[..8.min(reference.sha256.len())],
             &section.sha256[..8.min(section.sha256.len())]
+        );
+        let committed = git::object_at(root, &reference.commit, &reference.object)
+            .and_then(|object| object.section(reference.section).ok().cloned())
+            .ok_or_else(|| Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "reference target {} §{} is not present at commit {}; commit the target wording first",
+                    reference.object, reference.section, reference.commit
+                ),
+            ))?;
+        ensure!(
+            committed.recomputed_sha256()? == reference.sha256,
+            EXIT_INVARIANT,
+            "reference target {} §{} at commit {} does not contain the pinned wording; commit the target wording first",
+            reference.object,
+            reference.section,
+            reference.commit
         );
     }
     Ok(())
@@ -470,16 +484,34 @@ pub fn content(
     root: &Path,
     text: Option<String>,
     based_on: Option<String>,
+    no_based_on: bool,
     refs: Vec<crate::model::Ref>,
-) -> Content {
+) -> Result<Content> {
     let based_on = match based_on {
-        Some(revision) => git::resolve(root, &revision),
-        None if text.is_some() => git::head(root),
+        Some(revision) => Some(git::resolve(root, &revision).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!("based_on {revision} is not a commit in this repository"),
+            )
+        })?),
+        None if no_based_on => None,
+        None if text.is_some() && git::source_dirty(root) == Some(true) => {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                "source files have uncommitted changes; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on",
+            ));
+        }
+        None if text.is_some() => Some(git::head(root).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                "there is no repository HEAD to use as a basis; explicitly choose no repository basis with --no-based-on",
+            )
+        })?),
         None => None,
     };
-    Content {
+    Ok(Content {
         text: text.unwrap_or_default(),
         based_on,
         refs,
-    }
+    })
 }

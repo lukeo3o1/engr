@@ -20,11 +20,10 @@ object
 ├── status                    open | closed
 ├── rev                       increments on every confirmed action
 ├── next_section_id           monotonic, never reset
-├── last_projection_commit
 └── sections[]
     ├── id                    integer, never reused, never renumbered
     ├── text                  always the current wording
-    ├── based_on              the commit this wording was written against
+    ├── based_on?             committed repository context, absent by explicit choice
     ├── refs[]                { object, section, sha256, commit }
     ├── sha256                hash of text + based_on + refs
     └── confirmed_at
@@ -34,12 +33,12 @@ A section's `text` is always its current wording, because wording only changes
 through a confirmed action. Readers never have to ask which of two fields is
 authoritative — there is only one.
 
-### Sections are the authority; events are a buffer
+### Sections are current authority; events are durable history
 
-`.engr/events/<id>.jsonl` holds confirmed actions until they are projected into
-sections, and may then be discarded. **History is delegated to git**: objects live
-in the repository and are committed, so `git show <commit>:<path>` recovers any
-earlier wording.
+`.engr/events/<id>.jsonl` is append-only confirmed history and audit evidence.
+It is never purged in v0, but it is not a replay authority or a second source of
+current truth. **Sections remain authoritative for current wording**, and git
+additionally preserves committed projections for look-back and tamper evidence.
 
 This is the inversion from the previous design, and it is deliberate. Event
 sourcing bought a replayable past at the cost of a vocabulary nobody used; the
@@ -60,7 +59,7 @@ eight-character prefix.
 Section ids are integers scoped to their object, taken from `next_section_id`.
 They are **never reused and never renumbered**. Deleting a section leaves a gap,
 and the gap is information: something was there. Reuse would silently repoint
-every outside reference to it — which is why the counter must survive a purge,
+every outside reference to it — which is why the counter must be persisted,
 where `max(existing) + 1` would hand out a deleted id.
 
 ## Actions
@@ -82,11 +81,10 @@ Eight. All of them gated.
 `section_merged` carry content; the others must carry none.
 
 A **closed object refuses every section action, and a rename**. Reopen it first.
-The friction is deliberate: if a closed object could still change, `closed` would
-not mean "this has settled" and could not be used as the signal that it is safe
-to purge. A title is part of what settled, so exempting it would narrow `closed`
-to "the sections have settled" — and it is the wider reading that the purge
-signal rests on.
+The friction is deliberate: if a closed object could still change, `closed`
+would not mean "this has settled". A title is part of what settled, so exempting
+it would narrow `closed` to "the sections have settled" rather than the whole
+object.
 
 Sections have no `status` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
@@ -102,8 +100,10 @@ six-character challenge from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — no `0`/`O` o
 `prepare` **refuses up front**, so nothing that cannot apply ever reaches a
 human: the reducer is preflighted, `based_on` must name a real commit, and every
 reference must resolve to an existing section whose current hash matches what is
-being pinned. Deferring reference checks to `verify` is what let one mistyped id
-in the previous design poison a global health check permanently, with no way back.
+being pinned. The target wording at `refs[].commit` MUST recompute to
+`refs[].sha256`; an uncommitted target wording cannot be referenced. Deferring
+reference checks to `verify` is what let one mistyped id in the previous design
+poison a global health check permanently, with no way back.
 
 There is **one live candidate per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.
@@ -138,9 +138,21 @@ cannot be confirmed.
 
 ### What a human is shown
 
-The **change**, not the whole section again — the previous wording and the new
-wording. Requiring a full re-read on every revision is how confirmation decays
-into rubber-stamping.
+The **change**, not the whole section again. Revisions use a unified line diff
+with limited unchanged context; omitted unchanged wording remains part of the
+complete candidate payload and confirmation hash.
+
+### Repository basis
+
+`based_on` names the committed repository context against which wording was
+formed; it is not an exact wording dependency (that is what `refs[]` records).
+With a clean source worktree, omitted `--based-on` defaults to `HEAD`. If source
+files outside `.engr/**` are dirty, omission is refused: the caller must select
+a real commit with `--based-on` or explicitly assert no repository basis with
+`--no-based-on`. The latter omits the field; it is never encoded as `null` or a
+magic revision. Changes only under `.engr/**` do not make source context dirty.
+Outside a Git repository, omission cannot default to `HEAD`, so `--no-based-on`
+is required.
 
 ### Confirming
 
@@ -195,7 +207,8 @@ Two signals, both computed at read time, both needing nobody to be reading.
 | The basis moved | `based_on` versus HEAD: commits ahead, files changed |
 | A dependency changed | `refs[].sha256` versus the target section's current `sha256` |
 
-Both are reported as **information, not a verdict**. A threshold nobody has
+Sections without `based_on` have no basis-movement signal. Both signals are
+reported as **information, not a verdict**. A threshold nobody has
 validated would be a guess, and a binary "stale" that fires on every commit is
 worthless.
 
@@ -232,27 +245,15 @@ committed, look-back disappears silently — the recorded commit resolves to
 nothing and everything looks fine until someone needs it. `init` says whether
 this is a repository, and `confirm` says when an object has uncommitted changes.
 
-## Purge
-
-`purge` discards one object's event buffer and records `last_projection_commit`.
-
-It is **not gated**: it changes nothing a human confirmed, so it is garbage
-collection rather than a semantic act. The guard is mechanical instead — purge
-**refuses unless every event being dropped is already reflected in the sections**,
-because silently dropping an unprojected event would lose confirmed content.
-
-When to purge is a human judgement, not a threshold: the buffer has grown large,
-or the object has settled. A `closed` object is the obvious candidate.
-
 ## Verify
 
 `verify` recomputes each section's hash from what is stored, and the hash of
 each section those sections reference.
 
 It catches a section edited without recomputing the hash. It **cannot** catch an
-edit that recomputes the hash too: once events are purged, the hash sits beside
-the content it covers. Committed git history is the real tamper anchor, which is
-why `verify` also reports an uncommitted object.
+edit that recomputes the hash too. Append-only confirmed events preserve audit
+evidence, and committed git history provides an additional tamper anchor, which
+is why `verify` also reports an uncommitted object.
 
 Do not read `verify` as proof that a human confirmed the current wording. It
 proves internal consistency. The gate is a convention enforced by the agent's
@@ -298,7 +299,7 @@ otherwise would only obscure the second.
   .gitignore               excludes lock and candidates/
   lock                     one writer at a time
   objects/<uuid>.json      the authority        commit this
-  events/<uuid>.jsonl      the buffer, purgeable
+  events/<uuid>.jsonl      append-only confirmed history
   candidates/<CODE>.json   awaiting a human     never commit this
 ```
 
@@ -350,9 +351,9 @@ Splitting `closed` is the nearest of these, and part of its signal is already
 visible: abandoned work can only be closed, so the record goes on reporting a
 moved basis for something nobody intends to return to. That is a false alarm in
 the signal this design exists to keep believable. Any new status MUST answer the
-three questions the existing two answer — does it refuse section actions, is it
-safe to purge, and does it earn the closed-and-drifted alarm — and `abandoned`
-is so far the only candidate whose answers differ from `closed`'s.
+two questions the existing states answer — does it refuse section actions, and
+does it earn the closed-and-drifted alarm — and `abandoned` is so far the only
+candidate whose answers differ from `closed`'s.
 
 A priority would be a decision like any other and would go through the gate. The
 test for whether it belongs is whether a human wants to be asked to confirm a
