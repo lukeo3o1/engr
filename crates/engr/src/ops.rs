@@ -96,8 +96,18 @@ impl Report {
 /// preserve confirmed evidence, while committed git history remains an
 /// additional tamper anchor. That is why an uncommitted object file is reported.
 pub fn verify(root: &Path, id: &str) -> Result<Report> {
-    let object = effective(root, id)?;
     let events = store::load_events(root, id)?;
+    let persisted = match store::load_object(root, id) {
+        Ok(object) => Some(object),
+        Err(error) if error.code == EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
+    // Replay remains a read-only recovery check, but verification must report
+    // the bytes actually persisted as the projection. Otherwise a valid Event
+    // tail could make an unrepaired Object look synchronized.
+    let recovered = effective(root, id)?;
+    let object = persisted.as_ref().unwrap_or(&recovered);
+    let projection_rev = persisted.as_ref().map_or(0, |object| object.rev);
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     for section in &object.sections {
@@ -105,7 +115,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             tampered.push(section.id);
         }
         for reference in &section.refs {
-            let Ok(target) = effective(root, &reference.object) else {
+            let Ok(target) = store::load_object(root, &reference.object) else {
                 continue;
             };
             let Ok(target_section) = target.section(reference.section) else {
@@ -126,7 +136,10 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         sections: object.sections.len(),
         tampered,
         standing_on_tampered,
-        unprojected: events.iter().filter(|event| event.rev > object.rev).count(),
+        unprojected: events
+            .iter()
+            .filter(|event| event.rev > projection_rev)
+            .count(),
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })
 }

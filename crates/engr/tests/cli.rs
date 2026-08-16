@@ -207,7 +207,7 @@ fn reference_admission_uses_the_effective_target_projection() {
     .expect("prepare revision");
     let revision_event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: revision.candidate.binding.expected_rev + 1,
         time: "2026-08-17T00:00:00Z".to_owned(),
@@ -347,7 +347,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     let retry_code = retryable.candidate.challenge.clone();
     gate::confirm(root, &format!("CONFIRM {retry_code}")).expect("apply candidate");
     store::write_json(
-        &store::candidate_path(root, &retry_code),
+        &store::candidate_path(root, &retry_code).expect("candidate path"),
         &retryable.candidate,
     )
     .expect("restore candidate after deletion crash");
@@ -407,8 +407,11 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     .expect("prepare overtaking candidate");
     gate::confirm(root, &format!("CONFIRM {}", overtaking.candidate.challenge))
         .expect("confirm overtaking candidate");
-    store::write_json(&store::candidate_path(root, &stale_code), &stale.candidate)
-        .expect("restore overtaken candidate");
+    store::write_json(
+        &store::candidate_path(root, &stale_code).expect("candidate path"),
+        &stale.candidate,
+    )
+    .expect("restore overtaken candidate");
 
     let stale_view = run_engr(root, &["candidate", &stale_code]);
     assert!(stale_view.status.success());
@@ -673,12 +676,12 @@ fn legacy_crash_tail_reads_the_effective_object_without_writing() {
     assert!(listed.status.success(), "legacy crash-tail ls failed");
     assert!(String::from_utf8_lossy(&listed.stdout).contains("recovered confirmed wording"));
     let verified = run_engr(root, &["verify", id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("FAIL"));
     assert!(
-        verified.status.success(),
-        "legacy crash-tail verify failed: {}",
-        String::from_utf8_lossy(&verified.stderr)
+        String::from_utf8_lossy(&verified.stdout).contains("1 events are not reflected"),
+        "a legacy read may recover in memory but verify must not call the raw projection synchronized"
     );
-    assert!(String::from_utf8_lossy(&verified.stdout).contains("PASS"));
 
     assert!(
         !lock_path.exists(),
@@ -815,6 +818,70 @@ fn malformed_canonical_references_are_usage_errors_at_the_cli_boundary() {
         "{}",
         String::from_utf8_lossy(&reference.stderr)
     );
+}
+
+#[test]
+fn whole_object_arguments_reject_valid_but_unsupported_selectors_as_usage() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "selector input"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let compact = engr::reference::encode_uuid(uuid::Uuid::parse_str(id).expect("uuid"));
+    let with_section = format!("engr:obj:{compact}:3");
+    let with_snapshot = format!("engr:obj:{compact}@{}", "a".repeat(40));
+
+    for spec in [&with_section, &with_snapshot] {
+        assert_eq!(
+            run_engr(root, &["show", spec]).status.code(),
+            Some(engr::EXIT_USAGE)
+        );
+        assert_eq!(
+            run_engr(root, &["prepare", "--object", spec, "--close"])
+                .status
+                .code(),
+            Some(engr::EXIT_USAGE)
+        );
+    }
+}
+
+#[test]
+fn title_actions_reject_references_as_cli_usage() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let created = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--text",
+            "title",
+            "--ref",
+            "not-a-reference",
+        ],
+    );
+    assert_eq!(created.status.code(), Some(engr::EXIT_USAGE));
+
+    let object = prepare(root, &["prepare", "--new", "--text", "existing title"]);
+    confirm(root, &object);
+    let id = object["object"].as_str().expect("object");
+    let renamed = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--rename",
+            "--text",
+            "renamed title",
+            "--ref",
+            "not-a-reference",
+        ],
+    );
+    assert_eq!(renamed.status.code(), Some(engr::EXIT_USAGE));
 }
 
 #[test]
@@ -1141,7 +1208,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload_sha256 = payload.sha256().expect("payload hash");
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -1357,7 +1424,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
-            version: engr::FORMAT_VERSION,
+            version: engr::EVENT_ENVELOPE_VERSION_V0,
             event_id: engr::model::new_id(),
             rev: 2,
             time: "2026-08-13T00:00:00Z".to_owned(),

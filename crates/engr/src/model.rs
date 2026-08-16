@@ -5,7 +5,7 @@
 //! action. Nothing is derived at read time except staleness, which lives in
 //! [`crate::git`].
 
-use crate::FORMAT_VERSION;
+use crate::LEGACY_OBJECT_VERSION_V0;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -232,7 +232,7 @@ impl Object {
         }
         if let Some(version) = self.legacy_version {
             ensure!(
-                version == FORMAT_VERSION,
+                version == LEGACY_OBJECT_VERSION_V0,
                 EXIT_SCHEMA,
                 "unsupported legacy object version {version}"
             );
@@ -553,7 +553,7 @@ mod tests {
         };
         Event {
             format: EVENT_FORMAT.to_owned(),
-            version: FORMAT_VERSION,
+            version: crate::EVENT_ENVELOPE_VERSION_V0,
             event_id: new_id(),
             rev,
             time: "2026-08-17T00:00:00Z".to_owned(),

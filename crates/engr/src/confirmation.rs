@@ -107,7 +107,7 @@ pub fn response(input: &str) -> Response<'_> {
     if let Some(rest) = input.strip_prefix("CONFIRM ") {
         let mut words = rest.split_whitespace();
         if let Some(code) = words.next() {
-            if words.next().is_some() {
+            if words.next().is_some() && valid_challenge(code) {
                 return Response::Qualified(code);
             }
         }
@@ -139,7 +139,10 @@ pub fn authorize(
     }
 }
 
-fn valid_challenge(code: &str) -> bool {
+/// The only spelling that may name a candidate on disk. Keeping the grammar
+/// here makes a qualified response unable to turn arbitrary path text into a
+/// storage lookup before the domain gets a chance to reject it.
+pub fn valid_challenge(code: &str) -> bool {
     code.len() == CHALLENGE_LEN && code.bytes().all(|byte| ALPHABET.contains(&byte))
 }
 

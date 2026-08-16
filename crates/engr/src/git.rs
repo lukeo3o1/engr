@@ -7,7 +7,7 @@
 //! is worse than a noisy start.
 
 use crate::model::{Object, OBJECT_FORMAT};
-use crate::{ensure, Error, Result, EXIT_SCHEMA, FORMAT_VERSION};
+use crate::{ensure, Error, Result, EXIT_SCHEMA, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -71,7 +71,7 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
         "{path}: not an engr workspace"
     );
     ensure!(
-        format.version == FORMAT_VERSION,
+        format.version == WORKSPACE_VERSION,
         EXIT_SCHEMA,
         "{path}: workspace version {} is not supported by engr {}",
         format.version,
@@ -120,7 +120,7 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
         ensure!(
             object_value.get("format").and_then(|value| value.as_str()) == Some(OBJECT_FORMAT)
                 && object_value.get("version").and_then(|value| value.as_u64())
-                    == Some(FORMAT_VERSION.into()),
+                    == Some(LEGACY_OBJECT_VERSION_V0.into()),
             EXIT_SCHEMA,
             "{path}: not a recognized legacy v0 object"
         );

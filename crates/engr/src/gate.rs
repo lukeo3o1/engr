@@ -8,8 +8,8 @@ use crate::model::{
     CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::{
-    ensure, git, ops, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND,
-    EXIT_SCHEMA, EXIT_USAGE, FORMAT_VERSION,
+    ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION_V0,
+    EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -85,7 +85,7 @@ pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
 }
 
 pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
-    let path = store::candidate_path(root, challenge);
+    let path = store::candidate_path(root, challenge)?;
     ensure!(
         path.exists(),
         EXIT_NOT_FOUND,
@@ -98,12 +98,24 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
 
 fn validate_candidate(candidate: &Candidate) -> Result<()> {
     ensure!(
-        candidate.format == CANDIDATE_FORMAT && candidate.version == FORMAT_VERSION,
+        candidate.format == CANDIDATE_FORMAT && candidate.version == CANDIDATE_ENVELOPE_VERSION_V0,
         EXIT_SCHEMA,
         "candidate {} has an unsupported format",
         candidate.challenge
     );
-    candidate.payload.validate()
+    ensure!(
+        crate::confirmation::valid_challenge(&candidate.challenge),
+        EXIT_SCHEMA,
+        "candidate {} has an invalid challenge code",
+        candidate.challenge
+    );
+    candidate.payload.validate()?;
+    validate_title_context(&candidate.payload).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("candidate {}: {}", candidate.challenge, error.message),
+        )
+    })
 }
 
 /// The actionable state of an outstanding candidate.
@@ -233,10 +245,27 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
     payload.validate()
 }
 
+/// Titles name the Object; unlike section wording they are not assertions made
+/// against repository context or another section. Keeping that rule at
+/// admission prevents the renderer from hiding semantic fields a human never
+/// had a chance to read.
+fn validate_title_context(payload: &Payload) -> Result<()> {
+    if payload.action.carries_title() {
+        ensure!(
+            payload.content.based_on.is_none() && payload.content.refs.is_empty(),
+            EXIT_INVARIANT,
+            "{} titles cannot carry repository basis or references",
+            payload.action.label()
+        );
+    }
+    Ok(())
+}
+
 /// Confirmed payloads must already be canonical; retries must never use this to
 /// silently change what an earlier human confirmed.
 fn validate_persisted_payload(root: &Path, payload: &Payload) -> Result<()> {
     payload.validate()?;
+    validate_title_context(payload)?;
     if let Some(based_on) = &payload.content.based_on {
         ensure!(
             git::resolve(root, based_on).as_deref() == Some(based_on.as_str()),
@@ -303,8 +332,16 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// confirmation. References are checked here, at the gate — not in `verify`.
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
-pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
+pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
+    // Refuse legacy workspaces before opening the writer lock: even creating a
+    // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
+    store::with_lock(root, move || prepare_locked(root, payload))
+}
+
+fn prepare_locked(root: &Path, mut payload: Payload) -> Result<Prepared> {
+    store::require_current(root)?;
+    validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
     // A title is the line a listing prints, so whitespace around it is never
     // meaningful and always visible — it pushes one row out of column. The
@@ -375,7 +412,7 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
         let mut trial = object.clone();
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
-            version: FORMAT_VERSION,
+            version: EVENT_ENVELOPE_VERSION_V0,
             event_id: String::new(),
             rev: object.rev + 1,
             time: now(),
@@ -405,7 +442,7 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     )?;
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
-        version: FORMAT_VERSION,
+        version: CANDIDATE_ENVELOPE_VERSION_V0,
         gate,
         previous_text,
         previous_based_on,
@@ -418,13 +455,13 @@ pub fn prepare(root: &Path, mut payload: Payload) -> Result<Prepared> {
     let mut superseded = Vec::new();
     for existing in pending(root)? {
         if existing.payload.object == candidate.payload.object {
-            fs::remove_file(store::candidate_path(root, &existing.challenge))
+            fs::remove_file(store::candidate_path(root, &existing.challenge)?)
                 .map_err(|error| tool_error("discarding a superseded candidate", error))?;
             superseded.push(existing.challenge.clone());
         }
     }
     store::write_json(
-        &store::candidate_path(root, &candidate.challenge),
+        &store::candidate_path(root, &candidate.challenge)?,
         &candidate,
     )?;
 
@@ -500,7 +537,12 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
 
 pub fn discard(root: &Path, challenge: &str) -> Result<()> {
     store::require_current(root)?;
-    let path = store::candidate_path(root, challenge);
+    store::with_lock(root, || discard_locked(root, challenge))
+}
+
+fn discard_locked(root: &Path, challenge: &str) -> Result<()> {
+    store::require_current(root)?;
+    let path = store::candidate_path(root, challenge)?;
     ensure!(
         path.exists(),
         EXIT_NOT_FOUND,
@@ -518,10 +560,19 @@ pub fn discard(root: &Path, challenge: &str) -> Result<()> {
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
 pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     store::require_current(root)?;
+    store::with_lock(root, || confirm_locked(root, response))
+}
+
+fn confirm_locked(root: &Path, response: &str) -> Result<(Event, Object)> {
+    store::require_current(root)?;
     let code = crate::confirmation::authorize(
         response,
-        |code| store::candidate_path(root, code).exists(),
-        |code| discard(root, code),
+        |code| {
+            store::candidate_path(root, code)
+                .map(|path| path.exists())
+                .unwrap_or(false)
+        },
+        |code| discard_locked(root, code),
     )?;
 
     let candidate = find(root, code)?;
@@ -537,7 +588,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     let mut object = match candidate_state(root, &candidate)? {
         CandidateState::AlreadyApplied(applied) => {
             let object = ops::reconcile(root, &candidate.payload.object)?;
-            discard(root, code)?;
+            discard_locked(root, code)?;
             return Ok((*applied, object));
         }
         CandidateState::Stale { current_rev } => {
@@ -570,7 +621,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
 
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: FORMAT_VERSION,
+        version: EVENT_ENVELOPE_VERSION_V0,
         event_id: crate::model::new_id(),
         rev: object.rev + 1,
         time: now(),
@@ -584,7 +635,7 @@ pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
     project(&mut object, &event)?;
     store::append_event(root, &event)?;
     store::save_object(root, &object)?;
-    discard(root, code)?;
+    discard_locked(root, code)?;
     Ok((event, object))
 }
 

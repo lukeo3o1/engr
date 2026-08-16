@@ -125,13 +125,66 @@ fn hedged_assent_discards_the_candidate() {
 }
 
 #[test]
+fn malformed_confirmation_codes_never_escape_candidates() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "confirmation paths");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let format_path = store::engr_dir(&root).join("format.json");
+    let object_path = store::object_path(&root, &id);
+    let outside_path = root.join("outside.json");
+    std::fs::write(&outside_path, "outside candidate storage").expect("outside fixture");
+    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
+    let before: Vec<_> = [&format_path, &object_path, &outside_path, &candidate_path]
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read(path).expect("snapshot")))
+        .collect();
+
+    for malformed in [
+        "../format".to_owned(),
+        format!("../objects/{id}"),
+        "../../outside".to_owned(),
+    ] {
+        let error = gate::confirm(&root, &format!("CONFIRM {malformed} commentary"))
+            .expect_err("a path-shaped response is not a qualified assent");
+        assert_eq!(error.code, engr::EXIT_USAGE);
+        for (path, expected) in &before {
+            assert_eq!(
+                std::fs::read(path).expect("snapshot after refusal"),
+                *expected
+            );
+        }
+    }
+    for malformed in ["../format", "../objects/not-an-object", "../../outside"] {
+        assert_eq!(
+            gate::find(&root, malformed)
+                .expect_err("candidate lookup must reject malformed paths")
+                .code,
+            engr::EXIT_USAGE
+        );
+        assert_eq!(
+            gate::discard(&root, malformed)
+                .expect_err("candidate discard must reject malformed paths")
+                .code,
+            engr::EXIT_USAGE
+        );
+    }
+
+    let error = gate::confirm(&root, &format!("CONFIRM {code} commentary"))
+        .expect_err("a qualified valid code is discarded without nested locking");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(gate::find(&root, &code).is_err());
+}
+
+#[test]
 fn direct_confirmation_refuses_a_legacy_workspace_without_partial_mutation() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "legacy boundary");
     let prepared = gate::prepare(&root, empty(Action::ObjectClosed, &id)).expect("prepare");
     let code = prepared.candidate.challenge.clone();
     let object_path = store::object_path(&root, &id);
-    let candidate_path = store::candidate_path(&root, &code);
+    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
     let events_path = store::events_path(&root, &id);
 
     let mut object: serde_json::Value =
@@ -273,6 +326,105 @@ fn direct_gate_callers_cannot_persist_non_v7_object_identities() {
     assert!(
         gate::pending(&root).expect("pending candidates").is_empty(),
         "rejected direct inputs must not leave a candidate behind"
+    );
+}
+
+#[test]
+fn title_actions_cannot_carry_hidden_basis_or_references() {
+    let (_dir, root) = workspace();
+    let mut created = payload(Action::ObjectCreated, &engr::model::new_id(), "new title");
+    created.content.based_on = Some("HEAD".to_owned());
+    created.content.refs = vec![Ref {
+        object: engr::model::new_id(),
+        section: 1,
+        sha256: "0".repeat(64),
+        commit: "HEAD".to_owned(),
+    }];
+    let error = gate::prepare(&root, created).expect_err("a title has no hidden context");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(gate::pending(&root).expect("pending").is_empty());
+
+    let id = new_object(&root, "old title");
+    let mut renamed = payload(Action::ObjectRenamed, &id, "new title");
+    renamed.content.based_on = Some("HEAD".to_owned());
+    let error = gate::prepare(&root, renamed).expect_err("a renamed title has no basis");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        1,
+        "rejected title context must not enter Event history"
+    );
+}
+
+#[test]
+fn public_gate_mutations_serialize_direct_callers() {
+    use std::sync::{Arc, Barrier};
+
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "direct lock");
+    let first = payload(Action::SectionAdded, &id, "first proposal");
+    let second = payload(Action::SectionAdded, &id, "second proposal");
+    let start = Arc::new(Barrier::new(2));
+    let (first_prepare, second_prepare) = std::thread::scope(|scope| {
+        let first_start = Arc::clone(&start);
+        let second_start = Arc::clone(&start);
+        let first_root = &root;
+        let second_root = &root;
+        let first = scope.spawn(move || {
+            first_start.wait();
+            gate::prepare(first_root, first)
+        });
+        let second = scope.spawn(move || {
+            second_start.wait();
+            gate::prepare(second_root, second)
+        });
+        (
+            first.join().expect("first prepare"),
+            second.join().expect("second prepare"),
+        )
+    });
+    assert!(first_prepare.is_ok() && second_prepare.is_ok());
+    let candidates = gate::pending(&root).expect("one live candidate");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "direct prepares must supersede under one lock"
+    );
+
+    let response = format!("CONFIRM {}", candidates[0].challenge);
+    let start = Arc::new(Barrier::new(2));
+    let (first_confirm, second_confirm) = std::thread::scope(|scope| {
+        let first_start = Arc::clone(&start);
+        let second_start = Arc::clone(&start);
+        let first_root = &root;
+        let second_root = &root;
+        let first_response = response.clone();
+        let second_response = response.clone();
+        let first = scope.spawn(move || {
+            first_start.wait();
+            gate::confirm(first_root, &first_response)
+        });
+        let second = scope.spawn(move || {
+            second_start.wait();
+            gate::confirm(second_root, &second_response)
+        });
+        (
+            first.join().expect("first confirm"),
+            second.join().expect("second confirm"),
+        )
+    });
+    assert_eq!(
+        [first_confirm, second_confirm]
+            .iter()
+            .filter(|outcome| outcome.is_ok())
+            .count(),
+        1,
+        "one direct confirmation may admit the candidate"
+    );
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "concurrent confirmation must not append competing revision 2 events"
     );
 }
 
@@ -593,7 +745,7 @@ fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
         payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
     )
     .expect("prepare");
-    let path = store::candidate_path(&root, &prepared.candidate.challenge);
+    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
     let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
     stored
         .as_object_mut()
@@ -806,7 +958,11 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
 
     // Reinstate the candidate to stand in for a crash between saving the
     // projection and clearing it.
-    store::write_json(&store::candidate_path(&root, &code), &prepared.candidate).expect("rewrite");
+    store::write_json(
+        &store::candidate_path(&root, &code).expect("candidate path"),
+        &prepared.candidate,
+    )
+    .expect("rewrite");
 
     let (_, object) = gate::confirm(&root, &response).expect("recovery is idempotent");
     assert_eq!(object.rev, 2, "the event must not be applied a second time");
@@ -821,7 +977,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: first.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -860,7 +1016,7 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     let code = prepared.candidate.challenge.clone();
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: prepared.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -892,7 +1048,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::FORMAT_VERSION,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),

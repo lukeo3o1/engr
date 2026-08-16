@@ -10,7 +10,10 @@
 //! ```
 
 use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
-use crate::{ensure, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, FORMAT_VERSION};
+use crate::{
+    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
+    EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
+};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -39,8 +42,13 @@ pub fn object_path(root: &Path, id: &str) -> PathBuf {
 pub fn events_path(root: &Path, id: &str) -> PathBuf {
     events_dir(root).join(format!("{id}.jsonl"))
 }
-pub fn candidate_path(root: &Path, challenge: &str) -> PathBuf {
-    candidates_dir(root).join(format!("{challenge}.json"))
+pub fn candidate_path(root: &Path, challenge: &str) -> Result<PathBuf> {
+    ensure!(
+        crate::confirmation::valid_challenge(challenge),
+        EXIT_USAGE,
+        "candidate code {challenge:?} must be six characters from 23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    );
+    Ok(candidates_dir(root).join(format!("{challenge}.json")))
 }
 
 /// Walk up from `start` looking for a workspace, so the tool works from any
@@ -120,7 +128,7 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         &dir.join("format.json"),
         &Format {
             format: WORKSPACE_FORMAT.to_owned(),
-            version: FORMAT_VERSION,
+            version: WORKSPACE_VERSION,
         },
     )?;
     let ignore = dir.join(".gitignore");
@@ -147,7 +155,7 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         path.display()
     );
     ensure!(
-        format.version == FORMAT_VERSION,
+        format.version == WORKSPACE_VERSION,
         EXIT_SCHEMA,
         "workspace version {} is not supported by engr {}",
         format.version,
@@ -167,7 +175,8 @@ fn detect_legacy(root: &Path) -> Result<bool> {
     for id in ids {
         let value: serde_json::Value = read_json(&object_path(root, &id))?;
         if value.get("format").and_then(|value| value.as_str()) != Some("engr-object")
-            || value.get("version").and_then(|value| value.as_u64()) != Some(1)
+            || value.get("version").and_then(|value| value.as_u64())
+                != Some(LEGACY_OBJECT_VERSION_V0.into())
         {
             return Ok(false);
         }
@@ -317,7 +326,7 @@ pub fn migrate(root: &Path) -> Result<()> {
             &format_path,
             &Format {
                 format: WORKSPACE_FORMAT.to_owned(),
-                version: FORMAT_VERSION,
+                version: WORKSPACE_VERSION,
             },
         )?;
     }
@@ -568,7 +577,7 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         // Reconciliation can turn an event back into authority after a crash,
         // so corrupt recovery data must fail before it reaches the reducer.
         ensure!(
-            event.version == FORMAT_VERSION,
+            event.version == EVENT_ENVELOPE_VERSION_V0,
             EXIT_SCHEMA,
             "{}:{}: unsupported event version {}",
             path.display(),

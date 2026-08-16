@@ -159,7 +159,7 @@ fn run(cli: Cli) -> Result<()> {
         println!(
             "migrated {} to workspace version {}",
             store::engr_dir(&root).display(),
-            engr::FORMAT_VERSION
+            engr::WORKSPACE_VERSION
         );
         return Ok(());
     }
@@ -174,7 +174,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
             store::require_current(&root)?;
-            let (event, object) = store::with_lock(&root, || gate::confirm(&root, &response))?;
+            let (event, object) = gate::confirm(&root, &response)?;
             println!(
                 "CONFIRMED  {}  {}  rev {}",
                 shorten(&object.id, view::width(&root)),
@@ -271,16 +271,22 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         (None, None) => None,
     };
 
-    let mut references = Vec::new();
-    for spec in &command.references {
-        references.push(parse_ref(root, spec)?);
-    }
-
     if action.carries_title() && (command.based_on.is_some() || command.no_based_on) {
         return Err(Error::new(
             EXIT_USAGE,
             "a title has no repository basis; use --based-on or --no-based-on only for section wording",
         ));
+    }
+    if action.carries_title() && !command.references.is_empty() {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "a title has no references; use --ref only for section wording",
+        ));
+    }
+
+    let mut references = Vec::new();
+    for spec in &command.references {
+        references.push(parse_ref(root, spec)?);
     }
     if !action.carries_content() && command.no_based_on {
         return Err(Error::new(
@@ -301,7 +307,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         object,
         content,
     };
-    let prepared = store::with_lock(root, || gate::prepare(root, payload))?;
+    let prepared = gate::prepare(root, payload)?;
 
     if command.json {
         println!(
@@ -335,6 +341,19 @@ fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
 /// it is also used for stored authority. At the command line they are a person
 /// supplying an invalid argument, so translate only at this boundary.
 fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_engr_reference(field, spec, error))?;
+        if reference.kind() != engr::reference::ResourceKind::Object
+            || reference.section().is_some()
+            || reference.snapshot_selector().is_some()
+        {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("{field} {spec:?} must identify a current whole Object"),
+            ));
+        }
+    }
     store::resolve_id(root, spec).map_err(|error| malformed_engr_reference(field, spec, error))
 }
 

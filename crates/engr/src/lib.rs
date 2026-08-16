@@ -13,7 +13,14 @@ pub mod reference;
 pub mod store;
 pub mod view;
 
-pub const FORMAT_VERSION: u32 = 1;
+/// Schema version of `.engr/format.json`, the workspace-level authority.
+pub const WORKSPACE_VERSION: u32 = 1;
+/// Version carried by the supported Phase 0 Object envelope.
+pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
+/// Version carried by confirmed Event envelopes that remain readable unchanged.
+pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
+/// Version carried by live, local candidate envelopes.
+pub const CANDIDATE_ENVELOPE_VERSION_V0: u32 = 1;
 /// There is no version number. One moving release tag, `latest`, and the commit
 /// the binary was built from — see `build.rs` for where that comes from and what
 /// `-dirty` means.

@@ -158,10 +158,29 @@ fn reconcile_applies_an_event_the_projection_missed() {
         value["next_section_id"] = Value::from(1);
     });
 
+    let object_path = store::object_path(&root, &id);
+    let events_path = store::events_path(&root, &id);
+    let object_before = std::fs::read(&object_path).expect("raw object");
+    let events_before = std::fs::read(&events_path).expect("events");
+    let report = ops::verify(&root, &id).expect("verify raw projection");
+    assert!(!report.passed());
+    assert_eq!(report.unprojected, 1);
+    assert_eq!(
+        std::fs::read(&object_path).expect("object after verify"),
+        object_before
+    );
+    assert_eq!(
+        std::fs::read(&events_path).expect("events after verify"),
+        events_before
+    );
+
     let recovered = ops::reconcile(&root, &id).expect("reconcile");
     assert_eq!(recovered.rev, 2);
     assert_eq!(recovered.sections.len(), 1);
     assert_eq!(recovered.sections[0].text, "one");
+    assert!(ops::verify(&root, &id)
+        .expect("verify repaired projection")
+        .passed());
 }
 
 #[test]
