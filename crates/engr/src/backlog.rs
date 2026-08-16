@@ -291,11 +291,16 @@ impl Item {
 
     /// The newest Section activity. Derived rather than stored: an item-level
     /// timestamp that can disagree with its own Sections is a field that will.
+    ///
+    /// Compared as instants, not as text. RFC3339 permits an offset, and
+    /// `2026-08-17T01:00:00+08:00` sorts after `2026-08-16T20:00:00Z` as a
+    /// string while being an hour earlier in fact. The value returned is still
+    /// the one stored, so nothing here reinterprets what a Section recorded.
     pub fn updated_at(&self) -> &str {
         self.sections
             .iter()
+            .max_by_key(|section| instant(&section.updated_at))
             .map(|section| section.updated_at.as_str())
-            .max()
             .unwrap_or("")
     }
 
@@ -396,6 +401,28 @@ pub fn resolution_basis(text: &str, subjects: &[Subject]) -> Result<String> {
 fn canonical_json<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical form: {error}")))
+}
+
+/// The moment a stored timestamp names, or `None` if it is not one.
+///
+/// Loading validates this, so `None` should be unreachable for a Section that
+/// came off disk — but every comparison here goes through it rather than
+/// through the text, because the text of an RFC3339 value does not order.
+pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Whether two subject lists say the same thing.
+///
+/// `subjects[]` is a set, so order is not content. Reordering one leaves the
+/// resolution basis identical by design; activity has to agree, or triage
+/// reports work on a point nobody touched.
+fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
+    let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
+    let mut right: Vec<String> = right.iter().map(canonical_json).collect::<Result<_>>()?;
+    left.sort();
+    right.sort();
+    Ok(left == right)
 }
 
 fn short(value: &str) -> &str {
@@ -735,8 +762,13 @@ pub fn revise_section(root: &Path, id: &str, section: u64, text: &str) -> Result
             .iter_mut()
             .find(|candidate| candidate.id == section)
             .expect("section presence checked above");
-        text.clone_into(&mut slot.text);
-        slot.updated_at = now();
+        // Rewriting a section with the wording it already had is not work on
+        // it. An idempotent write must not manufacture activity, or a retried
+        // command makes an untouched point look like the freshest one.
+        if slot.text != text {
+            text.clone_into(&mut slot.text);
+            slot.updated_at = now();
+        }
         Ok(())
     })
 }
@@ -749,8 +781,14 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
             .iter_mut()
             .find(|candidate| candidate.id == section)
             .expect("section presence checked above");
+        // The caller's order is persisted, because no canonical order is
+        // required — but reordering a set is not a change to what is
+        // unresolved, and the resolution basis already says so.
+        let changed = !same_subjects(&slot.subjects, &subjects)?;
         slot.subjects = subjects;
-        slot.updated_at = now();
+        if changed {
+            slot.updated_at = now();
+        }
         Ok(())
     })
 }
@@ -929,7 +967,12 @@ impl Outcome {
 ///
 /// A source that changed is not a failure of the Object mutation. That was
 /// confirmed by a human and is already in the record.
-pub fn reconcile(root: &Path, sources: &[Source]) -> Result<Vec<Outcome>> {
+///
+/// Crate-visible deliberately. Its precondition — the caller already holds the
+/// workspace lock — cannot be expressed in the signature, and a lock a caller
+/// has to remember is one a caller will forget. Inside the crate there is
+/// exactly one caller and it is the confirmation path.
+pub(crate) fn reconcile(root: &Path, sources: &[Source]) -> Result<Vec<Outcome>> {
     let mut outcomes = Vec::new();
     for source in sources {
         let mut item = match load(root, &source.item) {

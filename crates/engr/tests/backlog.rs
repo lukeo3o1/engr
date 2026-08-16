@@ -652,6 +652,160 @@ fn the_resolution_basis_covers_text_and_subjects_and_nothing_else() {
     );
 }
 
+/// Write an item with exact timestamps, which `create` cannot: it uses the
+/// clock, and these tests are about values the clock never produces.
+fn staged(root: &Path, id: &str, topic: &str, sections: serde_json::Value) {
+    let item = serde_json::json!({
+        "id": id,
+        "topic": topic,
+        "next_section_id": sections.as_array().expect("sections").len() + 1,
+        "sections": sections,
+    });
+    store::write_json(&backlog::item_path(root, id), &item).expect("stage");
+}
+
+/// RFC3339 carries an offset, and offset timestamps do not sort as text.
+/// `updated_at` is what an agent reads to decide which unresolved point was
+/// touched most recently, so comparing the strings answers that question wrong.
+#[test]
+fn activity_is_compared_as_an_instant_not_as_text() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    staged(
+        &root,
+        &id,
+        "offsets",
+        serde_json::json!([
+            // 17:00Z — earlier, but sorts later as a string.
+            {"id": 1, "text": "first", "updated_at": "2026-08-17T01:00:00+08:00", "subjects": []},
+            {"id": 2, "text": "second", "updated_at": "2026-08-16T20:00:00Z", "subjects": []},
+        ]),
+    );
+
+    let item = backlog::load(&root, &id).expect("load");
+    assert_eq!(
+        item.updated_at(),
+        "2026-08-16T20:00:00Z",
+        "20:00Z is three hours after 01:00+08:00, whatever the strings do"
+    );
+    assert!(
+        "2026-08-17T01:00:00+08:00" > "2026-08-16T20:00:00Z",
+        "and text comparison really would have picked the other one"
+    );
+}
+
+/// Shortening a timestamp by cutting the string moves it. With an offset and
+/// fractional seconds, trimming at the `.` and appending `Z` reports an instant
+/// eight hours from the one recorded.
+#[test]
+fn rendering_activity_to_the_second_never_moves_the_instant() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    staged(
+        &root,
+        &id,
+        "rendered",
+        serde_json::json!([
+            {"id": 1, "text": "point", "updated_at": "2026-08-17T10:00:00.123456+08:00", "subjects": []},
+        ]),
+    );
+    let item = backlog::load(&root, &id).expect("load");
+
+    for rendered in [
+        engr::view::render_backlog_show(&root, &item),
+        engr::view::render_backlog_ls(&root, std::slice::from_ref(&item), None),
+    ] {
+        assert!(
+            rendered.contains("2026-08-17T02:00:00Z"),
+            "the same instant, in UTC, to the second: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("2026-08-17T10:00:00Z"),
+            "and never the local reading relabelled as UTC: {rendered:?}"
+        );
+    }
+
+    // The stored value keeps its own precision and offset; only the column is
+    // normalized.
+    assert_eq!(
+        item.sections[0].updated_at,
+        "2026-08-17T10:00:00.123456+08:00"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&engr::view::render_backlog_json(&item).expect("json")).expect("json");
+    assert_eq!(
+        json["sections"][0]["updated_at"],
+        item.sections[0].updated_at
+    );
+}
+
+/// `subjects[]` is a set, and the resolution basis already treats it as one.
+/// Activity has to agree: reordering is not work, and reporting it as work is a
+/// false signal in the exact field triage reads.
+#[test]
+fn reordering_an_equivalent_subject_set_is_not_activity() {
+    let (_dir, root) = workspace();
+    let object = compact(&engr::model::new_id());
+    let subjects = vec![
+        Subject::engr(format!("obj:{object}:1")),
+        Subject::engr(format!("obj:{object}:2")),
+    ];
+    let id = backlog::create(&root, "topic", "unresolved", subjects.clone())
+        .expect("create")
+        .id;
+    let before = backlog::load(&root, &id).expect("load");
+    let (basis, activity) = (
+        before.sections[0].resolution_basis().expect("basis"),
+        before.sections[0].updated_at.clone(),
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    backlog::set_subjects(&root, &id, 1, subjects.iter().rev().cloned().collect())
+        .expect("reorder");
+    let after = backlog::load(&root, &id).expect("load");
+    assert_eq!(
+        after.sections[0].resolution_basis().expect("basis"),
+        basis,
+        "the same set states the same unresolved thing"
+    );
+    assert_eq!(
+        after.sections[0].updated_at, activity,
+        "so it cannot look freshly worked on"
+    );
+    assert_eq!(
+        after.sections[0].subjects,
+        subjects.iter().rev().cloned().collect::<Vec<_>>(),
+        "the caller's order is still what gets stored"
+    );
+
+    // Rewriting the identical text is not work either.
+    backlog::revise_section(&root, &id, 1, "unresolved").expect("idempotent write");
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").sections[0].updated_at,
+        activity
+    );
+
+    // A real change to either does advance it.
+    backlog::set_subjects(&root, &id, 1, vec![subjects[0].clone()]).expect("drop one");
+    let changed = backlog::load(&root, &id).expect("load").sections[0]
+        .updated_at
+        .clone();
+    assert_ne!(changed, activity);
+    assert_ne!(
+        backlog::load(&root, &id).expect("load").sections[0]
+            .resolution_basis()
+            .expect("basis"),
+        basis
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    backlog::revise_section(&root, &id, 1, "reworded").expect("revise");
+    assert_ne!(
+        backlog::load(&root, &id).expect("load").sections[0].updated_at,
+        changed
+    );
+}
+
 #[test]
 fn a_topic_rename_does_not_refresh_section_activity() {
     let (_dir, root) = workspace();

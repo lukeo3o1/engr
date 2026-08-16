@@ -487,15 +487,27 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
 /// left to be inferred from which subcommand they happened to type.
 pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here was confirmed by a human\n";
 
-/// Activity to the second. The stored value keeps whatever precision the clock
-/// gave it, but nine fractional digits in a listing column push the topic —
-/// the thing being scanned for — off to the right for no gain: triage asks
-/// which points were touched recently, not which nanosecond.
+/// Activity to the second, in UTC.
+///
+/// The stored value keeps whatever precision the clock gave it, but nine
+/// fractional digits in a listing column push the topic — the thing being
+/// scanned for — off to the right for no gain: triage asks which points were
+/// touched recently, not which nanosecond.
+///
+/// Shortened by parsing the instant and formatting it again, never by cutting
+/// the string. RFC3339 allows an offset, so trimming at the `.` and appending
+/// `Z` turns `2026-08-17T10:00:00.123+08:00` into a time eight hours away from
+/// the one recorded. Normalizing to UTC leaves the instant untouched and makes
+/// the column comparable down the page, which is the only thing it is for.
 fn to_the_second(timestamp: &str) -> String {
-    match timestamp.split_once('.') {
-        Some((seconds, _)) => format!("{seconds}Z"),
-        None => timestamp.to_owned(),
-    }
+    const SECONDS: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    backlog::instant(timestamp)
+        .map(|instant| instant.to_offset(time::UtcOffset::UTC))
+        .and_then(|instant| instant.format(SECONDS).ok())
+        // Loading validates the format, so this is unreachable for a stored
+        // section — and showing the raw value beats inventing one.
+        .unwrap_or_else(|| timestamp.to_owned())
 }
 
 pub fn backlog_width(root: &Path) -> usize {

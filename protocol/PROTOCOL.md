@@ -390,6 +390,21 @@ remains unresolved, and refreshing would make an untouched point look worked on.
 Item-level activity is derived from the Sections rather than stored, so the two
 cannot disagree.
 
+Neither does a write that changes nothing. Rewriting a Section with the wording
+it already had, or with the same `subjects[]` set in a different order, MUST
+leave `updated_at` alone. Order is not content — the resolution basis already
+treats `subjects[]` as unordered — and an idempotent write that manufactures
+activity puts an untouched point at the top of the list somebody reads to find
+what was touched.
+
+The value is an RFC3339 timestamp, and it MUST be compared and rendered as an
+**instant**, never as text. RFC3339 carries an offset, so
+`2026-08-17T01:00:00+08:00` sorts after `2026-08-16T20:00:00Z` while being
+three hours earlier, and shortening a value by cutting the string at its
+fractional seconds and appending `Z` reports a different moment entirely. Read
+surfaces may normalize the offset for display; they may not change the instant,
+and the stored value keeps its own precision and offset.
+
 It is operational metadata and is **not** part of the resolution basis.
 
 ### produced[]
