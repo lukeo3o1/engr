@@ -244,6 +244,10 @@ rule in the wider vocabulary: classify it back into `draft`, `proposed` or
 `identified`, then revise. Renewed engineering work returns to the default
 listing rather than happening where nobody sees it.
 
+`--supersede` is the exception, because it is not renewed work — it is how an
+object stops being current, and the object it exists for is an `accepted` one.
+Supersede it where it stands.
+
 ## Roles, excerpts and relations
 
 A section may carry a role, saying what it asserts: `decision`, `risk`,
@@ -264,6 +268,13 @@ reasoning into `engr backlog`, point at the implementation with
 keep only the smallest relevant excerpt of a log. `--oversize` exists for when it
 genuinely is one bounded assertion, and the human sees that it was used.
 
+`--oversize` is only ever a **retry**. Adding it to the first attempt is refused,
+and so is adding it to something that breaks no limit — engr admits the exception
+only for a proposal it has already refused, unchanged. So there is nothing to
+gain by reaching for the flag early: prepare it normally, read the refusal, and
+decide. If you genuinely have no better destination, run the same command again
+with `--oversize`.
+
 `--implemented-by-file <path>` and `--implemented-by-symbol <path> <symbol>`
 record where an assertion is implemented, pinned to a real commit. Unlike
 `--ref`, they carry no wording dependency and never go stale.
@@ -273,6 +284,11 @@ Superseding is one command and one confirmation, and it needs a reason:
 ```bash
 engr prepare --object <old> --supersede <new> --text "why the replacement"
 ```
+
+It does not need the object brought back into the attention set first, and you
+should not do that: the object this exists for is an `accepted` one, and moving
+it back through `proposed` would confirm a state it was never in. Superseding is
+not resumed work on the object — it is how the object stops being current.
 
 That state and that relation cannot be separated afterwards, and there is no way
 back out of `superseded` — a superseded object stays readable and addressable,

@@ -1088,3 +1088,306 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     );
     assert_eq!(object.state, State::Open);
 }
+
+/// A Section written before `refs[]` was declared a set keeps the order its
+/// gate happened to write, and re-proposing the same members is still not a
+/// change.
+///
+/// Canonicalization is done to the proposal. If the "nothing to confirm" check
+/// did not do the same to the stored value only for the comparison, every
+/// Section stored before this rule holding two refs the other way round would
+/// accept one confirmation and one Event that changed nothing but an array's
+/// order — the exact thing declaring it a set was supposed to rule out. The
+/// stored Section is not tidied either: its hash covers the order it was
+/// written in.
+#[test]
+fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
+    let (_dir, root) = workspace();
+    let commit = repository(&root);
+    let target = new_object(&root, "the target");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, wording("depended upon")),
+    );
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, wording("also depended upon")),
+    );
+    git(&root, &["add", "-A"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "record",
+        ],
+    );
+    let commit = engr::git::head(&root).unwrap_or(commit);
+    let pin = |section: u64| Ref {
+        object: target.clone(),
+        section,
+        sha256: ops::effective_section(&root, &target, section)
+            .expect("section")
+            .sha256,
+        commit: commit.clone(),
+    };
+
+    let id = new_object(&root, "the source");
+    let object = admit(
+        &root,
+        payload(
+            Action::SectionAdded,
+            &id,
+            Content {
+                text: "stands on both".to_owned(),
+                refs: vec![pin(1), pin(2)],
+                based_on: Some(commit.clone()),
+                ..Content::default()
+            },
+        ),
+    );
+
+    // Seed what an older gate would have left: the same two refs the other way
+    // round, with the hash that order really produces. It is valid stored
+    // authority, not corruption — `verify` recomputes it and agrees.
+    let mut legacy = object.section(1).expect("section").content();
+    legacy.refs.reverse();
+    let legacy_sha256 = legacy.sha256().expect("hash");
+    rewrite(&root, &id, |value| {
+        let section = &mut value["sections"][0];
+        section["refs"].as_array_mut().expect("refs").reverse();
+        section["sha256"] = Value::String(legacy_sha256.clone());
+    });
+    let seeded = store::load_object(&root, &id).expect("an unsorted set is valid stored authority");
+    assert_eq!(
+        seeded.sections[0].recomputed_sha256().expect("recomputed"),
+        legacy_sha256,
+        "the seeded Section verifies against the order it is stored in"
+    );
+
+    // Both spellings of the same membership are the same assertion.
+    for refs in [vec![pin(1), pin(2)], vec![pin(2), pin(1)]] {
+        let error = gate::prepare(
+            &root,
+            payload(
+                Action::SectionRevised { section: 1 },
+                &id,
+                Content {
+                    text: "stands on both".to_owned(),
+                    refs,
+                    based_on: Some(commit.clone()),
+                    ..Content::default()
+                },
+            ),
+        )
+        .expect_err("re-proposing the same set is not a change");
+        assert_eq!(error.code, engr::EXIT_INVARIANT);
+        assert!(error.message.contains("nothing to confirm"), "{error}");
+    }
+
+    let after = store::load_object(&root, &id).expect("load");
+    assert_eq!(
+        after.sections[0].sha256, legacy_sha256,
+        "and nothing sorted the stored Section behind its own hash"
+    );
+    assert_eq!(after.sections[0].refs, legacy.refs);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "created and added — a reordering appends nothing"
+    );
+}
+
+/// The first refusal is a requirement on engr, not advice to the caller.
+///
+/// #14 makes the admission two-stage on purpose: above a normal threshold the
+/// first `prepare` must refuse, and only then may a retry ask for the
+/// exception. A flag alone cannot carry that, because a flag can be passed the
+/// first time — so the exception is admitted only as the retry of a refusal
+/// that really happened, for that same proposal.
+#[test]
+fn an_oversize_exception_is_only_ever_the_retry_of_a_refusal() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "admission");
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+    let another = format!("{long}y");
+
+    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
+        .expect_err("the flag is not a way past the first refusal");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("retry of a refusal"), "{error}");
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and no code is minted for it"
+    );
+
+    // An exception over nothing is an agent setting the flag by default.
+    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording("brief")))
+        .expect_err("there is nothing here to except");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(error.message.contains("no exception to make"), "{error}");
+
+    gate::prepare(&root, payload(Action::SectionAdded, &id, wording(&long)))
+        .expect_err("the first attempt is refused");
+
+    // A refusal admits the proposal it refused, and not whatever comes next.
+    let error =
+        gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&another)))
+            .expect_err("a receipt is not a mode the workspace is now in");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("retry of a refusal"), "{error}");
+
+    let prepared =
+        gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
+            .expect("the retry of what was actually refused");
+    assert!(prepared.candidate.context.oversize);
+
+    // One refusal admits one retry. Preparing the same thing again has to be
+    // refused again first, or the receipt would be a standing permission.
+    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
+        .expect_err("the receipt does not survive being used");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("retry of a refusal"), "{error}");
+}
+
+/// Where the work came from and how big it is are independent questions.
+///
+/// A proposal derived from unresolved staging that legitimately exceeds a
+/// normal threshold has to be able to take the oversize retry *and* keep saying
+/// where it came from. If the only oversize door dropped the sources, the
+/// choice would be between admitting the wording and settling the point it
+/// came out of — and confirming it would quietly resolve nothing.
+#[test]
+fn a_proposal_from_staging_keeps_its_sources_through_the_oversize_retry() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "the object");
+    let item = engr::backlog::create(&root, "unresolved reasoning", "a long point", Vec::new())
+        .expect("backlog item")
+        .id;
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+    let sources = || {
+        vec![gate::SourceRequest {
+            item: item.clone(),
+            section: 1,
+            produced: Vec::new(),
+            resolves: true,
+        }]
+    };
+
+    let error = gate::prepare_from_backlog(
+        &root,
+        payload(Action::SectionAdded, &id, wording(&long)),
+        sources(),
+    )
+    .expect_err("the first attempt is refused, sources or not");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    let prepared = gate::prepare_admitting(
+        &root,
+        payload(Action::SectionAdded, &id, wording(&long)),
+        sources(),
+        gate::Admission::Oversize,
+    )
+    .expect("the retry keeps both halves");
+    assert!(prepared.candidate.context.oversize);
+    assert_eq!(
+        prepared
+            .candidate
+            .context
+            .backlog
+            .iter()
+            .map(|source| source.item.as_str())
+            .collect::<Vec<_>>(),
+        vec![item.as_str()],
+        "the exception did not cost the candidate its Backlog context"
+    );
+
+    let admitted = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect("the normal confirmation flow admits it");
+    assert_eq!(
+        admitted.object.sections[0].text.chars().count(),
+        long.chars().count()
+    );
+    assert!(
+        matches!(
+            admitted.backlog.as_slice(),
+            [engr::backlog::Outcome {
+                result: engr::backlog::Reconciliation::Consumed { .. },
+                ..
+            }]
+        ),
+        "and confirming it still settled the point it came from: {:?}",
+        admitted.backlog
+    );
+}
+
+/// Supersession is the retirement of a current object, so the state it starts
+/// from is the one that needs no attention.
+///
+/// v0 defines no transition graph: a destination valid for the type with the
+/// invariants holding afterwards is the whole test. Sending an `accepted`
+/// decision back through `proposed` first would confirm a state it was never
+/// in, and would split into two the one operation the protocol requires to be
+/// atomic.
+#[test]
+fn an_accepted_object_is_superseded_without_being_reclassified_first() {
+    let (_dir, root) = workspace();
+    let replacement = new_object(&root, "the replacement");
+    let compact = engr::reference::encode_uuid_str(&replacement).expect("compact");
+    let id = new_object(&root, "the original");
+    let accepted = classified(&root, &id, Some(ObjectType::Decision), State::Accepted);
+    assert!(
+        !accepted.needs_attention(),
+        "the object supersession exists for is one nobody is looking at"
+    );
+
+    let object = admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &id,
+            Content {
+                text: "replaced by advisory locks".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(format!("obj:{compact}"))],
+                ..Content::default()
+            },
+        ),
+    );
+    assert_eq!(object.state, State::Superseded);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        3,
+        "created, classified, superseded — and no invented state in between"
+    );
+
+    // Superseding it again is refused by the coupled invariant counting two
+    // replacements, not by a lifecycle sequence. The difference matters: the
+    // record refuses to say it was replaced by two different things, and says
+    // so in those terms.
+    let second = new_object(&root, "a third design");
+    let second = engr::reference::encode_uuid_str(&second).expect("compact");
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &id,
+            Content {
+                text: "replaced again".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(format!("obj:{second}"))],
+                ..Content::default()
+            },
+        ),
+    )
+    .expect_err("one object has one replacement");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("exactly one superseded_by"),
+        "{error}"
+    );
+}

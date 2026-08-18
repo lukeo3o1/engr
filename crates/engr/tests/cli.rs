@@ -2388,38 +2388,10 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
         ],
     );
     confirm(root, &classified);
-    // An accepted decision is out of the attention set, so it is classified back
-    // in before anything is written to it — the same rule a closed object lives
-    // under, stated in the vocabulary a decision has.
-    let refused = run_engr(
-        root,
-        &[
-            "prepare",
-            "--object",
-            &original_id,
-            "--supersede",
-            &replacement_id,
-            "--no-based-on",
-            "--text",
-            "replaced",
-        ],
-    );
-    assert!(!refused.status.success());
-    let reproposed = prepare(
-        root,
-        &[
-            "prepare",
-            "--object",
-            &original_id,
-            "--classify",
-            "--type",
-            "decision",
-            "--state",
-            "proposed",
-        ],
-    );
-    confirm(root, &reproposed);
-
+    // Straight from `accepted`, with nothing in between. That is the object
+    // supersession exists for — one that was current until something replaced
+    // it — and it is out of the attention set by definition. Sending it back
+    // through `proposed` first would confirm a state it was never in.
     let screen = run_engr(
         root,
         &[
@@ -2461,8 +2433,9 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
         store::load_events(root, &original_id)
             .expect("events")
             .len(),
-        4,
-        "one semantic action appends one event"
+        3,
+        "created, classified, superseded — one semantic action appends one event, \
+         and retiring an accepted decision invents no intermediate state"
     );
 }
 
@@ -2530,4 +2503,178 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
             .expect("json");
     assert_eq!(value["state"], "closed");
     assert!(value.get("type").is_none());
+}
+
+/// Removing supplementary content shows the human what is being removed.
+///
+/// `content[]` is ordered and repeated types are valid, so with two `code.rs`
+/// entries the heading names a position, not a thing. A body is hashed with the
+/// section and is as authoritative as the wording above it — removed wording
+/// already appears in the text diff, and a removed body has to appear the same
+/// way, or the screen is asking for a confirmation of something it did not show.
+#[test]
+fn a_removed_supplementary_body_is_shown_and_a_changed_one_is_shown_as_a_diff() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "two excerpts"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // A body long enough that showing all of it would be the wrong answer for a
+    // modification, so the two presentations are actually distinguishable.
+    let long = (0..40)
+        .map(|line| format!("let step_{line} = {line};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let changed = long.replace("let step_7 = 7;", "let step_7 = 700;");
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &long,
+            "--content",
+            "code.rs",
+            "fn discarded() { todo!() }",
+        ],
+    );
+    confirm(root, &added);
+
+    // Keep the first entry, change it, and drop the second.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &changed,
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+
+    assert!(
+        shown.contains("── content [1] code.rs ── removed"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("fn discarded() { todo!() }"),
+        "the removed body is shown, not only which position it sat in: {shown}"
+    );
+
+    // The modified body is a diff against the previous one, which is the same
+    // presentation the wording gets — and the reason the protocol says a body
+    // is shown in full when it is added or removed rather than in every case.
+    assert!(shown.contains("-let step_7 = 7;"), "{shown}");
+    assert!(shown.contains("+let step_7 = 700;"), "{shown}");
+    assert!(
+        !shown.contains("let step_39 = 39;"),
+        "an unchanged tail forty lines away is not context: {shown}"
+    );
+
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let entries = value["sections"][0]["content"].as_array().expect("content");
+    assert_eq!(entries.len(), 1, "the second entry really is gone");
+    assert_eq!(entries[0]["body"], changed);
+}
+
+/// The exception is the retry of a refusal, and the command line cannot skip
+/// the refusal by reaching for the flag first.
+#[test]
+fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "admission order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let straight_to_it = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(
+        !straight_to_it.status.success(),
+        "the first prepare must refuse, whatever flags it carried"
+    );
+    let message = String::from_utf8_lossy(&straight_to_it.stderr).to_string();
+    assert!(message.contains("retry of a refusal"), "{message}");
+
+    // And an exception over content that breaks nothing is refused too, so the
+    // flag never becomes something an agent can just always pass.
+    let nothing_to_except = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            "brief",
+        ],
+    );
+    assert!(!nothing_to_except.status.success());
+    assert!(
+        String::from_utf8_lossy(&nothing_to_except.stderr).contains("no exception to make"),
+        "{}",
+        String::from_utf8_lossy(&nothing_to_except.stderr)
+    );
+    // Nor on an action that has no section content to measure at all, where the
+    // exception could only ever be a claim the screen makes on engr's behalf.
+    for action in [
+        vec!["--rename", "--text", "a better title"],
+        vec!["--classify", "--untyped", "--state", "closed"],
+    ] {
+        let mut args = vec!["prepare", "--object", &id, "--oversize"];
+        args.extend(action.iter().copied());
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{action:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("no size exception to make"),
+            "{action:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["candidate"]).stdout).contains("nothing"),
+        "and no attempt left a code awaiting a human"
+    );
 }

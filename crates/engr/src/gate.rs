@@ -468,20 +468,13 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_sized(root, payload, Vec::new(), false)
+    prepare_admitting(root, payload, Vec::new(), Admission::Normal)
 }
 
 /// Prepare a proposal that broke a normal size threshold, after a first attempt
 /// was already refused.
-///
-/// The two entry points are the mechanism. A normal limit is writing friction
-/// for an agent, not a ceiling on what a human may admit — but the friction only
-/// works if the agent has to stop, read what the refusal suggested, and decide
-/// again. One call that took a flag would let the flag be set by default;
-/// needing a different call after a refusal is what makes the retry explicit.
-/// The hard ceiling refuses here too.
 pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_sized(root, payload, Vec::new(), true)
+    prepare_admitting(root, payload, Vec::new(), Admission::Oversize)
 }
 
 /// Prepare a record mutation that the caller declares came from unresolved
@@ -496,21 +489,122 @@ pub fn prepare_from_backlog(
     payload: Payload,
     sources: Vec<SourceRequest>,
 ) -> Result<Prepared> {
-    prepare_sized(root, payload, sources, false)
+    prepare_admitting(root, payload, sources, Admission::Normal)
 }
 
-fn prepare_sized(
+/// How much this proposal is allowed to be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Admission {
+    /// Normal thresholds apply, and breaking one is refused.
+    Normal,
+    /// The explicit retry of a refusal, admitting this one proposal past a
+    /// normal threshold. Never past a hard ceiling.
+    Oversize,
+}
+
+/// The one entry point both other axes go through, so they compose.
+///
+/// Where the work came from and how big it is are independent questions, and
+/// the convenience wrappers above only cover the two common corners. A proposal
+/// derived from unresolved staging that legitimately exceeds a normal threshold
+/// has to be able to retry with the exception *and* keep saying where it came
+/// from — dropping the Backlog sources to get through the size door would make
+/// confirming it settle nothing.
+pub fn prepare_admitting(
     root: &Path,
     payload: Payload,
     sources: Vec<SourceRequest>,
-    oversize: bool,
+    admission: Admission,
 ) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
     store::with_lock(root, move || {
-        prepare_locked(root, payload, sources, oversize)
+        prepare_locked(root, payload, sources, admission)
     })
+}
+
+/// What engr last refused for size, so an explicit retry can prove it is the
+/// retry of something that was actually refused.
+///
+/// Admission-time only, like the exception itself: nothing here is the record,
+/// and nothing here survives being consumed.
+#[derive(Serialize, Deserialize)]
+struct Refusal {
+    payload_sha256: String,
+}
+
+/// The two-stage admission enforced, rather than described.
+///
+/// #14 says the first `prepare` above a normal threshold MUST refuse and only an
+/// explicit retry may ask for the exception. A flag cannot carry that on its
+/// own, because a flag can be passed the first time — so the refusal writes down
+/// which proposal it refused and the retry is admitted only if it is that same
+/// proposal, byte for byte. The payload is already canonical here, so the same
+/// wording written against a different basis is a different proposal and earns
+/// its own refusal first.
+fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Result<()> {
+    let oversize = admission == Admission::Oversize;
+    let breaches = semantics::exceeded(&payload.content.text, &payload.content.content);
+    let hard = breaches.iter().any(|item| item.hard);
+
+    if oversize {
+        // Both halves matter. There must be something to except — an exception
+        // over nothing is an agent setting the flag by default — and engr must
+        // already have said no to this exact proposal.
+        ensure!(
+            !breaches.is_empty(),
+            EXIT_USAGE,
+            "nothing in this Section exceeds a normal limit, so there is no exception to make; prepare it without --oversize"
+        );
+        if !hard {
+            ensure!(
+                refused(root)?.as_deref() == Some(payload.sha256()?.as_str()),
+                EXIT_INVARIANT,
+                "an oversize exception is the retry of a refusal, and engr has not refused this proposal; prepare it without --oversize first and read what that refusal suggests"
+            );
+        }
+    }
+
+    // The refusals themselves stay in one place, so the wording an agent reads
+    // and the wording the unit tests pin are the same wording.
+    let result = semantics::check_size(&payload.content.text, &payload.content.content, oversize);
+    // Remember what was refused, so the retry has something to be a retry of. A
+    // hard-ceiling refusal is deliberately not remembered: it has no retry, and
+    // leaving a receipt behind would make `--oversize` look like the answer to a
+    // refusal that always says no.
+    if result.is_err() && !hard {
+        store::write_json(
+            &store::refusal_path(root),
+            &Refusal {
+                payload_sha256: payload.sha256()?,
+            },
+        )?;
+    }
+    result.map(|_| ())
+}
+
+fn refused(root: &Path) -> Result<Option<String>> {
+    let path = store::refusal_path(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Unreadable is treated as absent rather than fatal: this file is one
+    // machine's scratch memory, and a corrupted one should cost a second
+    // refusal, not make the workspace unusable.
+    Ok(store::read_json::<Refusal>(&path)
+        .ok()
+        .map(|refusal| refusal.payload_sha256))
+}
+
+/// One refusal admits one retry. Cleared only once the candidate exists, so a
+/// proposal that failed some later check does not silently spend its receipt.
+fn spend_refusal(root: &Path) -> Result<()> {
+    let path = store::refusal_path(root);
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+    }
+    Ok(())
 }
 
 /// Resolve each declared source and pin what it currently says.
@@ -606,7 +700,7 @@ fn prepare_locked(
     root: &Path,
     mut payload: Payload,
     sources: Vec<SourceRequest>,
-    oversize: bool,
+    admission: Admission,
 ) -> Result<Prepared> {
     store::require_current(root)?;
     validate_title_context(&payload)?;
@@ -649,13 +743,23 @@ fn prepare_locked(
         (_, Some(_)) => {}
     }
 
-    // Every threshold this proposal breaks, refused here unless the caller came
-    // back through the oversize door. Not in `Payload::validate`, for the same
+    // Every threshold this proposal breaks, refused here unless it is the
+    // explicit retry of a refusal. Not in `Payload::validate`, for the same
     // reason the title limit is not: that runs when events are loaded, and a
     // workspace holding a Section admitted under an exception has to keep being
     // able to replay its own history.
     if payload.action.carries_content() && !payload.action.carries_title() {
-        semantics::check_size(&payload.content.text, &payload.content.content, oversize)?;
+        check_admission(root, &payload, admission)?;
+    } else {
+        // Nothing here is measured against a Section threshold, so an exception
+        // would be one the candidate claims and no refusal ever granted — a
+        // screen saying engr already refused this when it never did.
+        ensure!(
+            admission == Admission::Normal,
+            EXIT_USAGE,
+            "{} carries no Section content, so there is no size exception to make",
+            payload.action.label()
+        );
     }
 
     let mut previous = PreviousContent::default();
@@ -675,8 +779,19 @@ fn prepare_locked(
             // the same proposal written in another order canonicalizes to the
             // same content, and admitting it would spend a confirmation and a
             // revision on a reordering the model says is not a difference.
+            //
+            // Both sides are canonicalized for the comparison, and only for it.
+            // A Section stored before Phase 3 holds whatever order its gate
+            // happened to write, so comparing a sorted proposal against an
+            // unsorted stored value would find a difference that is not one and
+            // spend an Event on sorting an array. The stored Section is left
+            // exactly as it is: its hash covers the order it was written in, and
+            // rewriting it to tidy the order would be the same non-change from
+            // the other direction.
+            let mut current = section.content();
+            current.canonicalize_order();
             ensure!(
-                section.content() != payload.content,
+                current != payload.content,
                 EXIT_INVARIANT,
                 "§{} already says exactly this, so there is nothing to confirm",
                 section.id
@@ -735,7 +850,7 @@ fn prepare_locked(
         previous_content: previous.content,
         previous_relations: previous.relations,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
-        oversize,
+        oversize: admission == Admission::Oversize,
         backlog: pin_sources(root, sources, &projected)?,
     };
     let gate = crate::confirmation::Candidate::prepare_with(
@@ -771,6 +886,9 @@ fn prepare_locked(
         &store::candidate_path(root, &candidate.challenge)?,
         &candidate,
     )?;
+    if admission == Admission::Oversize {
+        spend_refusal(root)?;
+    }
 
     let notes = notes_for(root, &candidate);
 

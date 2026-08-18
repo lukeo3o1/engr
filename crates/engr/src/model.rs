@@ -306,12 +306,19 @@ impl Object {
     /// rather than happening out of sight of everyone who reads the default
     /// listing.
     ///
-    /// The rule is about *remaining* outside the attention set. An operation
-    /// that carried content and moved the Object into attention in the same
-    /// confirmation would satisfy it too — v0 simply has no such action, because
-    /// classification carries no content and supersession lands outside
-    /// attention by definition. Reclassify, then revise: two confirmations, and
-    /// the object is visible in the default listing for the second.
+    /// The rule is about *renewed* engineering work: wording that was confirmed
+    /// once being changed again while nobody is looking. Reclassify, then
+    /// revise — two confirmations, and the object is visible in the default
+    /// listing for the second.
+    ///
+    /// `object.superseded` is deliberately not one of the callers, and the
+    /// exemption is the rule rather than a hole in it. Superseding is not
+    /// resumed work on the Object; it is the act of retiring it, and the case it
+    /// exists for is an `accepted` design or decision that a newer one replaced
+    /// — an Object that by definition needs no attention. Demanding a
+    /// reclassification first would confirm an intermediate state the Object was
+    /// never in, and would split into two confirmations the one operation the
+    /// protocol requires to be atomic.
     fn require_attention(&self, what: &str) -> Result<()> {
         // The way through is named, and named in the caller's own vocabulary: an
         // untyped object is reopened, a typed one is classified. A refusal that
@@ -753,8 +760,15 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             // `superseded` is only in the design and decision vocabularies, so
             // an untyped object or a risk cannot hold the state — and therefore,
             // by the coupled invariant, cannot hold the relation either.
+            //
+            // No attention check, deliberately: see `require_attention`. The
+            // object this exists for is an `accepted` one, and v0 defines no
+            // transition graph — a destination valid for the type, with the
+            // semantic invariants holding afterwards, is the whole test.
+            // Superseding an already-superseded object is refused by the coupled
+            // invariant below, which counts two replacement relations, not by an
+            // invented lifecycle.
             validate_state(EXIT_INVARIANT, object.object_type, State::Superseded)?;
-            object.require_attention("object.superseded")?;
             let id = take_id(object)?;
             object.sections.push(section_from(id, event)?);
             object.state = State::Superseded;

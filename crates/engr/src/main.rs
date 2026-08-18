@@ -1150,6 +1150,13 @@ fn render_supplement_bodies(
                 "\n── content [{index}] {} ── removed\n",
                 entry.content_type
             ));
+            // The body, not only the type. Duplicate types are valid, so with
+            // two `code.rs` entries a heading names a position rather than a
+            // thing — and a human asked to admit a deletion has to be shown what
+            // is being deleted, the same way removed wording appears in the text
+            // diff. It is hashed with the section; it is not a detail.
+            out.push_str(entry.body.trim_end());
+            out.push('\n');
         }
     }
 }

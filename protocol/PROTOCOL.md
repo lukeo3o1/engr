@@ -105,11 +105,17 @@ so exempting it would narrow that to "the sections have settled" rather than the
 whole object. For an untyped object this is exactly the old "reopen it first"
 rule, unchanged.
 
-The rule is about *remaining* outside the attention set. An operation that
-carried content and moved the object back into attention in the same
-confirmation would satisfy it too; v0 has no such action, because
-`object_classified` carries no content and `object_superseded` lands outside
-attention by definition.
+The rule is about **renewed engineering work** — wording confirmed once being
+changed again out of sight of everyone reading the default listing.
+`object_superseded` is therefore exempt, and the exemption is the rule rather
+than a hole in it: superseding is not resumed work on the object, it is the act
+of retiring it, and the object it exists for is an `accepted` design or decision
+that a newer one replaced. Requiring a reclassification first would confirm an
+intermediate state the object was never in, and would split into two
+confirmations the one operation this protocol requires to be atomic. Superseding
+an object that is already superseded is refused by the coupled invariant, which
+would count two replacement relations — not by a lifecycle sequence, because v0
+defines none.
 
 Sections have no `state` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
@@ -323,13 +329,22 @@ much a human is being asked to read.
 | each `body` | 2000 | 8000 |
 | sum of bodies | 4000 | 12000 |
 
-Above a **normal** threshold, `prepare` MUST refuse, and the refusal MUST say
-where the material belongs rather than only that it is long: another section for
-an independent engineering point, backlog for unresolved reasoning, an
-`implemented_by` relation for actual implementation, and outside the record for a
-large log with only the smallest relevant excerpt kept. An **explicit oversize
-retry** may then go through the normal confirmation flow, and the candidate MUST
-show the exception where the human reads it.
+Above a **normal** threshold, the first `prepare` MUST refuse, and the refusal
+MUST say where the material belongs rather than only that it is long: another
+section for an independent engineering point, backlog for unresolved reasoning,
+an `implemented_by` relation for actual implementation, and outside the record
+for a large log with only the smallest relevant excerpt kept. An **explicit
+oversize retry** may then go through the normal confirmation flow, and the
+candidate MUST show the exception where the human reads it.
+
+"First" is a requirement on the implementation, not advice to the caller. An
+oversize exception MUST be admitted only as the retry of a refusal engr actually
+issued, for that same proposal — identified by the payload hash, so the same
+wording against a different basis is a different proposal and earns its own
+refusal. An exception over content that breaks no normal threshold MUST also be
+refused: there is nothing to except, and a flag that is harmless to pass is a
+flag an agent passes by default. How the refusal is remembered is local, and it
+MUST NOT be part of the record or of anything shared between machines.
 
 Above a **hard** ceiling, engr always refuses. The hard ceiling is not a
 threshold with an override, and MUST NOT read as one, or an agent that learned to
@@ -359,6 +374,15 @@ another way round produce the same section hash, and a revision that changes
 nothing else is refused as having nothing to confirm. No canonical persisted sort
 order is required of anyone hand-writing these files, and none is enforced on the
 read path, which is why every hash written before this rule existed stays valid.
+
+That last point has a consequence the "nothing to confirm" check MUST honour. A
+section stored before this rule holds whatever order its gate wrote, so the
+comparison MUST canonicalize the **stored** value too, and only for the
+comparison. Otherwise re-proposing the same members against such a section finds
+a difference that the model says is not one, and spends a confirmation and a
+revision on sorting an array. The stored section is left exactly as it is: its
+hash covers the order it was written in, and rewriting it to tidy that order
+would be the same non-change from the other direction.
 
 `content[]` is ordered because its entries are excerpts a reader goes through in
 sequence. Moving one is a change to the assertion.
@@ -447,10 +471,13 @@ against the entry that held the same position. An explicit absence of repository
 basis is displayed as such. Omitted unchanged wording remains part of the
 complete candidate payload and confirmation hash.
 
-Supplementary content bodies are shown **in full**. They are part of the
-assertion and part of what is hashed, so a human shown only the type of an entry
-has not read what they are about to admit; the bounds exist precisely so that
-printing all of it stays reasonable.
+A supplementary content body is shown **in full whenever it is added or
+removed** — the whole body, never only its type. A body that *changed* is shown
+as a unified line diff against the previous body, the same presentation section
+text gets. They are part of the assertion and part of what is hashed, so a human
+shown only the type of an entry has not read what they are about to admit, and
+duplicate types are valid, so a heading alone names a position rather than a
+thing. The bounds exist precisely so that printing a whole body stays reasonable.
 
 `object_classified` shows the destination type, the destination state, and what
 that does to the object's place in the default listing. A state without its type
