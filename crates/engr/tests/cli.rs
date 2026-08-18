@@ -156,6 +156,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "target".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -174,6 +175,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "projection wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -201,6 +203,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "effective crash-tail wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -231,6 +234,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "source".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -253,6 +257,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 sha256: raw.sha256,
                 commit: old_commit.clone(),
             }],
+            ..Content::default()
         },
     };
     let error = gate::prepare(root, stale_projection_ref)
@@ -303,6 +308,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                     sha256: effective.sha256,
                     commit: committed_effective,
                 }],
+                ..Content::default()
             },
         },
     )
@@ -324,6 +330,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "candidate state".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -340,6 +347,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "apply once".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -387,6 +395,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "stale candidate".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -401,6 +410,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "overtaking mutation".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -605,6 +615,7 @@ fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewri
             text: String::new(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         };
         event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
         std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
@@ -1203,6 +1214,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
             text: "event wording".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1417,6 +1429,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             text: "reconcile under lock".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1712,6 +1725,7 @@ fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
                 text: "what the work produced".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
         vec![
@@ -1911,6 +1925,7 @@ fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
                 text: "what the work produced".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
         ids.iter()
@@ -2081,4 +2096,438 @@ fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
     let printed = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(printed, engr::PROTOCOL);
     assert!(printed.starts_with("# engr protocol v0"));
+}
+
+/// A workspace with one committed source file, for the surfaces that pin one.
+fn repository_with_source(root: &Path) {
+    git(root, &["init", "-q"]);
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/verifier.rs"), "fn verify() {}\n").expect("source");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "source",
+        ],
+    );
+}
+
+/// The code a candidate screen ends with.
+fn code_from(screen: &str) -> String {
+    screen
+        .rsplit("CONFIRM ")
+        .next()
+        .expect("a candidate screen ends with its code")
+        .trim()
+        .to_owned()
+}
+
+/// The screen a human reads before typing a code has to carry the whole
+/// destination. A state without its type is a word that means different things
+/// on different objects, and attention is what they are actually deciding.
+#[test]
+fn classifying_shows_the_whole_destination_and_what_it_does_to_the_listing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "verification design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "draft",
+        ],
+    );
+    assert!(screen.status.success());
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for line in ["Type       design", "State      draft", "Attention  yes"] {
+        assert!(shown.contains(line), "{line:?} missing from {shown}");
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let listed = run_engr(root, &["ls"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("design/draft"));
+
+    // Accepting it takes it out of the default listing without closing it, and
+    // says so before the human commits to that.
+    let leaving = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &leaving);
+    let listed = run_engr(root, &["ls"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("no objects"),
+        "an accepted design is out of the default attention set"
+    );
+    let all = run_engr(root, &["ls", "--all"]);
+    assert!(String::from_utf8_lossy(&all.stdout).contains("design/accepted"));
+
+    // `--close` is the untyped vocabulary, and a design has no such state.
+    let refused = run_engr(root, &["prepare", "--object", &id, "--close"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a design cannot be closed"));
+}
+
+/// The role, the excerpt and the artifact are all part of the assertion, so all
+/// of them appear on the candidate screen and in the record afterwards.
+#[test]
+fn a_section_carries_role_supplementary_content_and_implementation_provenance() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "issuer validation"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--role",
+            "acceptance_criterion",
+            "--text",
+            "The verifier must reject an unknown issuer before checking audience.",
+            "--content",
+            "data.json",
+            "{\"error\":\"invalid_issuer\"}",
+            "--implemented-by-symbol",
+            "src/verifier.rs",
+            "verify",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for fragment in [
+        "Role       acceptance_criterion",
+        "Content    [0] data.json",
+        "implemented_by -> symbol src/verifier.rs :: verify",
+        // The body itself, not only its type: a human shown the label has not
+        // read what they are admitting.
+        "{\"error\":\"invalid_issuer\"}",
+    ] {
+        assert!(
+            shown.contains(fragment),
+            "{fragment:?} missing from {shown}"
+        );
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).to_string();
+    assert!(shown.contains("§1 [acceptance_criterion]"), "{shown}");
+    assert!(shown.contains("content  [0] data.json"), "{shown}");
+    assert!(shown.contains("relation implemented_by"), "{shown}");
+
+    let structured = run_engr(root, &["show", &id, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&structured.stdout).expect("json");
+    assert_eq!(value["state"], "open");
+    assert_eq!(value["attention"], Value::Bool(true));
+    assert!(
+        value.get("type").is_none(),
+        "an untyped object says nothing"
+    );
+    let section = &value["sections"][0];
+    assert_eq!(section["role"], "acceptance_criterion");
+    assert_eq!(section["content"][0]["type"], "data.json");
+    assert_eq!(section["relations"][0]["type"], "implemented_by");
+    assert!(
+        section["relations"][0]["target"]["commit"]
+            .as_str()
+            .expect("commit")
+            .len()
+            >= 40,
+        "a relation pins a full resolved object id"
+    );
+
+    // The vocabularies are closed, and closed at the command line too.
+    for bad in [
+        vec!["--role", "rationale"],
+        vec!["--content", "text.md", "prose"],
+    ] {
+        let mut args = vec![
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "x",
+        ];
+        args.extend(bad.iter().copied());
+        assert!(
+            !run_engr(root, &args).status.success(),
+            "{bad:?} is outside the vocabulary"
+        );
+    }
+}
+
+/// The first refusal has to send the agent somewhere, and the retry has to be
+/// visible to the human who is being asked to admit it anyway.
+#[test]
+fn an_oversize_section_is_refused_once_and_the_retry_says_so_on_the_screen() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "size policy"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("engr backlog"), "{message}");
+    assert!(message.contains("--oversize"), "{message}");
+
+    let retried = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+            "--oversize",
+        ],
+    );
+    assert!(retried.status.success());
+    let shown = String::from_utf8_lossy(&retried.stdout).to_string();
+    assert!(
+        shown.contains("OVERSIZE   admitted by exception"),
+        "the exception is on the screen, above the wording: {shown}"
+    );
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    assert!(!std::fs::read_to_string(store::object_path(root, &id))
+        .expect("object")
+        .contains("oversize"));
+}
+
+/// One command, one confirmation, three facts: the state, the replacement and
+/// the reason.
+#[test]
+fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let original = prepare(root, &["prepare", "--new", "--text", "redis locks"]);
+    confirm(root, &original);
+    let original_id = original["object"].as_str().expect("object id").to_owned();
+    let replacement = prepare(root, &["prepare", "--new", "--text", "advisory locks"]);
+    confirm(root, &replacement);
+    let replacement_id = replacement["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let classified = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &classified);
+    // An accepted decision is out of the attention set, so it is classified back
+    // in before anything is written to it — the same rule a closed object lives
+    // under, stated in the vocabulary a decision has.
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--supersede",
+            &replacement_id,
+            "--no-based-on",
+            "--text",
+            "replaced",
+        ],
+    );
+    assert!(!refused.status.success());
+    let reproposed = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "proposed",
+        ],
+    );
+    confirm(root, &reproposed);
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--supersede",
+            &replacement_id,
+            "--no-based-on",
+            "--text",
+            "Replaced: advisory locks remove the extra availability dependency.",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(shown.contains("Role       supersession"), "{shown}");
+    assert!(shown.contains("superseded_by -> engr:obj:"), "{shown}");
+    assert!(shown.contains("State      superseded"), "{shown}");
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &original_id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "superseded");
+    assert_eq!(value["attention"], Value::Bool(false));
+    assert_eq!(value["sections"][0]["role"], "supersession");
+    assert_eq!(
+        value["sections"][0]["relations"][0]["type"],
+        "superseded_by"
+    );
+    assert_eq!(
+        store::load_events(root, &original_id)
+            .expect("events")
+            .len(),
+        4,
+        "one semantic action appends one event"
+    );
+}
+
+/// A destination is only ever stated by the action that has one.
+#[test]
+fn type_and_state_flags_belong_to_classify_and_nothing_else() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "flag discipline"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    for (args, expected) in [
+        (
+            vec!["prepare", "--object", &id, "--close", "--state", "closed"],
+            "--state sets a destination for --classify",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--classify", "--state", "open"],
+            "--classify needs the destination type",
+        ),
+        (
+            vec![
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "x",
+                "--type",
+                "design",
+            ],
+            "--type and --untyped set a destination for --classify",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--close", "--role", "decision"],
+            "carries no wording",
+        ),
+    ] {
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{args:?} must be refused");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{args:?}: got {message:?}");
+    }
+
+    // `--untyped` is a word rather than the absence of `--type`, so "no type"
+    // and "I forgot to say" cannot look the same.
+    let untyped = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--untyped",
+            "--state",
+            "closed",
+        ],
+    );
+    confirm(root, &untyped);
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "closed");
+    assert!(value.get("type").is_none());
 }
