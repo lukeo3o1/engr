@@ -1,6 +1,7 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
+use engr::semantics::{self, Relation, Supplement, Target};
 use engr::{gate, git, ops, store, view};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ enum Command {
     },
     /// Admit a candidate. The response must be exactly `CONFIRM <code>`
     Confirm { response: String },
-    /// List objects. Only open ones unless --all
+    /// List objects. Only the ones needing attention unless --all
     Ls {
         /// Keyword to filter by, matched against titles and section text
         keyword: Option<String>,
@@ -234,11 +235,85 @@ enum Format {
     Json,
 }
 
+/// The Phase 3 vocabularies, spelled for a command line. They are the protocol
+/// values, so `clap` rejects anything outside them before a payload exists.
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum TypeArg {
+    Design,
+    Decision,
+    Risk,
+}
+
+impl TypeArg {
+    fn model(self) -> semantics::ObjectType {
+        match self {
+            TypeArg::Design => semantics::ObjectType::Design,
+            TypeArg::Decision => semantics::ObjectType::Decision,
+            TypeArg::Risk => semantics::ObjectType::Risk,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum StateArg {
+    Open,
+    Closed,
+    Draft,
+    Proposed,
+    Accepted,
+    Rejected,
+    Superseded,
+    Identified,
+    Mitigated,
+    Invalidated,
+}
+
+impl StateArg {
+    fn model(self) -> semantics::State {
+        match self {
+            StateArg::Open => semantics::State::Open,
+            StateArg::Closed => semantics::State::Closed,
+            StateArg::Draft => semantics::State::Draft,
+            StateArg::Proposed => semantics::State::Proposed,
+            StateArg::Accepted => semantics::State::Accepted,
+            StateArg::Rejected => semantics::State::Rejected,
+            StateArg::Superseded => semantics::State::Superseded,
+            StateArg::Identified => semantics::State::Identified,
+            StateArg::Mitigated => semantics::State::Mitigated,
+            StateArg::Invalidated => semantics::State::Invalidated,
+        }
+    }
+}
+
+/// `snake_case`, not clap's default kebab: the value written here is the
+/// protocol value, and `acceptance-criterion` on the command line for
+/// `acceptance_criterion` in the record would be a second spelling of a closed
+/// vocabulary.
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum RoleArg {
+    Decision,
+    Risk,
+    Supersession,
+    AcceptanceCriterion,
+}
+
+impl RoleArg {
+    fn model(self) -> semantics::Role {
+        match self {
+            RoleArg::Decision => semantics::Role::Decision,
+            RoleArg::Risk => semantics::Role::Risk,
+            RoleArg::Supersession => semantics::Role::Supersession,
+            RoleArg::AcceptanceCriterion => semantics::Role::AcceptanceCriterion,
+        }
+    }
+}
+
 #[derive(Args)]
 #[command(group(
     ArgGroup::new("action")
         .required(true)
-        .args(["new", "rename", "add", "revise", "merge", "delete", "close", "reopen"])
+        .args(["new", "rename", "add", "revise", "merge", "delete", "close", "reopen", "classify", "supersede"])
 ))]
 struct Prepare {
     /// Propose a new object
@@ -259,22 +334,64 @@ struct Prepare {
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
-    /// Declare the object finished
+    /// Declare an untyped object finished. Shorthand for --classify --untyped
+    /// --state closed
     #[arg(long)]
     close: bool,
-    /// Take a finished object back up
+    /// Take a finished untyped object back up
     #[arg(long)]
     reopen: bool,
+    /// Declare what this object is and what state it is in. Both are explicit
+    #[arg(long, requires = "state")]
+    classify: bool,
+    /// Replace this object with another, confirming the state, the replacement
+    /// and the reason together
+    #[arg(long, value_name = "OBJECT")]
+    supersede: Option<String>,
 
     /// The object to act on. Any unique id prefix. Omit only with --new
     #[arg(long)]
     object: Option<String>,
+    /// Destination type, with --classify
+    #[arg(
+        long = "type",
+        value_enum,
+        value_name = "TYPE",
+        conflicts_with = "untyped"
+    )]
+    object_type: Option<TypeArg>,
+    /// Destination is an untyped object, with --classify
+    #[arg(long)]
+    untyped: bool,
+    /// Destination state, valid for the destination type
+    #[arg(long, value_enum, value_name = "STATE")]
+    state: Option<StateArg>,
     /// Wording, inline
     #[arg(long)]
     text: Option<String>,
     /// Wording, from a file
     #[arg(long)]
     text_file: Option<PathBuf>,
+    /// What this section asserts, semantically
+    #[arg(long, value_enum, value_name = "ROLE")]
+    role: Option<RoleArg>,
+    /// A bounded literal excerpt, as code.<tag> or data.<tag> and a body.
+    /// Repeatable; order is significant
+    #[arg(long = "content", value_names = ["TYPE", "BODY"], num_args = 2)]
+    content: Vec<String>,
+    /// The same, with the body read from a file
+    #[arg(long = "content-file", value_names = ["TYPE", "PATH"], num_args = 2)]
+    content_file: Vec<String>,
+    /// A repository file that implements this assertion
+    #[arg(long = "implemented-by-file", value_name = "PATH")]
+    implemented_by_file: Vec<String>,
+    /// A source symbol that implements this assertion
+    #[arg(long = "implemented-by-symbol", value_names = ["PATH", "SYMBOL"], num_args = 2)]
+    implemented_by_symbol: Vec<String>,
+    /// Committed revision to pin implemented_by targets at. Defaults to HEAD
+    /// only while the path itself is clean
+    #[arg(long, value_name = "REVISION")]
+    implemented_at: Option<String>,
     /// Committed repository basis. Defaults to HEAD only when source is clean
     #[arg(long)]
     based_on: Option<String>,
@@ -284,8 +401,87 @@ struct Prepare {
     /// A section this wording depends on, as OBJECT:SECTION
     #[arg(long = "ref", value_name = "OBJECT:SECTION")]
     references: Vec<String>,
+    /// Retry a proposal a size threshold already refused once
+    #[arg(long)]
+    oversize: bool,
     #[arg(long)]
     json: bool,
+}
+
+impl Prepare {
+    /// The supplementary entries, in the order the caller wrote them.
+    ///
+    /// Inline and from-file entries are two spellings of one list, and clap
+    /// cannot interleave two options into one sequence — so the inline ones come
+    /// first and the file-backed ones follow. Order is semantic, which is
+    /// exactly why that has to be said rather than left to be discovered.
+    fn supplements(&self) -> Result<Vec<Supplement>> {
+        let mut entries = Vec::new();
+        for pair in self.content.chunks(2) {
+            let [content_type, body] = pair else {
+                return Err(Error::new(EXIT_USAGE, "--content takes a type and a body"));
+            };
+            entries.push(Supplement::new(content_type.clone(), body.clone()));
+        }
+        for pair in self.content_file.chunks(2) {
+            let [content_type, path] = pair else {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--content-file takes a type and a path",
+                ));
+            };
+            let body = std::fs::read_to_string(path)
+                .map_err(|error| engr::tool_error(path.clone(), error))?;
+            entries.push(Supplement::new(content_type.clone(), body));
+        }
+        for entry in &entries {
+            entry
+                .validate()
+                .map_err(|error| malformed_argument("--content", &entry.content_type, error))?;
+        }
+        Ok(entries)
+    }
+
+    /// `implemented_by` targets, each pinned to a real committed snapshot.
+    fn relations(&self, root: &Path) -> Result<Vec<Relation>> {
+        let revision = self.implemented_at.as_deref();
+        let mut relations = Vec::new();
+        for path in &self.implemented_by_file {
+            relations.push(Relation {
+                relation: semantics::RelationType::ImplementedBy,
+                target: Target::File {
+                    commit: backlog::pin(root, path, revision).map_err(|error| {
+                        malformed_argument("--implemented-by-file", path, error)
+                    })?,
+                    path: path.clone(),
+                },
+            });
+        }
+        for pair in self.implemented_by_symbol.chunks(2) {
+            let [path, symbol] = pair else {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--implemented-by-symbol takes a path and a symbol name",
+                ));
+            };
+            relations.push(Relation {
+                relation: semantics::RelationType::ImplementedBy,
+                target: Target::Symbol {
+                    commit: backlog::pin(root, path, revision).map_err(|error| {
+                        malformed_argument("--implemented-by-symbol", path, error)
+                    })?,
+                    path: path.clone(),
+                    symbol: symbol.clone(),
+                },
+            });
+        }
+        for relation in &relations {
+            relation
+                .validate()
+                .map_err(|error| malformed_argument("--implemented-by", "", error))?;
+        }
+        Ok(relations)
+    }
 }
 
 fn main() {
@@ -543,9 +739,42 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         Action::SectionDeleted { section }
     } else if command.close {
         Action::ObjectClosed
-    } else {
+    } else if command.reopen {
         Action::ObjectReopened
+    } else if command.classify {
+        // Both halves, always. `--untyped` is a word rather than the absence of
+        // `--type` because "I want no type" and "I forgot to say" look identical
+        // otherwise, and one of them is an authoritative change to what the
+        // object is.
+        if command.object_type.is_none() && !command.untyped {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--classify needs the destination type: --type <TYPE>, or --untyped",
+            ));
+        }
+        Action::ObjectClassified {
+            object_type: command.object_type.map(TypeArg::model),
+            state: command
+                .state
+                .ok_or_else(|| Error::new(EXIT_USAGE, "--classify needs a destination --state"))?
+                .model(),
+        }
+    } else {
+        Action::ObjectSuperseded
     };
+    if command.state.is_some() && !command.classify {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "--state sets a destination for --classify; --close, --reopen and --supersede already \
+             name the state they produce",
+        ));
+    }
+    if (command.object_type.is_some() || command.untyped) && !command.classify {
+        return Err(Error::new(
+            EXIT_USAGE,
+            "--type and --untyped set a destination for --classify",
+        ));
+    }
 
     let object = match (&action, &command.object) {
         (Action::ObjectCreated, Some(_)) => {
@@ -585,10 +814,29 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             "a title has no repository basis; use --based-on or --no-based-on only for section wording",
         ));
     }
-    if action.carries_title() && !command.references.is_empty() {
+    let supplements = command.supplements()?;
+    let mut relations = command.relations(root)?;
+    if action.carries_title()
+        && (!command.references.is_empty()
+            || command.role.is_some()
+            || !supplements.is_empty()
+            || !relations.is_empty())
+    {
         return Err(Error::new(
             EXIT_USAGE,
-            "a title has no references; use --ref only for section wording",
+            "a title is a label: --ref, --role, --content and --implemented-by apply only to \
+             section wording",
+        ));
+    }
+    if !action.carries_content()
+        && (command.role.is_some() || !supplements.is_empty() || !relations.is_empty())
+    {
+        return Err(Error::new(
+            EXIT_USAGE,
+            format!(
+                "{} carries no wording, so it carries no role, content or relations",
+                action.label()
+            ),
         ));
     }
 
@@ -596,6 +844,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     for spec in &command.references {
         references.push(parse_ref(root, spec)?);
     }
+    check_unique_arguments(&references, "--ref")?;
     if !action.carries_content() && command.no_based_on {
         return Err(Error::new(
             EXIT_USAGE,
@@ -603,19 +852,48 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         ));
     }
 
-    let content = gate::content(
+    // The replacement is an argument to `--supersede` rather than another
+    // relation flag, because it is not optional metadata on the action — the
+    // action means nothing without it, and the relation, the state and the
+    // reason are one thing a human confirms once.
+    let role = match (&command.supersede, command.role) {
+        (Some(target), role) => {
+            if !matches!(role, None | Some(RoleArg::Supersession)) {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--supersede writes the reason it was replaced, so its section is \
+                     role=supersession",
+                ));
+            }
+            let target = resolve_object_argument(root, "--supersede", target)?;
+            let compact = engr::reference::encode_uuid_str(&target)?;
+            relations.push(Relation::superseded_by(format!("obj:{compact}")));
+            Some(semantics::Role::Supersession)
+        }
+        (None, role) => role.map(RoleArg::model),
+    };
+    check_unique_arguments(&relations, "--implemented-by")?;
+
+    let mut content = gate::content(
         root,
         text,
         command.based_on.clone(),
         command.no_based_on || action.carries_title(),
         references,
     )?;
+    content.role = role;
+    content.content = supplements;
+    content.relations = relations;
     let payload = Payload {
         action,
         object,
         content,
     };
-    let prepared = gate::prepare(root, payload)?;
+    let prepared = if command.oversize {
+        gate::prepare_oversize(root, payload)?
+    } else {
+        gate::prepare(root, payload)?
+    };
 
     if command.json {
         println!(
@@ -642,6 +920,22 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 /// "the workspace on disk is". Translated here, at that boundary, and nowhere
 /// deeper — a missing resource stays not-found, and a malformed stored file
 /// reached through a valid argument stays schema.
+/// Sets are checked where the caller typed them, so a repeat reads as the typo
+/// it is rather than as a report that the workspace on disk is malformed. The
+/// domain refuses the same duplicate again on the way in; this is the message,
+/// not the guarantee.
+fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
+    for (index, item) in items.iter().enumerate() {
+        if items[..index].contains(item) {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("the same {flag} is given twice; it is a set, so listing it again says nothing new"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
     if error.code == EXIT_SCHEMA {
         Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
@@ -767,6 +1061,99 @@ fn render_ref(reference: &Ref, width: usize) -> String {
     )
 }
 
+fn render_relation(relation: &Relation) -> String {
+    relation.render(|commit| shorten(commit, 8).to_owned())
+}
+
+/// Role is a machine-readable claim about what the wording means, so a change
+/// to it is shown even when the wording itself is untouched.
+fn render_role(
+    out: &mut String,
+    previous: Option<semantics::Role>,
+    proposed: Option<semantics::Role>,
+) {
+    let name = |role: Option<semantics::Role>| role.map_or("none", |role| role.as_str());
+    if previous != proposed {
+        out.push_str(&format!(
+            "Role     - {}\nRole     + {}\n",
+            name(previous),
+            name(proposed)
+        ));
+    } else if proposed.is_some() {
+        out.push_str(&format!("Role       {}\n", name(proposed)));
+    }
+}
+
+/// Supplementary content is ordered, so a moved entry is a change. Rendering it
+/// as an index-by-index comparison rather than as two sets is what makes a
+/// reorder visible instead of silently matching up.
+fn render_supplement_diff(out: &mut String, previous: &[Supplement], proposed: &[Supplement]) {
+    for index in 0..previous.len().max(proposed.len()) {
+        match (previous.get(index), proposed.get(index)) {
+            (Some(before), Some(after)) if before == after => {
+                out.push_str(&format!("Content    [{index}] {}\n", after.content_type));
+            }
+            (before, after) => {
+                if let Some(before) = before {
+                    out.push_str(&format!("Content  - [{index}] {}\n", before.content_type));
+                }
+                if let Some(after) = after {
+                    out.push_str(&format!("Content  + [{index}] {}\n", after.content_type));
+                }
+            }
+        }
+    }
+}
+
+/// The bodies themselves, diffed against the entry that held the same position
+/// when there was one.
+fn render_supplement_bodies(
+    out: &mut String,
+    previous: &[Supplement],
+    proposed: &[Supplement],
+    revising: bool,
+) {
+    for (index, entry) in proposed.iter().enumerate() {
+        let before = revising.then(|| previous.get(index)).flatten();
+        match before {
+            Some(before) if before == entry => continue,
+            Some(before) => {
+                out.push_str(&format!(
+                    "\n── content [{index}] {} ──\n",
+                    entry.content_type
+                ));
+                if before.content_type != entry.content_type {
+                    out.push_str(&format!("(was {})\n", before.content_type));
+                }
+                let diff = similar::TextDiff::from_lines(&before.body, &entry.body);
+                out.push_str(
+                    &diff
+                        .unified_diff()
+                        .context_radius(3)
+                        .header("previous", "candidate")
+                        .to_string(),
+                );
+            }
+            None => {
+                out.push_str(&format!(
+                    "\n── content [{index}] {} ──\n",
+                    entry.content_type
+                ));
+                out.push_str(entry.body.trim_end());
+                out.push('\n');
+            }
+        }
+    }
+    if revising {
+        for (index, entry) in previous.iter().enumerate().skip(proposed.len()) {
+            out.push_str(&format!(
+                "\n── content [{index}] {} ── removed\n",
+                entry.content_type
+            ));
+        }
+    }
+}
+
 fn render_basis(basis: Option<&str>) -> String {
     basis
         .map(|commit| shorten(commit, 8).to_owned())
@@ -791,12 +1178,47 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // happened to be typed at says nothing about the change being confirmed.
     // It stays in the payload; it just does not belong on this screen, where
     // every line that means nothing is a line that trains people to skim.
+    // The whole destination, both halves, because that is what is being
+    // confirmed: a state read without the type it belongs to is a word that
+    // means different things on different objects.
+    if let Action::ObjectClassified { object_type, state } = &candidate.payload.action {
+        out.push_str(&format!(
+            "Type       {}\nState      {}\nAttention  {}\n",
+            object_type.map_or("none", |value| value.as_str()),
+            state.as_str(),
+            if semantics::needs_attention(*object_type, *state) {
+                "yes — it stays in the default listing"
+            } else {
+                "no — it leaves the default listing"
+            }
+        ));
+    }
     if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
         if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
             if !candidate.context.previous_semantics_recorded {
                 out.push_str(
                     "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
                 );
+            }
+            render_role(
+                &mut out,
+                candidate.context.previous_role,
+                candidate.payload.content.role,
+            );
+            render_supplement_diff(
+                &mut out,
+                &candidate.context.previous_content,
+                &candidate.payload.content.content,
+            );
+            for relation in &candidate.context.previous_relations {
+                if !candidate.payload.content.relations.contains(relation) {
+                    out.push_str(&format!("Relation - {}\n", render_relation(relation)));
+                }
+            }
+            for relation in &candidate.payload.content.relations {
+                if !candidate.context.previous_relations.contains(relation) {
+                    out.push_str(&format!("Relation + {}\n", render_relation(relation)));
+                }
             }
             if candidate.context.previous_based_on != candidate.payload.content.based_on {
                 out.push_str(&format!(
@@ -821,6 +1243,15 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                 }
             }
         } else {
+            if let Some(role) = candidate.payload.content.role {
+                out.push_str(&format!("Role       {}\n", role.as_str()));
+            }
+            for (index, entry) in candidate.payload.content.content.iter().enumerate() {
+                out.push_str(&format!("Content    [{index}] {}\n", entry.content_type));
+            }
+            for relation in &candidate.payload.content.relations {
+                out.push_str(&format!("Relation   {}\n", render_relation(relation)));
+            }
             out.push_str(&format!(
                 "Based on   {}\n",
                 render_basis(candidate.payload.content.based_on.as_deref())
@@ -828,6 +1259,30 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             for reference in &candidate.payload.content.refs {
                 out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
             }
+        }
+        if matches!(candidate.payload.action, Action::ObjectSuperseded) {
+            out.push_str(
+                "State      superseded — this object leaves the default listing, and the \
+                 relation above is where a reader is sent instead\n",
+            );
+        }
+        // Loud, and above the wording. The human is being asked to admit
+        // something engr already refused once, and the only way that stays a
+        // decision rather than a formality is if the screen says so before they
+        // read the text.
+        if candidate.context.oversize {
+            let exceeded = semantics::exceeded(
+                &candidate.payload.content.text,
+                &candidate.payload.content.content,
+            );
+            out.push_str(&format!(
+                "OVERSIZE   admitted by exception: {}\n",
+                exceeded
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
         }
     }
     // Confirming this will also edit unresolved staging, so the human reading
@@ -872,6 +1327,16 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             out.push_str(&format!("({})\n", action.label()));
         }
     }
+    // In full, and never elided. Supplementary content is part of the assertion
+    // being confirmed and part of what gets hashed, so a human who was shown
+    // only its type has not read what they are about to admit. It is bounded
+    // precisely so that printing all of it stays reasonable.
+    render_supplement_bodies(
+        &mut out,
+        &candidate.context.previous_content,
+        &candidate.payload.content.content,
+        candidate.context.previous_semantics_recorded,
+    );
     // Above the code, not below it: the point of a note is to be read while
     // there is still a decision to make.
     for note in notes {
@@ -947,7 +1412,7 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
     for id in store::object_ids(root)? {
         let object = ops::effective(root, &id)?;
-        if all || object.state == engr::model::Status::Open {
+        if all || object.needs_attention() {
             objects.push(object);
         }
     }

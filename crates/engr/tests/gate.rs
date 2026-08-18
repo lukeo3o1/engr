@@ -1,6 +1,7 @@
 //! The gate is the only way in. These tests pin that.
 
-use engr::model::{Action, Content, Payload, Ref, Status};
+use engr::model::{Action, Content, Payload, Ref};
+use engr::semantics::State;
 use engr::{gate, ops, store};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -42,6 +43,7 @@ fn content(text: &str) -> Content {
         text: text.to_owned(),
         based_on: None,
         refs: Vec::new(),
+        ..Content::default()
     }
 }
 
@@ -61,6 +63,7 @@ fn empty(action: Action, object: &str) -> Payload {
             text: String::new(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     }
 }
@@ -272,7 +275,7 @@ fn a_closed_object_refuses_section_changes() {
     let id = new_object(&root, "closing");
     admit(&root, payload(Action::SectionAdded, &id, "one"));
     let object = admit(&root, empty(Action::ObjectClosed, &id));
-    assert_eq!(object.state, Status::Closed);
+    assert_eq!(object.state, State::Closed);
 
     let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "two"))
         .expect_err("a closed object is sealed");

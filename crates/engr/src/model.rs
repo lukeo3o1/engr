@@ -5,6 +5,9 @@
 //! action. Nothing is derived at read time except staleness, which lives in
 //! [`crate::git`].
 
+use crate::semantics::{
+    needs_attention, validate_state, ObjectType, Relation, RelationType, Role, State, Supplement,
+};
 use crate::LEGACY_OBJECT_VERSION_V0;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::{Deserialize, Serialize};
@@ -66,26 +69,10 @@ pub const OBJECT_FORMAT: &str = "engr-object";
 pub const EVENT_FORMAT: &str = "engr-event";
 pub const CANDIDATE_FORMAT: &str = "engr-candidate";
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Open,
-    Closed,
-}
-
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Open => "open",
-            Status::Closed => "closed",
-        }
-    }
-}
-
 /// A reference to one section, pinned to what it said and the
 /// commit it said it at. `sha256` makes "my basis changed" computable locally;
 /// `commit` makes the old wording recoverable with `git show`.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Ref {
     pub object: String,
     pub section: u64,
@@ -101,13 +88,30 @@ impl Ref {
 }
 
 /// The part of a section a human actually reads and assents to.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+///
+/// Every semantic field a Section carries lives here, and only here, because
+/// this is what the section hash covers. A field held outside it would be
+/// authoritative meaning that `verify` cannot see and a ref cannot pin — which
+/// is exactly how `role` or a relation could be changed after the fact without
+/// anything reporting it.
+///
+/// The new fields are all skipped when empty, so a Section that carries none of
+/// them serializes and hashes byte for byte as it did before they existed.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Content {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
     pub text: String,
+    /// Ordered, unlike `refs` and `relations`: these are excerpts a reader goes
+    /// through in sequence, so moving one is a change to the assertion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<Supplement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub based_on: Option<String>,
     #[serde(default)]
     pub refs: Vec<Ref>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
 }
 
 impl Content {
@@ -117,15 +121,63 @@ impl Content {
         canonical_sha256_with_basis(self)
     }
 
+    /// Put the order-insensitive collections in one order before anything is
+    /// hashed.
+    ///
+    /// `refs` and `relations` are sets: the same three references written in
+    /// another order are the same assertion. Sorting them at the gate — before
+    /// the payload is fingerprinted and before a human is shown it — is what
+    /// makes that true in practice, and it costs nothing on the read path, so
+    /// every hash already stored stays valid.
+    pub fn canonicalize_order(&mut self) {
+        self.refs.sort();
+        self.relations.sort();
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(based_on) = &self.based_on {
             validate_git_oid("based_on", based_on)?;
         }
+        for entry in &self.content {
+            entry.validate()?;
+        }
         for reference in &self.refs {
             reference.validate()?;
         }
+        for relation in &self.relations {
+            relation.validate()?;
+        }
+        // A set cannot hold the same member twice. Enforced on the way in *and*
+        // wherever a stored payload is read, because a duplicate that only the
+        // write path refuses is a duplicate one hand-edit away from existing.
+        check_unique(&self.refs, "reference")?;
+        check_unique(&self.relations, "relation")?;
         Ok(())
     }
+
+    /// Every replacement this content names.
+    pub fn replacements(&self) -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        for relation in &self.relations {
+            if let Some(target) = relation.replacement()? {
+                found.push(target);
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// Exact duplicates only. Two refs to the same section pinned at different
+/// wording are different statements, and saying so is not this function's job.
+fn check_unique<T: PartialEq>(items: &[T], what: &str) -> Result<()> {
+    for (index, item) in items.iter().enumerate() {
+        ensure!(
+            !items[..index].contains(item),
+            EXIT_SCHEMA,
+            "the same {what} is listed twice"
+        );
+    }
+    Ok(())
 }
 
 fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
@@ -135,13 +187,20 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Section {
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<Supplement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub based_on: Option<String>,
     #[serde(default)]
     pub refs: Vec<Ref>,
-    /// Hash of the confirmed content — text, `based_on` and `refs` together, not
-    /// text alone. Repointing a ref would otherwise pass `verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
+    /// Hash of the confirmed content — role, text, supplementary content,
+    /// `based_on`, `refs` and `relations` together, not text alone. Repointing a
+    /// ref, or retyping a relation, would otherwise pass `verify`.
     pub sha256: String,
     pub confirmed_at: String,
 }
@@ -149,9 +208,12 @@ pub struct Section {
 impl Section {
     pub fn content(&self) -> Content {
         Content {
+            role: self.role,
             text: self.text.clone(),
+            content: self.content.clone(),
             based_on: self.based_on.clone(),
             refs: self.refs.clone(),
+            relations: self.relations.clone(),
         }
     }
 
@@ -176,8 +238,14 @@ pub struct Object {
     pub legacy_version: Option<u32>,
     pub id: String,
     pub title: String,
+    /// Optional, and absent is a first-class answer rather than a missing one.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<ObjectType>,
+    /// The one lifecycle field. `status` is read as an alias so a workspace
+    /// migrated from v0 keeps loading, and is never written back under that
+    /// name: two spellings of one truth is how they start disagreeing.
     #[serde(alias = "status")]
-    pub state: Status,
+    pub state: State,
     /// Increments on every confirmed action. Candidates pin it, so one prepared
     /// against an older state cannot be confirmed after the object moved.
     pub rev: u64,
@@ -196,13 +264,29 @@ impl Object {
             legacy_version: None,
             id,
             title,
-            state: Status::Open,
+            object_type: None,
+            state: State::Open,
             rev: 0,
             next_section_id: 1,
             sections: Vec::new(),
         };
         object.validate()?;
         Ok(object)
+    }
+
+    /// Whether this Object belongs in the default attention set. Derived from
+    /// `(type, state)` on every read; never stored.
+    pub fn needs_attention(&self) -> bool {
+        needs_attention(self.object_type, self.state)
+    }
+
+    /// Every replacement any of this Object's sections names.
+    pub fn replacements(&self) -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        for section in &self.sections {
+            found.extend(section.content().replacements()?);
+        }
+        Ok(found)
     }
 
     pub fn section(&self, id: u64) -> Result<&Section> {
@@ -212,11 +296,39 @@ impl Object {
             .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("section §{id} does not exist")))
     }
 
-    fn require_open(&self, what: &str) -> Result<()> {
+    /// Confirmed content is not revised while nobody is looking at it.
+    ///
+    /// This is the old "reopen first" rule stated in the terms Phase 3 gives it.
+    /// For an untyped Object attention is exactly `open`, so nothing about the
+    /// old behaviour changed; for a typed one it is the derived class, so an
+    /// `accepted` design has to be moved back to `draft` or `proposed` before it
+    /// can be reworded. Renewed engineering work returns to the attention set
+    /// rather than happening out of sight of everyone who reads the default
+    /// listing.
+    ///
+    /// The rule is about *remaining* outside the attention set. An operation
+    /// that carried content and moved the Object into attention in the same
+    /// confirmation would satisfy it too — v0 simply has no such action, because
+    /// classification carries no content and supersession lands outside
+    /// attention by definition. Reclassify, then revise: two confirmations, and
+    /// the object is visible in the default listing for the second.
+    fn require_attention(&self, what: &str) -> Result<()> {
+        // The way through is named, and named in the caller's own vocabulary: an
+        // untyped object is reopened, a typed one is classified. A refusal that
+        // makes someone go and look up which states are in the attention set is
+        // a refusal they will work around rather than read.
+        let way_through = match self.object_type {
+            None => "reopen it first".to_owned(),
+            Some(_) => format!(
+                "classify it into {} first",
+                crate::semantics::attention_states(self.object_type)
+            ),
+        };
         ensure!(
-            self.state == Status::Open,
+            self.needs_attention(),
             EXIT_INVARIANT,
-            "{what} requires an open object; reopen it first"
+            "{what} requires an object that needs attention, and {} does not; {way_through}",
+            self.state.as_str()
         );
         Ok(())
     }
@@ -237,6 +349,8 @@ impl Object {
                 "unsupported legacy object version {version}"
             );
         }
+        validate_state(EXIT_SCHEMA, self.object_type, self.state)?;
+        check_supersession(self, EXIT_SCHEMA)?;
         ensure!(
             self.next_section_id > 0,
             EXIT_SCHEMA,
@@ -266,17 +380,79 @@ impl Object {
     }
 }
 
+/// The supersession invariant, checked from both directions.
+///
+/// `state = superseded` and exactly one `superseded_by` relation are one fact
+/// written in two places, so either without the other is a record that
+/// contradicts itself: a superseded Object with nothing to forward a reader to,
+/// or a replacement edge that the state does not honour. Checking it after every
+/// projection is what makes the supersession operation atomic in practice — a
+/// revision that would drop the relation, or a deletion that would remove the
+/// Section holding it, fails here rather than quietly breaking the pair.
+fn check_supersession(object: &Object, code: i32) -> Result<()> {
+    let replacements = object
+        .sections
+        .iter()
+        .flat_map(|section| &section.relations)
+        .filter(|relation| relation.relation == RelationType::SupersededBy)
+        .count();
+    match (object.state == State::Superseded, replacements) {
+        (true, 1) | (false, 0) => Ok(()),
+        (true, found) => Err(Error::new(
+            code,
+            format!(
+                "{}: a superseded object needs exactly one superseded_by relation, and has {found}",
+                object.id
+            ),
+        )),
+        (false, _) => Err(Error::new(
+            code,
+            format!(
+                "{}: a superseded_by relation says the object was replaced, so its state must be superseded, not {}",
+                object.id,
+                object.state.as_str()
+            ),
+        )),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     ObjectCreated,
     ObjectRenamed,
     SectionAdded,
-    SectionRevised { section: u64 },
-    SectionMerged { absorbs: Vec<u64> },
-    SectionDeleted { section: u64 },
+    SectionRevised {
+        section: u64,
+    },
+    SectionMerged {
+        absorbs: Vec<u64>,
+    },
+    SectionDeleted {
+        section: u64,
+    },
     ObjectClosed,
     ObjectReopened,
+    /// Declare what this Object is and what state it is in, both explicitly.
+    ///
+    /// One action rather than two, because a type change without a destination
+    /// state has no answer: the vocabularies do not overlap, and any mapping
+    /// engr invented would be engr deciding that an `accepted` design becomes an
+    /// `accepted` decision — which is a judgement, not a conversion. Both values
+    /// are always restated, so the human reads the whole destination rather than
+    /// a delta against something they have to remember.
+    ObjectClassified {
+        #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+        object_type: Option<ObjectType>,
+        state: State,
+    },
+    /// Replace this Object with another, in one confirmation.
+    ///
+    /// The state, the replacement relation and the human-readable reason are one
+    /// semantic act. Splitting them into separately confirmable steps would be
+    /// easier to implement and would mean a record can sit in the state where it
+    /// says it was replaced and cannot say by what.
+    ObjectSuperseded,
 }
 
 impl Action {
@@ -290,6 +466,8 @@ impl Action {
             Action::SectionDeleted { .. } => "section.deleted",
             Action::ObjectClosed => "object.closed",
             Action::ObjectReopened => "object.reopened",
+            Action::ObjectClassified { .. } => "object.classified",
+            Action::ObjectSuperseded => "object.superseded",
         }
     }
 
@@ -302,6 +480,16 @@ impl Action {
                 | Action::SectionAdded
                 | Action::SectionRevised { .. }
                 | Action::SectionMerged { .. }
+                | Action::ObjectSuperseded
+        )
+    }
+
+    /// Actions that add wording as a new Section rather than replacing existing
+    /// wording or a label.
+    pub fn adds_section(&self) -> bool {
+        matches!(
+            self,
+            Action::SectionAdded | Action::SectionMerged { .. } | Action::ObjectSuperseded
         )
     }
 
@@ -343,10 +531,43 @@ impl Payload {
             ensure!(
                 self.content.text.is_empty()
                     && self.content.based_on.is_none()
-                    && self.content.refs.is_empty(),
+                    && self.content.refs.is_empty()
+                    && self.content.role.is_none()
+                    && self.content.content.is_empty()
+                    && self.content.relations.is_empty(),
                 EXIT_INVARIANT,
                 "{} does not carry content",
                 self.action.label()
+            );
+        }
+        if let Action::ObjectClassified { object_type, state } = &self.action {
+            validate_state(EXIT_USAGE, *object_type, *state)?;
+        }
+        // `superseded_by` may only arrive through the one action that also sets
+        // the state, and that action may carry nothing else. Any other way in
+        // would let the relation and the state be confirmed apart, which is the
+        // whole thing supersession is defined to prevent.
+        if matches!(self.action, Action::ObjectSuperseded) {
+            ensure!(
+                self.content.role == Some(Role::Supersession),
+                EXIT_INVARIANT,
+                "object.superseded carries the reason it was replaced, so its section is role=supersession"
+            );
+            ensure!(
+                self.content.relations.len() == 1
+                    && self.content.relations[0].relation == RelationType::SupersededBy,
+                EXIT_INVARIANT,
+                "object.superseded carries exactly one relation, the superseded_by naming the replacement"
+            );
+        } else {
+            ensure!(
+                !self
+                    .content
+                    .relations
+                    .iter()
+                    .any(|relation| relation.relation == RelationType::SupersededBy),
+                EXIT_INVARIANT,
+                "a superseded_by relation only enters through object.superseded, which confirms the state, the replacement and the reason together"
             );
         }
         if let Action::SectionMerged { absorbs } = &self.action {
@@ -461,16 +682,16 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         // it is the second reading that makes closed mean the whole object has
         // settled.
         Action::ObjectRenamed => {
-            object.require_open("object.renamed")?;
+            object.require_attention("object.renamed")?;
             object.title.clone_from(&content.text);
         }
         Action::SectionAdded => {
-            object.require_open("section.added")?;
+            object.require_attention("section.added")?;
             let id = take_id(object)?;
             object.sections.push(section_from(id, event)?);
         }
         Action::SectionRevised { section } => {
-            object.require_open("section.revised")?;
+            object.require_attention("section.revised")?;
             object.section(*section)?;
             let replacement = section_from(*section, event)?;
             let slot = object
@@ -481,7 +702,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             *slot = replacement;
         }
         Action::SectionMerged { absorbs } => {
-            object.require_open("section.merged")?;
+            object.require_attention("section.merged")?;
             for id in absorbs {
                 object.section(*id)?;
             }
@@ -492,25 +713,56 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             object.sections.push(section_from(id, event)?);
         }
         Action::SectionDeleted { section } => {
-            object.require_open("section.deleted")?;
+            object.require_attention("section.deleted")?;
             object.section(*section)?;
             object.sections.retain(|item| item.id != *section);
         }
+        // Kept, and kept narrow. These two are the Phase 0 spelling of the
+        // untyped vocabulary, they are what every confirmed event in an existing
+        // workspace says, and history is not rewritten to suit a newer action.
+        // On a typed object they have no meaning at all, because `open` and
+        // `closed` are not among its states.
+        // Validity before attention, in this order deliberately: on a typed
+        // object these two are categorically the wrong action, and being told
+        // to classify it into the attention set first would send someone off to
+        // do something that still would not let them close a design.
         Action::ObjectClosed => {
-            object.require_open("object.closed")?;
-            object.state = Status::Closed;
+            validate_state(EXIT_INVARIANT, object.object_type, State::Closed)?;
+            object.require_attention("object.closed")?;
+            object.state = State::Closed;
         }
         Action::ObjectReopened => {
+            validate_state(EXIT_INVARIANT, object.object_type, State::Open)?;
             ensure!(
-                object.state == Status::Closed,
+                object.state == State::Closed,
                 EXIT_INVARIANT,
                 "object.reopened requires a closed object"
             );
-            object.state = Status::Open;
+            object.state = State::Open;
+        }
+        Action::ObjectClassified { object_type, state } => {
+            // No transition graph, deliberately: v0 validates that the
+            // destination is legal for the destination type and that the
+            // semantic invariants still hold afterwards. Inventing a permitted
+            // sequence would be inventing a process nobody agreed to.
+            validate_state(EXIT_INVARIANT, *object_type, *state)?;
+            object.object_type = *object_type;
+            object.state = *state;
+        }
+        Action::ObjectSuperseded => {
+            // `superseded` is only in the design and decision vocabularies, so
+            // an untyped object or a risk cannot hold the state — and therefore,
+            // by the coupled invariant, cannot hold the relation either.
+            validate_state(EXIT_INVARIANT, object.object_type, State::Superseded)?;
+            object.require_attention("object.superseded")?;
+            let id = take_id(object)?;
+            object.sections.push(section_from(id, event)?);
+            object.state = State::Superseded;
         }
     }
     object.sections.sort_by_key(|section| section.id);
     object.rev = event.rev;
+    check_supersession(object, EXIT_INVARIANT)?;
     Ok(())
 }
 
@@ -530,9 +782,12 @@ fn section_from(id: u64, event: &Event) -> Result<Section> {
     Ok(Section {
         id,
         sha256: content.sha256()?,
+        role: content.role,
         text: content.text,
+        content: content.content,
         based_on: content.based_on,
         refs: content.refs,
+        relations: content.relations,
         confirmed_at: event.time.clone(),
     })
 }
@@ -547,8 +802,7 @@ mod tests {
             object: id.to_owned(),
             content: Content {
                 text: text.to_owned(),
-                based_on: None,
-                refs: Vec::new(),
+                ..Content::default()
             },
         };
         Event {

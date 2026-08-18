@@ -273,6 +273,18 @@ pub fn encode_uuid(uuid: uuid::Uuid) -> String {
         .collect()
 }
 
+/// The compact reference spelling of a stored UUID identity.
+///
+/// Records keep standard UUID text so a file can be identified without a
+/// resolver; references use the 26-character codec. Both spellings are the same
+/// 128 bits, and this is the one place that says so for callers holding the
+/// stored form.
+pub fn encode_uuid_str(value: &str) -> Result<String> {
+    let uuid = uuid::Uuid::parse_str(value)
+        .map_err(|_| Error::new(EXIT_SCHEMA, format!("{value:?} is not a UUID")))?;
+    Ok(encode_uuid(uuid))
+}
+
 pub fn decode_uuid(compact: &str) -> Result<uuid::Uuid> {
     ensure!(
         compact.len() == 26,
@@ -298,6 +310,43 @@ pub fn decode_uuid(compact: &str) -> Result<uuid::Uuid> {
         value = (value << 5) | digit;
     }
     Ok(uuid::Uuid::from_bytes(value.to_be_bytes()))
+}
+
+/// Parse an embedded engr target and hold it to the one canonical spelling.
+///
+/// Shared because every domain that embeds `{ "kind": "engr", "ref": ... }` has
+/// the same three questions — is it parseable, is that resource kind legal
+/// *here*, and is it written the one way — while each keeps its own answer to
+/// the second. Sharing the parser is not sharing the semantics: `subjects[]`,
+/// `produced[]` and `relations[]` all pass through this and mean different
+/// things on the other side.
+///
+/// `what` names the field in the refusal, because a caller who typed the wrong
+/// reference needs to know which of several it was.
+pub fn canonical_embedded(
+    reference: &str,
+    allowed: &[ResourceKind],
+    what: &str,
+) -> Result<CanonicalEngrRef> {
+    let parsed = EngrRef::parse_embedded(reference)?;
+    ensure!(
+        parsed.snapshot_selector().is_none(),
+        EXIT_SCHEMA,
+        "{what} names a current resource, so it cannot carry a Git snapshot selector"
+    );
+    ensure!(
+        allowed.contains(&parsed.kind()),
+        EXIT_SCHEMA,
+        "{what} cannot target {reference:?}"
+    );
+    let canonical = parsed.canonicalize(|_| None)?;
+    ensure!(
+        canonical.embedded() == reference,
+        EXIT_SCHEMA,
+        "{what} {reference:?} is not canonical; write it as {:?}",
+        canonical.embedded()
+    );
+    Ok(canonical)
 }
 
 #[cfg(test)]

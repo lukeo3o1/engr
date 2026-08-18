@@ -11,6 +11,7 @@ pub mod git;
 pub mod model;
 pub mod ops;
 pub mod reference;
+pub mod semantics;
 pub mod store;
 pub mod view;
 

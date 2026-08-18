@@ -8,7 +8,8 @@
 
 use crate::backlog;
 use crate::git;
-use crate::model::{Object, Ref, Status};
+use crate::model::{Object, Ref};
+use crate::semantics::{Relation, Supplement};
 use crate::{ops, store, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -201,6 +202,40 @@ pub fn counts(assessment: &[(u64, SectionStatus)]) -> Counts {
     }
 }
 
+/// `type` and `state` in one column, because the state vocabulary only means
+/// anything against the type it belongs to: `accepted` on a risk and `accepted`
+/// on a decision are different facts, and a column that showed only the state
+/// would invite reading them as the same one.
+pub fn classification(object: &Object) -> String {
+    match object.object_type {
+        Some(object_type) => format!("{}/{}", object_type.as_str(), object.state.as_str()),
+        None => object.state.as_str().to_owned(),
+    }
+}
+
+/// The supplementary entries, verbatim.
+///
+/// Never truncated and never re-indented: the body is literal content somebody
+/// confirmed, and an agent reading it back has to get the bytes that were
+/// hashed, not a prettier arrangement of them.
+fn render_content(out: &mut String, content: &[Supplement]) {
+    for (index, entry) in content.iter().enumerate() {
+        out.push_str(&format!("    content  [{index}] {}\n", entry.content_type));
+        for line in entry.body.split('\n') {
+            out.push_str(&format!("             {line}\n"));
+        }
+    }
+}
+
+fn render_relations(out: &mut String, relations: &[Relation]) {
+    for relation in relations {
+        out.push_str(&format!(
+            "    relation {}\n",
+            relation.render(|commit| short(commit).to_owned())
+        ));
+    }
+}
+
 pub fn render_show(root: &Path, object: &Object) -> String {
     let assessment = assess(root, object);
     let tally = counts(&assessment);
@@ -209,7 +244,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
     out.push_str(&format!(
         "{}  {}  {}\n",
         abbrev(&object.id, w),
-        object.state.as_str(),
+        classification(object),
         object.title
     ));
     out.push_str(&format!("{} sections   {} ok", tally.total, tally.ok));
@@ -229,9 +264,19 @@ pub fn render_show(root: &Path, object: &Object) -> String {
             .find(|(id, _)| *id == section.id)
             .map(|(_, status)| status.clone())
             .unwrap_or_default();
-        out.push_str(&format!("\n── §{} ── {}\n", section.id, status.label()));
+        match section.role {
+            Some(role) => out.push_str(&format!(
+                "\n── §{} [{}] ── {}\n",
+                section.id,
+                role.as_str(),
+                status.label()
+            )),
+            None => out.push_str(&format!("\n── §{} ── {}\n", section.id, status.label())),
+        }
         out.push_str(section.text.trim_end());
         out.push('\n');
+        render_content(&mut out, &section.content);
+        render_relations(&mut out, &section.relations);
         if let Some(commit) = &section.based_on {
             out.push_str(&format!(
                 "    based_on {}   confirmed {}\n",
@@ -322,10 +367,16 @@ pub fn render_show(root: &Path, object: &Object) -> String {
 #[derive(Serialize)]
 struct JsonSection<'a> {
     id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
     text: &'a str,
+    #[serde(skip_serializing_if = "<[Supplement]>::is_empty")]
+    content: &'a [Supplement],
     status: &'static str,
     based_on: Option<&'a str>,
     refs: &'a [Ref],
+    #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
+    relations: &'a [Relation],
     sha256: &'a str,
     confirmed_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,7 +399,13 @@ struct JsonSummary {
 struct JsonObject<'a> {
     id: &'a str,
     title: &'a str,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    object_type: Option<&'static str>,
     state: &'static str,
+    /// Derived here and nowhere on disk. It is in the read surface because a
+    /// planning agent needs the answer without reimplementing the table, and it
+    /// is absent from storage because a stored copy would be a second truth.
+    attention: bool,
     rev: u64,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
@@ -368,10 +425,13 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 .unwrap_or_default();
             JsonSection {
                 id: section.id,
+                role: section.role.map(|role| role.as_str()),
                 text: &section.text,
+                content: &section.content,
                 status: status.key(),
                 based_on: section.based_on.as_deref(),
                 refs: &section.refs,
+                relations: &section.relations,
                 sha256: &section.sha256,
                 confirmed_at: &section.confirmed_at,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
@@ -383,7 +443,9 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
     let value = JsonObject {
         id: &object.id,
         title: &object.title,
+        object_type: object.object_type.map(|value| value.as_str()),
         state: object.state.as_str(),
+        attention: object.needs_attention(),
         rev: object.rev,
         summary: JsonSummary {
             sections: tally.total,
@@ -427,9 +489,9 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
             _ => "ok".to_owned(),
         };
         out.push_str(&format!(
-            "{}  {:<6}  {:>2} sections  {:<12}  {}\n",
+            "{}  {:<20}  {:>2} sections  {:<12}  {}\n",
             abbrev(&object.id, w),
-            object.state.as_str(),
+            classification(object),
             tally.total,
             note,
             object.title
@@ -468,10 +530,10 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     for object in objects {
         for section in &object.sections {
             out.push_str(&format!(
-                "{} §{:<3} {:<6}  {}\n",
+                "{} §{:<3} {:<20}  {}\n",
                 abbrev(&object.id, w),
                 section.id,
-                object.state.as_str(),
+                classification(object),
                 section.text.replace('\n', " ").trim()
             ));
         }
@@ -657,9 +719,10 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
     .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }
 
-/// The one case worth interrupting for by default: an object someone declared
-/// finished, whose basis has since moved. Closed means nobody is looking, which
-/// is exactly when drift goes unnoticed.
+/// The one case worth interrupting for by default: an object nobody is looking
+/// at, whose basis has since moved. Outside the attention set is exactly where
+/// drift goes unnoticed — which is why this reads the derived class rather than
+/// `open`/`closed`, and so covers an accepted design and a mitigated risk too.
 pub fn render_stale(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
@@ -668,18 +731,18 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
             if status.is_ok() {
                 continue;
             }
-            let closed = object.state == Status::Closed;
-            let marker = if closed { "⚠" } else { "·" };
-            let tail = if closed {
+            let unwatched = !object.needs_attention();
+            let marker = if unwatched { "⚠" } else { "·" };
+            let tail = if unwatched {
                 " — nobody is looking at this one"
             } else {
                 ""
             };
             out.push_str(&format!(
-                "{} {}  {:<6}  §{}  {}{}\n",
+                "{} {}  {:<20}  §{}  {}{}\n",
                 marker,
                 abbrev(&object.id, w),
-                object.state.as_str(),
+                classification(object),
                 id,
                 status.label(),
                 tail

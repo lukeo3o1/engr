@@ -48,6 +48,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
             text: text.to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     }
 }
