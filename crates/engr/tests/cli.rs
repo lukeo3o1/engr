@@ -1594,6 +1594,470 @@ fn an_empty_commit_is_not_the_basis_moving() {
     );
 }
 
+/// The two domains share a workspace and nothing else. A reader who runs the
+/// record commands must not be shown a word of unconfirmed staging, and a
+/// reader who runs the staging commands must not be able to mistake what they
+/// are looking at.
+#[test]
+fn record_surfaces_never_mix_in_unconfirmed_staging() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "confirmed record"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &object,
+            "--add",
+            "--text",
+            "confirmed wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    let staged = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "reconsider the confirmed wording",
+            "--text",
+            "unconfirmed exploratory wording",
+        ],
+    );
+    assert!(
+        staged.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let staged = String::from_utf8(staged.stdout).expect("utf8");
+    assert!(staged.contains("UNCONFIRMED STAGING"), "got {staged:?}");
+
+    for args in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &object],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).expect("utf8");
+        assert!(
+            !text.contains("unconfirmed exploratory wording")
+                && !text.contains("reconsider the confirmed wording"),
+            "{args:?} must not mix staging into the record: {text:?}"
+        );
+    }
+
+    // `verify` stays record-oriented: staging existing is not a record verdict.
+    let verify = run_engr(root, &["verify"]);
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("PASS"));
+
+    // And structured staging output carries the boundary as a field, because
+    // that is what travels furthest from the banner.
+    let shown = run_engr(root, &["backlog", "ls"]);
+    let listing = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(listing.contains("UNCONFIRMED STAGING"));
+    let id = listing
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().next())
+        .expect("a listed item")
+        .to_owned();
+    let json = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).expect("backlog json");
+    assert_eq!(json["authority"], "unconfirmed_staging");
+    assert_eq!(
+        json["sections"][0]["text"],
+        "unconfirmed exploratory wording"
+    );
+}
+
+/// What a candidate derived from staging shows, and what confirming it says it
+/// did. The flags that declare a source are still an open protocol question, so
+/// the candidate is prepared through the library — but the screens a human
+/// reads are the command line's, and they are what this pins.
+#[test]
+fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    let staging = engr::backlog::create(root, "two points", "settled here", Vec::new())
+        .expect("stage")
+        .id;
+    engr::backlog::add_section(root, &staging, "still open", Vec::new()).expect("second point");
+
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&object).expect("object id is a uuid"));
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+        vec![
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: true,
+            },
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 2,
+                produced: vec![engr::backlog::Produced::object(format!("obj:{compact}"))],
+                resolves: false,
+            },
+        ],
+    )
+    .expect("prepare from staging");
+    let code = prepared.candidate.challenge.clone();
+
+    // Re-rendered hours later, the screen still says what typing the code does.
+    let shown = run_engr(root, &["candidate", &code]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(
+        shown.contains("§1  resolved by this — will be consumed"),
+        "got {shown:?}"
+    );
+    assert!(
+        shown.contains("§2  still unresolved after this"),
+        "got {shown:?}"
+    );
+    assert!(shown.contains(&format!("produced engr:obj:{compact}")));
+
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        confirmed.status.success(),
+        "confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    let confirmed = String::from_utf8(confirmed.stdout).expect("utf8");
+    assert!(confirmed.contains("CONFIRMED"));
+    assert!(
+        confirmed.contains("resolved and consumed"),
+        "confirming must say what it did to staging: {confirmed:?}"
+    );
+    assert!(
+        confirmed.contains("recorded 1 produced outcome(s); still unresolved"),
+        "including the point it did not settle: {confirmed:?}"
+    );
+
+    let stored = engr::backlog::load(root, &staging).expect("the second point survives");
+    assert_eq!(stored.sections.len(), 1);
+    assert_eq!(stored.sections[0].id, 2);
+    assert_eq!(stored.sections[0].produced.len(), 1);
+}
+
+/// Three different failures, three different exit codes. Phase 1 fixed that
+/// boundary for the record; staging has to keep it, or a script cannot tell a
+/// typo from a corrupted workspace.
+#[test]
+fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let item = engr::backlog::create(root, "topic", "unresolved", Vec::new())
+        .expect("stage")
+        .id;
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&item).expect("uuid is a uuid"));
+    let absent =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&engr::model::new_id()).expect("uuid"));
+
+    let code = |args: &[&str]| run_engr(root, args).status.code();
+
+    // Legal syntax, wrong shape for the command: usage.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{compact}:1")]),
+        Some(engr::EXIT_USAGE),
+        "every backlog command addresses a whole item"
+    );
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:obj:{compact}")]),
+        Some(engr::EXIT_USAGE),
+        "and a backlog command does not address an Object"
+    );
+    // Malformed canonical reference the person typed: usage, not schema.
+    for malformed in ["engr:backlog:not-a-compact-uuid", "engr:nonsense:abc"] {
+        assert_eq!(
+            code(&["backlog", "show", malformed]),
+            Some(engr::EXIT_USAGE),
+            "{malformed}"
+        );
+    }
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            "engr:obj:not-a-compact-uuid",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "a malformed --subject is a mistyped argument"
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            &format!("engr:collection:{compact}"),
+        ]),
+        Some(engr::EXIT_USAGE)
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject-file",
+            "../outside.rs",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "and so is a path that is not repository-relative"
+    );
+
+    // Well-formed, but there is no such item: not found.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{absent}")]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+    assert_eq!(
+        code(&["backlog", "show", "0198ffff"]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+
+    // The stored file itself is wrong: schema, reached through a valid argument.
+    let path = engr::backlog::item_path(root, &item);
+    let mut stored: Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["updated_at"] = Value::String("last tuesday".to_owned());
+    store::write_json(&path, &stored).expect("corrupt the stored item");
+    assert_eq!(
+        code(&["backlog", "show", &item]),
+        Some(engr::EXIT_SCHEMA),
+        "a malformed workspace is not the caller's argument being wrong"
+    );
+    assert_eq!(code(&["backlog", "ls"]), Some(engr::EXIT_SCHEMA));
+}
+
+/// The confirmation screen names which unresolved point gets consumed, so two
+/// different points may never print the same identifier on it. Backlog ids
+/// abbreviate against Backlog ids: borrowing the Object width is how two
+/// distinct sources become indistinguishable exactly where it matters.
+#[test]
+fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    // Two backlog items differing only in their last character. One object, so
+    // the Object width is 8 — which would render both of these identically.
+    let ids = [
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6a",
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6b",
+    ];
+    for id in ids {
+        let item = serde_json::json!({
+            "id": id,
+            "topic": format!("unresolved point in {id}"),
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": "still open",
+                "updated_at": "2026-08-17T00:00:00Z",
+                "subjects": [],
+            }],
+        });
+        store::write_json(&engr::backlog::item_path(root, id), &item).expect("stage");
+    }
+    assert_eq!(engr::view::width(root), 8, "the object namespace is narrow");
+
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+            },
+        },
+        ids.iter()
+            .map(|id| gate::SourceRequest {
+                item: (*id).to_owned(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: false,
+            })
+            .collect(),
+    )
+    .expect("prepare from two staged points");
+
+    let shown = run_engr(root, &["candidate", &prepared.candidate.challenge]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    let rendered: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| line.strip_prefix("Backlog    "))
+        .map(|line| line.split_whitespace().next().expect("an id"))
+        .collect();
+    assert_eq!(rendered.len(), 2, "both sources are shown: {shown:?}");
+    assert_ne!(
+        rendered[0], rendered[1],
+        "two unresolved points must not render identically: {shown:?}"
+    );
+    for (id, printed) in ids.iter().zip(&rendered) {
+        assert!(
+            id.starts_with(printed),
+            "{printed} does not abbreviate {id}"
+        );
+    }
+}
+
+/// Backlog CRUD through the command line, including the one refusal that keeps
+/// a subject from claiming provenance it does not have.
+#[test]
+fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.name", "test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    std::fs::write(root.join("session.rs"), "fn refresh() {}\n").expect("source");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "source"]);
+
+    let created = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "refresh strategy",
+            "--text",
+            "offline mode may invalidate it",
+            "--subject-file",
+            "session.rs",
+            "--subject-symbol",
+            "session.rs",
+            "refresh",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let id = engr::backlog::ids(root).expect("ids").remove(0);
+
+    assert!(
+        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
+            .status
+            .success()
+    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "2",
+            "--text",
+            "reworded"
+        ]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "merge",
+            &id,
+            "--sections",
+            "1,2",
+            "--text",
+            "one point"
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
+            .status
+            .success()
+    );
+
+    let item = engr::backlog::load(root, &id).expect("item");
+    assert_eq!(item.topic, "refresh");
+    assert_eq!(item.sections.len(), 1);
+    assert_eq!(item.sections[0].id, 3);
+    assert!(
+        engr::gate::pending(root).expect("candidates").is_empty(),
+        "staging edits never mint a challenge code"
+    );
+
+    // A dirty path cannot be pinned, and the refusal says what to do about it.
+    std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "concerns dirty source",
+            "--subject-file",
+            "session.rs",
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("commit it first"), "got {message:?}");
+
+    assert!(run_engr(root, &["backlog", "rm", &id, "--section", "3"])
+        .status
+        .success());
+    assert!(
+        engr::backlog::ids(root).expect("ids").is_empty(),
+        "removing the last unresolved point removes the topic"
+    );
+    let empty = run_engr(root, &["backlog", "ls"]);
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("nothing unresolved"));
+}
+
 /// Installed from a release archive there is no checkout, so the document that
 /// says what the tool guarantees would otherwise not be on the machine the tool
 /// is on. It also has to work before `init`: the protocol is what someone reads

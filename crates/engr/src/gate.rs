@@ -3,13 +3,15 @@
 //! `prepare` puts a candidate up and mints a challenge; `confirm` admits it only
 //! against the exact response. There is no unconfirmed write path.
 
+use crate::backlog;
 use crate::model::{
     canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
     CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::{
-    ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION_V0,
-    EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE,
+    ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION,
+    CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,13 +23,26 @@ pub struct Candidate {
     pub version: u32,
     #[serde(flatten)]
     pub gate: crate::confirmation::Candidate<Payload, ObjectBinding>,
+    #[serde(flatten)]
+    pub context: PreparedContext,
+}
+
+/// Everything prepared beside the mutation itself: what the human will be
+/// shown, and what a successful confirmation will reconcile in Backlog.
+///
+/// None of it belongs in `payload_sha256` — that value travels into the
+/// confirmed Event and identifies the mutation, and Backlog must not become
+/// part of the authoritative record. All of it belongs in `integrity_sha256`,
+/// because all of it changes what happens at confirm.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PreparedContext {
     /// What the human is shown when the candidate carries a change to existing
     /// wording, so they read the change rather than the whole section again.
+    #[serde(default)]
     pub previous_text: Option<String>,
     /// Previous semantic content for revisions. These remain separate from
-    /// `previous_text` so candidates minted by older builds still load; the
-    /// action tells the renderer whether absence means "no basis" or "not a
-    /// section revision".
+    /// `previous_text`; the action tells the renderer whether absence means
+    /// "no basis" or "not a section revision".
     #[serde(default)]
     pub previous_based_on: Option<String>,
     #[serde(default)]
@@ -36,6 +51,10 @@ pub struct Candidate {
     /// candidate that never captured those values at all.
     #[serde(default)]
     pub previous_semantics_recorded: bool,
+    /// The unresolved points this candidate says it came from, each pinned to
+    /// the resolution basis it was prepared against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backlog: Vec<backlog::Source>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -52,36 +71,82 @@ impl std::ops::Deref for Candidate {
     }
 }
 
+/// What a confirmation produced: the Event that entered the record, the object
+/// it produced, and what that did to the Backlog sources the candidate named.
+#[derive(Debug)]
+pub struct Admitted {
+    pub event: Event,
+    pub object: Object,
+    pub backlog: Vec<backlog::Outcome>,
+}
+
+/// A Backlog source a caller declares a candidate was derived from. The
+/// resolution basis is pinned by `prepare`, not supplied, so the pin is always
+/// what the source actually said at that moment.
+#[derive(Clone, Debug)]
+pub struct SourceRequest {
+    /// Any unique Backlog id prefix, or an `engr:backlog:<id>` reference.
+    pub item: String,
+    pub section: u64,
+    pub produced: Vec<backlog::Produced>,
+    pub resolves: bool,
+}
+
 fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .expect("formatting a timestamp cannot fail")
 }
 
-pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
+/// Every challenge code a candidate file currently claims.
+///
+/// Read from the filenames, without loading anything. Minting a fresh code has
+/// to avoid every code on disk, including one this build refuses to admit —
+/// otherwise a candidate left by an older build would either be silently
+/// overwritten, or would make preparing anything at all fail with a message
+/// about some unrelated code.
+pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     let dir = store::candidates_dir(root);
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut found = Vec::new();
+    let mut codes = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
         let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
-        let path = entry.path();
-        if path.extension().and_then(|item| item.to_str()) != Some("json") {
-            continue;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(code) = name.strip_suffix(".json") {
+            if crate::confirmation::valid_challenge(code) {
+                codes.push(code.to_owned());
+            }
         }
-        let candidate: Candidate = store::read_json(&path)?;
-        ensure!(
-            candidate.format == CANDIDATE_FORMAT,
-            EXIT_SCHEMA,
-            "{}: not an engr candidate",
-            path.display()
-        );
-        validate_candidate(&candidate)?;
-        found.push(candidate);
+    }
+    codes.sort();
+    Ok(codes)
+}
+
+/// Every pending candidate, fully loaded and checked.
+///
+/// The strict half of the pair: one file this build refuses fails the whole
+/// call. That is right for a caller that wants candidates, and wrong for a
+/// listing — which is why the listing walks [`pending_codes`] and loads each
+/// one on its own, so a file it cannot read becomes a line rather than the
+/// absence of every other line.
+pub fn pending(root: &Path) -> Result<Vec<Candidate>> {
+    let mut found = Vec::new();
+    for code in pending_codes(root)? {
+        found.push(find(root, &code)?);
     }
     found.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(found)
+}
+
+/// Which object a candidate file is about, without holding it to this build's
+/// rules. Superseding has to work against a candidate this build would refuse,
+/// because leaving that one live is what would give one object two codes.
+fn candidate_object(root: &Path, code: &str) -> Option<String> {
+    let path = store::candidate_path(root, code).ok()?;
+    let value: serde_json::Value = store::read_json(&path).ok()?;
+    value.get("object")?.as_str().map(str::to_owned)
 }
 
 pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
@@ -92,16 +157,40 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
         "no candidate awaiting {challenge}"
     );
     let candidate: Candidate = store::read_json(&path)?;
+    // The code a candidate names is the code it will be admitted by, so a file
+    // that names a different one is not a candidate to render — it is a
+    // redirect. Rendering it would show one mutation and ask for the answer to
+    // another, which is the exact thing the gate exists to prevent, and both
+    // files would pass every check of their own.
+    ensure!(
+        candidate.challenge == challenge,
+        EXIT_SCHEMA,
+        "candidate {challenge} names challenge {}; it would show one change and admit another",
+        candidate.challenge
+    );
     validate_candidate(&candidate)?;
     Ok(candidate)
 }
 
 fn validate_candidate(candidate: &Candidate) -> Result<()> {
     ensure!(
-        candidate.format == CANDIDATE_FORMAT && candidate.version == CANDIDATE_ENVELOPE_VERSION_V0,
+        candidate.format == CANDIDATE_FORMAT,
         EXIT_SCHEMA,
         "candidate {} has an unsupported format",
         candidate.challenge
+    );
+    ensure!(
+        candidate.version != CANDIDATE_ENVELOPE_VERSION_V0,
+        EXIT_SCHEMA,
+        "candidate {} predates candidate integrity, so what it would present cannot be checked against what was prepared; prepare it again",
+        candidate.challenge
+    );
+    ensure!(
+        candidate.version == CANDIDATE_ENVELOPE_VERSION,
+        EXIT_SCHEMA,
+        "candidate {} has an unsupported envelope version {}",
+        candidate.challenge,
+        candidate.version
     );
     ensure!(
         crate::confirmation::valid_challenge(&candidate.challenge),
@@ -109,7 +198,21 @@ fn validate_candidate(candidate: &Candidate) -> Result<()> {
         "candidate {} has an invalid challenge code",
         candidate.challenge
     );
+    // Both fingerprints wherever a candidate is loaded, not only at confirm.
+    // Re-rendering a candidate is a use of its prepared context: `engr candidate
+    // <code>` is the screen a human reads hours later, and it has to be the
+    // screen `prepare` produced.
+    candidate.verify_payload_with(Payload::sha256)?;
+    candidate.verify_integrity(&candidate.context)?;
     candidate.payload.validate()?;
+    for source in &candidate.context.backlog {
+        source.validate().map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("candidate {}: {}", candidate.challenge, error.message),
+            )
+        })?;
+    }
     validate_title_context(&candidate.payload).map_err(|error| {
         Error::new(
             EXIT_SCHEMA,
@@ -333,13 +436,121 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
+    prepare_from_backlog(root, payload, Vec::new())
+}
+
+/// Prepare a record mutation that the caller declares came from unresolved
+/// staging.
+///
+/// The sources are the candidate's own statement about where the work came
+/// from and what confirming it settles. engr never derives that from the fact
+/// that an Object changed: an inferred link would eventually consume an
+/// unresolved point nobody meant to resolve.
+pub fn prepare_from_backlog(
+    root: &Path,
+    payload: Payload,
+    sources: Vec<SourceRequest>,
+) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
-    store::with_lock(root, move || prepare_locked(root, payload))
+    store::with_lock(root, move || prepare_locked(root, payload, sources))
 }
 
-fn prepare_locked(root: &Path, mut payload: Payload) -> Result<Prepared> {
+/// Resolve each declared source and pin what it currently says.
+///
+/// Refused up front, like every other precondition at this gate: a candidate
+/// naming an unresolved point that does not exist cannot reconcile later, and
+/// the moment to say so is before a human is holding a code.
+/// Whether a declared outcome names authority that will exist once this
+/// candidate is admitted.
+///
+/// Checked against the projected object rather than the stored one, because the
+/// usual outcome of working on an unresolved point is the very Object or Section
+/// this candidate creates — refusing that would make the field useless for the
+/// case it was designed for. The projection is exact: the candidate pins
+/// `expected_rev`, so the state confirmation applies to is the state this saw.
+fn produced_outcome_exists(
+    root: &Path,
+    projected: &Object,
+    outcome: &backlog::Produced,
+) -> Result<()> {
+    let (target, section) = outcome.target()?;
+    let authority = if target == projected.id {
+        projected.clone()
+    } else {
+        ops::effective(root, &target).map_err(|error| {
+            if error.code == EXIT_NOT_FOUND {
+                Error::new(
+                    EXIT_NOT_FOUND,
+                    format!("produced outcome names object {target}, which does not exist"),
+                )
+            } else {
+                error
+            }
+        })?
+    };
+    if let Some(section) = section {
+        authority.section(section).map_err(|_| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!("produced outcome names {target} §{section}, which does not exist"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn pin_sources(
+    root: &Path,
+    requests: Vec<SourceRequest>,
+    projected: &Object,
+) -> Result<Vec<backlog::Source>> {
+    let mut sources: Vec<backlog::Source> = Vec::new();
+    for request in requests {
+        let item = backlog::resolve_id(root, &request.item)?;
+        let loaded = backlog::load(root, &item)?;
+        let section = loaded.section(request.section)?;
+        ensure!(
+            !sources
+                .iter()
+                .any(|other| other.item == item && other.section == request.section),
+            EXIT_USAGE,
+            "backlog source {} §{} is declared twice",
+            item,
+            request.section
+        );
+        let mut produced: Vec<backlog::Produced> = Vec::new();
+        for outcome in request.produced {
+            outcome.validate()?;
+            produced_outcome_exists(root, projected, &outcome)?;
+            ensure!(
+                !produced.contains(&outcome),
+                EXIT_USAGE,
+                "backlog source {} §{} declares the same outcome twice",
+                item,
+                request.section
+            );
+            produced.push(outcome);
+        }
+        let source = backlog::Source {
+            item,
+            section: request.section,
+            basis_sha256: section.resolution_basis()?,
+            produced,
+            resolves: request.resolves,
+        };
+        source.validate()?;
+        sources.push(source);
+    }
+    Ok(sources)
+}
+
+fn prepare_locked(
+    root: &Path,
+    mut payload: Payload,
+    sources: Vec<SourceRequest>,
+) -> Result<Prepared> {
     store::require_current(root)?;
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
@@ -407,14 +618,20 @@ fn prepare_locked(root: &Path, mut payload: Payload) -> Result<Prepared> {
     };
 
     // Preflight the reducer so a candidate that cannot possibly apply never
-    // reaches a human.
-    if let Some(object) = &object {
-        let mut trial = object.clone();
+    // reaches a human. The result is kept rather than thrown away: it is the
+    // authority this candidate will produce, and declared Backlog outcomes are
+    // checked against that rather than against a state the confirmation is
+    // about to replace.
+    let projected = {
+        let mut trial = match &object {
+            Some(object) => object.clone(),
+            None => Object::new(payload.object.clone(), String::new())?,
+        };
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
             version: EVENT_ENVELOPE_VERSION_V0,
             event_id: String::new(),
-            rev: object.rev + 1,
+            rev: trial.rev + 1,
             time: now(),
             payload: payload.clone(),
             confirmation: Confirmation {
@@ -423,41 +640,47 @@ fn prepare_locked(root: &Path, mut payload: Payload) -> Result<Prepared> {
             },
         };
         project(&mut trial, &probe)?;
-    }
+        trial
+    };
 
     validate_refs(root, &payload)?;
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
-    let taken: Vec<String> = pending(root)?
-        .into_iter()
-        .map(|candidate| candidate.challenge.clone())
-        .collect();
-    let previous_semantics_recorded = matches!(payload.action, Action::SectionRevised { .. });
+    let taken = pending_codes(root)?;
+    let context = PreparedContext {
+        previous_text,
+        previous_based_on,
+        previous_refs,
+        previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
+        backlog: pin_sources(root, sources, &projected)?,
+    };
     let gate = crate::confirmation::Candidate::prepare_with(
         payload,
         ObjectBinding { expected_rev },
+        &context,
         &taken,
         now(),
         Payload::sha256,
     )?;
     let candidate = Candidate {
         format: CANDIDATE_FORMAT.to_owned(),
-        version: CANDIDATE_ENVELOPE_VERSION_V0,
+        version: CANDIDATE_ENVELOPE_VERSION,
         gate,
-        previous_text,
-        previous_based_on,
-        previous_refs,
-        previous_semantics_recorded,
+        context,
     };
 
     // One live candidate per object: a second proposal supersedes the first, so
-    // a human is never holding two codes for the same thing.
+    // a human is never holding two codes for the same thing. Read leniently, so
+    // a candidate this build would refuse still gets superseded rather than
+    // being left beside its replacement.
     let mut superseded = Vec::new();
-    for existing in pending(root)? {
-        if existing.payload.object == candidate.payload.object {
-            fs::remove_file(store::candidate_path(root, &existing.challenge)?)
+    for code in pending_codes(root)? {
+        if code != candidate.challenge
+            && candidate_object(root, &code).as_deref() == Some(candidate.payload.object.as_str())
+        {
+            fs::remove_file(store::candidate_path(root, &code)?)
                 .map_err(|error| tool_error("discarding a superseded candidate", error))?;
-            superseded.push(existing.challenge.clone());
+            superseded.push(code);
         }
     }
     store::write_json(
@@ -558,12 +781,37 @@ fn discard_locked(root: &Path, challenge: &str) -> Result<()> {
 /// near miss to be helpful about — it is hedged assent, and it discards the
 /// candidate. Accepting a bare code instead would put the agent in the position
 /// of deciding whether "yes, but reword the second sentence" counted as a yes.
-pub fn confirm(root: &Path, response: &str) -> Result<(Event, Object)> {
+pub fn confirm(root: &Path, response: &str) -> Result<Admitted> {
     store::require_current(root)?;
     store::with_lock(root, || confirm_locked(root, response))
 }
 
-fn confirm_locked(root: &Path, response: &str) -> Result<(Event, Object)> {
+/// Reconcile the candidate's Backlog sources, inside the same lock that made
+/// the Object mutation durable and before the candidate is disposed of.
+///
+/// Both halves of that matter. The lock is what stops a Backlog edit landing
+/// between the basis check and the write, so compare-and-consume cannot delete
+/// wording it never compared against. Running before disposal is what makes the
+/// crash retry finish the job: the already-applied path comes back through here
+/// with the same declarations, and appending an outcome already listed does
+/// nothing.
+fn reconcile_backlog(root: &Path, candidate: &Candidate) -> Result<Vec<backlog::Outcome>> {
+    if candidate.context.backlog.is_empty() {
+        return Ok(Vec::new());
+    }
+    backlog::reconcile(root, &candidate.context.backlog).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "the object change was confirmed and saved; reconciling backlog failed: {}. \
+                 Repeat the same confirmation to finish it",
+                error.message
+            ),
+        )
+    })
+}
+
+fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     store::require_current(root)?;
     let code = crate::confirmation::authorize(
         response,
@@ -578,18 +826,24 @@ fn confirm_locked(root: &Path, response: &str) -> Result<(Event, Object)> {
     let candidate = find(root, code)?;
     ensure!(
         !matches!(candidate.payload.action, Action::SectionRevised { .. })
-            || candidate.previous_semantics_recorded,
+            || candidate.context.previous_semantics_recorded,
         EXIT_SCHEMA,
         "candidate {code} predates complete semantic revision rendering; prepare it again"
     );
-    candidate.verify_payload_with(Payload::sha256)?;
     validate_persisted_payload(root, &candidate.payload)?;
 
     let mut object = match candidate_state(root, &candidate)? {
         CandidateState::AlreadyApplied(applied) => {
             let object = ops::reconcile(root, &candidate.payload.object)?;
+            // The retry's whole job is to finish what a crash interrupted, and
+            // Backlog reconciliation is part of that job.
+            let backlog = reconcile_backlog(root, &candidate)?;
             discard_locked(root, code)?;
-            return Ok((*applied, object));
+            return Ok(Admitted {
+                event: *applied,
+                object,
+                backlog,
+            });
         }
         CandidateState::Stale { current_rev } => {
             crate::confirmation::admission(
@@ -635,8 +889,16 @@ fn confirm_locked(root: &Path, response: &str) -> Result<(Event, Object)> {
     project(&mut object, &event)?;
     store::append_event(root, &event)?;
     store::save_object(root, &object)?;
+    // Backlog last, and never able to undo any of the above. What a human
+    // confirmed is in the record; a source that moved since prepare is a
+    // reconciliation outcome to report, not a failed admission.
+    let backlog = reconcile_backlog(root, &candidate)?;
     discard_locked(root, code)?;
-    Ok((event, object))
+    Ok(Admitted {
+        event,
+        object,
+        backlog,
+    })
 }
 
 /// Build the content half of a payload, defaulting `based_on` to HEAD so a

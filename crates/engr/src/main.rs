@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::{gate, git, ops, store, view};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
@@ -56,6 +57,175 @@ enum Command {
     },
     /// Recompute section hashes
     Verify { object: Option<String> },
+    /// Unresolved staging. Nothing here is confirmed
+    #[command(subcommand)]
+    Backlog(Backlog),
+}
+
+/// Backlog edits do not go through the gate, and must not look as though they
+/// might: a separate namespace keeps `ls`, `show` and `verify` meaning exactly
+/// what they meant before, which is confirmed record and nothing else.
+#[derive(Subcommand)]
+enum Backlog {
+    /// Start a topic with its first unresolved point
+    New {
+        #[arg(long)]
+        topic: String,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// List unresolved topics
+    Ls {
+        /// Keyword, matched against topics and section text
+        keyword: Option<String>,
+    },
+    /// Show one topic: its unresolved points, subjects and produced outcomes
+    Show {
+        item: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Replace the topic. Does not touch section activity
+    Rename {
+        item: String,
+        #[arg(long)]
+        topic: String,
+    },
+    /// Add another unresolved point to a topic
+    Add {
+        item: String,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Reword an unresolved point
+    Revise {
+        item: String,
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        text: TextArg,
+    },
+    /// Replace what an unresolved point concerns
+    Subjects {
+        item: String,
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Consolidate unresolved points into one
+    Merge {
+        item: String,
+        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
+        sections: Vec<u64>,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Remove an unresolved point, or the whole topic
+    Rm {
+        item: String,
+        /// Remove one point. The topic goes when its last one does
+        #[arg(long)]
+        section: Option<u64>,
+    },
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("wording").required(true).args(["text", "text_file"])))]
+struct TextArg {
+    /// Wording, inline
+    #[arg(long)]
+    text: Option<String>,
+    /// Wording, from a file
+    #[arg(long)]
+    text_file: Option<PathBuf>,
+}
+
+impl TextArg {
+    fn read(&self) -> Result<String> {
+        match (&self.text, &self.text_file) {
+            (Some(text), None) => Ok(text.clone()),
+            (None, Some(path)) => std::fs::read_to_string(path)
+                .map_err(|error| engr::tool_error(path.display(), error)),
+            _ => Err(Error::new(
+                EXIT_USAGE,
+                "use --text or --text-file, not both",
+            )),
+        }
+    }
+}
+
+#[derive(Args)]
+struct SubjectArgs {
+    /// Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+    #[arg(long = "subject", value_name = "ENGR_REF")]
+    subject: Vec<String>,
+    /// A repository file this concerns
+    #[arg(long = "subject-file", value_name = "PATH")]
+    subject_file: Vec<String>,
+    /// A source symbol this concerns
+    #[arg(long = "subject-symbol", value_names = ["PATH", "SYMBOL"], num_args = 2)]
+    subject_symbol: Vec<String>,
+    /// Committed revision to pin file and symbol subjects at. Defaults to HEAD
+    /// only while the path itself is clean
+    #[arg(long, value_name = "REVISION")]
+    subject_commit: Option<String>,
+}
+
+impl SubjectArgs {
+    fn build(&self, root: &Path) -> Result<Vec<Subject>> {
+        let revision = self.subject_commit.as_deref();
+        let mut subjects = Vec::new();
+        // Validated here rather than left to storage. A subject the domain
+        // would refuse is a person mistyping an argument, and it has to read as
+        // that — deferring it turns a typo into a report that the workspace is
+        // malformed.
+        for spec in &self.subject {
+            let relative = spec.strip_prefix("engr:").ok_or_else(|| {
+                Error::new(
+                    EXIT_USAGE,
+                    format!("--subject {spec:?} must be an engr: reference"),
+                )
+            })?;
+            let subject = Subject::engr(relative.to_owned());
+            subject
+                .validate()
+                .map_err(|error| malformed_argument("--subject", spec, error))?;
+            subjects.push(subject);
+        }
+        for path in &self.subject_file {
+            subjects.push(Subject::File {
+                commit: backlog::pin(root, path, revision)
+                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                path: path.clone(),
+            });
+        }
+        for pair in self.subject_symbol.chunks(2) {
+            let [path, symbol] = pair else {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--subject-symbol takes a path and a symbol name",
+                ));
+            };
+            let subject = Subject::Symbol {
+                commit: backlog::pin(root, path, revision)
+                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                path: path.clone(),
+                symbol: symbol.clone(),
+            };
+            subject
+                .validate()
+                .map_err(|error| malformed_argument("--subject-symbol", symbol, error))?;
+            subjects.push(subject);
+        }
+        Ok(subjects)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -174,14 +344,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
             store::require_current(&root)?;
-            let (event, object) = gate::confirm(&root, &response)?;
+            let admitted = gate::confirm(&root, &response)?;
             println!(
                 "CONFIRMED  {}  {}  rev {}",
-                shorten(&object.id, view::width(&root)),
-                event.payload.action.label(),
-                object.rev
+                shorten(&admitted.object.id, view::width(&root)),
+                admitted.event.payload.action.label(),
+                admitted.object.rev
             );
-            warn_uncommitted(&root, &object.id);
+            report_backlog(&root, &admitted.backlog);
+            warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
         Command::Ls {
@@ -217,6 +388,143 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
+        Command::Backlog(command) => backlog_command(&root, command),
+    }
+}
+
+/// Say what confirmation did to unresolved staging, in the same breath as the
+/// admission. A source that moved needs a decision, and the moment the human is
+/// still here is the moment to say so.
+fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
+    let width = view::backlog_width(root);
+    for outcome in outcomes {
+        let item = shorten(&outcome.item, width);
+        let line = match &outcome.result {
+            backlog::Reconciliation::Recorded { added: 0 } => {
+                "already recorded — nothing to add".to_owned()
+            }
+            backlog::Reconciliation::Recorded { added } => {
+                format!("recorded {added} produced outcome(s); still unresolved")
+            }
+            backlog::Reconciliation::Consumed { item_removed: true } => {
+                "resolved and consumed; the topic had nothing else unresolved".to_owned()
+            }
+            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
+            backlog::Reconciliation::SourceChanged => {
+                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
+            }
+            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
+        };
+        println!("backlog    {item} §{}  {line}", outcome.section);
+    }
+}
+
+fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
+    match command {
+        Backlog::New {
+            topic,
+            text,
+            subjects,
+        } => {
+            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            print!("{}", view::render_backlog_show(root, &item));
+            Ok(())
+        }
+        Backlog::Ls { keyword } => {
+            let items = backlog::all(root)?;
+            if items.is_empty() {
+                println!("nothing unresolved");
+                return Ok(());
+            }
+            print!(
+                "{}",
+                view::render_backlog_ls(root, &items, keyword.as_deref())
+            );
+            Ok(())
+        }
+        Backlog::Show { item, format } => {
+            let item = backlog::load(root, &resolve_backlog_argument(root, "backlog", &item)?)?;
+            if format == Format::Json {
+                println!("{}", view::render_backlog_json(&item)?);
+            } else {
+                print!("{}", view::render_backlog_show(root, &item));
+            }
+            Ok(())
+        }
+        Backlog::Rename { item, topic } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let item = backlog::rename(root, &id, &topic)?;
+            println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
+            Ok(())
+        }
+        Backlog::Add {
+            item,
+            text,
+            subjects,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            println!("added §{section}");
+            Ok(())
+        }
+        Backlog::Revise {
+            item,
+            section,
+            text,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            backlog::revise_section(root, &id, section, &text.read()?)?;
+            println!("revised §{section}");
+            Ok(())
+        }
+        Backlog::Subjects {
+            item,
+            section,
+            subjects,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let subjects = subjects.build(root)?;
+            let count = subjects.len();
+            backlog::set_subjects(root, &id, section, subjects)?;
+            println!("§{section} now concerns {count} subject(s)");
+            Ok(())
+        }
+        Backlog::Merge {
+            item,
+            sections,
+            text,
+            subjects,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let section = backlog::merge_sections(
+                root,
+                &id,
+                &sections,
+                &text.read()?,
+                subjects.build(root)?,
+            )?;
+            println!("merged into §{section}");
+            Ok(())
+        }
+        Backlog::Rm { item, section } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            match section {
+                Some(section) => {
+                    if backlog::delete_section(root, &id, section)? {
+                        println!(
+                            "removed §{section}, and the topic with it — nothing else was unresolved"
+                        );
+                    } else {
+                        println!("removed §{section}");
+                    }
+                }
+                None => {
+                    backlog::delete_item(root, &id)?;
+                    println!("removed {}", shorten(&id, view::backlog_width(root)));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -319,7 +627,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
     print!(
         "{}",
-        render_candidate(&prepared.candidate, view::width(root), &prepared.notes)
+        render_candidate(root, &prepared.candidate, &prepared.notes)
     );
     for code in &prepared.superseded {
         println!("(candidate {code} was superseded by this one)");
@@ -327,9 +635,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     Ok(())
 }
 
-/// `OBJECT:SECTION` — the pinned hash and commit are read from the target now,
-/// so the caller cannot pin something the target never said.
-fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
+/// The shared parser and the domain both report a malformed value as a schema
+/// error, because both also run against stored authority. Typed at a command
+/// line the same value is a person getting an argument wrong, and the two must
+/// not share an exit code: one says "your input is invalid", the other says
+/// "the workspace on disk is". Translated here, at that boundary, and nowhere
+/// deeper — a missing resource stays not-found, and a malformed stored file
+/// reached through a valid argument stays schema.
+fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
     if error.code == EXIT_SCHEMA {
         Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
     } else {
@@ -337,13 +650,10 @@ fn malformed_engr_reference(field: &str, spec: &str, error: Error) -> Error {
     }
 }
 
-/// The shared `engr:` parser treats malformed values as schema errors because
-/// it is also used for stored authority. At the command line they are a person
-/// supplying an invalid argument, so translate only at this boundary.
 fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
-            .map_err(|error| malformed_engr_reference(field, spec, error))?;
+            .map_err(|error| malformed_argument(field, spec, error))?;
         if reference.kind() != engr::reference::ResourceKind::Object
             || reference.section().is_some()
             || reference.snapshot_selector().is_some()
@@ -354,13 +664,33 @@ fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<Strin
             ));
         }
     }
-    store::resolve_id(root, spec).map_err(|error| malformed_engr_reference(field, spec, error))
+    store::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
+}
+
+/// The same boundary for the Backlog namespace. Every `engr backlog` command
+/// addresses a whole item, so a Section reference is a legal thing to write and
+/// the wrong thing to write here — a usage error, not a missing resource.
+fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<String> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_argument(field, spec, error))?;
+        if reference.kind() != engr::reference::ResourceKind::Backlog
+            || reference.section().is_some()
+            || reference.snapshot_selector().is_some()
+        {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!("{field} {spec:?} must identify a current whole Backlog item"),
+            ));
+        }
+    }
+    backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+            .map_err(|error| malformed_argument("--ref", spec, error))?;
         if reference.kind() != engr::reference::ResourceKind::Object
             || reference.section().is_none()
         {
@@ -371,9 +701,9 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         }
         let canonical = reference
             .canonicalize(|revision| git::resolve(root, revision))
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?;
+            .map_err(|error| malformed_argument("--ref", spec, error))?;
         let id = engr::reference::decode_uuid(canonical.id())
-            .map_err(|error| malformed_engr_reference("--ref", spec, error))?
+            .map_err(|error| malformed_argument("--ref", spec, error))?
             .to_string();
         let section = canonical
             .section()
@@ -443,7 +773,14 @@ fn render_basis(basis: Option<&str>) -> String {
         .unwrap_or_else(|| "none (explicit)".to_owned())
 }
 
-fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::Note]) -> String {
+/// Two namespaces, two abbreviation widths. An id is only short enough when it
+/// is still unique among its own kind, and Backlog ids abbreviate against
+/// Backlog ids — borrowing the Object width can print two different unresolved
+/// points identically on the one screen that says which of them confirming
+/// consumes.
+fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
+    let width = view::width(root);
+    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     out.push_str(&format!(
         "Candidate  {}\nObject     {}\n",
@@ -456,15 +793,15 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
     // every line that means nothing is a line that trains people to skim.
     if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
         if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
-            if !candidate.previous_semantics_recorded {
+            if !candidate.context.previous_semantics_recorded {
                 out.push_str(
                     "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
                 );
             }
-            if candidate.previous_based_on != candidate.payload.content.based_on {
+            if candidate.context.previous_based_on != candidate.payload.content.based_on {
                 out.push_str(&format!(
                     "Based on - {}\nBased on + {}\n",
-                    render_basis(candidate.previous_based_on.as_deref()),
+                    render_basis(candidate.context.previous_based_on.as_deref()),
                     render_basis(candidate.payload.content.based_on.as_deref())
                 ));
             } else {
@@ -473,13 +810,13 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
                     render_basis(candidate.payload.content.based_on.as_deref())
                 ));
             }
-            for reference in &candidate.previous_refs {
+            for reference in &candidate.context.previous_refs {
                 if !candidate.payload.content.refs.contains(reference) {
                     out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
                 }
             }
             for reference in &candidate.payload.content.refs {
-                if !candidate.previous_refs.contains(reference) {
+                if !candidate.context.previous_refs.contains(reference) {
                     out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
                 }
             }
@@ -493,10 +830,30 @@ fn render_candidate(candidate: &gate::Candidate, width: usize, notes: &[gate::No
             }
         }
     }
+    // Confirming this will also edit unresolved staging, so the human reading
+    // the change is shown that before they type, not told about it afterwards.
+    for source in &candidate.context.backlog {
+        out.push_str(&format!(
+            "Backlog    {} §{}  {}\n",
+            shorten(&source.item, backlog_width),
+            source.section,
+            if source.resolves {
+                "resolved by this — will be consumed"
+            } else {
+                "still unresolved after this"
+            }
+        ));
+        for produced in &source.produced {
+            out.push_str(&format!(
+                "           produced engr:{}\n",
+                produced.target.reference
+            ));
+        }
+    }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
     // everything is how confirmation decays into rubber-stamping.
-    match (&candidate.previous_text, &candidate.payload.action) {
+    match (&candidate.context.previous_text, &candidate.payload.action) {
         (Some(previous), _) => {
             let diff = similar::TextDiff::from_lines(previous, &candidate.payload.content.text);
             out.push_str(
@@ -537,10 +894,7 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
         Some(code) => {
             let candidate = gate::find(root, code)?;
             let notes = gate::notes_for(root, &candidate);
-            print!(
-                "{}",
-                render_candidate(&candidate, view::width(root), &notes)
-            );
+            print!("{}", render_candidate(root, &candidate, &notes));
             match gate::candidate_state(root, &candidate)? {
                 gate::CandidateState::Pending => {}
                 gate::CandidateState::AlreadyApplied(_) => println!(
@@ -553,13 +907,24 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
             Ok(())
         }
         None => {
-            let pending = gate::pending(root)?;
-            if pending.is_empty() {
+            let codes = gate::pending_codes(root)?;
+            if codes.is_empty() {
                 println!("nothing is awaiting confirmation");
                 return Ok(());
             }
             let width = view::width(root);
-            for candidate in pending {
+            // Per code, not the whole list at once. One candidate this build
+            // will not admit — left by an older one, or edited on disk — is
+            // exactly what somebody runs this to find out about, so it belongs
+            // on a line of its own rather than replacing the listing.
+            for code in codes {
+                let candidate = match gate::find(root, &code) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        println!("{code}   {:<16} {}", "unusable", error.message);
+                        continue;
+                    }
+                };
                 println!(
                     "{}   {:<16} {} {:<8} {}",
                     candidate.challenge,

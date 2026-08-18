@@ -69,7 +69,7 @@ fn empty(action: Action, object: &str) -> Payload {
 fn admit(root: &Path, payload: Payload) -> engr::model::Object {
     let prepared = gate::prepare(root, payload).expect("prepare");
     let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").1
+    gate::confirm(root, &response).expect("confirm").object
 }
 
 fn new_object(root: &Path, title: &str) -> String {
@@ -103,7 +103,7 @@ fn a_candidate_is_only_admitted_by_the_exact_phrase() {
     assert!(gate::find(&root, &code).is_ok());
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
         .expect("the exact phrase")
-        .1;
+        .object;
     assert_eq!(object.title, "a title");
 }
 
@@ -478,7 +478,9 @@ fn direct_gate_callers_canonicalize_git_anchors_before_confirmation() {
     );
 
     let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    let (event, _) = gate::confirm(&root, &response).expect("confirm canonical candidate");
+    let event = gate::confirm(&root, &response)
+        .expect("confirm canonical candidate")
+        .event;
     assert_eq!(
         event.payload.content.based_on.as_deref(),
         Some(commit.as_str())
@@ -759,6 +761,244 @@ fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
     assert!(error.message.contains("prepare it again"));
 }
 
+/// A candidate is not only a mutation. It is also the binding that decides
+/// whether admission is fresh, and the previous wording the human is shown the
+/// change against. Rewriting either on disk would let a candidate present or
+/// bind a different confirmation context and still pass its own hash, so one
+/// integrity value covers all of it.
+#[test]
+fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "candidate integrity");
+    admit(&root, payload(Action::SectionAdded, &id, "old wording"));
+
+    for (name, tamper) in [
+        (
+            "binding",
+            Box::new(|value: &mut serde_json::Value| value["expected_rev"] = serde_json::json!(0))
+                as Box<dyn Fn(&mut serde_json::Value)>,
+        ),
+        (
+            "previous_text",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_text"] = serde_json::json!("wording that was never confirmed")
+            }),
+        ),
+        (
+            "previous_based_on",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_based_on"] = serde_json::json!("0".repeat(40))
+            }),
+        ),
+        (
+            "previous_refs",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_refs"] = serde_json::json!([{
+                    "object": engr::model::new_id(),
+                    "section": 1,
+                    "sha256": "0".repeat(64),
+                    "commit": "0".repeat(40),
+                }])
+            }),
+        ),
+        (
+            "previous_semantics_recorded",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_semantics_recorded"] = serde_json::json!(false)
+            }),
+        ),
+    ] {
+        let prepared = gate::prepare(
+            &root,
+            payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
+        )
+        .expect("prepare");
+        let code = prepared.candidate.challenge.clone();
+        let path = store::candidate_path(&root, &code).expect("path");
+
+        // Untouched, it confirms — and renders — exactly as prepared.
+        gate::find(&root, &code).expect("an untouched candidate loads");
+
+        let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+        tamper(&mut stored);
+        store::write_json(&path, &stored).expect("rewrite candidate");
+
+        let error = gate::find(&root, &code).expect_err(name);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+        assert!(error.message.contains("integrity"), "{name}");
+        let error = gate::confirm(&root, &format!("CONFIRM {code}")).expect_err(name);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+        assert_eq!(
+            ops::effective(&root, &id).expect("object").sections[0].text,
+            "old wording",
+            "{name}: a rewritten candidate must not be admitted"
+        );
+        gate::discard(&root, &code).expect("clear the tampered candidate");
+    }
+}
+
+/// The upgrade refuses the old envelope rather than treating missing integrity
+/// data as if it were protected. A live candidate is local and short-lived, so
+/// the cost of re-preparing is a moment; the cost of the other choice is a
+/// guarantee that only looks like one.
+#[test]
+fn a_candidate_envelope_without_integrity_is_refused_rather_than_trusted() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "envelope version");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let path = store::candidate_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+    let stored_object = stored.as_object_mut().expect("candidate object");
+    stored_object.insert("version".to_owned(), serde_json::json!(1));
+    stored_object.remove("integrity_sha256");
+    store::write_json(&path, &stored).expect("legacy candidate");
+
+    let error =
+        gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("no integrity, no admission");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("prepare it again"));
+    assert_eq!(ops::effective(&root, &id).expect("object").rev, 1);
+}
+
+/// The code a candidate names has to be the code that admits it.
+///
+/// Two live candidates, and A's stored challenge rewritten to B's code. Every
+/// other check still passes — both files are internally consistent — so without
+/// binding the challenge, `engr candidate A` renders A's change and tells the
+/// human to type `CONFIRM B`, and B's change is what enters the record. That is
+/// the one property the whole design exists for, inverted.
+#[test]
+fn a_candidate_cannot_redirect_a_human_to_another_candidates_code() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "the change they read");
+    let second = new_object(&root, "the change they did not");
+    let a = gate::prepare(&root, payload(Action::SectionAdded, &first, "wording A"))
+        .expect("prepare A");
+    let b = gate::prepare(&root, payload(Action::SectionAdded, &second, "wording B"))
+        .expect("prepare B");
+    let (a_code, b_code) = (a.candidate.challenge.clone(), b.candidate.challenge.clone());
+    assert_ne!(a_code, b_code);
+
+    let a_path = store::candidate_path(&root, &a_code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&a_path).expect("candidate A");
+    stored["challenge"] = serde_json::json!(b_code);
+    store::write_json(&a_path, &stored).expect("redirect A at B");
+
+    // A cannot be rendered, so no screen can ever pair A's change with B's code.
+    let error = gate::find(&root, &a_code).expect_err("a redirect is not a candidate");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        gate::confirm(&root, &format!("CONFIRM {a_code}")).is_err(),
+        "and its own code admits nothing"
+    );
+    // Both files are still there to be found and cleaned up; it is loading the
+    // rewritten one that fails, not noticing it.
+    assert_eq!(
+        gate::pending_codes(&root).expect("codes").len(),
+        2,
+        "the rewritten file is not hidden, it is refused"
+    );
+    gate::find(&root, &b_code).expect("B still loads");
+
+    assert_eq!(
+        ops::effective(&root, &first).expect("first").sections.len(),
+        0,
+        "neither mutation may have been admitted"
+    );
+    assert_eq!(
+        ops::effective(&root, &second)
+            .expect("second")
+            .sections
+            .len(),
+        0
+    );
+
+    // B is untouched and still admits exactly what B says.
+    let admitted = gate::confirm(&root, &format!("CONFIRM {b_code}")).expect("B is unaffected");
+    assert_eq!(admitted.object.id, second);
+    assert_eq!(admitted.object.sections[0].text, "wording B");
+}
+
+/// A candidate this build refuses is one file, not a broken workspace. It must
+/// not take the listing down with it, must not stop anything else being
+/// prepared, and must still be superseded when its own object is proposed
+/// again — leaving it beside its replacement is what would hand one object two
+/// live codes.
+#[test]
+fn a_refused_candidate_does_not_block_the_rest_of_the_workspace() {
+    let (_dir, root) = workspace();
+    let stranded = new_object(&root, "left by an older build");
+    let unrelated = new_object(&root, "prepared afterwards");
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &stranded, "old envelope"),
+    )
+    .expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let path = store::candidate_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+    let stored_object = stored.as_object_mut().expect("candidate object");
+    stored_object.insert("version".to_owned(), serde_json::json!(1));
+    stored_object.remove("integrity_sha256");
+    store::write_json(&path, &stored).expect("legacy candidate");
+
+    // Preparing something else works, and does not reuse the stranded code.
+    let other = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &unrelated, "unaffected"),
+    )
+    .expect("an unrelated proposal is unaffected");
+    assert_ne!(other.candidate.challenge, code);
+    assert!(other.superseded.is_empty());
+    assert!(
+        gate::confirm(&root, &format!("CONFIRM {}", other.candidate.challenge)).is_ok(),
+        "and confirms normally"
+    );
+
+    // Proposing the stranded candidate's own object supersedes it.
+    let replacement = gate::prepare(
+        &root,
+        payload(Action::SectionAdded, &stranded, "prepared again"),
+    )
+    .expect("prepare again");
+    assert_eq!(replacement.superseded, vec![code.clone()]);
+    assert!(store::candidate_path(&root, &code)
+        .map(|path| !path.exists())
+        .unwrap_or(false));
+    gate::confirm(
+        &root,
+        &format!("CONFIRM {}", replacement.candidate.challenge),
+    )
+    .expect("the replacement admits");
+}
+
+/// The already-applied retry still has to work, and integrity is checked on the
+/// way through it: cleanup after a crash is the one path where a candidate is
+/// deliberately re-read after its event is durable.
+#[test]
+fn candidate_integrity_does_not_break_the_idempotent_cleanup_retry() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "integrity retry");
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "apply once")).expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    gate::confirm(&root, &format!("CONFIRM {code}")).expect("apply");
+    store::write_json(
+        &store::candidate_path(&root, &code).expect("path"),
+        &prepared.candidate,
+    )
+    .expect("restore the candidate a crash would have left");
+
+    let object = gate::confirm(&root, &format!("CONFIRM {code}"))
+        .expect("the retry is idempotent")
+        .object;
+    assert_eq!(object.rev, 2);
+    assert_eq!(store::load_events(&root, &id).expect("events").len(), 2);
+    assert!(gate::find(&root, &code).is_err());
+}
+
 /// The field is unforgiving — no rename, and the mistake only shows after
 /// confirmation — so a body pasted in here has to be refused at the gate.
 #[test]
@@ -847,14 +1087,14 @@ fn a_title_changes_through_one_confirmation() {
     )
     .expect("prepare");
     assert_eq!(
-        prepared.candidate.previous_text.as_deref(),
+        prepared.candidate.context.previous_text.as_deref(),
         Some("audit failure reason codes"),
         "a rename shows the change, so the old title has to travel with it"
     );
 
     let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
         .expect("confirm")
-        .1;
+        .object;
     assert_eq!(object.title, "audit failure reason codes v2");
     assert_eq!(object.rev, 2, "a rename is an action like any other");
 
@@ -964,7 +1204,9 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
     )
     .expect("rewrite");
 
-    let (_, object) = gate::confirm(&root, &response).expect("recovery is idempotent");
+    let object = gate::confirm(&root, &response)
+        .expect("recovery is idempotent")
+        .object;
     assert_eq!(object.rev, 2, "the event must not be applied a second time");
     assert_eq!(object.sections.len(), 1);
     assert!(gate::find(&root, &code).is_err());
@@ -997,7 +1239,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     assert_eq!(second.candidate.binding.expected_rev, 2);
     let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge))
         .expect("confirm second")
-        .1;
+        .object;
     assert_eq!(object.rev, 3);
     let text: Vec<_> = object
         .sections
@@ -1028,8 +1270,9 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     };
     store::append_event(&root, &event).expect("append before the crash");
 
-    let (_, object) =
-        gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
+    let object = gate::confirm(&root, &format!("CONFIRM {code}"))
+        .expect("the retry is idempotent")
+        .object;
     assert_eq!(object.rev, 2);
     assert_eq!(object.sections[0].text, "once");
     assert_eq!(
@@ -1061,8 +1304,9 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     store::append_event(&root, &event).expect("append before the crash");
 
     let code = prepared.candidate.challenge.clone();
-    let (_, object) =
-        gate::confirm(&root, &format!("CONFIRM {code}")).expect("the retry is idempotent");
+    let object = gate::confirm(&root, &format!("CONFIRM {code}"))
+        .expect("the retry is idempotent")
+        .object;
     assert_eq!(object.rev, 1);
     assert_eq!(object.title, "created once");
     assert_eq!(

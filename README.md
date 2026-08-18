@@ -8,6 +8,11 @@ revising, merging, deleting, closing — all of it goes through one gate: an age
 proposes, a human reads the change, and types a challenge code. There is no other
 way in.
 
+Work that is still unresolved goes in the **backlog** instead, which is
+git-tracked, freely agent-editable, and confirmed by nobody. That is what lets
+the record stay strict: exploratory material has somewhere to live that does not
+cost a confirmation or dilute what a recorded section means.
+
 Current workspaces use `.engr/format.json` as their sole schema authority.
 Legacy v0 workspaces without it remain readable; run `engr migrate` explicitly
 before changing them. engr refuses to mutate unknown or newer versions.
@@ -69,7 +74,7 @@ word must not print `ok` over words nobody agreed to.
 compiled into the binary — `engr protocol` prints the copy that matches the
 build you are running, which is what makes "where this document and the
 implementation disagree" a question you can settle without a checkout.
-Forty-three tests cover the gate, the record and the command line.
+The tests cover the gate, the record, unresolved staging and the command line.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a
@@ -117,7 +122,24 @@ engr protocol                                # the spec this binary implements
 
 Objects are addressed by unique id prefix, like a git commit.
 
-**Commit `.engr/objects` and `.engr/events`.** Confirmed events are append-only
+Work that is not settled yet goes somewhere else entirely:
+
+```bash
+engr backlog new --topic "reconsider the refresh strategy" \
+                 --text "offline mode may invalidate it" \
+                 --subject-file src/auth/session.rs
+engr backlog ls                              # unresolved topics
+engr backlog show <id>                       # points, subjects, outcomes so far
+engr backlog add <id> --text "another point"
+engr backlog revise <id> --section 2 --text "reworded"
+engr backlog rm <id> --section 2             # removing it is what says "settled"
+```
+
+No confirmation, no challenge code, no event log — an agent edits it directly
+and git is its history. Nothing there is authority, every screen says so, and
+`ls`, `show` and `verify` never mix a word of it into the record.
+
+**Commit `.engr/objects`, `.engr/events` and `.engr/backlog`.** Confirmed events are append-only
 history and audit evidence; sections remain the authority for current wording.
 This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —

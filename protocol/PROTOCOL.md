@@ -6,8 +6,12 @@ wrong and should be fixed, or the implementation is a bug — say which.
 ## The one rule
 
 **Nothing enters the record that a human has not read and confirmed.** There is
-no unconfirmed write path. Every action goes `prepare` → the human reads the
-change → `confirm` with the exact phrase.
+no unconfirmed write path **into the record**. Every action goes `prepare` → the
+human reads the change → `confirm` with the exact phrase.
+
+The workspace also holds **backlog**, which is explicitly outside the record and
+carries no such guarantee. The scope of the rule is what makes both possible: a
+place to put unresolved work, without the record having to mean less.
 
 ## Model
 
@@ -136,6 +140,35 @@ or spacing does not report a clash with itself.
 The candidate records `expected_rev`. A candidate prepared against an older state
 cannot be confirmed.
 
+### Candidate integrity
+
+A candidate stores two fingerprints. `payload_sha256` identifies the mutation:
+it travels into the confirmed event, and an already-applied retry is recognised
+by it, so **its input may never widen**. `integrity_sha256` covers that value
+together with the challenge and the whole prepared context — the binding, the
+previous wording a revision is diffed against, and any backlog declarations.
+Every load of a candidate MUST check both, not only admission: re-rendering a
+candidate hours later is as much a use of its prepared context as confirming it
+is.
+
+Without the second value those fields sit outside every check while still
+deciding what the human is shown and what confirmation does. This is **not** a
+boundary against someone who controls the machine — the file is on that machine
+and so is the binary. It is the narrower guarantee that a candidate rewritten on
+disk cannot present or bind a different confirmation context and still pass.
+
+The challenge is covered because it is the link between the two halves of the
+gate: what a human is shown, and what their answer admits. A candidate MUST
+additionally be refused unless the challenge it stores is the one it was looked
+up by. Otherwise, with two candidates live, rewriting one file's challenge to
+the other's code makes it render its own change while naming the other's answer
+— and both files remain internally consistent, so nothing else catches it. What
+enters the record would then be a change nobody read.
+
+An envelope that cannot carry that guarantee MUST be refused and re-prepared,
+never read as if absence meant protection. Candidates are local, uncommitted and
+short-lived, so this costs a moment.
+
 ### What a human is shown
 
 The **complete semantic change**, not the whole section again. Revisions use a
@@ -263,6 +296,217 @@ Do not read `verify` as proof that a human confirmed the current wording. It
 proves internal consistency. The gate is a convention enforced by the agent's
 instructions, not a mechanism — see below.
 
+## Backlog
+
+Where unresolved engineering work waits. It is **not a weaker record** — it is
+outside the record entirely.
+
+| | Record | Backlog |
+| --- | --- | --- |
+| Admission | human confirmation | none; agents edit it directly |
+| Authority | current confirmed wording | none |
+| History | append-only events, and git | git |
+| Integrity | section hashes, tamper alarms | schema validation only |
+
+Committing backlog means only *this was the working thought stored here at that
+point*. It never means anyone agreed to it.
+
+Weak guarantees are not absent ones. Backlog storage is schema-validated, and
+loading MUST enforce everything writing enforces: a topic that is present,
+single-line and label-sized, section text that is not blank, an `updated_at`
+that is a real RFC3339 timestamp, and the id rules below. Two validations that
+disagree mean the stricter one is decorative — staging is hand-edited by design,
+and the shape only has to survive one edit to stop being true. Malformed stored
+data is a schema fault; the same value typed at a command line is a usage one,
+and the two MUST NOT share an exit code.
+
+That covers the shape as well as the values. A stored backlog resource carrying
+a field outside the current schema MUST be refused as a schema fault, not loaded
+with the field ignored. Ignoring it is the worse outcome: engr would report the
+workspace as valid and then drop the field on the next ordinary rewrite, having
+silently edited data whose shape it claimed to understand. `status` and
+`resolved` are the cases that matter most, because the lifecycle below says
+existence is the only signal there is — and `format` and `version` are refused
+for the same reason no resource carries them, since `.engr/format.json` is the
+sole schema authority.
+
+```text
+backlog item
+├── id                  uuidv7
+├── topic               what the unresolved work is about
+├── next_section_id     monotonic, never reset
+└── sections[]
+    ├── id
+    ├── text
+    ├── updated_at
+    ├── subjects[]      what this point concerns
+    └── produced[]?     confirmed outcomes so far
+```
+
+Sections, rather than one blob, because a topic commonly holds several
+independent concerns and a blob forces unrelated points to move together.
+
+### The lifecycle is the whole model
+
+```text
+a Section exists    = still unresolved
+a Section is gone   = somebody judged it resolved
+```
+
+There is no `status`, `resolved`, `promoted`, `partial` or `abandoned`, and none
+should be added to retain settled entries. A field that can disagree with those
+two lines is a field that lets finished work go on looking pending, which is the
+failure backlog exists to prevent. Removing the last Section removes the item:
+an item is a topic that still has unresolved work in it.
+
+Section ids are monotonic and never reused, for the reason the record's are —
+`max(existing) + 1` would hand back the id of a consumed Section and silently
+repoint every subject aimed at it.
+
+A confirmed section never moves back into backlog. The confirmed wording remains
+the last-admitted wording until another confirmed revision replaces it; the
+doubt goes into backlog instead, and is later settled by a normal record action.
+
+### subjects[]
+
+*This unresolved point concerns these things.* Deliberately weaker than `refs[]`:
+no dependency, no authority, no ordering, and no claim the target must change.
+
+An `engr` subject may name an Object, an Object Section, another backlog item or
+one of its Sections. **Backlog-to-backlog cycles are valid** — this is a
+navigation relation, not a dependency graph. Authoritative `refs[]` MUST NOT
+gain the ability to target backlog: a confirmed section cannot stand on wording
+nobody read. The asymmetry is the point.
+
+A `file` or `symbol` subject pins a path and a full resolved commit. Where the
+caller does not choose a committed revision and the path is dirty, engr MUST
+refuse rather than pin HEAD — HEAD would not describe what was actually read.
+The path MUST exist in the commit pinned. Backlog is allowed to be unresolved;
+it is not allowed to claim provenance it does not have. Symbol identity is a
+path and a human-readable name; no language-specific resolution is attempted.
+
+A subject that later stops resolving is a stale signpost, and MUST NOT make the
+item unreadable. Backlog is staging, not a referential-integrity database.
+
+`subjects[]` is semantically **unordered**, and exact duplicates are refused so
+that "the same set" has one meaning. No persisted sort order is required.
+
+### updated_at
+
+When the unresolved statement itself last changed: creation, text revision,
+subject changes, a merge result. A topic rename MUST NOT refresh it, and neither
+does appending a produced outcome — an outcome deliberately does not change what
+remains unresolved, and refreshing would make an untouched point look worked on.
+Item-level activity is derived from the Sections rather than stored, so the two
+cannot disagree.
+
+Neither does a write that changes nothing. Rewriting a Section with the wording
+it already had, or with the same `subjects[]` set in a different order, MUST
+leave `updated_at` alone. Order is not content — the resolution basis already
+treats `subjects[]` as unordered — and an idempotent write that manufactures
+activity puts an untouched point at the top of the list somebody reads to find
+what was touched.
+
+The value is an RFC3339 timestamp, and it MUST be compared and rendered as an
+**instant**, never as text. RFC3339 carries an offset, so
+`2026-08-17T01:00:00+08:00` sorts after `2026-08-16T20:00:00Z` while being
+three hours earlier, and shortening a value by cutting the string at its
+fractional seconds and appending `Z` reports a different moment entirely. Read
+surfaces may normalize the offset for display; they may not change the instant,
+and the stored value keeps its own precision and offset.
+
+It is operational metadata and is **not** part of the resolution basis.
+
+### produced[]
+
+Authoritative knowledge already created or materially changed while working on
+this point. Targets are authoritative Objects and Object Sections only; backlog,
+collections, files and symbols are refused, because `produced[]` answers what
+the *record* gained.
+
+```text
+produced.length > 0   DOES NOT MEAN   resolved
+```
+
+One unresolved point may produce several confirmed outcomes across several
+sessions and still have work left in it. They MUST NOT be forced into one batch
+confirmation so the point can be consumed. An agent resuming work should read
+the text, the subjects and the produced outcomes together before deciding what
+is left — that is what stops it re-solving what an earlier session settled.
+
+A declared outcome asserts that authority exists, so `prepare` MUST refuse one
+that names an Object or Section which will not exist once the candidate is
+admitted. The check is against the **projected** state, not the stored one: the
+usual outcome of working on an unresolved point is the very Object or Section
+the candidate creates, and refusing that would make the field useless for its
+own case. The candidate pins `expected_rev`, so that projection is exact.
+
+Existence is checked when the claim is made and never again. Loading backlog
+MUST NOT depend on a recorded outcome still existing: an Object deleted through
+the gate afterwards is history, and history cannot be allowed to make the
+staging around it unreadable.
+
+### Resolution basis
+
+The transient compare-and-consume token is
+
+```text
+canonical(text, subjects[])
+```
+
+excluding `produced[]`, `updated_at`, the Section id and the parent topic, with
+`subjects[]` canonicalized as an unordered set. It is **not** stored on the
+backlog Section: it is comparison state a candidate pins, not a trust hash.
+
+If a produced outcome materially changes what remains unresolved, the agent
+revises `text` or `subjects[]` — which moves the basis, as it should.
+
+### Candidate-derived outcomes
+
+A normal record action remains the thing that enters the record. There is no
+`backlog_promoted` event and no second confirmation flow.
+
+A candidate derived from backlog MUST explicitly declare its source Section(s),
+the outcomes produced from each, and whether confirming settles each one. It
+MUST NOT be inferred from the fact that an Object changed. `prepare` pins each
+source's resolution basis and refuses up front if the source does not exist.
+
+Those declarations are covered by candidate integrity and stay out of the event:
+backlog is not part of the authoritative record.
+
+After successful confirmation, per source:
+
+| Basis since prepare | Candidate says | Result |
+| --- | --- | --- |
+| unchanged | still unresolved | declared outcomes appended to `produced[]` |
+| unchanged | resolved | Section consumed; item removed if it was the last |
+| **changed** | either | left untouched, and reported |
+
+The third row is the one that matters. A stale source MUST NOT invalidate
+wording a human already confirmed — the record mutation still admits — and an
+old candidate MUST NOT mutate newer unresolved staging. Failing to reconcile
+because the source moved is an expected outcome, not a failed admission.
+
+A source declared resolved is consumed, so outcomes declared alongside it have
+nowhere to be written and are not: the point is settled, and the outcome is in
+the record, which is where it belongs.
+
+Reconciliation MUST happen inside the same successful confirmation, holding the
+same lock that made the mutation durable, so nothing can edit the source between
+the basis check and the write. It MUST also be idempotent: appending an outcome
+already listed does nothing, and a consumed Section is simply gone, so the retry
+that closes the crash window applies none of it twice.
+
+### Read surfaces
+
+Backlog lives under an explicit namespace and every surface it prints MUST state
+that it is unconfirmed. Structured output carries that as a field, because it
+travels furthest from any banner.
+
+`ls`, `show` and `verify` are record surfaces and MUST NOT mix backlog wording
+into their output. `verify` stays record-oriented: staging validity is not part
+of what a record `PASS` claims.
+
 ## What v0 does not solve
 
 `prepare` prints the challenge code where the agent can read it, and the agent
@@ -315,7 +559,12 @@ versions are never mutated.
   objects/<uuid>.json      the authority        commit this
   events/<uuid>.jsonl      append-only confirmed history
   candidates/<CODE>.json   awaiting a human     never commit this
+  backlog/<uuid>.json      unresolved staging   commit this
 ```
+
+Backlog is committed: git is its only history. A new optional directory is not
+a schema change, so adding it does not move the workspace version — a workspace
+holding no backlog is byte-for-byte what it was.
 
 `init` MUST write a `.gitignore` excluding `lock` and `candidates/`. A candidate's
 filename is a live challenge code, and `git add -A` is how a workspace gets
@@ -333,9 +582,10 @@ UUID strings. Their reference form encodes the canonical 128 UUID bits as
 exactly 26 lowercase Crockford Base32 characters using
 `0123456789abcdefghjkmnpqrstvwxyz`, without padding.
 
-Local standalone forms are `engr:obj:<id>`,
-`engr:obj:<id>:<section>`, and `engr:backlog:<id>`. A Git snapshot selector may
-follow as `@<commit>`; it selects an as-of snapshot and is not identity.
+Local standalone forms are `engr:obj:<id>`, `engr:obj:<id>:<section>`,
+`engr:backlog:<id>` and `engr:backlog:<id>:<section>`. A Git snapshot selector
+may follow as `@<commit>`; it selects an as-of snapshot and is not identity.
+Backlog `subjects[]` and `produced[]` name current resources, so they refuse it.
 Embedded references omit `engr:` and pair their namespace-relative `ref` with
 `kind: "engr"`. The shared parser owns syntax only: each caller decides which
 resources and selectors are legal and what they mean. Repository-qualified
@@ -368,6 +618,8 @@ bring it in:
 
 | Absent | Signal |
 | --- | --- |
+| A backlog status (`resolved`, `partial`, `promoted`) | Something has to be kept in backlog after it is settled, and its absence loses information nobody can recover |
+| A priority, owner or due date on a backlog item | Which unresolved point to take next has to be answered mechanically rather than read |
 | A `kind` on sections | `show` becomes unreadable without grouping |
 | Section ordering | A document has to be generated, or a merge has nowhere to sit |
 | Object-to-object relations | A dependency that belongs to no particular section |

@@ -4,6 +4,7 @@
 //! are append-only history and audit evidence, projected immediately at confirm
 //! time. Git additionally preserves committed projections.
 
+pub mod backlog;
 pub mod confirmation;
 pub mod gate;
 pub mod git;
@@ -19,7 +20,15 @@ pub const WORKSPACE_VERSION: u32 = 1;
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
 /// Version carried by confirmed Event envelopes that remain readable unchanged.
 pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
-/// Version carried by live, local candidate envelopes.
+/// The candidate envelope this build mints and admits.
+///
+/// Version 1 stored its binding and its revision-presentation metadata outside
+/// any fingerprint. A live candidate is local, uncommitted and short-lived, so
+/// the upgrade refuses the old envelope outright rather than reading missing
+/// integrity data as if it were protected — the whole point is that what a
+/// human was shown is the thing that gets admitted.
+pub const CANDIDATE_ENVELOPE_VERSION: u32 = 2;
+/// Version carried by candidate envelopes minted before candidate integrity.
 pub const CANDIDATE_ENVELOPE_VERSION_V0: u32 = 1;
 /// There is no version number. One moving release tag, `latest`, and the commit
 /// the binary was built from — see `build.rs` for where that comes from and what

@@ -6,6 +6,7 @@
 //! opposite conclusion from the truth. And nothing is truncated: an agent asked
 //! to reason from a record needs all of it.
 
+use crate::backlog;
 use crate::git;
 use crate::model::{Object, Ref, Status};
 use crate::{ops, store, Result};
@@ -476,6 +477,184 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
         }
     }
     out
+}
+
+/// Every Backlog surface opens with this line.
+///
+/// The record's whole claim is that a human read these words and agreed to
+/// them. Nothing here was read by anyone, and the two are one `engr` command
+/// apart — so the boundary is stated where the reader already is, rather than
+/// left to be inferred from which subcommand they happened to type.
+pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here was confirmed by a human\n";
+
+/// Activity to the second, in UTC.
+///
+/// The stored value keeps whatever precision the clock gave it, but nine
+/// fractional digits in a listing column push the topic — the thing being
+/// scanned for — off to the right for no gain: triage asks which points were
+/// touched recently, not which nanosecond.
+///
+/// Shortened by parsing the instant and formatting it again, never by cutting
+/// the string. RFC3339 allows an offset, so trimming at the `.` and appending
+/// `Z` turns `2026-08-17T10:00:00.123+08:00` into a time eight hours away from
+/// the one recorded. Normalizing to UTC leaves the instant untouched and makes
+/// the column comparable down the page, which is the only thing it is for.
+fn to_the_second(timestamp: &str) -> String {
+    const SECONDS: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    backlog::instant(timestamp)
+        .map(|instant| instant.to_offset(time::UtcOffset::UTC))
+        .and_then(|instant| instant.format(SECONDS).ok())
+        // Loading validates the format, so this is unreachable for a stored
+        // section — and showing the raw value beats inventing one.
+        .unwrap_or_else(|| timestamp.to_owned())
+}
+
+pub fn backlog_width(root: &Path) -> usize {
+    backlog::ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(8)
+}
+
+/// Whether a subject still resolves, so a signpost pointing nowhere says so.
+/// A failure is never an error here: subjects are navigation, and staging that
+/// refused to load because a file moved would be a referential-integrity
+/// database, which is the thing Backlog is explicitly not.
+fn subject_note(root: &Path, subject: &backlog::Subject) -> Option<&'static str> {
+    match subject {
+        backlog::Subject::Engr { reference } => {
+            let parsed = crate::reference::EngrRef::parse_embedded(reference).ok()?;
+            let id = crate::reference::decode_uuid(parsed.id()).ok()?.to_string();
+            let found = match parsed.kind() {
+                crate::reference::ResourceKind::Backlog => backlog::load(root, &id)
+                    .map(|item| {
+                        parsed
+                            .section()
+                            .map(|section| item.section(section).is_ok())
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(false),
+                _ => ops::effective(root, &id)
+                    .map(|object| {
+                        parsed
+                            .section()
+                            .map(|section| object.section(section).is_ok())
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(false),
+            };
+            (!found).then_some("not found")
+        }
+        backlog::Subject::File { path, commit } | backlog::Subject::Symbol { path, commit, .. } => {
+            (!git::path_at(root, commit, path)).then_some("snapshot unavailable")
+        }
+    }
+}
+
+pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&str>) -> String {
+    let w = backlog_width(root);
+    let mut out = String::from(STAGING_BANNER);
+    for item in items {
+        if let Some(needle) = keyword {
+            let needle = needle.to_lowercase();
+            let hit = item.topic.to_lowercase().contains(&needle)
+                || item
+                    .sections
+                    .iter()
+                    .any(|section| section.text.to_lowercase().contains(&needle));
+            if !hit {
+                continue;
+            }
+        }
+        let produced: usize = item
+            .sections
+            .iter()
+            .map(|section| section.produced.len())
+            .sum();
+        let note = if produced > 0 {
+            format!("{produced} produced")
+        } else {
+            "-".to_owned()
+        };
+        out.push_str(&format!(
+            "{}  {:>2} unresolved  {:<12}  {}  {}\n",
+            abbrev(&item.id, w),
+            item.sections.len(),
+            note,
+            to_the_second(item.updated_at()),
+            item.topic
+        ));
+    }
+    out
+}
+
+/// One unresolved topic in full.
+///
+/// A resumed agent needs all four of text, subjects, produced outcomes and
+/// activity to decide what is left — and needs none of it to read like
+/// confirmed wording, which is what the banner and the section marker are for.
+pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
+    let w = backlog_width(root);
+    let mut out = String::from(STAGING_BANNER);
+    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.topic));
+    out.push_str(&format!(
+        "{} unresolved   updated {}\n",
+        item.sections.len(),
+        to_the_second(item.updated_at())
+    ));
+    for section in &item.sections {
+        out.push_str(&format!("\n── §{} ── unresolved\n", section.id));
+        out.push_str(section.text.trim_end());
+        out.push('\n');
+        out.push_str(&format!(
+            "    updated  {}\n",
+            to_the_second(&section.updated_at)
+        ));
+        for subject in &section.subjects {
+            match subject_note(root, subject) {
+                Some(note) => {
+                    out.push_str(&format!("    concerns {}  ({note})\n", subject.render()))
+                }
+                None => out.push_str(&format!("    concerns {}\n", subject.render())),
+            }
+        }
+        for produced in &section.produced {
+            out.push_str(&format!(
+                "    produced engr:{}\n",
+                produced.target.reference
+            ));
+        }
+        // Said once per Section that has outcomes, because this is the exact
+        // place a resuming agent is most likely to conclude the opposite.
+        if !section.produced.is_empty() {
+            out.push_str("             (already confirmed; this point is still unresolved)\n");
+        }
+    }
+    out
+}
+
+#[derive(Serialize)]
+struct JsonBacklogItem<'a> {
+    id: &'a str,
+    topic: &'a str,
+    authority: &'static str,
+    next_section_id: u64,
+    updated_at: &'a str,
+    sections: &'a [backlog::Section],
+}
+
+pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
+    serde_json::to_string_pretty(&JsonBacklogItem {
+        id: &item.id,
+        topic: &item.topic,
+        // Structured output travels furthest from the banner, so the boundary
+        // has to be a field rather than a line somebody printed once.
+        authority: "unconfirmed_staging",
+        next_section_id: item.next_section_id,
+        updated_at: item.updated_at(),
+        sections: &item.sections,
+    })
+    .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }
 
 /// The one case worth interrupting for by default: an object someone declared
