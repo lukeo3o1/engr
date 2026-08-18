@@ -21,21 +21,30 @@ An **object** is an aggregate. It holds **sections**, each carrying text.
 object
 ├── id                        uuidv7
 ├── title
-├── state                     open | closed
+├── type?                     design | decision | risk, absent by design
+├── state                     one field, valid for the type
 ├── rev                       increments on every confirmed action
 ├── next_section_id           monotonic, never reset
 └── sections[]
     ├── id                    integer, never reused, never renumbered
+    ├── role?                 decision | risk | supersession | acceptance_criterion
     ├── text                  always the current wording
+    ├── content[]?            bounded literal excerpts, ordered
     ├── based_on?             committed repository context, absent by explicit choice
     ├── refs[]                { object, section, sha256, commit }
-    ├── sha256                hash of text + based_on + refs
+    ├── relations[]?          { type, target }
+    ├── sha256                hash of role + text + content + based_on + refs + relations
     └── confirmed_at
 ```
 
 A section's `text` is always its current wording, because wording only changes
 through a confirmed action. Readers never have to ask which of two fields is
 authoritative — there is only one.
+
+Every optional field above is **absent when it carries nothing**. An empty
+`content[]`, an empty `relations[]` and a null `role` are not stored, so a
+section using none of them is byte for byte what it was before those fields
+existed — and hashes to the same value.
 
 ### Sections are current authority; events are durable history
 
@@ -68,32 +77,291 @@ where `max(existing) + 1` would hand out a deleted id.
 
 ## Actions
 
-Eight. All of them gated.
+Ten. All of them gated.
 
 | Action | Data | Effect |
 | --- | --- | --- |
 | `object_created` | — | Creates the object with the confirmed title |
-| `object_renamed` | — | Replaces the title; requires an open object |
+| `object_renamed` | — | Replaces the title |
 | `section_added` | — | Appends a section, id from the counter |
 | `section_revised` | `section` | Replaces that section's content; id unchanged |
 | `section_merged` | `absorbs[]` | New id carrying the confirmed wording; absorbed sections removed |
 | `section_deleted` | `section` | Removes the section |
-| `object_closed` | — | `state` → `closed` |
-| `object_reopened` | — | `state` → `open` |
+| `object_closed` | — | `state` → `closed`; untyped objects only |
+| `object_reopened` | — | `state` → `open`; untyped objects only |
+| `object_classified` | `type?`, `state` | Sets both, explicitly |
+| `object_superseded` | — | Appends the reason, records the replacement, `state` → `superseded` |
 
-`object_created`, `object_renamed`, `section_added`, `section_revised` and
-`section_merged` carry content; the others must carry none.
+`object_created`, `object_renamed`, `section_added`, `section_revised`,
+`section_merged` and `object_superseded` carry content; the others must carry
+none — no text, no basis, no refs, no role, no supplementary content, no
+relations.
 
-A **closed object refuses every section action, and a rename**. Reopen it first.
-The friction is deliberate: if a closed object could still change, `closed`
-would not mean "this has settled". A title is part of what settled, so exempting
-it would narrow `closed` to "the sections have settled" rather than the whole
-object.
+An object that **does not need attention refuses every section action, and a
+rename**. Move it back into the attention set first. The friction is deliberate:
+if confirmed knowledge could still change while nobody was looking at it,
+`accepted` would not mean "this has settled". A title is part of what settled,
+so exempting it would narrow that to "the sections have settled" rather than the
+whole object. For an untyped object this is exactly the old "reopen it first"
+rule, unchanged.
+
+The rule is about *remaining* outside the attention set. An operation that
+carried content and moved the object back into attention in the same
+confirmation would satisfy it too; v0 has no such action, because
+`object_classified` carries no content and `object_superseded` lands outside
+attention by definition.
 
 Sections have no `state` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
 
 A merge must absorb at least two distinct sections.
+
+## Type and state
+
+`type` is optional, and an untyped object is a **first-class long-term form**,
+not a waiting room for classification. Most confirmed knowledge is just
+knowledge.
+
+There is exactly one persisted lifecycle field. Which values it may take depends
+on the type:
+
+```text
+type absent    open | closed
+design         draft | proposed | accepted | rejected | superseded
+decision       proposed | accepted | rejected | superseded
+risk           identified | accepted | mitigated | invalidated
+```
+
+The vocabularies are deliberately **not symmetric**. A risk being `accepted` and
+a decision being `accepted` are different facts, and one shared enum would
+flatten that distinction. A design has `draft` because a design is formed over
+time; a decision does not, because a decision that is not yet formed belongs in
+backlog rather than in the record.
+
+A new untyped object is `open`. Nothing else is assigned by default anywhere.
+
+`object_classified` MUST carry both halves: the destination type, or its
+explicit absence, and a state valid for that destination. There is **no
+automatic mapping** between vocabularies — `design.accepted` becoming
+`decision.accepted` would be engr making a judgement nobody asked it to make.
+
+v0 defines **no transition graph**. Any destination is reachable when it is valid
+for the destination type and the invariants below still hold. An invented
+lifecycle sequence would be a process the protocol has no authority to impose.
+
+`object_closed` and `object_reopened` remain, and remain narrow: they are the
+Phase 0 spelling of the untyped vocabulary and are what every confirmed event in
+an existing workspace says. On a typed object they have no meaning and MUST be
+refused.
+
+### Attention
+
+Attention is **derived from `(type, state)` and never stored**:
+
+```text
+untyped     open        needs attention
+            closed      no
+design      draft       needs attention
+            proposed    needs attention
+            accepted    no
+            rejected    no
+            superseded  no
+decision    proposed    needs attention
+            accepted    no
+            rejected    no
+            superseded  no
+risk        identified  needs attention
+            accepted    no
+            mitigated   no
+            invalidated no
+```
+
+A stored `attention` field would be a second truth that disagrees with `state`
+the moment somebody edits one of them; the whole reason there is one lifecycle
+field is to have no such pair.
+
+Default `engr ls` and planning diagnostics MUST use derived attention rather than
+assuming `open | closed`. `--all` includes everything.
+
+No attention does not mean finished, correct, approved, or immutable. It means
+this is not in the default set of things somebody is currently looking at.
+
+## Section roles
+
+Optional, and the vocabulary is exactly:
+
+```text
+decision
+risk
+supersession
+acceptance_criterion
+```
+
+A role is independent of the object's type: an untyped object may hold a section
+with `role = decision` without itself being a decision important enough to have
+its own identity and lifecycle. v0 defines no `type × role` compatibility matrix,
+and adds one only if a real combination proves meaningfully invalid.
+
+`acceptance_criterion` states a **verifiable condition, not its verification**.
+It MUST NOT gain `passed`, `failed`, `pending`, `waived` or any other local
+lifecycle. Whether a criterion currently holds is evidence: it changes without
+anyone confirming anything, and putting it here would make the record assert
+something no human read.
+
+Because a role changes the machine-readable meaning of confirmed wording, it is
+authoritative content: it passes the gate and it is inside the section hash.
+
+## Relations
+
+`relations[]` is section-owned. The vocabulary is exactly:
+
+```text
+superseded_by
+implemented_by
+```
+
+A relation is a typed semantic edge, and each type defines its own legal targets.
+This is not an arbitrary-string knowledge graph.
+
+`relations[]` is not `refs[]`. A ref is a **wording dependency** and drifts when
+its target is reworded; a relation says what this assertion relates to, and
+inherits none of that drift behaviour. Nor is it backlog `subjects[]`, which is
+weak, unconfirmed navigation.
+
+### `superseded_by`
+
+```text
+target      an existing Object, kind=engr, obj:<id>, no section selector
+            never the source Object
+            no source/target type compatibility requirement
+            no target state requirement
+graph       MUST be acyclic
+```
+
+The coupled invariant:
+
+```text
+state = superseded
+  if and only if
+exactly one valid superseded_by relation exists on the object
+```
+
+Both directions, checked after every projection and wherever an object is loaded.
+They are one fact written in two places, so either without the other is a record
+that contradicts itself: a superseded object with nothing to forward a reader to,
+or a replacement edge the state does not honour.
+
+Supersession is therefore **one atomic semantic operation**, `object_superseded`,
+confirming together:
+
+```text
+state = superseded
+the replacement relation
+a human-readable Section with role = supersession
+```
+
+A `superseded_by` relation MUST NOT enter through any other action. Splitting
+these into separately confirmable steps would be easier to implement and would
+mean a record can sit in the state that says it was replaced while being unable
+to say by what.
+
+Two consequences follow from the tables rather than from any separate rule, and
+both are deliberate. `superseded` is not in the untyped or risk vocabularies, so
+only a design or a decision can be superseded — and by the coupled invariant, only
+a design or a decision can hold the relation. And nothing removes the pair: see
+[What v0 does not solve](#what-v0-does-not-solve).
+
+### `implemented_by`
+
+```text
+file target     path + full committed Git object id; path MUST exist at that commit
+symbol target   path + symbol + full committed Git object id; path MUST exist at that commit
+```
+
+The symbol itself is **not** resolved. v0 does not parse the languages a
+repository is written in, and a check that only worked for the ones it could
+parse would be worse than none — failing on real code and passing on the rest.
+
+It is implementation-artifact provenance, not a wording dependency, so a section
+carrying one is never reported as stale because the file moved on.
+
+## Supplementary content
+
+`text` remains the complete human-readable engineering assertion. A section MUST
+be understandable from `text` alone.
+
+`content[]` holds bounded literal excerpts — the code, configuration or data the
+assertion needs in order to be precise:
+
+```text
+type    ^(code|data)\.[a-z0-9][a-z0-9-]{0,15}$
+body    non-empty UTF-8 literal content
+```
+
+There is deliberately no `text` content type, and no `markdown`, `note`, `todo`
+or `mixed`. Natural-language assertion already has exactly one home, and a second
+container for prose is how a section becomes a blob.
+
+The tag is **not a registry**. An unknown but well-formed tag is valid and MUST
+survive a round trip untouched; engr does not normalize `yml` to `yaml`, because
+an alias table is a maintenance surface with no authority behind it.
+
+A content entry has no id, no state, no refs, no relations and no confirmation of
+its own. Changing one is an ordinary revision of the containing section, which is
+what keeps the section the single unit of authority, hashing, revision and
+reference. Duplicate types are allowed; an empty `content[]` is not stored.
+
+### Bounds
+
+Counted in **Unicode scalar values**, not bytes, because the limit is about how
+much a human is being asked to read.
+
+| | normal | hard |
+| --- | --- | --- |
+| `text` | 1200 | 5000 |
+| `content[]` entries | 4 | 8 |
+| each `body` | 2000 | 8000 |
+| sum of bodies | 4000 | 12000 |
+
+Above a **normal** threshold, `prepare` MUST refuse, and the refusal MUST say
+where the material belongs rather than only that it is long: another section for
+an independent engineering point, backlog for unresolved reasoning, an
+`implemented_by` relation for actual implementation, and outside the record for a
+large log with only the smallest relevant excerpt kept. An **explicit oversize
+retry** may then go through the normal confirmation flow, and the candidate MUST
+show the exception where the human reads it.
+
+Above a **hard** ceiling, engr always refuses. The hard ceiling is not a
+threshold with an override, and MUST NOT read as one, or an agent that learned to
+add the flag for the first would add it for the second.
+
+The exception is **admission-time only**. It travels with the candidate, is
+covered by candidate integrity, and is never persisted: no `oversize` field on a
+section, no lasting exemption. Every revision is measured again against its own
+proposed value.
+
+## Sets and order
+
+```text
+refs[]        semantically unordered
+relations[]   semantically unordered
+content[]     ordered
+```
+
+Exact duplicate refs and relations are invalid, on the way in and wherever a
+stored payload is read. Two refs to the same section pinned at different wording
+are different statements and remain valid.
+
+Reordering a set alone MUST NOT count as a semantic change. engr canonicalizes
+the order of `refs[]` and `relations[]` at the gate, before the payload is
+fingerprinted and before a human is shown it — so the same members written
+another way round produce the same section hash, and a revision that changes
+nothing else is refused as having nothing to confirm. No canonical persisted sort
+order is required of anyone hand-writing these files, and none is enforced on the
+read path, which is why every hash written before this rule existed stays valid.
+
+`content[]` is ordered because its entries are excerpts a reader goes through in
+sequence. Moving one is a change to the assertion.
 
 ## The gate
 
@@ -173,10 +441,24 @@ short-lived, so this costs a moment.
 
 The **complete semantic change**, not the whole section again. Revisions use a
 unified line diff with limited unchanged context and separately show old/new
-`based_on` plus added and removed refs, including their pinned hashes and
-commits. An explicit absence of repository basis is displayed as such. Omitted
-unchanged wording remains part of the complete candidate payload and
-confirmation hash.
+`based_on`, old/new `role`, added and removed refs and relations — including
+their pinned hashes and commits — and supplementary content entry by entry,
+against the entry that held the same position. An explicit absence of repository
+basis is displayed as such. Omitted unchanged wording remains part of the
+complete candidate payload and confirmation hash.
+
+Supplementary content bodies are shown **in full**. They are part of the
+assertion and part of what is hashed, so a human shown only the type of an entry
+has not read what they are about to admit; the bounds exist precisely so that
+printing all of it stays reasonable.
+
+`object_classified` shows the destination type, the destination state, and what
+that does to the object's place in the default listing. A state without its type
+is a word that means different things on different objects, and the attention
+consequence is the thing actually being decided.
+
+An oversize exception is shown before the wording it applies to, so the human
+knows engr already refused this once while there is still a decision to make.
 
 ### Repository basis
 
@@ -517,6 +799,25 @@ as evidence that a human was present. Making the gate a mechanism needs the
 challenge to travel where the agent cannot read it, or `confirm` to run in a
 different process. That is not v0.
 
+### Supersession is one-way
+
+The coupled invariant closes in both directions, so there is **no way out of
+`superseded`**. Reclassifying away from it leaves a replacement relation the
+state no longer honours; deleting or rewording the section that holds the
+relation leaves a superseded object with nothing to forward a reader to. Each
+half is refused on its own, and no compound operation undoes both together.
+
+This is stated rather than worked around, because working around it means
+inventing a semantics for un-supersession that nothing has decided: whether the
+record was wrong about being replaced, or whether the replacement was withdrawn,
+or whether the two objects merged back — and those are different facts that would
+want different rationale. A superseded object remains authoritative, addressable
+and readable; what it cannot do is come back as current. If the knowledge is
+current again, that is what a new object says.
+
+The signal that would bring an operation in is a real case where the supersession
+itself was the mistake, rather than the design being replaced changing again.
+
 ### Redaction is not a goal
 
 Taking back something already confirmed — a secret, a person's name, a remark
@@ -550,6 +851,15 @@ from their legacy resource markers. Either form remains read-only until
 representation (`Object.status` to `Object.state`) and preserves compatible
 legacy markers and confirmed Event envelopes. Unknown or newer workspace
 versions are never mutated.
+
+Migration **classifies nothing**. `status = open|closed` becomes
+`state = open|closed` with no type, because the stored record does not contain
+enough to infer one and a guessed classification is an engineering judgement
+nobody made. Classifying an existing object later is an authoritative change like
+any other, and passes the gate with a state valid for the type it is given.
+Adding the Phase 3 fields did not move the workspace version: they are absent
+when empty, so a workspace that uses none of them is byte-for-byte — and hash for
+hash — what it was.
 
 ```text
 .engr/
@@ -620,25 +930,35 @@ bring it in:
 | --- | --- |
 | A backlog status (`resolved`, `partial`, `promoted`) | Something has to be kept in backlog after it is settled, and its absence loses information nobody can recover |
 | A priority, owner or due date on a backlog item | Which unresolved point to take next has to be answered mechanically rather than read |
-| A `kind` on sections | `show` becomes unreadable without grouping |
 | Section ordering | A document has to be generated, or a merge has nowhere to sit |
-| Object-to-object relations | A dependency that belongs to no particular section |
-| Typed relations | Something needs to act on the type mechanically |
+| Object-owned relations | A relation that belongs to no particular section, and that no confirmed section can express naturally |
+| More relation types | A real edge that `superseded_by` and `implemented_by` cannot express, where something needs to act on it mechanically |
+| Workspace-defined types, roles or relation types | Discovery labels are needed badly enough to be worth weakening a vocabulary every reader currently agrees on |
+| A `type × role` compatibility matrix | A real combination proves meaningfully invalid rather than merely unusual |
+| Verification state on an `acceptance_criterion` | Nothing outside the record can say whether a criterion holds, which would first mean evidence has nowhere else to live |
+| An operation that leaves `superseded` | The supersession itself was the mistake, rather than the design being replaced changing again |
+| A `text`, `markdown` or `note` content type | Something needs prose that is genuinely not the assertion, often enough to be worth a second place for wording |
 | Machine observations (test results, progress) | Those need to be in the record |
-| Splitting `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
-| Statuses between open and closed (`deferred`, `blocked`) | A record is neither being worked on nor settled, and calling it one of the two loses something someone needed |
+| Splitting untyped `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
+| Untyped states between open and closed (`deferred`, `blocked`) | An untyped record is neither being worked on nor settled, and calling it one of the two loses something someone needed |
 | A priority on an object | Which record matters more has to be answered mechanically — a listing has to order by it |
 | Path scoping on a section (`--about internal/audit/**`) | A basis reads as moved because of a change to an area the section does not cover, often enough that the signal stops being read |
 | A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
 | More than one action per confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
 
-Splitting `closed` is the nearest of these, and part of its signal is already
-visible: abandoned work can only be closed, so the record goes on reporting a
-moved basis for something nobody intends to return to. That is a false alarm in
-the signal this design exists to keep believable. Any new status MUST answer the
-two questions the existing states answer — does it refuse section actions, and
-does it earn the closed-and-drifted alarm — and `abandoned` is so far the only
-candidate whose answers differ from `closed`'s.
+Splitting untyped `closed` is the nearest of these, and part of its signal is
+already visible: abandoned untyped work can only be closed, so the record goes on
+reporting a moved basis for something nobody intends to return to. That is a
+false alarm in the signal this design exists to keep believable. Any new state
+MUST answer the two questions the existing ones answer — does it refuse section
+actions, and does it earn the unwatched-and-drifted alarm — and `abandoned` is so
+far the only candidate whose answers differ from `closed`'s.
+
+A typed object already answers part of that: `rejected` and `invalidated` say
+*why* something is out of the attention set, which is exactly the distinction
+`abandoned` was reaching for. That is a reason to classify work rather than a
+reason to widen the untyped vocabulary, and it is why the row above is now
+narrower than it was.
 
 A priority would be a decision like any other and would go through the gate. The
 test for whether it belongs is whether a human wants to be asked to confirm a

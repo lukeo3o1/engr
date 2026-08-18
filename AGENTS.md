@@ -18,6 +18,7 @@ normative, and it explains why each rule exists rather than just stating it.
 
 ```text
 crates/engr/src/model.rs        objects, sections, the confirmed payload, projection
+crates/engr/src/semantics.rs    type/state, attention, roles, relations, bounded content
 crates/engr/src/gate.rs         prepare, confirm, candidates
 crates/engr/src/confirmation.rs the shared, domain-neutral admission primitive
 crates/engr/src/backlog.rs      unresolved staging: subjects, produced, reconciliation
@@ -28,6 +29,7 @@ crates/engr/src/reference.rs    the one engr: reference parser and compact codec
 crates/engr/src/view.rs         staleness assessment, show, ls, staging surfaces
 crates/engr/src/main.rs         the CLI
 crates/engr/tests/gate.rs       what may enter the record
+crates/engr/tests/semantics.rs  what an object is, and what a section may carry
 crates/engr/tests/record.rs     what the record then guarantees
 crates/engr/tests/backlog.rs    what staging is, and what it is not
 crates/engr/tests/cli.rs        what the command line promises the outside world
@@ -44,8 +46,9 @@ holding.**
 
 Read state with `engr show <id>`. Each section is annotated with how far it can be
 trusted and what to do about it; that is not a separate report to fetch. Use
-`--format json` when you want structure: an Object's lifecycle is `state`, while
-each Section's `status` is computed, not stored.
+`--format json` when you want structure: an Object has one lifecycle field,
+`state`, valid for its optional `type`, plus a derived `attention` that is never
+stored — while each Section's `status` is computed, not stored either.
 
 When `show` says a section's basis or a dependency moved, do not quietly reason
 from it. Recover the old wording with the `git show` command it hands you, decide

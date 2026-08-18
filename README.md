@@ -60,8 +60,9 @@ to be reading:
   on, so the target being rewritten is a computation too — and it pins the commit
   as well, so `git show` recovers what it used to say.
 
-The case worth interrupting for is a **closed** object whose basis moved. Closed
-means nobody is looking, which is exactly when drift goes unnoticed.
+The case worth interrupting for is an object **nobody is looking at** whose basis
+moved — a closed one, an accepted design, a mitigated risk. Out of the default
+listing is exactly where drift goes unnoticed.
 
 Reading is also checking. `show` recomputes every section's hash before printing
 it, and the hash of every section it stands on, because the default way in is the
@@ -74,7 +75,13 @@ word must not print `ok` over words nobody agreed to.
 compiled into the binary — `engr protocol` prints the copy that matches the
 build you are running, which is what makes "where this document and the
 implementation disagree" a question you can settle without a checkout.
-The tests cover the gate, the record, unresolved staging and the command line.
+The tests cover the gate, the record, object semantics, unresolved staging and
+the command line.
+
+An object may carry a `type` — `design`, `decision` or `risk` — and one `state`
+valid for it; untyped is a first-class answer, not a gap. What `engr ls` shows by
+default is derived from that pair rather than stored, so an accepted design and a
+mitigated risk leave the listing without anything having to be called closed.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a
@@ -109,9 +116,11 @@ engr prepare --object <id> --revise 3 --text-file f.txt
 engr prepare --object <id> --merge 1,2 --text-file f.txt
 engr prepare --object <id> --delete 3
 engr prepare --object <id> --close
+engr prepare --object <id> --classify --type decision --state accepted
+engr prepare --object <id> --supersede <other> --text "why it was replaced"
 engr candidate                               # what is awaiting a human
 engr candidate <code>                        # show it again, hours later
-engr ls                                      # open objects
+engr ls                                      # what needs attention
 engr ls --all --stale                        # what needs attention
 engr ls --all --sections | grep <term>       # one line per section, greppable
 engr show <id>                               # sections, and how far each can be trusted
