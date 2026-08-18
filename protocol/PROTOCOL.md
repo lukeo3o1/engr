@@ -320,6 +320,16 @@ and the shape only has to survive one edit to stop being true. Malformed stored
 data is a schema fault; the same value typed at a command line is a usage one,
 and the two MUST NOT share an exit code.
 
+That covers the shape as well as the values. A stored backlog resource carrying
+a field outside the current schema MUST be refused as a schema fault, not loaded
+with the field ignored. Ignoring it is the worse outcome: engr would report the
+workspace as valid and then drop the field on the next ordinary rewrite, having
+silently edited data whose shape it claimed to understand. `status` and
+`resolved` are the cases that matter most, because the lifecycle below says
+existence is the only signal there is — and `format` and `version` are refused
+for the same reason no resource carries them, since `.engr/format.json` is the
+sole schema authority.
+
 ```text
 backlog item
 ├── id                  uuidv7

@@ -14,6 +14,15 @@
 //!
 //! No `status`, no `resolved`, no `promoted`. A field that could disagree with
 //! that sentence is a field that lets settled work keep looking pending.
+//!
+//! Which is why every persisted shape here refuses a field it does not know.
+//! Backlog is hand-editable on purpose, so the realistic failure is not a
+//! corrupt file but a plausible one. Accepting `"status": "resolved"` and
+//! ignoring it is worse than refusing the file: engr would call the workspace
+//! valid, then drop the field on the next ordinary rewrite, having silently
+//! edited data it told the reader it understood. `.engr/format.json` is the
+//! only schema authority, so a resource carrying its own `format`/`version` is
+//! refused for that same reason.
 
 use crate::model::{is_canonical_git_oid, new_id};
 use crate::reference::{CanonicalEngrRef, EngrRef, ResourceKind};
@@ -72,7 +81,7 @@ impl EngrTarget {
 /// authority, no ordering, and no claim that the target must change — so a
 /// subject that stops resolving is a stale signpost, not a broken record.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Subject {
     Engr {
         #[serde(rename = "ref")]
@@ -188,6 +197,7 @@ impl Produced {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Section {
     pub id: u64,
     pub text: String,
@@ -266,6 +276,7 @@ impl Section {
 /// because a topic commonly holds several independent concerns and forcing them
 /// to move together makes partial resolution impossible.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Item {
     pub id: String,
     pub topic: String,

@@ -267,6 +267,89 @@ fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
     backlog::load(&root, &id).expect("120 characters is a topic, not a body");
 }
 
+/// Backlog files are meant to be hand-edited, so a field engr does not know is
+/// a field it would drop on the next ordinary rewrite. Reading such a file as
+/// valid is worse than refusing it: the tool claims to understand the shape and
+/// then edits it. Lifecycle fields are the case that matters — existence is the
+/// only unresolved/resolved signal there is.
+#[test]
+fn stored_backlog_data_outside_the_schema_is_refused_rather_than_dropped() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "something a point can concern");
+    let reference = format!("obj:{}", compact(&object));
+    let id = backlog::create(
+        &root,
+        "topic",
+        "unresolved",
+        vec![Subject::engr(&reference)],
+    )
+    .expect("create")
+    .id;
+    let path = backlog::item_path(&root, &id);
+
+    // Seed an outcome too, so every persisted shape below is one this test
+    // actually reaches rather than one it assumes exists.
+    let mut pristine: serde_json::Value = store::read_json(&path).expect("item");
+    pristine["sections"][0]["produced"] =
+        serde_json::json!([{ "target": { "kind": "engr", "ref": reference } }]);
+    store::write_json(&path, &pristine).expect("write");
+    backlog::load(&root, &id).expect("the seeded shape is the one the writer produces");
+
+    for (name, corrupt) in [
+        (
+            "a section status the lifecycle deliberately does not have",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["status"] = serde_json::json!("resolved")
+            }) as Box<dyn Fn(&mut serde_json::Value)>,
+        ),
+        (
+            "a resolved flag on a section",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["resolved"] = serde_json::json!(true)
+            }),
+        ),
+        (
+            "resource-local schema markers on the item",
+            Box::new(|value: &mut serde_json::Value| {
+                value["format"] = serde_json::json!("engr-backlog");
+                value["version"] = serde_json::json!(999);
+            }),
+        ),
+        (
+            "tracker metadata on the item",
+            Box::new(|value: &mut serde_json::Value| {
+                value["owner"] = serde_json::json!("someone");
+                value["priority"] = serde_json::json!("high");
+            }),
+        ),
+        (
+            "an unknown field on a subject",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["subjects"][0]["blocks"] = serde_json::json!(true)
+            }),
+        ),
+        (
+            "an unknown field on a produced outcome",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["produced"][0]["at"] =
+                    serde_json::json!("2026-01-01T00:00:00Z")
+            }),
+        ),
+        (
+            "the reserved semantic key on an embedded target",
+            Box::new(|value: &mut serde_json::Value| {
+                value["sections"][0]["produced"][0]["target"]["type"] = serde_json::json!("engr")
+            }),
+        ),
+    ] {
+        let mut value = pristine.clone();
+        corrupt(&mut value);
+        store::write_json(&path, &value).expect("write corrupt item");
+        let error = backlog::load(&root, &id).expect_err(name);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+    }
+}
+
 #[test]
 fn removing_the_last_unresolved_point_removes_the_item() {
     let (_dir, root) = workspace();
