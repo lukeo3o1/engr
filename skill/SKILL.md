@@ -109,7 +109,7 @@ task state, guesses, routine observations, or every thought merely because engr
 is available. An open question is not a decision: stage it instead.
 
 ```bash
-engr ls                              # open objects
+engr ls                              # what needs attention
 engr show <id>                       # sections, and how far each can be trusted
 engr show <id> --format json         # the same, structured
 engr ls --all --sections | grep <term>
@@ -197,15 +197,113 @@ anything unconfirmed.
 | Two sections saying one thing | `--merge <a>,<b>` |
 | No longer belongs | `--delete <n>` |
 | The object's title no longer describes it | `--rename --text "..."` |
-| The work has settled | `--close` |
+| An untyped object has settled | `--close` |
+| What kind of thing this is, or where it now stands | `--classify` |
+| Another object has replaced this one | `--supersede <object>` |
 
-`--rename` replaces the title and nothing else, and a closed object refuses it —
-reopen first. Do not reach for it to record that the work changed shape: that
-belongs in a section, where it can say why.
+`--rename` replaces the title and nothing else, and an object nobody is looking
+at refuses it — bring it back into the attention set first. Do not reach for it
+to record that the work changed shape: that belongs in a section, where it can
+say why.
 
 Prefer `--revise` over delete-then-add. A revision keeps the section's id, so
 every reference to it stays meaningful; delete-then-add breaks them, and the id
 is never reused.
+
+## Type, state and attention
+
+An object may have a type. Most do not need one, and untyped is a real answer
+rather than a gap to fill in:
+
+```text
+untyped     open | closed
+design      draft | proposed | accepted | rejected | superseded
+decision    proposed | accepted | rejected | superseded
+risk        identified | accepted | mitigated | invalidated
+```
+
+`engr ls` shows what **needs attention**, which is derived from the pair: an
+untyped `open`, a `draft` or `proposed` design, a `proposed` decision, an
+`identified` risk. Everything else is out of the default listing — which does not
+mean finished or correct, only that nobody is being asked to look at it. Use
+`--all` to see the rest.
+
+Classifying always states both halves, because the vocabularies do not overlap
+and engr will not guess a mapping:
+
+```bash
+engr prepare --object <id> --classify --type decision --state accepted
+```
+
+Use `--untyped` to say explicitly that an object has no type. There is no
+transition order to follow: any state valid for the destination type is
+reachable, and every hop is a separate confirmation.
+
+**A no-attention object refuses section work.** That is the old "reopen first"
+rule in the wider vocabulary: classify it back into `draft`, `proposed` or
+`identified`, then revise. Renewed engineering work returns to the default
+listing rather than happening where nobody sees it.
+
+`--supersede` is the exception, because it is not renewed work — it is how an
+object stops being current, and the object it exists for is an `accepted` one.
+Supersede it where it stands.
+
+## Roles, excerpts and relations
+
+A section may carry a role, saying what it asserts: `decision`, `risk`,
+`supersession`, `acceptance_criterion`. An `acceptance_criterion` states a
+condition that must hold — never whether it currently passes. Verification
+results are evidence and belong outside the record.
+
+`--content <type> <body>` adds a bounded literal excerpt, `code.<tag>` or
+`data.<tag>`, in the order you give them. Use it when the assertion needs the
+literal to be precise. The section must still be understandable from its text
+alone: if the text reads "use the following", the excerpt has swallowed the
+assertion.
+
+`--content-file <type> <path>` is the same entry with the body read from a file.
+The two can be mixed freely; entries come out in the order you wrote them on the
+command line, not grouped by which flag you used.
+
+A body is stored **exactly** as given — including a trailing newline, which is
+what a file almost always ends with. So `"x"` and `"x\n"` are different sections
+with different hashes, and revising one into the other is a real revision. Decide
+deliberately which one you mean rather than letting the shell decide for you. The
+candidate screen names any ending it cannot show, so a human is never confirming
+whitespace they could not see.
+
+If engr refuses a section as too large, do not shorten prose until the number
+goes down. Split an independent point into another section, move unresolved
+reasoning into `engr backlog`, point at the implementation with
+`--implemented-by-file` or `--implemented-by-symbol` instead of pasting it, and
+keep only the smallest relevant excerpt of a log. `--oversize` exists for when it
+genuinely is one bounded assertion, and the human sees that it was used.
+
+`--oversize` is only ever a **retry**. Adding it to the first attempt is refused,
+and so is adding it to something that breaks no limit — engr admits the exception
+only for a proposal it has already refused, unchanged. So there is nothing to
+gain by reaching for the flag early: prepare it normally, read the refusal, and
+decide. If you genuinely have no better destination, run the same command again
+with `--oversize`.
+
+`--implemented-by-file <path>` and `--implemented-by-symbol <path> <symbol>`
+record where an assertion is implemented, pinned to a real commit. Unlike
+`--ref`, they carry no wording dependency and never go stale.
+
+Superseding is one command and one confirmation, and it needs a reason:
+
+```bash
+engr prepare --object <old> --supersede <new> --text "why the replacement"
+```
+
+It does not need the object brought back into the attention set first, and you
+should not do that: the object this exists for is an `accepted` one, and moving
+it back through `proposed` would confirm a state it was never in. Superseding is
+not resumed work on the object — it is how the object stops being current.
+
+That state and that relation cannot be separated afterwards, and there is no way
+back out of `superseded` — a superseded object stays readable and addressable,
+but if the knowledge is current again, say so in a new object.
 
 Give `--based-on` when the wording is about code as it stood at a specific
 commit. With clean source files it defaults to HEAD. If source outside `.engr/`

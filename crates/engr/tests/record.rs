@@ -48,6 +48,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
             text: text.to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     }
 }
@@ -357,6 +358,7 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
         text: "identical wording".to_owned(),
         based_on: None,
         refs: Vec::new(),
+        ..Content::default()
     };
     let added = Payload {
         action: Action::SectionAdded,

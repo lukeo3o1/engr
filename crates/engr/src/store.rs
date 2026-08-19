@@ -52,6 +52,20 @@ pub fn candidate_path(root: &Path, challenge: &str) -> Result<PathBuf> {
     Ok(candidates_dir(root).join(format!("{challenge}.json")))
 }
 
+/// Where the last size refusal is written down.
+///
+/// Inside `candidates/` deliberately, and not beside `format.json`. That
+/// directory is already ignored by every `.gitignore` `init` has ever written,
+/// so this file cannot travel out of the machine that made it — whereas a new
+/// path at the top of `.engr` would need a line existing workspaces do not have,
+/// and quietly rewriting somebody's `.gitignore` is a worse answer than picking
+/// a directory that already says "local only". [`crate::gate::pending_codes`]
+/// reads this directory by filename and keeps only valid challenge codes, so a
+/// name that is not one is invisible to it.
+pub fn refusal_path(root: &Path) -> PathBuf {
+    candidates_dir(root).join("refused-oversize.json")
+}
+
 /// Walk up from `start` looking for a workspace, so the tool works from any
 /// subdirectory the way git does.
 pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {

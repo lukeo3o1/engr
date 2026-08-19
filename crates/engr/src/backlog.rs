@@ -24,8 +24,8 @@
 //! only schema authority, so a resource carrying its own `format`/`version` is
 //! refused for that same reason.
 
-use crate::model::{is_canonical_git_oid, new_id};
-use crate::reference::{CanonicalEngrRef, EngrRef, ResourceKind};
+use crate::model::new_id;
+use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -440,62 +440,14 @@ fn short(value: &str) -> &str {
     &value[..8.min(value.len())]
 }
 
-/// Parse an embedded engr reference, restrict it to the kinds this field may
-/// name, and require the stored spelling to already be canonical.
-fn canonical_embedded(
-    reference: &str,
-    allowed: &[ResourceKind],
-    what: &str,
-) -> Result<CanonicalEngrRef> {
-    let parsed = EngrRef::parse_embedded(reference)?;
-    ensure!(
-        parsed.snapshot_selector().is_none(),
-        EXIT_SCHEMA,
-        "{what} names a current resource, so it cannot carry a Git snapshot selector"
-    );
-    ensure!(
-        allowed.contains(&parsed.kind()),
-        EXIT_SCHEMA,
-        "{what} cannot target {reference:?}"
-    );
-    let canonical = parsed.canonicalize(|_| None)?;
-    ensure!(
-        canonical.embedded() == reference,
-        EXIT_SCHEMA,
-        "{what} {reference:?} is not canonical; write it as {:?}",
-        canonical.embedded()
-    );
-    Ok(canonical)
-}
-
+/// Backlog says "subject" where the record says "target", so the refusals name
+/// the field the caller actually wrote.
 fn validate_repo_path(path: &str) -> Result<()> {
-    ensure!(
-        !path.trim().is_empty(),
-        EXIT_SCHEMA,
-        "a file or symbol subject needs a path"
-    );
-    ensure!(
-        !path.contains('\\') && !path.starts_with('/') && !path.contains(':'),
-        EXIT_SCHEMA,
-        "subject path {path:?} must be repository-relative with forward slashes"
-    );
-    ensure!(
-        !path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == ".."),
-        EXIT_SCHEMA,
-        "subject path {path:?} must be a normalized repository path"
-    );
-    Ok(())
+    crate::semantics::validate_repo_path("a file or symbol subject", path)
 }
 
 fn validate_pinned_commit(commit: &str) -> Result<()> {
-    ensure!(
-        is_canonical_git_oid(commit),
-        EXIT_SCHEMA,
-        "a file or symbol subject must pin a full resolved Git object id"
-    );
-    Ok(())
+    crate::semantics::validate_pinned_commit("a file or symbol subject", commit)
 }
 
 fn check_topic(topic: &str) -> Result<()> {

@@ -8,6 +8,7 @@ use crate::model::{
     canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
     CANDIDATE_FORMAT, EVENT_FORMAT,
 };
+use crate::semantics::{self, Relation, RelationType, Role, Supplement, Target};
 use crate::{
     ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION,
     CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND,
@@ -47,10 +48,28 @@ pub struct PreparedContext {
     pub previous_based_on: Option<String>,
     #[serde(default)]
     pub previous_refs: Vec<crate::model::Ref>,
+    /// The rest of the previous semantic content, all skipped when empty so a
+    /// candidate prepared before these fields existed still hashes to the same
+    /// integrity value and remains admissible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_role: Option<Role>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_content: Vec<Supplement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_relations: Vec<Relation>,
     /// Distinguishes a new revision with no old basis/refs from a legacy
     /// candidate that never captured those values at all.
     #[serde(default)]
     pub previous_semantics_recorded: bool,
+    /// The size exception this proposal was admitted under.
+    ///
+    /// Here rather than in the payload, because it is a fact about admission
+    /// rather than about the mutation: it decides what the human is shown and
+    /// what confirm will re-check, and it must never become a lasting property
+    /// of the Section. `integrity_sha256` covers it, so a candidate cannot be
+    /// edited on disk into an exception nobody granted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oversize: bool,
     /// The unresolved points this candidate says it came from, each pinned to
     /// the resolution basis it was prepared against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -345,6 +364,15 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
         reference.object = canonical_object_id(&reference.object)?;
         reference.commit = resolve_commit(root, "reference commit", &reference.commit)?;
     }
+    for relation in &mut payload.content.relations {
+        if let Target::File { commit, .. } | Target::Symbol { commit, .. } = &mut relation.target {
+            *commit = resolve_commit(root, "relation commit", commit)?;
+        }
+    }
+    // After resolution, not before: two spellings of the same commit are the
+    // same relation, and sorting has to see the resolved values or the order
+    // would depend on what the caller happened to type.
+    payload.content.canonicalize_order();
     payload.validate()
 }
 
@@ -355,9 +383,13 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
 fn validate_title_context(payload: &Payload) -> Result<()> {
     if payload.action.carries_title() {
         ensure!(
-            payload.content.based_on.is_none() && payload.content.refs.is_empty(),
+            payload.content.based_on.is_none()
+                && payload.content.refs.is_empty()
+                && payload.content.role.is_none()
+                && payload.content.content.is_empty()
+                && payload.content.relations.is_empty(),
             EXIT_INVARIANT,
-            "{} titles cannot carry repository basis or references",
+            "{} titles carry no repository basis, references, role, supplementary content or relations",
             payload.action.label()
         );
     }
@@ -436,7 +468,13 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_from_backlog(root, payload, Vec::new())
+    prepare_admitting(root, payload, Vec::new(), Admission::Normal)
+}
+
+/// Prepare a proposal that broke a normal size threshold, after a first attempt
+/// was already refused.
+pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
+    prepare_admitting(root, payload, Vec::new(), Admission::Oversize)
 }
 
 /// Prepare a record mutation that the caller declares came from unresolved
@@ -451,10 +489,138 @@ pub fn prepare_from_backlog(
     payload: Payload,
     sources: Vec<SourceRequest>,
 ) -> Result<Prepared> {
+    prepare_admitting(root, payload, sources, Admission::Normal)
+}
+
+/// How much this proposal is allowed to be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Admission {
+    /// Normal thresholds apply, and breaking one is refused.
+    Normal,
+    /// The explicit retry of a refusal, admitting this one proposal past a
+    /// normal threshold. Never past a hard ceiling.
+    Oversize,
+}
+
+/// The one entry point both other axes go through, so they compose.
+///
+/// Where the work came from and how big it is are independent questions, and
+/// the convenience wrappers above only cover the two common corners. A proposal
+/// derived from unresolved staging that legitimately exceeds a normal threshold
+/// has to be able to retry with the exception *and* keep saying where it came
+/// from — dropping the Backlog sources to get through the size door would make
+/// confirming it settle nothing.
+pub fn prepare_admitting(
+    root: &Path,
+    payload: Payload,
+    sources: Vec<SourceRequest>,
+    admission: Admission,
+) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
-    store::with_lock(root, move || prepare_locked(root, payload, sources))
+    store::with_lock(root, move || {
+        prepare_locked(root, payload, sources, admission)
+    })
+}
+
+/// Which proposals engr has refused for size, so an explicit retry can prove it
+/// is the retry of something that was actually refused.
+///
+/// A list rather than a slot, because a workspace holds work on many Objects at
+/// once. One slot would mean any second proposal considered anywhere revoked the
+/// first one's refusal, and the agent that had already done what the rule asks
+/// would be sent back to do it again — enforcing the rule for whichever proposal
+/// happened to be refused last, rather than for each.
+///
+/// Admission-time only, like the exception itself: nothing here is the record,
+/// nothing here survives being consumed, and it is capped because it is scratch
+/// memory rather than history. Past the cap the oldest entry is dropped and that
+/// proposal simply earns its refusal again, which is the safe direction.
+#[derive(Serialize, Deserialize, Default)]
+struct Refusals {
+    /// Payload hashes, most recently refused first.
+    refused: Vec<String>,
+}
+
+const REFUSALS_REMEMBERED: usize = 32;
+
+/// The two-stage admission enforced, rather than described.
+///
+/// #14 says the first `prepare` above a normal threshold MUST refuse and only an
+/// explicit retry may ask for the exception. A flag cannot carry that on its
+/// own, because a flag can be passed the first time — so the refusal writes down
+/// which proposal it refused and the retry is admitted only if it is that same
+/// proposal, byte for byte. The payload is already canonical here, so the same
+/// wording written against a different basis is a different proposal and earns
+/// its own refusal first.
+fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Result<()> {
+    let oversize = admission == Admission::Oversize;
+    let breaches = semantics::exceeded(&payload.content.text, &payload.content.content);
+    let hard = breaches.iter().any(|item| item.hard);
+
+    if oversize {
+        // Both halves matter. There must be something to except — an exception
+        // over nothing is an agent setting the flag by default — and engr must
+        // already have said no to this exact proposal.
+        ensure!(
+            !breaches.is_empty(),
+            EXIT_USAGE,
+            "nothing in this Section exceeds a normal limit, so there is no exception to make; prepare it without --oversize"
+        );
+        if !hard {
+            ensure!(
+                refusals(root).refused.contains(&payload.sha256()?),
+                EXIT_INVARIANT,
+                "an oversize exception is the retry of a refusal, and engr has not refused this proposal; prepare it without --oversize first and read what that refusal suggests"
+            );
+        }
+    }
+
+    // The refusals themselves stay in one place, so the wording an agent reads
+    // and the wording the unit tests pin are the same wording.
+    let result = semantics::check_size(&payload.content.text, &payload.content.content, oversize);
+    // Remember what was refused, so the retry has something to be a retry of. A
+    // hard-ceiling refusal is deliberately not remembered: it has no retry, and
+    // leaving a receipt behind would make `--oversize` look like the answer to a
+    // refusal that always says no.
+    if result.is_err() && !hard {
+        remember_refusal(root, &payload.sha256()?)?;
+    }
+    result.map(|_| ())
+}
+
+/// Unreadable or absent is treated as "nothing refused" rather than as an error:
+/// this file is one machine's scratch memory, and a corrupted one should cost a
+/// second refusal, not make the workspace unusable.
+fn refusals(root: &Path) -> Refusals {
+    store::read_json::<Refusals>(&store::refusal_path(root)).unwrap_or_default()
+}
+
+fn remember_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
+    let mut held = refusals(root);
+    held.refused.retain(|held| held != payload_sha256);
+    held.refused.insert(0, payload_sha256.to_owned());
+    held.refused.truncate(REFUSALS_REMEMBERED);
+    store::write_json(&store::refusal_path(root), &held)
+}
+
+/// One refusal admits one retry, and only the retry of that proposal. Spent
+/// once the candidate exists, so a proposal that failed some later check does
+/// not silently lose its place — and spending one leaves every other
+/// outstanding refusal alone.
+fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
+    let mut held = refusals(root);
+    let before = held.refused.len();
+    held.refused.retain(|held| held != payload_sha256);
+    if held.refused.len() == before {
+        return Ok(());
+    }
+    let path = store::refusal_path(root);
+    if held.refused.is_empty() {
+        return fs::remove_file(&path).map_err(|error| tool_error(path.display(), error));
+    }
+    store::write_json(&path, &held)
 }
 
 /// Resolve each declared source and pin what it currently says.
@@ -550,6 +716,7 @@ fn prepare_locked(
     root: &Path,
     mut payload: Payload,
     sources: Vec<SourceRequest>,
+    admission: Admission,
 ) -> Result<Prepared> {
     store::require_current(root)?;
     validate_title_context(&payload)?;
@@ -592,29 +759,72 @@ fn prepare_locked(
         (_, Some(_)) => {}
     }
 
-    let (previous_text, previous_based_on, previous_refs) = match (&payload.action, &object) {
-        (Action::ObjectRenamed, Some(object)) => (Some(object.title.clone()), None, Vec::new()),
+    // Every threshold this proposal breaks, refused here unless it is the
+    // explicit retry of a refusal. Not in `Payload::validate`, for the same
+    // reason the title limit is not: that runs when events are loaded, and a
+    // workspace holding a Section admitted under an exception has to keep being
+    // able to replay its own history.
+    if payload.action.carries_content() && !payload.action.carries_title() {
+        check_admission(root, &payload, admission)?;
+    } else {
+        // Nothing here is measured against a Section threshold, so an exception
+        // would be one the candidate claims and no refusal ever granted — a
+        // screen saying engr already refused this when it never did.
+        ensure!(
+            admission == Admission::Normal,
+            EXIT_USAGE,
+            "{} carries no Section content, so there is no size exception to make",
+            payload.action.label()
+        );
+    }
+
+    let mut previous = PreviousContent::default();
+    let previous_text = match (&payload.action, &object) {
+        (Action::ObjectRenamed, Some(object)) => Some(object.title.clone()),
         (Action::SectionRevised { section }, Some(object)) => {
             let section = object.section(*section)?;
-            (
-                Some(section.text.clone()),
-                section.based_on.clone(),
-                section.refs.clone(),
-            )
+            previous = PreviousContent {
+                based_on: section.based_on.clone(),
+                refs: section.refs.clone(),
+                role: section.role,
+                content: section.content.clone(),
+                relations: section.relations.clone(),
+            };
+            // A revision that changes nothing is not a change to confirm. It
+            // matters here specifically because `refs` and `relations` are sets:
+            // the same proposal written in another order canonicalizes to the
+            // same content, and admitting it would spend a confirmation and a
+            // revision on a reordering the model says is not a difference.
+            //
+            // Both sides are canonicalized for the comparison, and only for it.
+            // A Section stored before Phase 3 holds whatever order its gate
+            // happened to write, so comparing a sorted proposal against an
+            // unsorted stored value would find a difference that is not one and
+            // spend an Event on sorting an array. The stored Section is left
+            // exactly as it is: its hash covers the order it was written in, and
+            // rewriting it to tidy the order would be the same non-change from
+            // the other direction.
+            let mut current = section.content();
+            current.canonicalize_order();
+            ensure!(
+                current != payload.content,
+                EXIT_INVARIANT,
+                "§{} already says exactly this, so there is nothing to confirm",
+                section.id
+            );
+            Some(section.text.clone())
         }
-        (Action::SectionDeleted { section }, Some(object)) => (
-            Some(object.section(*section)?.text.clone()),
-            None,
-            Vec::new(),
-        ),
+        (Action::SectionDeleted { section }, Some(object)) => {
+            Some(object.section(*section)?.text.clone())
+        }
         (Action::SectionMerged { absorbs }, Some(object)) => {
             let mut parts = Vec::new();
             for id in absorbs {
                 parts.push(format!("§{id}: {}", object.section(*id)?.text.trim_end()));
             }
-            (Some(parts.join("\n")), None, Vec::new())
+            Some(parts.join("\n"))
         }
-        _ => (None, None, Vec::new()),
+        _ => None,
     };
 
     // Preflight the reducer so a candidate that cannot possibly apply never
@@ -644,14 +854,19 @@ fn prepare_locked(
     };
 
     validate_refs(root, &payload)?;
+    validate_relations(root, &payload, &projected)?;
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
     let taken = pending_codes(root)?;
     let context = PreparedContext {
         previous_text,
-        previous_based_on,
-        previous_refs,
+        previous_based_on: previous.based_on,
+        previous_refs: previous.refs,
+        previous_role: previous.role,
+        previous_content: previous.content,
+        previous_relations: previous.relations,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
+        oversize: admission == Admission::Oversize,
         backlog: pin_sources(root, sources, &projected)?,
     };
     let gate = crate::confirmation::Candidate::prepare_with(
@@ -687,6 +902,9 @@ fn prepare_locked(
         &store::candidate_path(root, &candidate.challenge)?,
         &candidate,
     )?;
+    if admission == Admission::Oversize {
+        spend_refusal(root, &candidate.payload_sha256)?;
+    }
 
     let notes = notes_for(root, &candidate);
 
@@ -695,6 +913,108 @@ fn prepare_locked(
         superseded,
         notes,
     })
+}
+
+/// The semantic content a revision is replacing, gathered in one place so the
+/// candidate can show the change rather than the whole section again.
+#[derive(Default)]
+struct PreviousContent {
+    based_on: Option<String>,
+    refs: Vec<crate::model::Ref>,
+    role: Option<Role>,
+    content: Vec<Supplement>,
+    relations: Vec<Relation>,
+}
+
+/// Everything a relation claims about the world outside this payload.
+///
+/// Checked at the gate rather than in the reducer, which stays a pure function
+/// of the event: these questions need the workspace and the repository, and the
+/// answers change over time. Checked again at admission, because a replacement
+/// object can be superseded, and a graph that was acyclic while the human read
+/// the candidate may not be by the time they type.
+///
+/// `projected` is the object this candidate will produce, so a supersession can
+/// see the section it is itself adding when the cycle is walked.
+fn validate_relations(root: &Path, payload: &Payload, projected: &Object) -> Result<()> {
+    for relation in &payload.content.relations {
+        match (relation.relation, &relation.target) {
+            (RelationType::SupersededBy, _) => {
+                let target = relation
+                    .replacement()?
+                    .expect("a superseded_by relation names a replacement");
+                ensure!(
+                    target != payload.object,
+                    EXIT_INVARIANT,
+                    "an object cannot supersede itself"
+                );
+                ops::effective(root, &target).map_err(|error| {
+                    if error.code == EXIT_NOT_FOUND {
+                        Error::new(
+                            EXIT_NOT_FOUND,
+                            format!("superseded_by names object {target}, which does not exist"),
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+                check_acyclic(root, projected)?;
+            }
+            (RelationType::ImplementedBy, Target::File { path, commit })
+            | (RelationType::ImplementedBy, Target::Symbol { path, commit, .. }) => {
+                ensure!(
+                    git::resolve(root, commit).as_deref() == Some(commit.as_str()),
+                    EXIT_INVARIANT,
+                    "implemented_by pins commit {commit}, which is not a commit in this repository"
+                );
+                // The path, not the symbol. A symbol target says which file the
+                // implementation is in and what it is called there; v0 does not
+                // parse the language, and pretending to would be a check that
+                // fails on anything engr cannot compile.
+                ensure!(
+                    git::path_at(root, commit, path),
+                    EXIT_INVARIANT,
+                    "implemented_by names {path}, which does not exist at commit {}",
+                    &commit[..8.min(commit.len())]
+                );
+            }
+            (RelationType::ImplementedBy, Target::Engr { .. }) => {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    "implemented_by names a repository artifact, not an engr resource".to_owned(),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk the replacement chain forward from `object` and refuse to close it.
+///
+/// A cycle in `superseded_by` is a set of objects each of which claims the next
+/// one replaced it, so a reader following the chain to find current knowledge
+/// never arrives anywhere. The walk is bounded by the objects in the workspace,
+/// and an object that cannot be loaded ends that branch rather than the check —
+/// a chain into a missing object is a dangling pointer, not a cycle.
+fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
+    let mut seen = vec![object.id.clone()];
+    let mut frontier = object.replacements()?;
+    while let Some(next) = frontier.pop() {
+        ensure!(
+            next != object.id,
+            EXIT_INVARIANT,
+            "that replacement closes a supersession cycle back onto {}",
+            object.id
+        );
+        if seen.contains(&next) {
+            continue;
+        }
+        seen.push(next.clone());
+        if let Ok(target) = ops::effective(root, &next) {
+            frontier.extend(target.replacements()?);
+        }
+    }
+    Ok(())
 }
 
 fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
@@ -887,6 +1207,19 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     };
 
     project(&mut object, &event)?;
+    // After the projection, because the acyclic walk has to see the section this
+    // event is adding: the relation being admitted is part of the graph it must
+    // not close. The size re-check uses the exception the candidate carries, so
+    // a candidate edited on disk to drop it cannot get in — though candidate
+    // integrity has already refused that file by this point.
+    validate_relations(root, &candidate.payload, &object)?;
+    if candidate.payload.action.carries_content() && !candidate.payload.action.carries_title() {
+        semantics::check_size(
+            &candidate.payload.content.text,
+            &candidate.payload.content.content,
+            candidate.context.oversize,
+        )?;
+    }
     store::append_event(root, &event)?;
     store::save_object(root, &object)?;
     // Backlog last, and never able to undo any of the above. What a human
@@ -944,5 +1277,6 @@ pub fn content(
         text: text.unwrap_or_default(),
         based_on,
         refs,
+        ..Content::default()
     })
 }

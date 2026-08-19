@@ -156,6 +156,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "target".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -174,6 +175,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "projection wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -201,6 +203,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "effective crash-tail wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -231,6 +234,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 text: "source".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -253,6 +257,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 sha256: raw.sha256,
                 commit: old_commit.clone(),
             }],
+            ..Content::default()
         },
     };
     let error = gate::prepare(root, stale_projection_ref)
@@ -303,6 +308,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                     sha256: effective.sha256,
                     commit: committed_effective,
                 }],
+                ..Content::default()
             },
         },
     )
@@ -324,6 +330,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "candidate state".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -340,6 +347,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "apply once".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -387,6 +395,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "stale candidate".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -401,6 +410,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
                 text: "overtaking mutation".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -605,6 +615,7 @@ fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewri
             text: String::new(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         };
         event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
         std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
@@ -1203,6 +1214,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
             text: "event wording".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1417,6 +1429,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             text: "reconcile under lock".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1712,6 +1725,7 @@ fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
                 text: "what the work produced".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
         vec![
@@ -1911,6 +1925,7 @@ fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
                 text: "what the work produced".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
         ids.iter()
@@ -2081,4 +2096,820 @@ fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
     let printed = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(printed, engr::PROTOCOL);
     assert!(printed.starts_with("# engr protocol v0"));
+}
+
+/// A workspace with one committed source file, for the surfaces that pin one.
+fn repository_with_source(root: &Path) {
+    git(root, &["init", "-q"]);
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/verifier.rs"), "fn verify() {}\n").expect("source");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "source",
+        ],
+    );
+}
+
+/// The code a candidate screen ends with.
+fn code_from(screen: &str) -> String {
+    screen
+        .rsplit("CONFIRM ")
+        .next()
+        .expect("a candidate screen ends with its code")
+        .trim()
+        .to_owned()
+}
+
+/// The screen a human reads before typing a code has to carry the whole
+/// destination. A state without its type is a word that means different things
+/// on different objects, and attention is what they are actually deciding.
+#[test]
+fn classifying_shows_the_whole_destination_and_what_it_does_to_the_listing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "verification design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "draft",
+        ],
+    );
+    assert!(screen.status.success());
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for line in ["Type       design", "State      draft", "Attention  yes"] {
+        assert!(shown.contains(line), "{line:?} missing from {shown}");
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let listed = run_engr(root, &["ls"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("design/draft"));
+
+    // Accepting it takes it out of the default listing without closing it, and
+    // says so before the human commits to that.
+    let leaving = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &leaving);
+    let listed = run_engr(root, &["ls"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("no objects"),
+        "an accepted design is out of the default attention set"
+    );
+    let all = run_engr(root, &["ls", "--all"]);
+    assert!(String::from_utf8_lossy(&all.stdout).contains("design/accepted"));
+
+    // `--close` is the untyped vocabulary, and a design has no such state.
+    let refused = run_engr(root, &["prepare", "--object", &id, "--close"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a design cannot be closed"));
+}
+
+/// The role, the excerpt and the artifact are all part of the assertion, so all
+/// of them appear on the candidate screen and in the record afterwards.
+#[test]
+fn a_section_carries_role_supplementary_content_and_implementation_provenance() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "issuer validation"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--role",
+            "acceptance_criterion",
+            "--text",
+            "The verifier must reject an unknown issuer before checking audience.",
+            "--content",
+            "data.json",
+            "{\"error\":\"invalid_issuer\"}",
+            "--implemented-by-symbol",
+            "src/verifier.rs",
+            "verify",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for fragment in [
+        "Role       acceptance_criterion",
+        "Content    [0] data.json",
+        "implemented_by -> symbol src/verifier.rs :: verify",
+        // The body itself, not only its type: a human shown the label has not
+        // read what they are admitting.
+        "{\"error\":\"invalid_issuer\"}",
+    ] {
+        assert!(
+            shown.contains(fragment),
+            "{fragment:?} missing from {shown}"
+        );
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).to_string();
+    assert!(shown.contains("§1 [acceptance_criterion]"), "{shown}");
+    assert!(shown.contains("content  [0] data.json"), "{shown}");
+    assert!(shown.contains("relation implemented_by"), "{shown}");
+
+    let structured = run_engr(root, &["show", &id, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&structured.stdout).expect("json");
+    assert_eq!(value["state"], "open");
+    assert_eq!(value["attention"], Value::Bool(true));
+    assert!(
+        value.get("type").is_none(),
+        "an untyped object says nothing"
+    );
+    let section = &value["sections"][0];
+    assert_eq!(section["role"], "acceptance_criterion");
+    assert_eq!(section["content"][0]["type"], "data.json");
+    assert_eq!(section["relations"][0]["type"], "implemented_by");
+    assert!(
+        section["relations"][0]["target"]["commit"]
+            .as_str()
+            .expect("commit")
+            .len()
+            >= 40,
+        "a relation pins a full resolved object id"
+    );
+
+    // The vocabularies are closed, and closed at the command line too.
+    for bad in [
+        vec!["--role", "rationale"],
+        vec!["--content", "text.md", "prose"],
+    ] {
+        let mut args = vec![
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "x",
+        ];
+        args.extend(bad.iter().copied());
+        assert!(
+            !run_engr(root, &args).status.success(),
+            "{bad:?} is outside the vocabulary"
+        );
+    }
+}
+
+/// The first refusal has to send the agent somewhere, and the retry has to be
+/// visible to the human who is being asked to admit it anyway.
+#[test]
+fn an_oversize_section_is_refused_once_and_the_retry_says_so_on_the_screen() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "size policy"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("engr backlog"), "{message}");
+    assert!(message.contains("--oversize"), "{message}");
+
+    let retried = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+            "--oversize",
+        ],
+    );
+    assert!(retried.status.success());
+    let shown = String::from_utf8_lossy(&retried.stdout).to_string();
+    assert!(
+        shown.contains("OVERSIZE   admitted by exception"),
+        "the exception is on the screen, above the wording: {shown}"
+    );
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    assert!(!std::fs::read_to_string(store::object_path(root, &id))
+        .expect("object")
+        .contains("oversize"));
+}
+
+/// One command, one confirmation, three facts: the state, the replacement and
+/// the reason.
+#[test]
+fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let original = prepare(root, &["prepare", "--new", "--text", "redis locks"]);
+    confirm(root, &original);
+    let original_id = original["object"].as_str().expect("object id").to_owned();
+    let replacement = prepare(root, &["prepare", "--new", "--text", "advisory locks"]);
+    confirm(root, &replacement);
+    let replacement_id = replacement["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let classified = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &classified);
+    // Straight from `accepted`, with nothing in between. That is the object
+    // supersession exists for — one that was current until something replaced
+    // it — and it is out of the attention set by definition. Sending it back
+    // through `proposed` first would confirm a state it was never in.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--supersede",
+            &replacement_id,
+            "--no-based-on",
+            "--text",
+            "Replaced: advisory locks remove the extra availability dependency.",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(shown.contains("Role       supersession"), "{shown}");
+    assert!(shown.contains("superseded_by -> engr:obj:"), "{shown}");
+    assert!(shown.contains("State      superseded"), "{shown}");
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &original_id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "superseded");
+    assert_eq!(value["attention"], Value::Bool(false));
+    assert_eq!(value["sections"][0]["role"], "supersession");
+    assert_eq!(
+        value["sections"][0]["relations"][0]["type"],
+        "superseded_by"
+    );
+    assert_eq!(
+        store::load_events(root, &original_id)
+            .expect("events")
+            .len(),
+        3,
+        "created, classified, superseded — one semantic action appends one event, \
+         and retiring an accepted decision invents no intermediate state"
+    );
+}
+
+/// A destination is only ever stated by the action that has one.
+#[test]
+fn type_and_state_flags_belong_to_classify_and_nothing_else() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "flag discipline"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    for (args, expected) in [
+        (
+            vec!["prepare", "--object", &id, "--close", "--state", "closed"],
+            "--state sets a destination for --classify",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--classify", "--state", "open"],
+            "--classify needs the destination type",
+        ),
+        (
+            vec![
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "x",
+                "--type",
+                "design",
+            ],
+            "--type and --untyped set a destination for --classify",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--close", "--role", "decision"],
+            "carries no wording",
+        ),
+    ] {
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{args:?} must be refused");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{args:?}: got {message:?}");
+    }
+
+    // `--untyped` is a word rather than the absence of `--type`, so "no type"
+    // and "I forgot to say" cannot look the same.
+    let untyped = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--untyped",
+            "--state",
+            "closed",
+        ],
+    );
+    confirm(root, &untyped);
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "closed");
+    assert!(value.get("type").is_none());
+}
+
+/// Removing supplementary content shows the human what is being removed.
+///
+/// `content[]` is ordered and repeated types are valid, so with two `code.rs`
+/// entries the heading names a position, not a thing. A body is hashed with the
+/// section and is as authoritative as the wording above it — removed wording
+/// already appears in the text diff, and a removed body has to appear the same
+/// way, or the screen is asking for a confirmation of something it did not show.
+#[test]
+fn a_removed_supplementary_body_is_shown_and_a_changed_one_is_shown_as_a_diff() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "two excerpts"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // A body long enough that showing all of it would be the wrong answer for a
+    // modification, so the two presentations are actually distinguishable.
+    let long = (0..40)
+        .map(|line| format!("let step_{line} = {line};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let changed = long.replace("let step_7 = 7;", "let step_7 = 700;");
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &long,
+            "--content",
+            "code.rs",
+            "fn discarded() { todo!() }",
+        ],
+    );
+    confirm(root, &added);
+
+    // Keep the first entry, change it, and drop the second.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &changed,
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+
+    assert!(
+        shown.contains("── content [1] code.rs ── removed"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("fn discarded() { todo!() }"),
+        "the removed body is shown, not only which position it sat in: {shown}"
+    );
+
+    // The modified body is a diff against the previous one, which is the same
+    // presentation the wording gets — and the reason the protocol says a body
+    // is shown in full when it is added or removed rather than in every case.
+    assert!(shown.contains("-let step_7 = 7;"), "{shown}");
+    assert!(shown.contains("+let step_7 = 700;"), "{shown}");
+    assert!(
+        !shown.contains("let step_39 = 39;"),
+        "an unchanged tail forty lines away is not context: {shown}"
+    );
+
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let entries = value["sections"][0]["content"].as_array().expect("content");
+    assert_eq!(entries.len(), 1, "the second entry really is gone");
+    assert_eq!(entries[0]["body"], changed);
+}
+
+/// The exception is the retry of a refusal, and the command line cannot skip
+/// the refusal by reaching for the flag first.
+#[test]
+fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "admission order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let straight_to_it = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(
+        !straight_to_it.status.success(),
+        "the first prepare must refuse, whatever flags it carried"
+    );
+    let message = String::from_utf8_lossy(&straight_to_it.stderr).to_string();
+    assert!(message.contains("retry of a refusal"), "{message}");
+
+    // And an exception over content that breaks nothing is refused too, so the
+    // flag never becomes something an agent can just always pass.
+    let nothing_to_except = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            "brief",
+        ],
+    );
+    assert!(!nothing_to_except.status.success());
+    assert!(
+        String::from_utf8_lossy(&nothing_to_except.stderr).contains("no exception to make"),
+        "{}",
+        String::from_utf8_lossy(&nothing_to_except.stderr)
+    );
+    // Nor on an action that has no section content to measure at all, where the
+    // exception could only ever be a claim the screen makes on engr's behalf.
+    for action in [
+        vec!["--rename", "--text", "a better title"],
+        vec!["--classify", "--untyped", "--state", "closed"],
+    ] {
+        let mut args = vec!["prepare", "--object", &id, "--oversize"];
+        args.extend(action.iter().copied());
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{action:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("no size exception to make"),
+            "{action:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["candidate"]).stdout).contains("nothing"),
+        "and no attempt left a code awaiting a human"
+    );
+}
+
+/// Give a stored Section bodies a text editor could have put there.
+///
+/// The hash is recomputed, so this is valid persisted authority rather than
+/// corruption — exactly what a workspace written by any build may hold, since
+/// nothing on the read path normalizes a body.
+fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
+    let mut object = store::load_object(root, id).expect("load");
+    let section = &mut object.sections[0];
+    section.content = bodies
+        .iter()
+        .map(|body| engr::semantics::Supplement::new("code.rs", *body))
+        .collect();
+    section.sha256 = section.recomputed_sha256().expect("hash");
+    store::save_object(root, &object).expect("save");
+    assert!(
+        run_engr(root, &["verify", id]).status.success(),
+        "the seeded section must be valid stored authority"
+    );
+}
+
+/// The screen cannot draw two different authoritative bodies the same way.
+///
+/// A terminal shows `"x"`, `"x\n"` and `"x   "` identically, and a body of
+/// nothing but spaces as nothing at all — yet each is a different literal
+/// inside a different Section hash. Nothing normalizes a body, on the way in or
+/// on the read path, so any build's workspace may hold all of these; the gate's
+/// obligation is to say what it is showing, not to change it.
+#[test]
+fn a_body_whose_ending_is_invisible_is_described_where_the_human_reads_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "invisible endings"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "placeholder one",
+            "--content",
+            "code.rs",
+            "placeholder two",
+            "--content",
+            "code.rs",
+            "placeholder three",
+        ],
+    );
+    confirm(root, &added);
+
+    // Now they hold what a previous build, a hand edit, or a body that simply
+    // ended that way would leave behind.
+    seed_bodies(root, &id, &["let x = 1;\n", "let y = 2;   ", "   "]);
+
+    // Removing all three: the screen has to convey what is being removed.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for expected in [
+        "── content [0] code.rs ── removed, ends with 1 newline",
+        "── content [1] code.rs ── removed, ends with 3 spaces",
+        "── content [2] code.rs ── removed, 3 spaces, and nothing else",
+    ] {
+        assert!(
+            expected_line(&shown, expected),
+            "{expected:?} not in {shown}"
+        );
+    }
+    // The bodies themselves are still printed exactly, untrimmed.
+    assert!(shown.contains("let x = 1;\n"), "{shown}");
+    assert!(shown.contains("let y = 2;   \n"), "{shown}");
+
+    // And a revision that only moves trailing whitespace — which the line diff
+    // below cannot show — is named on both sides.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "let x = 1;\n\n",
+            "--content",
+            "code.rs",
+            "let y = 2;   ",
+            "--content",
+            "code.rs",
+            "   ",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(
+        expected_line(
+            &shown,
+            "── content [0] code.rs ── previous ends with 1 newline; candidate ends with 2 newlines"
+        ),
+        "{shown}"
+    );
+    // The other two are unchanged, so they are not shown at all.
+    assert!(!shown.contains("content [1]"), "{shown}");
+    assert!(!shown.contains("content [2]"), "{shown}");
+}
+
+/// Whether a line is present exactly, trailing spaces and all.
+fn expected_line(screen: &str, line: &str) -> bool {
+    screen.lines().any(|candidate| candidate == line)
+}
+
+/// Content order is the order the caller wrote, whichever flag spelled it.
+///
+/// `content[]` is ordered and moving an entry is a revision, so grouping the
+/// inline entries ahead of the file-backed ones would be authoritative input
+/// being silently rearranged. Both spellings stay available and mixing them
+/// stays legal; what changed is that the sequence survives.
+#[test]
+fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "content order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let second = root.join("second.json");
+    std::fs::write(&second, "{\"second\":true}").expect("write");
+    let fourth = root.join("fourth.json");
+    std::fs::write(&fourth, "{\"fourth\":true}").expect("write");
+
+    // Inline, file, inline, file — the interleaving the two lists cannot hold.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "four excerpts, in this order",
+            "--content",
+            "code.rs",
+            "let first = 1;",
+            "--content-file",
+            "data.json",
+            second.to_str().expect("path"),
+            "--content",
+            "code.rs",
+            "let third = 3;",
+            "--content-file",
+            "data.json",
+            fourth.to_str().expect("path"),
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    let headings: Vec<&str> = shown
+        .lines()
+        .filter(|line| line.starts_with("Content    ["))
+        .collect();
+    assert_eq!(
+        headings,
+        vec![
+            "Content    [0] code.rs",
+            "Content    [1] data.json",
+            "Content    [2] code.rs",
+            "Content    [3] data.json",
+        ],
+        "the candidate screen shows the caller's order: {shown}"
+    );
+
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let bodies: Vec<&str> = value["sections"][0]["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .map(|entry| entry["body"].as_str().expect("body"))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            "let first = 1;",
+            "{\"second\":true}",
+            "let third = 3;",
+            "{\"fourth\":true}",
+        ],
+        "and the record stores it"
+    );
 }
