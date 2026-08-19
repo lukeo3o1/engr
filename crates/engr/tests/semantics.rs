@@ -1392,72 +1392,6 @@ fn an_accepted_object_is_superseded_without_being_reclassified_first() {
     );
 }
 
-/// Two literal bodies a terminal draws identically must not be two payloads.
-///
-/// A body is literal, so its internal whitespace is untouchable — but
-/// whitespace at the *end* of one is invisible on the screen a human confirms.
-/// Left alone, `"x"`, `"x\n"` and `"x   "` would be three different payloads
-/// with three different Section hashes that read the same, and the whole
-/// premise of this gate is that what a human read is what got admitted. So the
-/// value is normalized, not the picture of it.
-#[test]
-fn bodies_that_differ_only_in_trailing_whitespace_are_one_assertion() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "literal bodies");
-    let excerpt = |body: &str| Content {
-        text: "the assertion the excerpt supports".to_owned(),
-        content: vec![Supplement::new("code.rs", body)],
-        ..Content::default()
-    };
-
-    let object = admit(
-        &root,
-        payload(Action::SectionAdded, &id, excerpt("let x = 1;\n\n  ")),
-    );
-    assert_eq!(
-        object.sections[0].content[0].body, "let x = 1;",
-        "admission trims the end of a body, before it is hashed"
-    );
-
-    // Every other spelling of the same literal is now the same assertion, and a
-    // revision into one of them has nothing to confirm.
-    for spelling in ["let x = 1;", "let x = 1;\n", "let x = 1;   \n\t"] {
-        let error = gate::prepare(
-            &root,
-            payload(
-                Action::SectionRevised { section: 1 },
-                &id,
-                excerpt(spelling),
-            ),
-        )
-        .expect_err("a trailing newline is not a semantic change");
-        assert_eq!(error.code, engr::EXIT_INVARIANT);
-        assert!(error.message.contains("nothing to confirm"), "{error}");
-    }
-
-    // Inside the body nothing is touched, because that is the content.
-    let object = admit(
-        &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &id,
-            excerpt("  let x = 1;\n\n    let y = 2;"),
-        ),
-    );
-    assert_eq!(
-        object.sections[0].content[0].body, "  let x = 1;\n\n    let y = 2;",
-        "leading and internal whitespace is the excerpt"
-    );
-
-    // And a body that was only whitespace is nothing at all.
-    for blank in [" ", "\n", "\t\n  "] {
-        let error = gate::prepare(&root, payload(Action::SectionAdded, &id, excerpt(blank)))
-            .expect_err("whitespace alone is not a body");
-        assert_eq!(error.code, engr::EXIT_SCHEMA);
-        assert!(error.message.contains("whitespace alone"), "{error}");
-    }
-}
-
 /// A refusal belongs to the proposal it refused, not to the workspace.
 ///
 /// One slot would mean any second proposal considered anywhere revoked the
@@ -1493,4 +1427,73 @@ fn each_refused_proposal_keeps_its_own_retry() {
             .expect_err("an exception is spent by the retry that used it");
         assert_eq!(error.code, engr::EXIT_INVARIANT);
     }
+}
+
+/// Every byte of a literal body is part of the assertion.
+///
+/// #14 defines a body as literal non-empty UTF-8 and says nothing about
+/// normalising it, so v0 does not: `"x"`, `"x\n"` and `"x   "` are three
+/// different Sections with three different hashes, and a body of nothing but
+/// spaces is a body somebody wrote. Whether trailing whitespace *should* be
+/// insignificant is a real question, and an open one — deciding it here would
+/// redefine literal equality, payload identity and no-op semantics without an
+/// accepted design ruling. What the gate owes in the meantime is presentation,
+/// not normalisation, and that is pinned on the command line.
+#[test]
+fn a_literal_body_keeps_every_byte_it_was_written_with() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "literal bodies");
+    let excerpt = |body: &str| Content {
+        text: "the assertion the excerpt supports".to_owned(),
+        content: vec![Supplement::new("code.rs", body)],
+        ..Content::default()
+    };
+
+    let object = admit(
+        &root,
+        payload(Action::SectionAdded, &id, excerpt("let x = 1;\n")),
+    );
+    assert_eq!(
+        object.sections[0].content[0].body, "let x = 1;\n",
+        "the trailing newline is stored, because nothing is entitled to drop it"
+    );
+    let with_newline = object.sections[0].sha256.clone();
+
+    // The same characters without it are a different assertion, so this is a
+    // revision with something to confirm rather than a no-op.
+    let object = admit(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &id,
+            excerpt("let x = 1;"),
+        ),
+    );
+    assert_eq!(object.sections[0].content[0].body, "let x = 1;");
+    assert_ne!(
+        object.sections[0].sha256, with_newline,
+        "two bodies that differ only in a trailing newline hash differently"
+    );
+
+    // And the same wording written twice over is still nothing to confirm, so
+    // the no-op check has not been loosened along the way.
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &id,
+            excerpt("let x = 1;"),
+        ),
+    )
+    .expect_err("the identical body is identical");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("nothing to confirm"), "{error}");
+
+    // Whitespace alone is a body. Empty is the one that means nothing.
+    let object = admit(&root, payload(Action::SectionAdded, &id, excerpt("   ")));
+    assert_eq!(object.sections[1].content[0].body, "   ");
+    let error = gate::prepare(&root, payload(Action::SectionAdded, &id, excerpt("")))
+        .expect_err("an empty body is not content");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("cannot be empty"), "{error}");
 }

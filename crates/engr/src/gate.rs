@@ -372,7 +372,7 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
     // After resolution, not before: two spellings of the same commit are the
     // same relation, and sorting has to see the resolved values or the order
     // would depend on what the caller happened to type.
-    payload.content.canonicalize();
+    payload.content.canonicalize_order();
     payload.validate()
 }
 
@@ -798,14 +798,14 @@ fn prepare_locked(
             //
             // Both sides are canonicalized for the comparison, and only for it.
             // A Section stored before Phase 3 holds whatever order its gate
-            // happened to write, and a body it never trimmed, so comparing a
-            // canonical proposal against it would find differences that are not
-            // ones and spend an Event on sorting an array or dropping a
-            // trailing newline. The stored Section is left exactly as it is:
-            // its hash covers the bytes it was written with, and rewriting it
-            // to tidy them would be the same non-change from the other side.
+            // happened to write, so comparing a sorted proposal against an
+            // unsorted stored value would find a difference that is not one and
+            // spend an Event on sorting an array. The stored Section is left
+            // exactly as it is: its hash covers the order it was written in, and
+            // rewriting it to tidy the order would be the same non-change from
+            // the other direction.
             let mut current = section.content();
-            current.canonicalize();
+            current.canonicalize_order();
             ensure!(
                 current != payload.content,
                 EXIT_INVARIANT,

@@ -262,13 +262,15 @@ alone: if the text reads "use the following", the excerpt has swallowed the
 assertion.
 
 `--content-file <type> <path>` is the same entry with the body read from a file.
-**Do not mix the two flags in one command** — it is refused. Content order is
-part of the assertion, and two separate flags cannot express one interleaved
-sequence, so engr will not guess one. Use one spelling for every entry.
+The two can be mixed freely; entries come out in the order you wrote them on the
+command line, not grouped by which flag you used.
 
-Trailing whitespace is trimmed off a body when it is admitted, so a file that
-ends in a newline needs no special handling. Everything inside the body is left
-exactly alone. A body that is nothing but whitespace is refused.
+A body is stored **exactly** as given — including a trailing newline, which is
+what a file almost always ends with. So `"x"` and `"x\n"` are different sections
+with different hashes, and revising one into the other is a real revision. Decide
+deliberately which one you mean rather than letting the shell decide for you. The
+candidate screen names any ending it cannot show, so a human is never confirming
+whitespace they could not see.
 
 If engr refuses a section as too large, do not shorten prose until the number
 goes down. Split an independent point into another section, move unresolved

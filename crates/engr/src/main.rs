@@ -1,4 +1,4 @@
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
@@ -382,6 +382,11 @@ struct Prepare {
     /// The same, with the body read from a file
     #[arg(long = "content-file", value_names = ["TYPE", "PATH"], num_args = 2)]
     content_file: Vec<String>,
+    /// Which flag wrote each `content[]` entry, in the order they appeared on
+    /// the command line. Filled from the parsed matches rather than by clap's
+    /// derive, which has no way to interleave two lists — see [`content_order`].
+    #[arg(skip)]
+    content_order: Vec<ContentSource>,
     /// A repository file that implements this assertion
     #[arg(long = "implemented-by-file", value_name = "PATH")]
     implemented_by_file: Vec<String>,
@@ -416,30 +421,14 @@ impl Prepare {
     /// first and the file-backed ones follow. Order is semantic, which is
     /// exactly why that has to be said rather than left to be discovered.
     fn supplements(&self) -> Result<Vec<Supplement>> {
-        // `content[]` is ordered, and the order is part of the assertion — a
-        // reader goes through the excerpts in sequence, and moving one is a
-        // revision. Two flags cannot express one interleaved sequence here:
-        // clap collects each into its own list, so `--content A
-        // --content-file B --content C` would silently arrive as A, C, B. That
-        // is authoritative semantic input being reordered, not CLI tidying, so
-        // the mixed form is refused rather than quietly given an order the
-        // caller did not write.
-        if !self.content.is_empty() && !self.content_file.is_empty() {
-            return Err(Error::new(
-                EXIT_USAGE,
-                "--content and --content-file cannot be mixed, because content order is \
-                 part of the assertion and the two flags cannot express one sequence; \
-                 use --content-file for every entry, or --content for every entry"
-                    .to_owned(),
-            ));
-        }
-        let mut entries = Vec::new();
+        let mut inline = Vec::new();
         for pair in self.content.chunks(2) {
             let [content_type, body] = pair else {
                 return Err(Error::new(EXIT_USAGE, "--content takes a type and a body"));
             };
-            entries.push(Supplement::new(content_type.clone(), body.clone()));
+            inline.push(Supplement::new(content_type.clone(), body.clone()));
         }
+        let mut from_file = Vec::new();
         for pair in self.content_file.chunks(2) {
             let [content_type, path] = pair else {
                 return Err(Error::new(
@@ -449,8 +438,34 @@ impl Prepare {
             };
             let body = std::fs::read_to_string(path)
                 .map_err(|error| engr::tool_error(path.clone(), error))?;
-            entries.push(Supplement::new(content_type.clone(), body));
+            from_file.push(Supplement::new(content_type.clone(), body));
         }
+        // `content[]` is ordered, and the order is part of the assertion — a
+        // reader goes through the excerpts in sequence, and moving one is a
+        // revision. So the entries come out in the order they were written on
+        // the command line, not grouped by which flag spelled them: clap keeps
+        // each flag's values in its own list, and taking one list after the
+        // other would turn `--content A --content-file B --content C` into
+        // A, C, B. That is authoritative input being reordered.
+        //
+        // `content_order` is the interleaving clap actually saw. Empty when
+        // nothing recorded it — a direct constructor in a test — in which case
+        // the two lists follow each other, the same answer whenever only one
+        // spelling was used.
+        let mut inline = inline.into_iter();
+        let mut from_file = from_file.into_iter();
+        let mut entries = Vec::new();
+        for source in &self.content_order {
+            let next = match source {
+                ContentSource::Inline => inline.next(),
+                ContentSource::File => from_file.next(),
+            };
+            if let Some(entry) = next {
+                entries.push(entry);
+            }
+        }
+        entries.extend(inline);
+        entries.extend(from_file);
         for entry in &entries {
             entry
                 .validate()
@@ -501,8 +516,57 @@ impl Prepare {
     }
 }
 
+/// Which flag a `content[]` entry was written with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ContentSource {
+    Inline,
+    File,
+}
+
+/// Recover the order the caller wrote `--content` and `--content-file` in.
+///
+/// `content[]` order is semantic, and the derive API cannot express one
+/// interleaved sequence across two options — each keeps its own list, and the
+/// lists say nothing about which came first. The parsed matches do: every value
+/// carries its position on the command line. Two values per occurrence, so the
+/// first index of each pair marks where that entry was written.
+///
+/// Read from the matches rather than from `std::env::args`, because a body is
+/// arbitrary text and one that happens to read `--content-file` would fool a
+/// scan of the raw arguments. clap already knows which tokens were flags.
+fn content_order(matches: &clap::ArgMatches) -> Vec<ContentSource> {
+    let Some(prepare) = matches.subcommand_matches("prepare") else {
+        return Vec::new();
+    };
+    let mut written: Vec<(usize, ContentSource)> = Vec::new();
+    for (id, source) in [
+        ("content", ContentSource::Inline),
+        ("content_file", ContentSource::File),
+    ] {
+        let Some(indices) = prepare.indices_of(id) else {
+            continue;
+        };
+        let indices: Vec<usize> = indices.collect();
+        for pair in indices.chunks(2) {
+            written.push((pair[0], source));
+        }
+    }
+    written.sort_by_key(|(index, _)| *index);
+    written.into_iter().map(|(_, source)| source).collect()
+}
+
 fn main() {
-    if let Err(error) = run(Cli::parse()) {
+    // The long way round `Cli::parse()`, which is exactly this pair, because the
+    // matches are thrown away by `parse` and one thing here needs them.
+    let matches = Cli::command().get_matches();
+    let mut cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    if let Command::Prepare(prepare) = &mut cli.command {
+        prepare.content_order = content_order(&matches);
+    }
+    if let Err(error) = run(cli) {
         eprintln!("error: {}", error.message);
         std::process::exit(error.code);
     }
@@ -1136,8 +1200,9 @@ fn render_supplement_bodies(
             Some(before) if before == entry => continue,
             Some(before) => {
                 out.push_str(&format!(
-                    "\n── content [{index}] {} ──\n",
-                    entry.content_type
+                    "\n── content [{index}] {} ──{}\n",
+                    entry.content_type,
+                    tail_suffix(" ", both_tails(Some(&before.body), Some(&entry.body)))
                 ));
                 if before.content_type != entry.content_type {
                     out.push_str(&format!("(was {})\n", before.content_type));
@@ -1153,8 +1218,9 @@ fn render_supplement_bodies(
             }
             None => {
                 out.push_str(&format!(
-                    "\n── content [{index}] {} ──\n",
-                    entry.content_type
+                    "\n── content [{index}] {} ──{}\n",
+                    entry.content_type,
+                    tail_suffix(" ", both_tails(None, Some(&entry.body)))
                 ));
                 push_body(out, &entry.body);
             }
@@ -1163,8 +1229,9 @@ fn render_supplement_bodies(
     if revising {
         for (index, entry) in previous.iter().enumerate().skip(proposed.len()) {
             out.push_str(&format!(
-                "\n── content [{index}] {} ── removed\n",
-                entry.content_type
+                "\n── content [{index}] {} ── removed{}\n",
+                entry.content_type,
+                tail_suffix(", ", both_tails(Some(&entry.body), None))
             ));
             // The body, not only the type. Duplicate types are valid, so with
             // two `code.rs` entries a heading names a position rather than a
@@ -1176,19 +1243,103 @@ fn render_supplement_bodies(
     }
 }
 
-/// A literal body, exactly as it is being admitted.
+/// A literal body, exactly as it is stored or proposed.
 ///
-/// Not trimmed. Admission already took the trailing whitespace off, so there is
-/// nothing here that trimming would tidy — and if this renderer trimmed anyway
-/// it would be able to draw two different payloads, with two different Section
-/// hashes, the same way. That is precisely the thing this gate exists to
-/// prevent. The one newline is the renderer's own line break, added only when
-/// the body does not already end in one, so a body a previous build stored
-/// untrimmed still prints as itself.
+/// Never trimmed. Every byte of a body is inside the Section hash, so a
+/// renderer that tidied one would be able to draw two different authoritative
+/// values the same way — which is the one thing this gate exists to prevent.
+/// The single newline is the renderer's own line break, added only when the
+/// body does not already end in one; what that break might be hiding is said
+/// out loud by [`tail_note`].
 fn push_body(out: &mut String, body: &str) {
     out.push_str(body);
     if !body.ends_with('\n') {
         out.push('\n');
+    }
+}
+
+/// How a body ends, when the way it ends cannot be seen.
+///
+/// A terminal draws `"x"`, `"x\n"` and `"x   "` identically, and a body of
+/// nothing but spaces as nothing at all — yet those are different literals with
+/// different Section hashes, and a human is being asked to admit one of them
+/// specifically. #14 defines a body as literal non-empty content and says
+/// nothing about normalising it, so v0 keeps every byte and describes the ones
+/// that do not show. Counted, not merely named: "2 spaces" and "3 spaces" are
+/// as different as anything else here, and a quoted run of spaces is no more
+/// countable on screen than an unquoted one.
+///
+/// `None` when the body ends in something visible, which is the ordinary case —
+/// a note on every entry would be a note nobody reads.
+fn tail_note(body: &str) -> Option<String> {
+    let visible = body.trim_end_matches(char::is_whitespace);
+    if visible.len() == body.len() {
+        return None;
+    }
+    let mut runs: Vec<String> = Vec::new();
+    let mut characters = body[visible.len()..].chars().peekable();
+    while let Some(character) = characters.next() {
+        let mut count = 1;
+        while characters.peek() == Some(&character) {
+            characters.next();
+            count += 1;
+        }
+        runs.push(format!("{count} {}", whitespace_name(character, count)));
+    }
+    let listed = match runs.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => return None,
+    };
+    Some(if visible.is_empty() {
+        format!("{listed}, and nothing else")
+    } else {
+        format!("ends with {listed}")
+    })
+}
+
+fn whitespace_name(character: char, count: usize) -> String {
+    let name = match character {
+        ' ' => "space",
+        '\t' => "tab",
+        '\n' => "newline",
+        '\r' => "carriage return",
+        other => return format!("U+{:04X}", other as u32),
+    };
+    if count == 1 {
+        name.to_owned()
+    } else {
+        format!("{name}s")
+    }
+}
+
+/// The heading suffix for one entry, naming whichever side has an invisible
+/// tail. Both sides are named when both do, because a revision that only moves
+/// trailing whitespace is a real change to a real hash and the diff below
+/// cannot show it.
+fn both_tails(previous: Option<&str>, proposed: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(note) = previous.and_then(tail_note) {
+        parts.push(match proposed {
+            Some(_) => format!("previous {note}"),
+            None => note,
+        });
+    }
+    if let Some(note) = proposed.and_then(tail_note) {
+        parts.push(match previous {
+            Some(_) => format!("candidate {note}"),
+            None => note,
+        });
+    }
+    parts.join("; ")
+}
+
+/// The note as a heading suffix, punctuated for whichever heading it follows.
+fn tail_suffix(separator: &str, note: String) -> String {
+    if note.is_empty() {
+        String::new()
+    } else {
+        format!("{separator}{note}")
     }
 }
 

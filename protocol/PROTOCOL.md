@@ -317,17 +317,18 @@ its own. Changing one is an ordinary revision of the containing section, which i
 what keeps the section the single unit of authority, hashing, revision and
 reference. Duplicate types are allowed; an empty `content[]` is not stored.
 
-A body is **literal**, so its internal whitespace and indentation are part of the
-content and MUST NOT be altered. Whitespace at the very **end** of a body is the
-one exception: admission trims it, before the payload is hashed and before a
-human is shown it. The reason is the gate rather than tidiness — trailing
-whitespace is invisible on a terminal, so `"x"`, `"x\n"` and `"x   "` would
-otherwise be three payloads with three different section hashes that a human
-reads identically, and `--content-file` makes that the ordinary case rather than
-the odd one, because text files end in a newline. A body that was nothing but
-whitespace becomes empty and is refused. Nothing is trimmed on the read path, so
-every hash written before this rule stays valid, and the "nothing to confirm"
-comparison MUST normalize the stored body the same way it normalizes stored sets.
+A body is **literal**. Every byte of it is inside the section hash and none of it
+is normalized — not on the way in and not on the read path. `"x"`, `"x\n"` and
+`"x   "` are three different sections, and a body of nothing but whitespace is a
+body; only an empty one is refused.
+
+That leaves a real problem, and v0 answers it as a **presentation** obligation
+rather than by changing the value: trailing whitespace is invisible on a
+terminal, so the confirmation display MUST say how a body ends whenever the way
+it ends cannot be seen. See [What a human is shown](#what-a-human-is-shown).
+Whether admission *should* normalize trailing whitespace instead is an open
+question, recorded under [What v0 does not
+solve](#trailing-whitespace-in-a-body-is-significant-by-default).
 
 ### Bounds
 
@@ -395,9 +396,8 @@ nothing else is refused as having nothing to confirm. No canonical persisted sor
 order is required of anyone hand-writing these files, and none is enforced on the
 read path, which is why every hash written before this rule existed stays valid.
 
-That last point has a consequence the "nothing to confirm" check MUST honour, and
-it applies equally to the trailing-whitespace normalization of a body. A
-section stored before these rules holds whatever order its gate wrote, so the
+That last point has a consequence the "nothing to confirm" check MUST honour. A
+section stored before this rule holds whatever order its gate wrote, so the
 comparison MUST canonicalize the **stored** value too, and only for the
 comparison. Otherwise re-proposing the same members against such a section finds
 a difference that the model says is not one, and spends a confirmation and a
@@ -501,11 +501,20 @@ the type of an entry has not read what they are about to admit, and duplicate
 types are valid, so a heading alone names a position rather than a thing. The
 bounds exist precisely so that printing a whole body stays reasonable.
 
-"Exactly" is load-bearing: a renderer that trimmed could draw two payloads with
-two different section hashes the same way, which is the one thing this gate
-exists to prevent. Trailing whitespace is removed at **admission** instead, where
-it changes the value actually hashed — see [Supplementary
-content](#supplementary-content).
+"Exactly" is load-bearing, and it is not enough on its own. A renderer that
+trimmed could draw two different authoritative values the same way, which is the
+one thing this gate exists to prevent — but so does a terminal, for any body
+ending in whitespace. So the display MUST also **name the ending it cannot
+show**: whenever a body ends in whitespace, the presentation MUST state what
+that trailing run consists of, counted rather than merely named, since three
+spaces and two spaces are as different as anything else here. A body that is
+entirely whitespace MUST be identified as such. When a revision moves only
+trailing whitespace — which a line diff cannot show — both the previous and the
+proposed ending MUST be named.
+
+This applies to bodies already in storage, not only to newly admitted ones.
+Nothing normalizes a body anywhere, so any workspace may hold these values, and
+the human confirming their removal is confirming the exact literal.
 
 `object_classified` shows the destination type, the destination state, and what
 that does to the object's place in the default listing. A state without its type
@@ -872,6 +881,27 @@ current again, that is what a new object says.
 
 The signal that would bring an operation in is a real case where the supersession
 itself was the mistake, rather than the design being replaced changing again.
+
+### Trailing whitespace in a body is significant by default
+
+`content[].body` is literal, and #14 says only that it is non-empty UTF-8. So
+`"x"`, `"x\n"` and `"x   "` are three different sections with three different
+hashes, a body of nothing but spaces is admissible, and a revision that only adds
+a trailing newline is a real revision with something to confirm.
+
+Whether that is right is **undecided**, and deliberately not decided here. The
+case for normalizing trailing whitespace at admission is that a body read from a
+file almost always ends in a newline, so two callers writing the same excerpt two
+ordinary ways produce two different records for no engineering reason. The case
+against is that normalizing redefines literal equality, payload identity and
+"nothing to confirm" all at once — for a field whose whole point is being
+literal — and #14 establishes no such exception.
+
+v0 therefore keeps every byte and pays for it in presentation: the display names
+the ending it cannot show, so the ambiguity never reaches the human. That closes
+the confirmation risk without settling the semantics. Settling it needs an
+accepted design decision on #14, not an implementation choice, because it changes
+what is persisted for a given input.
 
 ### Redaction is not a goal
 

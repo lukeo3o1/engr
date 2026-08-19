@@ -2679,25 +2679,43 @@ fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
     );
 }
 
-/// The screen shows the exact literal that will be hashed.
+/// Give a stored Section bodies a text editor could have put there.
 ///
-/// A file body normally ends in a newline, so this is the ordinary path rather
-/// than a corner. Admission takes the trailing whitespace off, the screen shows
-/// what is left, and the section stores exactly that — one value, read and
-/// admitted and stored, with no step in the middle quietly showing something
-/// else.
+/// The hash is recomputed, so this is valid persisted authority rather than
+/// corruption — exactly what a workspace written by any build may hold, since
+/// nothing on the read path normalizes a body.
+fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
+    let mut object = store::load_object(root, id).expect("load");
+    let section = &mut object.sections[0];
+    section.content = bodies
+        .iter()
+        .map(|body| engr::semantics::Supplement::new("code.rs", *body))
+        .collect();
+    section.sha256 = section.recomputed_sha256().expect("hash");
+    store::save_object(root, &object).expect("save");
+    assert!(
+        run_engr(root, &["verify", id]).status.success(),
+        "the seeded section must be valid stored authority"
+    );
+}
+
+/// The screen cannot draw two different authoritative bodies the same way.
+///
+/// A terminal shows `"x"`, `"x\n"` and `"x   "` identically, and a body of
+/// nothing but spaces as nothing at all — yet each is a different literal
+/// inside a different Section hash. Nothing normalizes a body, on the way in or
+/// on the read path, so any build's workspace may hold all of these; the gate's
+/// obligation is to say what it is showing, not to change it.
 #[test]
-fn a_file_backed_body_is_admitted_and_shown_as_the_same_literal() {
+fn a_body_whose_ending_is_invisible_is_described_where_the_human_reads_it() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
-    let created = prepare(root, &["prepare", "--new", "--text", "literal bodies"]);
+    let created = prepare(root, &["prepare", "--new", "--text", "invisible endings"]);
     confirm(root, &created);
     let id = created["object"].as_str().expect("object id").to_owned();
 
-    let excerpt = root.join("excerpt.json");
-    std::fs::write(&excerpt, "{\n  \"issuer\": \"acme\"\n}\n").expect("write excerpt");
-    let screen = run_engr(
+    let added = prepare(
         root,
         &[
             "prepare",
@@ -2706,36 +2724,26 @@ fn a_file_backed_body_is_admitted_and_shown_as_the_same_literal() {
             "--add",
             "--no-based-on",
             "--text",
-            "The issuer block is the one the verifier reads.",
-            "--content-file",
-            "data.json",
-            excerpt.to_str().expect("path"),
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "placeholder one",
+            "--content",
+            "code.rs",
+            "placeholder two",
+            "--content",
+            "code.rs",
+            "placeholder three",
         ],
     );
-    assert!(
-        screen.status.success(),
-        "{}",
-        String::from_utf8_lossy(&screen.stderr)
-    );
-    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
-    assert!(shown.contains("{\n  \"issuer\": \"acme\"\n}\n"), "{shown}");
-    let code = code_from(&shown);
-    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
-        .status
-        .success());
+    confirm(root, &added);
 
-    let value: Value =
-        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
-            .expect("json");
-    assert_eq!(
-        value["sections"][0]["content"][0]["body"], "{\n  \"issuer\": \"acme\"\n}",
-        "the trailing newline came off at admission, not at the renderer"
-    );
+    // Now they hold what a previous build, a hand edit, or a body that simply
+    // ended that way would leave behind.
+    seed_bodies(root, &id, &["let x = 1;\n", "let y = 2;   ", "   "]);
 
-    // The same file without its final newline is therefore the same assertion,
-    // and there is nothing left to confirm about it.
-    std::fs::write(&excerpt, "{\n  \"issuer\": \"acme\"\n}").expect("rewrite excerpt");
-    let refused = run_engr(
+    // Removing all three: the screen has to convey what is being removed.
+    let screen = run_engr(
         root,
         &[
             "prepare",
@@ -2745,24 +2753,84 @@ fn a_file_backed_body_is_admitted_and_shown_as_the_same_literal() {
             "1",
             "--no-based-on",
             "--text",
-            "The issuer block is the one the verifier reads.",
-            "--content-file",
-            "data.json",
-            excerpt.to_str().expect("path"),
+            "Three excerpts stand behind this assertion.",
         ],
     );
-    assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("nothing to confirm"),
+        screen.status.success(),
         "{}",
-        String::from_utf8_lossy(&refused.stderr)
+        String::from_utf8_lossy(&screen.stderr)
     );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for expected in [
+        "── content [0] code.rs ── removed, ends with 1 newline",
+        "── content [1] code.rs ── removed, ends with 3 spaces",
+        "── content [2] code.rs ── removed, 3 spaces, and nothing else",
+    ] {
+        assert!(
+            expected_line(&shown, expected),
+            "{expected:?} not in {shown}"
+        );
+    }
+    // The bodies themselves are still printed exactly, untrimmed.
+    assert!(shown.contains("let x = 1;\n"), "{shown}");
+    assert!(shown.contains("let y = 2;   \n"), "{shown}");
+
+    // And a revision that only moves trailing whitespace — which the line diff
+    // below cannot show — is named on both sides.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "let x = 1;\n\n",
+            "--content",
+            "code.rs",
+            "let y = 2;   ",
+            "--content",
+            "code.rs",
+            "   ",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(
+        expected_line(
+            &shown,
+            "── content [0] code.rs ── previous ends with 1 newline; candidate ends with 2 newlines"
+        ),
+        "{shown}"
+    );
+    // The other two are unchanged, so they are not shown at all.
+    assert!(!shown.contains("content [1]"), "{shown}");
+    assert!(!shown.contains("content [2]"), "{shown}");
 }
 
-/// Content order is part of the assertion, so a spelling that cannot express
-/// one order is refused rather than given one nobody wrote.
+/// Whether a line is present exactly, trailing spaces and all.
+fn expected_line(screen: &str, line: &str) -> bool {
+    screen.lines().any(|candidate| candidate == line)
+}
+
+/// Content order is the order the caller wrote, whichever flag spelled it.
+///
+/// `content[]` is ordered and moving an entry is a revision, so grouping the
+/// inline entries ahead of the file-backed ones would be authoritative input
+/// being silently rearranged. Both spellings stay available and mixing them
+/// stays legal; what changed is that the sequence survives.
 #[test]
-fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
+fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -2770,45 +2838,12 @@ fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
     confirm(root, &created);
     let id = created["object"].as_str().expect("object id").to_owned();
 
-    let middle = root.join("middle.json");
-    std::fs::write(&middle, "{\"second\":true}").expect("write");
-    let refused = run_engr(
-        root,
-        &[
-            "prepare",
-            "--object",
-            &id,
-            "--add",
-            "--no-based-on",
-            "--text",
-            "three excerpts, in this order",
-            "--content",
-            "code.rs",
-            "let first = 1;",
-            "--content-file",
-            "data.json",
-            middle.to_str().expect("path"),
-            "--content",
-            "code.rs",
-            "let third = 3;",
-        ],
-    );
-    assert!(
-        !refused.status.success(),
-        "the flags cannot express first, middle, third"
-    );
-    let message = String::from_utf8_lossy(&refused.stderr).to_string();
-    assert!(message.contains("cannot be mixed"), "{message}");
-    assert!(
-        message.contains("order"),
-        "the refusal says why, not just that: {message}"
-    );
-    assert!(
-        String::from_utf8_lossy(&run_engr(root, &["candidate"]).stdout).contains("nothing"),
-        "and nothing was minted from a guessed order"
-    );
+    let second = root.join("second.json");
+    std::fs::write(&second, "{\"second\":true}").expect("write");
+    let fourth = root.join("fourth.json");
+    std::fs::write(&fourth, "{\"fourth\":true}").expect("write");
 
-    // One spelling for every entry keeps the order the caller wrote.
+    // Inline, file, inline, file — the interleaving the two lists cannot hold.
     let screen = run_engr(
         root,
         &[
@@ -2818,16 +2853,19 @@ fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
             "--add",
             "--no-based-on",
             "--text",
-            "three excerpts, in this order",
+            "four excerpts, in this order",
             "--content",
             "code.rs",
             "let first = 1;",
-            "--content",
+            "--content-file",
             "data.json",
-            "{\"second\":true}",
+            second.to_str().expect("path"),
             "--content",
             "code.rs",
             "let third = 3;",
+            "--content-file",
+            "data.json",
+            fourth.to_str().expect("path"),
         ],
     );
     assert!(
@@ -2835,7 +2873,23 @@ fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
         "{}",
         String::from_utf8_lossy(&screen.stderr)
     );
-    let code = code_from(&String::from_utf8_lossy(&screen.stdout));
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    let headings: Vec<&str> = shown
+        .lines()
+        .filter(|line| line.starts_with("Content    ["))
+        .collect();
+    assert_eq!(
+        headings,
+        vec![
+            "Content    [0] code.rs",
+            "Content    [1] data.json",
+            "Content    [2] code.rs",
+            "Content    [3] data.json",
+        ],
+        "the candidate screen shows the caller's order: {shown}"
+    );
+
+    let code = code_from(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -2850,6 +2904,12 @@ fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
         .collect();
     assert_eq!(
         bodies,
-        vec!["let first = 1;", "{\"second\":true}", "let third = 3;"]
+        vec![
+            "let first = 1;",
+            "{\"second\":true}",
+            "let third = 3;",
+            "{\"fourth\":true}",
+        ],
+        "and the record stores it"
     );
 }

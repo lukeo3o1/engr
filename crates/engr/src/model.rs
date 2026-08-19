@@ -121,7 +121,8 @@ impl Content {
         canonical_sha256_with_basis(self)
     }
 
-    /// Put this content in the one form that will be hashed and shown.
+    /// Put the order-insensitive collections in one order before anything is
+    /// hashed.
     ///
     /// `refs` and `relations` are sets: the same three references written in
     /// another order are the same assertion. Sorting them at the gate — before
@@ -129,26 +130,16 @@ impl Content {
     /// makes that true in practice, and it costs nothing on the read path, so
     /// every hash already stored stays valid.
     ///
-    /// Supplementary bodies lose trailing whitespace for a related reason, and
-    /// one specific to this gate. A body is literal, so *internal* whitespace
-    /// and indentation are untouchable — but whitespace at the very end of one
-    /// is invisible on the screen a human confirms, and `"x"`, `"x\n"` and
-    /// `"x   "` would otherwise be three different payloads with three
-    /// different hashes that a terminal draws identically. `--content-file`
-    /// makes that the common case rather than the odd one, because text files
-    /// end in a newline. Normalising here means what the human reads is what
-    /// gets hashed, instead of the renderer quietly hiding the difference.
-    /// A body that was nothing but whitespace becomes empty, which
-    /// [`Supplement::validate`] refuses.
-    pub fn canonicalize(&mut self) {
+    /// Supplementary bodies are **not** touched here. A body is literal, and
+    /// #14 says only that it is non-empty UTF-8 — so every byte of it is
+    /// significant, `"x"` and `"x\n"` are different sections with different
+    /// hashes, and it is not this function's place to decide otherwise. That
+    /// makes the trailing whitespace a *presentation* obligation instead: see
+    /// `render_supplement_bodies`, which says how a body ends when the way it
+    /// ends would otherwise be invisible.
+    pub fn canonicalize_order(&mut self) {
         self.refs.sort();
         self.relations.sort();
-        for entry in &mut self.content {
-            let trimmed = entry.body.trim_end();
-            if trimmed.len() != entry.body.len() {
-                entry.body.truncate(trimmed.len());
-            }
-        }
     }
 
     fn validate(&self) -> Result<()> {
