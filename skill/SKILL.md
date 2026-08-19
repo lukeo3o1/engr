@@ -261,6 +261,15 @@ literal to be precise. The section must still be understandable from its text
 alone: if the text reads "use the following", the excerpt has swallowed the
 assertion.
 
+`--content-file <type> <path>` is the same entry with the body read from a file.
+**Do not mix the two flags in one command** — it is refused. Content order is
+part of the assertion, and two separate flags cannot express one interleaved
+sequence, so engr will not guess one. Use one spelling for every entry.
+
+Trailing whitespace is trimmed off a body when it is admitted, so a file that
+ends in a newline needs no special handling. Everything inside the body is left
+exactly alone. A body that is nothing but whitespace is refused.
+
 If engr refuses a section as too large, do not shorten prose until the number
 goes down. Split an independent point into another section, move unresolved
 reasoning into `engr backlog`, point at the implementation with

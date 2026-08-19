@@ -372,7 +372,7 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
     // After resolution, not before: two spellings of the same commit are the
     // same relation, and sorting has to see the resolved values or the order
     // would depend on what the caller happened to type.
-    payload.content.canonicalize_order();
+    payload.content.canonicalize();
     payload.validate()
 }
 
@@ -524,15 +524,26 @@ pub fn prepare_admitting(
     })
 }
 
-/// What engr last refused for size, so an explicit retry can prove it is the
-/// retry of something that was actually refused.
+/// Which proposals engr has refused for size, so an explicit retry can prove it
+/// is the retry of something that was actually refused.
+///
+/// A list rather than a slot, because a workspace holds work on many Objects at
+/// once. One slot would mean any second proposal considered anywhere revoked the
+/// first one's refusal, and the agent that had already done what the rule asks
+/// would be sent back to do it again — enforcing the rule for whichever proposal
+/// happened to be refused last, rather than for each.
 ///
 /// Admission-time only, like the exception itself: nothing here is the record,
-/// and nothing here survives being consumed.
-#[derive(Serialize, Deserialize)]
-struct Refusal {
-    payload_sha256: String,
+/// nothing here survives being consumed, and it is capped because it is scratch
+/// memory rather than history. Past the cap the oldest entry is dropped and that
+/// proposal simply earns its refusal again, which is the safe direction.
+#[derive(Serialize, Deserialize, Default)]
+struct Refusals {
+    /// Payload hashes, most recently refused first.
+    refused: Vec<String>,
 }
+
+const REFUSALS_REMEMBERED: usize = 32;
 
 /// The two-stage admission enforced, rather than described.
 ///
@@ -559,7 +570,7 @@ fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Resu
         );
         if !hard {
             ensure!(
-                refused(root)?.as_deref() == Some(payload.sha256()?.as_str()),
+                refusals(root).refused.contains(&payload.sha256()?),
                 EXIT_INVARIANT,
                 "an oversize exception is the retry of a refusal, and engr has not refused this proposal; prepare it without --oversize first and read what that refusal suggests"
             );
@@ -574,37 +585,42 @@ fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Resu
     // leaving a receipt behind would make `--oversize` look like the answer to a
     // refusal that always says no.
     if result.is_err() && !hard {
-        store::write_json(
-            &store::refusal_path(root),
-            &Refusal {
-                payload_sha256: payload.sha256()?,
-            },
-        )?;
+        remember_refusal(root, &payload.sha256()?)?;
     }
     result.map(|_| ())
 }
 
-fn refused(root: &Path) -> Result<Option<String>> {
-    let path = store::refusal_path(root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    // Unreadable is treated as absent rather than fatal: this file is one
-    // machine's scratch memory, and a corrupted one should cost a second
-    // refusal, not make the workspace unusable.
-    Ok(store::read_json::<Refusal>(&path)
-        .ok()
-        .map(|refusal| refusal.payload_sha256))
+/// Unreadable or absent is treated as "nothing refused" rather than as an error:
+/// this file is one machine's scratch memory, and a corrupted one should cost a
+/// second refusal, not make the workspace unusable.
+fn refusals(root: &Path) -> Refusals {
+    store::read_json::<Refusals>(&store::refusal_path(root)).unwrap_or_default()
 }
 
-/// One refusal admits one retry. Cleared only once the candidate exists, so a
-/// proposal that failed some later check does not silently spend its receipt.
-fn spend_refusal(root: &Path) -> Result<()> {
-    let path = store::refusal_path(root);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+fn remember_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
+    let mut held = refusals(root);
+    held.refused.retain(|held| held != payload_sha256);
+    held.refused.insert(0, payload_sha256.to_owned());
+    held.refused.truncate(REFUSALS_REMEMBERED);
+    store::write_json(&store::refusal_path(root), &held)
+}
+
+/// One refusal admits one retry, and only the retry of that proposal. Spent
+/// once the candidate exists, so a proposal that failed some later check does
+/// not silently lose its place — and spending one leaves every other
+/// outstanding refusal alone.
+fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
+    let mut held = refusals(root);
+    let before = held.refused.len();
+    held.refused.retain(|held| held != payload_sha256);
+    if held.refused.len() == before {
+        return Ok(());
     }
-    Ok(())
+    let path = store::refusal_path(root);
+    if held.refused.is_empty() {
+        return fs::remove_file(&path).map_err(|error| tool_error(path.display(), error));
+    }
+    store::write_json(&path, &held)
 }
 
 /// Resolve each declared source and pin what it currently says.
@@ -782,14 +798,14 @@ fn prepare_locked(
             //
             // Both sides are canonicalized for the comparison, and only for it.
             // A Section stored before Phase 3 holds whatever order its gate
-            // happened to write, so comparing a sorted proposal against an
-            // unsorted stored value would find a difference that is not one and
-            // spend an Event on sorting an array. The stored Section is left
-            // exactly as it is: its hash covers the order it was written in, and
-            // rewriting it to tidy the order would be the same non-change from
-            // the other direction.
+            // happened to write, and a body it never trimmed, so comparing a
+            // canonical proposal against it would find differences that are not
+            // ones and spend an Event on sorting an array or dropping a
+            // trailing newline. The stored Section is left exactly as it is:
+            // its hash covers the bytes it was written with, and rewriting it
+            // to tidy them would be the same non-change from the other side.
             let mut current = section.content();
-            current.canonicalize_order();
+            current.canonicalize();
             ensure!(
                 current != payload.content,
                 EXIT_INVARIANT,
@@ -887,7 +903,7 @@ fn prepare_locked(
         &candidate,
     )?;
     if admission == Admission::Oversize {
-        spend_refusal(root)?;
+        spend_refusal(root, &candidate.payload_sha256)?;
     }
 
     let notes = notes_for(root, &candidate);

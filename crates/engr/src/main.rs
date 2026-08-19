@@ -416,6 +416,23 @@ impl Prepare {
     /// first and the file-backed ones follow. Order is semantic, which is
     /// exactly why that has to be said rather than left to be discovered.
     fn supplements(&self) -> Result<Vec<Supplement>> {
+        // `content[]` is ordered, and the order is part of the assertion — a
+        // reader goes through the excerpts in sequence, and moving one is a
+        // revision. Two flags cannot express one interleaved sequence here:
+        // clap collects each into its own list, so `--content A
+        // --content-file B --content C` would silently arrive as A, C, B. That
+        // is authoritative semantic input being reordered, not CLI tidying, so
+        // the mixed form is refused rather than quietly given an order the
+        // caller did not write.
+        if !self.content.is_empty() && !self.content_file.is_empty() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--content and --content-file cannot be mixed, because content order is \
+                 part of the assertion and the two flags cannot express one sequence; \
+                 use --content-file for every entry, or --content for every entry"
+                    .to_owned(),
+            ));
+        }
         let mut entries = Vec::new();
         for pair in self.content.chunks(2) {
             let [content_type, body] = pair else {
@@ -1139,8 +1156,7 @@ fn render_supplement_bodies(
                     "\n── content [{index}] {} ──\n",
                     entry.content_type
                 ));
-                out.push_str(entry.body.trim_end());
-                out.push('\n');
+                push_body(out, &entry.body);
             }
         }
     }
@@ -1155,9 +1171,24 @@ fn render_supplement_bodies(
             // thing — and a human asked to admit a deletion has to be shown what
             // is being deleted, the same way removed wording appears in the text
             // diff. It is hashed with the section; it is not a detail.
-            out.push_str(entry.body.trim_end());
-            out.push('\n');
+            push_body(out, &entry.body);
         }
+    }
+}
+
+/// A literal body, exactly as it is being admitted.
+///
+/// Not trimmed. Admission already took the trailing whitespace off, so there is
+/// nothing here that trimming would tidy — and if this renderer trimmed anyway
+/// it would be able to draw two different payloads, with two different Section
+/// hashes, the same way. That is precisely the thing this gate exists to
+/// prevent. The one newline is the renderer's own line break, added only when
+/// the body does not already end in one, so a body a previous build stored
+/// untrimmed still prints as itself.
+fn push_body(out: &mut String, body: &str) {
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
     }
 }
 

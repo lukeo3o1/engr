@@ -1391,3 +1391,106 @@ fn an_accepted_object_is_superseded_without_being_reclassified_first() {
         "{error}"
     );
 }
+
+/// Two literal bodies a terminal draws identically must not be two payloads.
+///
+/// A body is literal, so its internal whitespace is untouchable — but
+/// whitespace at the *end* of one is invisible on the screen a human confirms.
+/// Left alone, `"x"`, `"x\n"` and `"x   "` would be three different payloads
+/// with three different Section hashes that read the same, and the whole
+/// premise of this gate is that what a human read is what got admitted. So the
+/// value is normalized, not the picture of it.
+#[test]
+fn bodies_that_differ_only_in_trailing_whitespace_are_one_assertion() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "literal bodies");
+    let excerpt = |body: &str| Content {
+        text: "the assertion the excerpt supports".to_owned(),
+        content: vec![Supplement::new("code.rs", body)],
+        ..Content::default()
+    };
+
+    let object = admit(
+        &root,
+        payload(Action::SectionAdded, &id, excerpt("let x = 1;\n\n  ")),
+    );
+    assert_eq!(
+        object.sections[0].content[0].body, "let x = 1;",
+        "admission trims the end of a body, before it is hashed"
+    );
+
+    // Every other spelling of the same literal is now the same assertion, and a
+    // revision into one of them has nothing to confirm.
+    for spelling in ["let x = 1;", "let x = 1;\n", "let x = 1;   \n\t"] {
+        let error = gate::prepare(
+            &root,
+            payload(
+                Action::SectionRevised { section: 1 },
+                &id,
+                excerpt(spelling),
+            ),
+        )
+        .expect_err("a trailing newline is not a semantic change");
+        assert_eq!(error.code, engr::EXIT_INVARIANT);
+        assert!(error.message.contains("nothing to confirm"), "{error}");
+    }
+
+    // Inside the body nothing is touched, because that is the content.
+    let object = admit(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &id,
+            excerpt("  let x = 1;\n\n    let y = 2;"),
+        ),
+    );
+    assert_eq!(
+        object.sections[0].content[0].body, "  let x = 1;\n\n    let y = 2;",
+        "leading and internal whitespace is the excerpt"
+    );
+
+    // And a body that was only whitespace is nothing at all.
+    for blank in [" ", "\n", "\t\n  "] {
+        let error = gate::prepare(&root, payload(Action::SectionAdded, &id, excerpt(blank)))
+            .expect_err("whitespace alone is not a body");
+        assert_eq!(error.code, engr::EXIT_SCHEMA);
+        assert!(error.message.contains("whitespace alone"), "{error}");
+    }
+}
+
+/// A refusal belongs to the proposal it refused, not to the workspace.
+///
+/// One slot would mean any second proposal considered anywhere revoked the
+/// first one's refusal — so an agent that had already done exactly what the
+/// two-stage rule asks would be sent back to do it again, for a reason with
+/// nothing to do with its own proposal. A workspace holds work on many Objects
+/// at once; the rule has to hold for each of them.
+#[test]
+fn each_refused_proposal_keeps_its_own_retry() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "one object");
+    let second = new_object(&root, "another object");
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+    let other = format!("{long}y");
+    let proposal = |id: &str, text: &str| payload(Action::SectionAdded, id, wording(text));
+
+    // Both are refused, in the order that used to lose the first receipt.
+    gate::prepare(&root, proposal(&first, &long)).expect_err("refused for size");
+    gate::prepare(&root, proposal(&second, &other)).expect_err("refused for size");
+
+    // The older refusal is still the caller's to retry.
+    let earlier =
+        gate::prepare_oversize(&root, proposal(&first, &long)).expect("the first refusal stands");
+    assert!(earlier.candidate.context.oversize);
+    let later = gate::prepare_oversize(&root, proposal(&second, &other))
+        .expect("and so does the second, independently");
+    assert!(later.candidate.context.oversize);
+
+    // Spending one leaves nothing behind for it, and takes nothing from anyone
+    // else — both were spent above, so both now need a fresh refusal.
+    for (id, text) in [(&first, &long), (&second, &other)] {
+        let error = gate::prepare_oversize(&root, proposal(id, text))
+            .expect_err("an exception is spent by the retry that used it");
+        assert_eq!(error.code, engr::EXIT_INVARIANT);
+    }
+}

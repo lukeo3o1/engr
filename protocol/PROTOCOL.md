@@ -317,6 +317,18 @@ its own. Changing one is an ordinary revision of the containing section, which i
 what keeps the section the single unit of authority, hashing, revision and
 reference. Duplicate types are allowed; an empty `content[]` is not stored.
 
+A body is **literal**, so its internal whitespace and indentation are part of the
+content and MUST NOT be altered. Whitespace at the very **end** of a body is the
+one exception: admission trims it, before the payload is hashed and before a
+human is shown it. The reason is the gate rather than tidiness — trailing
+whitespace is invisible on a terminal, so `"x"`, `"x\n"` and `"x   "` would
+otherwise be three payloads with three different section hashes that a human
+reads identically, and `--content-file` makes that the ordinary case rather than
+the odd one, because text files end in a newline. A body that was nothing but
+whitespace becomes empty and is refused. Nothing is trimmed on the read path, so
+every hash written before this rule stays valid, and the "nothing to confirm"
+comparison MUST normalize the stored body the same way it normalizes stored sets.
+
 ### Bounds
 
 Counted in **Unicode scalar values**, not bytes, because the limit is about how
@@ -345,6 +357,14 @@ refusal. An exception over content that breaks no normal threshold MUST also be
 refused: there is nothing to except, and a flag that is harmless to pass is a
 flag an agent passes by default. How the refusal is remembered is local, and it
 MUST NOT be part of the record or of anything shared between machines.
+
+Refusals are tracked **per proposal, not per workspace**. A workspace holds work
+on many objects at once, and considering a second proposal MUST NOT revoke the
+first one's refusal — an agent that has already done what the rule asks would
+otherwise be sent back to do it again for a reason that has nothing to do with
+its proposal. Spending one exception leaves every other outstanding refusal
+alone. The set may be bounded; forgetting costs an extra refusal, which is the
+safe direction.
 
 Above a **hard** ceiling, engr always refuses. The hard ceiling is not a
 threshold with an override, and MUST NOT read as one, or an agent that learned to
@@ -375,8 +395,9 @@ nothing else is refused as having nothing to confirm. No canonical persisted sor
 order is required of anyone hand-writing these files, and none is enforced on the
 read path, which is why every hash written before this rule existed stays valid.
 
-That last point has a consequence the "nothing to confirm" check MUST honour. A
-section stored before this rule holds whatever order its gate wrote, so the
+That last point has a consequence the "nothing to confirm" check MUST honour, and
+it applies equally to the trailing-whitespace normalization of a body. A
+section stored before these rules holds whatever order its gate wrote, so the
 comparison MUST canonicalize the **stored** value too, and only for the
 comparison. Otherwise re-proposing the same members against such a section finds
 a difference that the model says is not one, and spends a confirmation and a
@@ -472,12 +493,19 @@ basis is displayed as such. Omitted unchanged wording remains part of the
 complete candidate payload and confirmation hash.
 
 A supplementary content body is shown **in full whenever it is added or
-removed** — the whole body, never only its type. A body that *changed* is shown
-as a unified line diff against the previous body, the same presentation section
-text gets. They are part of the assertion and part of what is hashed, so a human
-shown only the type of an entry has not read what they are about to admit, and
-duplicate types are valid, so a heading alone names a position rather than a
-thing. The bounds exist precisely so that printing a whole body stays reasonable.
+removed** — the whole body, exactly as it is being admitted, never only its type
+and never trimmed by the renderer. A body that *changed* is shown as a unified
+line diff against the previous body, the same presentation section text gets.
+They are part of the assertion and part of what is hashed, so a human shown only
+the type of an entry has not read what they are about to admit, and duplicate
+types are valid, so a heading alone names a position rather than a thing. The
+bounds exist precisely so that printing a whole body stays reasonable.
+
+"Exactly" is load-bearing: a renderer that trimmed could draw two payloads with
+two different section hashes the same way, which is the one thing this gate
+exists to prevent. Trailing whitespace is removed at **admission** instead, where
+it changes the value actually hashed — see [Supplementary
+content](#supplementary-content).
 
 `object_classified` shows the destination type, the destination state, and what
 that does to the object's place in the default listing. A state without its type

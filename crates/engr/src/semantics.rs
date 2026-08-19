@@ -412,13 +412,16 @@ impl Supplement {
 
     pub fn validate(&self) -> Result<()> {
         validate_content_type(&self.content_type)?;
-        // Not `trim().is_empty()`: whitespace can be the whole point of a code
-        // or data excerpt, and an entry that is only whitespace is still an
-        // entry somebody meant to write. Empty is the case that means nothing.
+        // Not `trim().is_empty()`: internal whitespace and indentation can be
+        // the whole point of a code or data excerpt, and this also runs when a
+        // stored payload is read, where nothing may be reinterpreted. A body
+        // that is *only* whitespace still gets here as empty, because
+        // admission trims the trailing whitespace off every body first —
+        // see [`crate::model::Content::canonicalize`].
         ensure!(
             !self.body.is_empty(),
             EXIT_SCHEMA,
-            "content entry {}: a body cannot be empty",
+            "content entry {}: a body cannot be empty, and whitespace alone is not a body",
             self.content_type
         );
         Ok(())

@@ -2678,3 +2678,178 @@ fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
         "and no attempt left a code awaiting a human"
     );
 }
+
+/// The screen shows the exact literal that will be hashed.
+///
+/// A file body normally ends in a newline, so this is the ordinary path rather
+/// than a corner. Admission takes the trailing whitespace off, the screen shows
+/// what is left, and the section stores exactly that — one value, read and
+/// admitted and stored, with no step in the middle quietly showing something
+/// else.
+#[test]
+fn a_file_backed_body_is_admitted_and_shown_as_the_same_literal() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "literal bodies"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let excerpt = root.join("excerpt.json");
+    std::fs::write(&excerpt, "{\n  \"issuer\": \"acme\"\n}\n").expect("write excerpt");
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "The issuer block is the one the verifier reads.",
+            "--content-file",
+            "data.json",
+            excerpt.to_str().expect("path"),
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(shown.contains("{\n  \"issuer\": \"acme\"\n}\n"), "{shown}");
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(
+        value["sections"][0]["content"][0]["body"], "{\n  \"issuer\": \"acme\"\n}",
+        "the trailing newline came off at admission, not at the renderer"
+    );
+
+    // The same file without its final newline is therefore the same assertion,
+    // and there is nothing left to confirm about it.
+    std::fs::write(&excerpt, "{\n  \"issuer\": \"acme\"\n}").expect("rewrite excerpt");
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "The issuer block is the one the verifier reads.",
+            "--content-file",
+            "data.json",
+            excerpt.to_str().expect("path"),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("nothing to confirm"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+/// Content order is part of the assertion, so a spelling that cannot express
+/// one order is refused rather than given one nobody wrote.
+#[test]
+fn inline_and_file_backed_content_cannot_be_mixed_in_one_command() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "content order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let middle = root.join("middle.json");
+    std::fs::write(&middle, "{\"second\":true}").expect("write");
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "three excerpts, in this order",
+            "--content",
+            "code.rs",
+            "let first = 1;",
+            "--content-file",
+            "data.json",
+            middle.to_str().expect("path"),
+            "--content",
+            "code.rs",
+            "let third = 3;",
+        ],
+    );
+    assert!(
+        !refused.status.success(),
+        "the flags cannot express first, middle, third"
+    );
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("cannot be mixed"), "{message}");
+    assert!(
+        message.contains("order"),
+        "the refusal says why, not just that: {message}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["candidate"]).stdout).contains("nothing"),
+        "and nothing was minted from a guessed order"
+    );
+
+    // One spelling for every entry keeps the order the caller wrote.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "three excerpts, in this order",
+            "--content",
+            "code.rs",
+            "let first = 1;",
+            "--content",
+            "data.json",
+            "{\"second\":true}",
+            "--content",
+            "code.rs",
+            "let third = 3;",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let code = code_from(&String::from_utf8_lossy(&screen.stdout));
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let bodies: Vec<&str> = value["sections"][0]["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .map(|entry| entry["body"].as_str().expect("body"))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["let first = 1;", "{\"second\":true}", "let third = 3;"]
+    );
+}
