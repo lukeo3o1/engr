@@ -484,17 +484,29 @@ short-lived, so this costs a moment.
 
 ### Naming a resource to engr
 
-Every reference-taking surface — `refs[]`, backlog `subjects[]`, work
-dependencies and blockers, collection members — wants the canonical form
-`engr:obj:<26>` or `engr:backlog:<26>`. A read surface MUST therefore **print
-it**: `show` and its structured form, for objects and for backlog items alike,
-and each section MUST carry its own.
+Every addressable entity MUST expose its canonical reference on a normal
+**machine-readable** read path. A caller — an agent especially — MUST NOT have to
+reconstruct one from the persisted identity, because that means reimplementing
+the compact codec outside engr to use the tool's own flags.
 
-This is not a convenience. Without it the only way to produce the argument those
-surfaces require is to implement the compact codec outside engr, which makes the
-ordinary workflow depend on reimplementing part of the tool — and an id that is
-printed in one alphabet and demanded in another is a gap a reader has no way to
-bridge.
+```text
+object            engr:obj:<26>
+object section    engr:obj:<26>:<n>
+backlog item      engr:backlog:<26>
+backlog section   engr:backlog:<26>:<n>
+collection        engr:collection:<10>
+```
+
+The requirement is the capability, not a spelling. The structured surfaces are
+the contract; where the text surfaces also print it, that is presentation and may
+change. **Identity, storage path and canonical reference stay distinct concepts**
+— `id` remains the persisted identity and is not replaced by the reference.
+
+A section selector is a **positive integer**. `:0` MUST be rejected by the shared
+parser: section ids come from a counter that starts at 1, so `:0` names nothing
+that can exist, and a reference that parses and round-trips while being
+unresolvable by construction is worse than one that is refused. Whether a
+resource kind supports a section selector at all stays a domain rule.
 
 ### What a human is shown
 
@@ -576,6 +588,25 @@ The reducer takes an object and an event and nothing else. **No clocks, no git,
 no language model, no interpretation of prose.** Everything it needs is inside
 the event, because the agent's judgement was frozen there when a human confirmed
 it. Structure that was not recorded does not exist.
+
+## Absence is not failure
+
+Shared resolution MUST keep **genuine absence** apart from **resolution
+failure**. `NOT_FOUND` MUST NOT be collapsed with schema, invariant or
+reconciliation faults, and a caller MUST be left with enough information to tell
+them apart.
+
+On authoritative trust and verification paths this is a hard rule: malformed or
+unreadable authority MUST surface as a failure and MUST NOT be downgraded into
+`not found`, `gone`, `moved`, or a clean verification. A reference whose target
+will not load is reported as **`REF UNREADABLE`**, distinct from `REF TAMPERED` —
+one says the words were changed behind the gate, the other says nobody can tell
+what the words are, and both are failures rather than drift.
+
+Non-authoritative domains may choose their own presentation — backlog subjects,
+work targets and collection members each say "not found" or "unreadable" in
+their own words — but they must be able to make that choice, which is why the
+shared layer does not flatten it first.
 
 ## Integrity on the read path
 

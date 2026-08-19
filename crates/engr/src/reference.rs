@@ -123,11 +123,24 @@ impl EngrRef {
             }
         };
         validate_id(kind, id)?;
+        // A **positive** integer. Section ids are allocated from a counter that
+        // starts at 1, so `:0` names nothing that can ever exist — accepting it
+        // would let a reference parse, canonicalize and round-trip while being
+        // unresolvable by construction, which is worse than refusing it here.
+        //
+        // Whether a resource kind supports a section selector at all stays a
+        // domain rule: shared syntax is not shared semantics.
         let section = section
             .map(|value| {
-                value
+                let parsed = value
                     .parse::<u64>()
-                    .map_err(|_| Error::new(EXIT_SCHEMA, "section selector must be an integer"))
+                    .map_err(|_| Error::new(EXIT_SCHEMA, "section selector must be an integer"))?;
+                ensure!(
+                    parsed > 0,
+                    EXIT_SCHEMA,
+                    "section selector must be a positive integer, and {parsed} is not"
+                );
+                Ok(parsed)
             })
             .transpose()?;
         Ok(Self {

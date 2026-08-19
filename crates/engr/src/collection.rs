@@ -560,12 +560,24 @@ pub fn set_schedule(root: &Path, id: &str, schedule: Option<Schedule>) -> Result
 fn require_target(root: &Path, target: &str) -> Result<()> {
     let parsed = crate::reference::EngrRef::parse_embedded(target)?;
     let uuid = crate::reference::decode_uuid(parsed.id())?.to_string();
-    let known = match parsed.kind() {
-        ResourceKind::Backlog => crate::backlog::load(root, &uuid).is_ok(),
-        _ => crate::ops::effective(root, &uuid).is_ok(),
+    let outcome = match parsed.kind() {
+        ResourceKind::Backlog => crate::backlog::load(root, &uuid).map(|_| ()),
+        _ => crate::ops::effective(root, &uuid).map(|_| ()),
     };
-    ensure!(known, EXIT_NOT_FOUND, "{target} does not exist");
-    Ok(())
+    // Absence and unreadable authority are different refusals. Reporting a
+    // malformed file as "does not exist" would send someone to create what is
+    // already there, and hide the fault that actually needs looking at.
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == EXIT_NOT_FOUND => Err(Error::new(
+            EXIT_NOT_FOUND,
+            format!("{target} does not exist"),
+        )),
+        Err(error) => Err(Error::new(
+            error.code,
+            format!("{target} cannot be read: {}", error.message),
+        )),
+    }
 }
 
 pub fn add_member(

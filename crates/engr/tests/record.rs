@@ -385,3 +385,72 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
         content.sha256().expect("hash")
     );
 }
+
+/// A dependency that will not load is a failure, not drift.
+///
+/// This is the one read surface whose job is to say how far wording can be
+/// trusted, so flattening "the target is malformed" into "the target moved"
+/// would answer the question wrongly in the safe-looking direction. Absence and
+/// unreadable authority are different facts and must stay apart.
+#[test]
+fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, with_ref);
+
+    // Sound to begin with.
+    let object = store::load_object(&root, &source).expect("source");
+    assert!(view::assess(&root, &object)[0].1.is_ok());
+
+    // Now the target becomes something this build refuses to read at all —
+    // present on disk, and not loadable.
+    let path = store::object_path(&root, &target);
+    let mut raw: serde_json::Value = store::read_json(&path).expect("read");
+    raw["state"] = serde_json::json!("not-a-state");
+    store::write_json(&path, &raw).expect("write");
+    assert!(
+        ops::effective(&root, &target).is_err(),
+        "the target must genuinely fail to load"
+    );
+
+    let object = ops::effective(&root, &source).expect("source still loads");
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(status.stands_on_unreadable(), "{status:?}");
+    assert!(
+        !status.stands_on_tampered(),
+        "unreadable is not the same claim as tampered"
+    );
+    assert!(
+        status.forged(),
+        "and it counts as a failure, so verify cannot pass"
+    );
+    assert_eq!(status.label(), "REF UNREADABLE");
+    assert_eq!(status.key(), "ref_unreadable");
+
+    // A target that is genuinely absent is the other answer, and stays drift.
+    store::write_json(&path, &raw).expect("restore the broken file");
+    std::fs::remove_file(&path).expect("remove");
+    let object = ops::effective(&root, &source).expect("source");
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(
+        !status.stands_on_unreadable(),
+        "absence is not unreadable authority: {status:?}"
+    );
+}

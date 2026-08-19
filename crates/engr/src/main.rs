@@ -46,7 +46,7 @@ enum Command {
         /// One line per section, so grep can reach the text
         #[arg(long)]
         sections: bool,
-        /// Only what needs attention
+        /// Sections whose basis or references moved, or that will not verify
         #[arg(long)]
         stale: bool,
     },
@@ -1861,23 +1861,23 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
         .and_then(|parsed| engr::reference::decode_uuid(parsed.id()))
         .map_err(|error| malformed_argument(field, spec, error))?
         .to_string();
-    let known = if relative.starts_with("backlog:") {
-        backlog::load(root, &id).is_ok()
+    let outcome = if relative.starts_with("backlog:") {
+        backlog::load(root, &id).map(|_| ())
     } else {
-        ops::effective(root, &id).is_ok()
+        ops::effective(root, &id).map(|_| ())
     };
-    ensure_found(known, field, spec)?;
-    Ok(relative.to_owned())
-}
-
-fn ensure_found(known: bool, field: &str, spec: &str) -> Result<()> {
-    if known {
-        Ok(())
-    } else {
-        Err(Error::new(
+    // Absence and unreadable authority stay apart: "does not exist" would send
+    // someone to create what is already there and hide the real fault.
+    match outcome {
+        Ok(()) => Ok(relative.to_owned()),
+        Err(error) if error.code == EXIT_NOT_FOUND => Err(Error::new(
             EXIT_NOT_FOUND,
             format!("{field} {spec:?} does not exist"),
-        ))
+        )),
+        Err(error) => Err(Error::new(
+            error.code,
+            format!("{field} {spec:?} cannot be read: {}", error.message),
+        )),
     }
 }
 

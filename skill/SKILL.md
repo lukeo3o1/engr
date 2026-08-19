@@ -95,8 +95,12 @@ the one they are holding.
 
 ## Reading the record
 
-At the start of engineering work, run `engr ls --stale`; it includes relevant
-objects outside the default attention set. Before making or revisiting a
+At the start of engineering work, run `engr ls --stale`. It lists **sections that
+no longer verify cleanly** — a moved basis, a rewritten reference, wording that
+was tampered with, or a dependency that will not load — and it marks the ones
+belonging to objects nobody is looking at, which is where that goes unnoticed.
+It is not a second spelling of `engr ls`: that one answers what needs attention,
+this one answers what stopped adding up. Before making or revisiting a
 significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
@@ -141,10 +145,11 @@ the abbreviation for you.
 | --- | --- |
 | `TAMPERED` / `tampered` | This section's wording does not match the hash confirmed with it |
 | `REF TAMPERED` / `ref_tampered` | A section this one stands on does not match *its* hash |
+| `REF UNREADABLE` / `ref_unreadable` | A section this one stands on will not load at all — malformed authority, not a missing one |
 | `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
 | `refs moved` / `stale_refs` | A section this one references was rewritten through the gate |
 
-The first two are a different kind of problem from the last two, and they are
+The first three are a different kind of problem from the last two, and they are
 not something to work around. **Stop and tell the human.** Someone edited the
 stored file directly rather than going through the gate, so nothing about that
 wording was agreed to by anyone. `show` hands you `git show <commit>:<path>` —

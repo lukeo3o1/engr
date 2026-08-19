@@ -26,6 +26,12 @@ pub struct RefDrift {
     /// stored hash alone leaves `current_sha256` equal to what was pinned, so
     /// the ref looks unmoved while the wording under it was rewritten.
     pub target_tampered: bool,
+    /// The target could not be read at all — malformed authority, a broken
+    /// invariant, a file this build refuses. **Not** the same as the target
+    /// being absent, and the difference is the point: absence is a fact a
+    /// record can legitimately report, while unreadable authority is a failure
+    /// and must never be downgraded into "moved", "gone", or a clean verify.
+    pub target_unreadable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,16 +49,23 @@ impl SectionStatus {
         !self.tampered && self.basis.is_none() && self.drifted.is_empty()
     }
 
-    /// A section whose own words are intact, standing on wording that is not
-    /// what was confirmed.
+    /// A section standing on wording that is not what was confirmed.
     pub fn stands_on_tampered(&self) -> bool {
         self.drifted.iter().any(|drift| drift.target_tampered)
+    }
+
+    /// A section standing on authority nothing could read. Reported apart from
+    /// tampering because they are different facts — one says the words were
+    /// changed behind the gate, the other says nobody can tell what the words
+    /// are — and both are failures rather than drift.
+    pub fn stands_on_unreadable(&self) -> bool {
+        self.drifted.iter().any(|drift| drift.target_unreadable)
     }
 
     /// Whether the wording here can be trusted at all — either it was forged,
     /// or what it explicitly leans on was.
     pub fn forged(&self) -> bool {
-        self.tampered || self.stands_on_tampered()
+        self.tampered || self.stands_on_tampered() || self.stands_on_unreadable()
     }
 
     pub fn label(&self) -> &'static str {
@@ -61,6 +74,9 @@ impl SectionStatus {
         }
         if self.stands_on_tampered() {
             return "REF TAMPERED";
+        }
+        if self.stands_on_unreadable() {
+            return "REF UNREADABLE";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -76,6 +92,9 @@ impl SectionStatus {
         }
         if self.stands_on_tampered() {
             return "ref_tampered";
+        }
+        if self.stands_on_unreadable() {
+            return "ref_unreadable";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -128,7 +147,15 @@ pub fn width(root: &Path) -> usize {
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let target = ops::effective(root, &reference.object)
+    let loaded = ops::effective(root, &reference.object);
+    // Absent and unreadable are different answers, and flattening them here is
+    // what would let a corrupt dependency read as ordinary drift on the one
+    // surface whose job is to say how far wording can be trusted.
+    let target_unreadable = loaded
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.code != crate::EXIT_NOT_FOUND);
+    let target = loaded
         .ok()
         .and_then(|target| target.section(reference.section).ok().cloned());
     let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
@@ -151,6 +178,7 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         current_sha256: current,
         lookback,
         target_tampered,
+        target_unreadable,
     }
 }
 
@@ -622,25 +650,29 @@ fn subject_note(root: &Path, subject: &backlog::Subject) -> Option<&'static str>
         backlog::Subject::Engr { reference } => {
             let parsed = crate::reference::EngrRef::parse_embedded(reference).ok()?;
             let id = crate::reference::decode_uuid(parsed.id()).ok()?.to_string();
-            let found = match parsed.kind() {
-                crate::reference::ResourceKind::Backlog => backlog::load(root, &id)
-                    .map(|item| {
-                        parsed
-                            .section()
-                            .map(|section| item.section(section).is_ok())
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(false),
-                _ => ops::effective(root, &id)
-                    .map(|object| {
-                        parsed
-                            .section()
-                            .map(|section| object.section(section).is_ok())
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(false),
+            // Absent and unreadable are different answers even here, where
+            // neither is authority: "not found" invites removing the signpost,
+            // "unreadable" invites looking at why the file will not load.
+            let outcome = match parsed.kind() {
+                crate::reference::ResourceKind::Backlog => backlog::load(root, &id).map(|item| {
+                    parsed
+                        .section()
+                        .map(|section| item.section(section).is_ok())
+                        .unwrap_or(true)
+                }),
+                _ => ops::effective(root, &id).map(|object| {
+                    parsed
+                        .section()
+                        .map(|section| object.section(section).is_ok())
+                        .unwrap_or(true)
+                }),
             };
-            (!found).then_some("not found")
+            match outcome {
+                Ok(true) => None,
+                Ok(false) => Some("not found"),
+                Err(error) if error.code == crate::EXIT_NOT_FOUND => Some("not found"),
+                Err(_) => Some("unreadable"),
+            }
         }
         backlog::Subject::File { path, commit } | backlog::Subject::Symbol { path, commit, .. } => {
             (!git::path_at(root, commit, path)).then_some("snapshot unavailable")
@@ -734,6 +766,17 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
 }
 
 #[derive(Serialize)]
+struct JsonBacklogSection<'a> {
+    id: u64,
+    /// The section's own canonical reference. An addressable entity exposes
+    /// one on a machine-readable path; a `--subject` naming a backlog section
+    /// is exactly what this is for.
+    reference: String,
+    #[serde(flatten)]
+    section: &'a backlog::Section,
+}
+
+#[derive(Serialize)]
 struct JsonBacklogItem<'a> {
     id: &'a str,
     /// The canonical form `--subject`, `work depend --on` and
@@ -744,7 +787,7 @@ struct JsonBacklogItem<'a> {
     authority: &'static str,
     next_section_id: u64,
     updated_at: &'a str,
-    sections: &'a [backlog::Section],
+    sections: Vec<JsonBacklogSection<'a>>,
 }
 
 pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
@@ -757,7 +800,15 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
         authority: "unconfirmed_staging",
         next_section_id: item.next_section_id,
         updated_at: item.updated_at(),
-        sections: &item.sections,
+        sections: item
+            .sections
+            .iter()
+            .map(|section| JsonBacklogSection {
+                id: section.id,
+                reference: format!("{}:{}", backlog_reference(&item.id), section.id),
+                section,
+            })
+            .collect(),
     })
     .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }
@@ -816,11 +867,15 @@ pub const WORK_BANNER: &str =
 fn work_target_note(root: &Path, target: &crate::reference::EngrTarget) -> Option<&'static str> {
     let parsed = crate::reference::EngrRef::parse_embedded(&target.reference).ok()?;
     let id = crate::reference::decode_uuid(parsed.id()).ok()?.to_string();
-    let found = match parsed.kind() {
-        crate::reference::ResourceKind::Backlog => backlog::load(root, &id).is_ok(),
-        _ => ops::effective(root, &id).is_ok(),
+    let outcome = match parsed.kind() {
+        crate::reference::ResourceKind::Backlog => backlog::load(root, &id).map(|_| ()),
+        _ => ops::effective(root, &id).map(|_| ()),
     };
-    (!found).then_some("  (not found)")
+    match outcome {
+        Ok(()) => None,
+        Err(error) if error.code == crate::EXIT_NOT_FOUND => Some("  (not found)"),
+        Err(_) => Some("  (unreadable)"),
+    }
 }
 
 fn work_target(root: &Path, target: &crate::reference::EngrTarget) -> String {
@@ -987,7 +1042,10 @@ fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
     match parsed.kind() {
         crate::reference::ResourceKind::Backlog => match backlog::load(root, &id) {
             Ok(item) => format!("unresolved  {}", item.topic),
-            Err(_) => "gone (consumed or removed)".to_owned(),
+            Err(error) if error.code == crate::EXIT_NOT_FOUND => {
+                "gone (consumed or removed)".to_owned()
+            }
+            Err(_) => "unreadable (the file is there and will not load)".to_owned(),
         },
         _ => match ops::effective(root, &id) {
             // Derived attention, not `open`: a typed Object has no such state,
@@ -1002,7 +1060,8 @@ fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
                 },
                 object.title
             ),
-            Err(_) => "gone".to_owned(),
+            Err(error) if error.code == crate::EXIT_NOT_FOUND => "gone".to_owned(),
+            Err(_) => "unreadable (the file is there and will not load)".to_owned(),
         },
     }
 }
@@ -1054,7 +1113,8 @@ fn needs_attention(root: &Path, target: &crate::reference::EngrTarget) -> bool {
 pub fn render_collection_show(root: &Path, item: &collection::Collection) -> String {
     let mut out = String::from(PLANNING_BANNER);
     out.push_str(&format!(
-        "Collection {}\nState      {}\nName       {}\n",
+        "Collection {}\nReference  engr:collection:{}\nState      {}\nName       {}\n",
+        item.id,
         item.id,
         item.state.as_str(),
         item.name
@@ -1106,6 +1166,10 @@ pub fn render_collection_show(root: &Path, item: &collection::Collection) -> Str
 pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
     let value = serde_json::json!({
         "id": item.id,
+        // Collection is addressable — `engr:collection:<id>` — so its
+        // machine-readable read path exposes the reference like every other
+        // addressable entity. Identity and addressing stay distinct fields.
+        "reference": format!("engr:collection:{}", item.id),
         // The same field Backlog and Work carry, for the same reason: structured
         // output leaves the screen that would otherwise have said so.
         "authority": "planning",

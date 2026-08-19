@@ -3494,3 +3494,157 @@ fn a_read_surface_prints_the_reference_every_flag_asks_for() {
         );
     }
 }
+
+/// Every addressable entity says its own canonical reference, exactly.
+///
+/// The contract is the machine-readable path — an agent must be able to obtain
+/// a reference without reimplementing the codec — so this asserts the exact
+/// values rather than only that one of them round-trips. Sections included:
+/// they are addressable too, and `--ref` and `--subject` take them.
+#[test]
+fn every_addressable_entity_exposes_its_canonical_reference() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "t", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    // The exact values, derived independently of the surfaces under test.
+    let object_ref = format!(
+        "engr:obj:{}",
+        engr::reference::encode_uuid_str(&id).expect("compact")
+    );
+    let item_ref = format!(
+        "engr:backlog:{}",
+        engr::reference::encode_uuid_str(&item).expect("compact")
+    );
+    let plan_ref = format!("engr:collection:{plan}");
+
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(object["reference"], object_ref);
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{object_ref}:1")
+    );
+    assert_eq!(object["id"], id, "identity is not replaced by addressing");
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(staged["reference"], item_ref);
+    assert_eq!(staged["sections"][0]["reference"], format!("{item_ref}:1"));
+    assert_eq!(
+        staged["sections"][0]["id"], 1,
+        "the section keeps its own id"
+    );
+    assert_eq!(staged["id"], item);
+
+    let planned: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(planned["reference"], plan_ref);
+    assert_eq!(planned["id"], plan);
+
+    // Each one is accepted where it is meant to be used.
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "u",
+            "--text",
+            "x",
+            "--subject",
+            &format!("{object_ref}:1")
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["collection", "add", &plan, "--target", &item_ref])
+            .status
+            .success()
+    );
+}
+
+/// `:0` names a section that cannot exist, so the shared parser refuses it.
+#[test]
+fn a_zero_section_selector_is_refused_everywhere() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    for spelling in [
+        format!("engr:obj:{compact}:0"),
+        format!("obj:{compact}:0"),
+        format!("engr:backlog:{compact}:0"),
+    ] {
+        let error = engr::reference::EngrRef::parse_embedded(
+            spelling.strip_prefix("engr:").unwrap_or(&spelling),
+        )
+        .expect_err("section ids start at 1");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{spelling}");
+        assert!(error.message.contains("positive integer"), "{error}");
+    }
+    // One is still fine, and so is the parser's own error for a non-integer.
+    assert!(engr::reference::EngrRef::parse_embedded(&format!("obj:{compact}:1")).is_ok());
+
+    // And it is refused at the command line, through the same parser.
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "t",
+            "--text",
+            "x",
+            "--subject",
+            &format!("engr:obj:{compact}:0"),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("positive integer"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
