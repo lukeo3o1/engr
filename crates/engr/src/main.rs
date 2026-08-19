@@ -2185,34 +2185,22 @@ impl From<LevelArg> for collection::Level {
 }
 
 /// A member target, held to what a plan is allowed to group.
-fn collection_target(root: &Path, spec: &str) -> Result<String> {
-    let relative = spec.strip_prefix("engr:").ok_or_else(|| {
-        Error::new(
-            EXIT_USAGE,
-            format!("--target {spec:?} must be an engr: reference"),
-        )
-    })?;
-    collection::check_target("--target", relative)
-        .map_err(|error| malformed_argument("--target", spec, error))?;
-    // Resolved for existence as well as shape. A member added by typo is a plan
-    // silently covering nothing; a member that is *later* consumed is a
-    // different thing entirely and is shown rather than repaired.
-    let id = engr::reference::EngrRef::parse_embedded(relative)
-        .and_then(|parsed| engr::reference::decode_uuid(parsed.id()))
-        .map_err(|error| malformed_argument("--target", spec, error))?
-        .to_string();
-    let known = if relative.starts_with("backlog:") {
-        backlog::load(root, &id).is_ok()
-    } else {
-        ops::effective(root, &id).is_ok()
-    };
-    if !known {
-        return Err(Error::new(
-            EXIT_NOT_FOUND,
-            format!("--target {spec:?} does not exist"),
-        ));
-    }
-    Ok(relative.to_owned())
+/// Strip the `engr:` prefix a caller writes, leaving the embedded form the
+/// domain stores.
+///
+/// Shape and existence are **not** checked here. They used to be, and that was
+/// the bug: the command line enforced a membership rule the library did not, so
+/// what a plan could contain depended on which door it came through. The rule
+/// lives in `collection::add_member` now, and this only translates the spelling.
+fn collection_target(spec: &str) -> Result<String> {
+    spec.strip_prefix("engr:")
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                format!("--target {spec:?} must be an engr: reference"),
+            )
+        })
 }
 
 fn priority_of(
@@ -2250,9 +2238,21 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             // Open plans first, then by name: what is still being pursued is
             // what a listing is for, and nothing here records activity to sort
             // by instead.
-            found.sort_by(|left, right| {
-                (left.state.as_str(), left.name.to_lowercase())
-                    .cmp(&(right.state.as_str(), right.name.to_lowercase()))
+            //
+            // By an explicit rank, not by the state's spelling. Alphabetically
+            // `cancelled` and `completed` both precede `open`, so sorting on the
+            // name of the state puts every abandoned plan above every live one —
+            // exactly backwards, and silently, because the code above says the
+            // opposite and nothing checks.
+            found.sort_by_key(|item| {
+                (
+                    match item.state {
+                        collection::State::Open => 0,
+                        collection::State::Completed => 1,
+                        collection::State::Cancelled => 2,
+                    },
+                    item.name.to_lowercase(),
+                )
             });
             print!("{}", view::render_collection_ls(root, &found));
         }
@@ -2295,7 +2295,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             reason,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = collection_target(root, &target)?;
+            let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
             let item = collection::add_member(root, &id, &target, order, priority)?;
             print!("{}", view::render_collection_show(root, &item));

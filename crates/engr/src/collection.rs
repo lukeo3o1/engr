@@ -219,7 +219,7 @@ impl Collection {
             &[ResourceKind::Collection],
             "a collection id",
         )?;
-        check_name(EXIT_SCHEMA, &self.name)?;
+        check_stored_name(&self.name)?;
         if let Some(description) = &self.description {
             ensure!(
                 !description.trim().is_empty(),
@@ -310,6 +310,24 @@ fn check_name(code: i32, name: &str) -> Result<()> {
         code,
         "a collection name is the line a listing prints, so it cannot span lines. \
          Put the detail in --description."
+    );
+    Ok(())
+}
+
+/// The same rule, plus what the write path guarantees about stored names.
+///
+/// `create` and `rename` trim before storing, so a stored name never carries
+/// leading or trailing whitespace — and a reader that accepted one anyway would
+/// be accepting a spelling the API cannot produce. Two spellings of `Q3` that
+/// only a listing's alignment can tell apart is exactly the shadow schema the
+/// other domains were closed against.
+fn check_stored_name(name: &str) -> Result<()> {
+    check_name(EXIT_SCHEMA, name)?;
+    ensure!(
+        name.trim() == name,
+        EXIT_SCHEMA,
+        "a stored collection name carries no surrounding whitespace, so this is not \
+         one this build wrote: {name:?}"
     );
     Ok(())
 }
@@ -531,6 +549,25 @@ pub fn set_schedule(root: &Path, id: &str, schedule: Option<Schedule>) -> Result
     load(root, id)
 }
 
+/// Whether a target names something that exists **right now**.
+///
+/// Checked when a member is added and never again, and the difference is the
+/// whole point. A member added by typo is a plan silently covering nothing, and
+/// nothing later will tell anyone. A member whose target is consumed *after* it
+/// was added is legitimate planning context — the plan really did cover that,
+/// and saying so is more honest than repairing it — so this must not become a
+/// rule that stored data is held to.
+fn require_target(root: &Path, target: &str) -> Result<()> {
+    let parsed = crate::reference::EngrRef::parse_embedded(target)?;
+    let uuid = crate::reference::decode_uuid(parsed.id())?.to_string();
+    let known = match parsed.kind() {
+        ResourceKind::Backlog => crate::backlog::load(root, &uuid).is_ok(),
+        _ => crate::ops::effective(root, &uuid).is_ok(),
+    };
+    ensure!(known, EXIT_NOT_FOUND, "{target} does not exist");
+    Ok(())
+}
+
 pub fn add_member(
     root: &Path,
     id: &str,
@@ -538,6 +575,11 @@ pub fn add_member(
     order: Option<i64>,
     priority: Option<Priority>,
 ) -> Result<Collection> {
+    // Shape first, so a malformed reference is refused as malformed rather than
+    // as missing — `decode_uuid` on nonsense would otherwise answer the wrong
+    // question.
+    check_target("a collection member", target)?;
+    require_target(root, target)?;
     edit(root, id, |collection| {
         ensure!(
             collection.member(target).is_err(),

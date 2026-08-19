@@ -518,3 +518,76 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
     }
 }
+
+/// A member that never existed is a plan silently covering nothing.
+///
+/// The distinction the check has to keep is between *never existed* and *stopped
+/// existing*. A typo at add time is a mistake nothing later will report; a
+/// consumed backlog item is legitimate planning context. So existence is
+/// required when a member is added and never asked again — and it is required by
+/// the domain, not by whichever caller happened to be used.
+#[test]
+fn a_member_must_exist_when_it_is_added_whichever_door_it_comes_through() {
+    let (_dir, root) = workspace();
+    let item = plan(&root, "targets");
+
+    // Well-formed, canonical, and naming a UUID nothing ever created.
+    let absent = object_ref(&engr::model::new_id());
+    let error = collection::add_member(&root, &item.id, &absent, None, None)
+        .expect_err("a plan cannot cover something that was never there");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+    assert!(error.message.contains("does not exist"), "{error}");
+
+    let absent_item = backlog_ref(&engr::model::new_id());
+    let error = collection::add_member(&root, &item.id, &absent_item, None, None)
+        .expect_err("the same for staging");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+
+    assert!(
+        collection::load(&root, &item.id)
+            .expect("load")
+            .members
+            .is_empty(),
+        "and nothing was written"
+    );
+
+    // Malformed is still refused as malformed, not as missing: the shape check
+    // runs first, so the error names the real problem.
+    let error = collection::add_member(&root, &item.id, "obj:not-compact", None, None)
+        .expect_err("a malformed reference");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// A stored name is exactly what the write path emits.
+///
+/// `create` and `rename` trim, so a stored name never carries surrounding
+/// whitespace — and a reader accepting one would be accepting a spelling the API
+/// cannot produce. Two names a listing can only tell apart by alignment is the
+/// shadow schema the other domains were already closed against.
+#[test]
+fn a_stored_collection_name_carries_no_surrounding_whitespace() {
+    let (_dir, root) = workspace();
+    let item = collection::create(&root, "  Q3 authentication  ", None, None).expect("create");
+    assert_eq!(
+        item.name, "Q3 authentication",
+        "the write path trims, and that is the existing behaviour"
+    );
+    let renamed = collection::rename(&root, &item.id, "  Q4  ").expect("rename");
+    assert_eq!(renamed.name, "Q4");
+
+    for stored in ["  Q3 ", "Q3 ", " Q3", "Q3\t"] {
+        rewrite(&root, &item.id, |value| {
+            value["name"] = json!(stored);
+        });
+        let error = collection::load(&root, &item.id).expect_err(stored);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{stored:?}");
+        assert!(error.message.contains("surrounding whitespace"), "{error}");
+    }
+
+    // The trimmed spelling of the same name is fine, which is the point: one
+    // name, one way of storing it.
+    rewrite(&root, &item.id, |value| {
+        value["name"] = json!("Q3");
+    });
+    assert_eq!(collection::load(&root, &item.id).expect("load").name, "Q3");
+}

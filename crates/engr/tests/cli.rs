@@ -3314,3 +3314,70 @@ fn deleting_a_collection_reports_the_planning_context_it_discarded() {
         );
     }
 }
+
+/// The listing puts what is still being pursued first.
+///
+/// Pinned with all three states because the bug it replaces was invisible with
+/// one: sorting by the *name* of the state puts `cancelled` and `completed`
+/// above `open` alphabetically, which is the exact reverse of what a planning
+/// listing is for, and nothing about a single open plan would have shown it.
+#[test]
+fn collection_ls_lists_open_plans_before_closed_ones() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let make = |name: &str| -> String {
+        let made = run_engr(root, &["collection", "new", "--name", name]);
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        String::from_utf8_lossy(&made.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("Collection "))
+            .expect("id")
+            .trim()
+            .to_owned()
+    };
+    // Named so that alphabetical order by name would also get this wrong.
+    let cancelled = make("aaa dropped");
+    let completed = make("bbb finished");
+    let open = make("zzz current");
+    assert!(run_engr(
+        root,
+        &["collection", "state", &cancelled, "--state", "cancelled"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["collection", "state", &completed, "--state", "completed"]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["collection", "ls"]).stdout).to_string();
+    // Rows only: the banner says "what its members mean", which a looser filter
+    // would count as a row and quietly shift every position by one.
+    let order: Vec<&str> = listed
+        .lines()
+        .filter(|line| line.contains("need attention"))
+        .map(|line| {
+            if line.contains("zzz current") {
+                "open"
+            } else if line.contains("bbb finished") {
+                "completed"
+            } else {
+                "cancelled"
+            }
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["open", "completed", "cancelled"],
+        "open plans come first: {listed}"
+    );
+    assert!(listed.contains(&open[..4]), "{listed}");
+}
