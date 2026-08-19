@@ -3002,9 +3002,26 @@ fn work_is_its_own_namespace_and_every_screen_says_it_is_not_the_record() {
             .expect("json");
     assert!(structured.get("work").is_none(), "{structured}");
     assert_eq!(structured["state"], "open", "the Object is where it was");
+
+    // Structured Work output travels furthest from any banner — into another
+    // tool, with no screen in between — so the boundary has to be a field.
+    // `{"state": "active"}` alone is indistinguishable from an Object's state.
+    let sidecar: Value =
+        serde_json::from_slice(&run_engr(root, &["work", "show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(
+        sidecar["authority"], "execution_memory",
+        "the JSON surface must say what it is: {sidecar}"
+    );
+    assert_eq!(sidecar["standing"], "blocked");
+    assert_eq!(sidecar["state"], "active");
 }
 
-/// A human said stop, and the command line will not help an agent around it.
+/// A human said stop, and every screen that touches it says so.
+///
+/// The rule itself is the agent's to follow — engr cannot tell who asked, so it
+/// does not refuse. What it can do is never let the signal pass unremarked: the
+/// state screen states the rule, and deleting says what went with the sidecar.
 #[test]
 fn pausing_work_survives_an_agent_trying_to_delete_it() {
     let workspace = TempDir::new().expect("temp dir");
@@ -3023,18 +3040,23 @@ fn pausing_work_survives_an_agent_trying_to_delete_it() {
         "the screen states the rule the tool cannot enforce: {shown}"
     );
 
-    let refused = run_engr(root, &["work", "rm", &id]);
-    assert!(!refused.status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("human saying stop"),
-        "{}",
-        String::from_utf8_lossy(&refused.stderr)
+        removed.status.success(),
+        "the deletion is carried out: the rule is normative, not mechanical"
     );
-    assert!(run_engr(root, &["work", "show", &id]).status.success());
-
-    assert!(run_engr(root, &["work", "resume", &id]).status.success());
-    assert!(run_engr(root, &["work", "rm", &id]).status.success());
+    assert!(
+        String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"),
+        "but it does not pass unremarked: {}",
+        String::from_utf8_lossy(&removed.stdout)
+    );
     assert!(!run_engr(root, &["work", "show", &id]).status.success());
+
+    // Deleting an active one says only that there is nothing left to hand off.
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(removed.status.success());
+    assert!(!String::from_utf8_lossy(&removed.stdout).contains("stop signal"));
 }
 
 /// A work target names a whole Object or Backlog item, and must exist.

@@ -1892,7 +1892,10 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
             for id in work::ids(root)? {
                 entries.push((id.clone(), work::load(root, &id)?));
             }
-            entries.sort_by(|left, right| right.1.updated_at.cmp(&left.1.updated_at));
+            // As instants, not as strings: two valid RFC3339 values written in
+            // different offsets do not compare correctly as text, and the most
+            // recently touched sidecar is the whole point of this ordering.
+            entries.sort_by_key(|(_, item)| std::cmp::Reverse(item.updated_at()));
             print!("{}", view::render_work_ls(root, &entries));
         }
         Work::Show { object, format } => {
@@ -1920,11 +1923,19 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
         }
         Work::Rm { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            work::remove(root, &id)?;
+            let removed = work::remove(root, &id)?;
             println!(
                 "no execution memory for {}",
                 shorten(&id, view::width(root))
             );
+            // Reported, not refused. Whether a human directed this is not
+            // something engr can know, so it carries the deletion out and says
+            // what went with it — a stop signal disappearing in silence is the
+            // part worth avoiding, while refusing would invent a lifecycle rule
+            // #12 deliberately left as a rule for the agent to follow.
+            if removed.was_paused {
+                println!("that work was paused; a human's stop signal went with it");
+            }
         }
         Work::Depend { object, on, reason } => {
             let id = resolve_object_argument(root, "object", &object)?;

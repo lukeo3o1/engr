@@ -48,6 +48,9 @@ fn compact(id: &str) -> String {
     engr::reference::encode_uuid_str(id).expect("compact")
 }
 
+/// One named way of hand-editing a stored sidecar into something invalid.
+type Corruption = (&'static str, fn(&mut Value));
+
 /// Edit the sidecar the way a text editor would.
 fn rewrite(root: &Path, object: &str, edit: impl FnOnce(&mut Value)) {
     let path = work::path(root, object);
@@ -137,33 +140,35 @@ fn the_only_stored_states_are_active_and_paused() {
     }
 }
 
-/// `paused` is a human saying stop, and deleting the sidecar would erase it.
+/// `paused` is a human saying stop, and the rule about it is the agent's.
 ///
-/// The rest of the rule — that an agent must not set or clear it on its own —
-/// is a convention engr cannot check, because it cannot tell an agent from a
-/// human. This half it can: the signal survives the one operation that would
-/// otherwise let an agent start again with a clean sidecar.
+/// #12 makes "an agent MUST NOT delete a paused WorkObject without explicit
+/// human direction" a normative agent rule, not a gate mutation — so engr does
+/// not refuse the deletion. It cannot tell who asked, refusing would make a
+/// human's own "delete that" impossible to carry out directly, and it would
+/// stop no agent that is willing to resume first anyway. What it does is report
+/// what went with the sidecar, so the signal never disappears in silence.
 #[test]
-fn a_paused_sidecar_cannot_be_deleted_out_from_under_the_human_who_paused_it() {
+fn deleting_a_paused_sidecar_is_carried_out_and_reported_rather_than_refused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "pause");
     work::start(&root, &id, None).expect("start");
     work::set_state(&root, &id, State::Paused).expect("pause");
 
-    let error = work::remove(&root, &id).expect_err("paused work is not the agent's to delete");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(error.message.contains("human saying stop"), "{error}");
+    let removed = work::remove(&root, &id).expect("the rule is the agent's, not the tool's");
     assert!(
-        work::find(&root, &id).expect("find").is_some(),
-        "and it is still there"
+        removed.was_paused,
+        "and what was discarded is reported rather than swallowed"
     );
-
-    // Active work is the agent's to drop when it stops being useful.
-    work::set_state(&root, &id, State::Active).expect("resume");
-    work::remove(&root, &id).expect("active work may be deleted");
     assert!(work::find(&root, &id).expect("find").is_none());
 
-    // Deleting says nothing about the Object.
+    // Nothing about deleting an active one is different, except that there is
+    // no stop signal to mention.
+    work::start(&root, &id, None).expect("start again");
+    let removed = work::remove(&root, &id).expect("active work may be deleted");
+    assert!(!removed.was_paused);
+
+    // Deleting says nothing about the Object, either way.
     let object = ops::effective(&root, &id).expect("object");
     assert_eq!(object.state, ObjectState::Open);
     assert!(object.needs_attention());
@@ -426,7 +431,6 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
     work::add_blocker(&root, &id, Some("waiting"), None).expect("block");
     work::set_item_result(&root, &id, entry, Some("an outcome")).expect("result");
 
-    type Corruption = (&'static str, fn(&mut Value));
     let corruptions: [Corruption; 9] = [
         ("an unknown top-level field", |value| {
             value["owner"] = json!("someone");
@@ -463,9 +467,167 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
         store::write_json(&work::path(&root, &id), &sound).expect("restore");
         rewrite(&root, &id, corrupt);
         let error = work::load(&root, &id).expect_err(what);
-        assert!(
-            error.code == engr::EXIT_SCHEMA || error.code == engr::EXIT_USAGE,
-            "{what}: {error}"
+        // Schema, not usage, and not "either". Accepting both would hide the
+        // boundary this test exists to hold: nothing about a file on disk is
+        // the current caller's mistake.
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+    }
+}
+
+/// A sidecar that belongs to no Object is invalid Work, not a row with a hole.
+///
+/// The owner invariant has to hold on the way out as well as the way in. A
+/// sidecar names its Object in its filename, so a copied file can name one that
+/// never existed — and a check that only ran on the write path would let this
+/// build read, list and hand back operational memory for nothing.
+#[test]
+fn an_orphan_sidecar_is_refused_rather_than_listed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "the object");
+    work::start(&root, &id, Some("a checkpoint")).expect("start");
+
+    // Copied to a filename naming an Object that was never created.
+    let orphan = engr::model::new_id();
+    let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
+    store::write_json(&work::path(&root, &orphan), &sound).expect("write");
+
+    let error = work::load(&root, &orphan).expect_err("a sidecar for nothing");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("belongs to no object"), "{error}");
+    assert!(work::find(&root, &orphan).is_err(), "and find agrees");
+
+    // The real one is untouched by its neighbour being wrong.
+    work::load(&root, &id).expect("the valid sidecar still loads");
+}
+
+/// Stored Work is held to exactly what the write path can produce.
+///
+/// A shadow schema — shapes the API refuses but the reader accepts — is only
+/// ever discovered by something that came to depend on it. These are the four
+/// places the two could have drifted apart.
+#[test]
+fn the_persisted_schema_is_not_looser_than_the_write_path() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "schema");
+    let other = new_object(&root, "target");
+    let target = format!("obj:{}", compact(&other));
+    work::start(&root, &id, None).expect("start");
+    let entry = work::add_item(&root, &id, "a step").expect("add");
+    work::add_item_commit(&root, &id, entry, &"a".repeat(40)).expect("commit");
+    work::add_dependency(&root, &id, &target, None).expect("depend");
+    let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
+    let restore = || store::write_json(&work::path(&root, &id), &sound).expect("restore");
+
+    // `dependencies`, `blockers`, `items` and `items[].commits` are required and
+    // may be empty. Omitted is a third spelling the write path never produces.
+    for field in ["dependencies", "blockers", "items"] {
+        restore();
+        rewrite(&root, &id, |value| {
+            value.as_object_mut().expect("object").remove(field);
+        });
+        let error = work::load(&root, &id).expect_err(field);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{field}");
+    }
+    restore();
+    rewrite(&root, &id, |value| {
+        value["items"][0]
+            .as_object_mut()
+            .expect("item")
+            .remove("commits");
+    });
+    assert!(work::load(&root, &id).is_err(), "commits is required too");
+
+    // The write path refuses a duplicate dependency and a duplicate commit, so
+    // stored ones are shapes it could not have written.
+    restore();
+    rewrite(&root, &id, |value| {
+        let held = value["dependencies"][0].clone();
+        value["dependencies"] = json!([held.clone(), held]);
+    });
+    let error = work::load(&root, &id).expect_err("one prerequisite is one dependency");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("twice"), "{error}");
+
+    restore();
+    rewrite(&root, &id, |value| {
+        let held = value["items"][0]["commits"][0].clone();
+        value["items"][0]["commits"] = json!([held.clone(), held]);
+    });
+    let error = work::load(&root, &id).expect_err("a commit recorded twice");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    // A stored fault is a schema fault. Reporting it as usage would blame
+    // whoever happened to run the next command for a file they never wrote.
+    let stored_faults: [Corruption; 2] = [
+        ("an over-long stored summary", |value| {
+            value["summary"] = json!("x".repeat(engr::work::SUMMARY_MAX + 1));
+        }),
+        ("an empty stored item", |value| {
+            value["items"][0]["text"] = json!("   ");
+        }),
+    ];
+    for (what, corrupt) in stored_faults {
+        restore();
+        rewrite(&root, &id, corrupt);
+        let error = work::load(&root, &id).expect_err(what);
+        assert_eq!(
+            error.code,
+            engr::EXIT_SCHEMA,
+            "{what} is stored data, not a caller mistake: {error}"
         );
+    }
+
+    // The same limits are still usage errors when a caller supplies them.
+    restore();
+    let error = work::set_summary(&root, &id, Some(&"x".repeat(engr::work::SUMMARY_MAX + 1)))
+        .expect_err("too long to write");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+}
+
+/// `updated_at` is an instant, and is held to being one.
+///
+/// Two valid RFC3339 values written in different offsets do not compare
+/// correctly as strings — the same class of bug already fixed for Backlog — and
+/// the most recently touched sidecar is exactly what an ordering by it is for.
+#[test]
+fn updated_at_is_validated_and_compared_as_an_instant() {
+    let (_dir, root) = workspace();
+    let earlier = new_object(&root, "earlier");
+    let later = new_object(&root, "later");
+    work::start(&root, &earlier, None).expect("start");
+    work::start(&root, &later, None).expect("start");
+
+    // The same moment, written two ways: as text the offset one sorts lower,
+    // as an instant it is two hours after.
+    rewrite(&root, &earlier, |value| {
+        value["updated_at"] = json!("2026-08-19T10:00:00Z");
+    });
+    rewrite(&root, &later, |value| {
+        value["updated_at"] = json!("2026-08-19T09:00:00-03:00");
+    });
+    let earlier_at = work::load(&root, &earlier).expect("load").updated_at();
+    let later_at = work::load(&root, &later).expect("load").updated_at();
+    assert!(
+        later_at > earlier_at,
+        "12:00Z is after 10:00Z however it is spelled"
+    );
+    assert!(
+        "2026-08-19T09:00:00-03:00" < "2026-08-19T10:00:00Z",
+        "and comparing the text would have said the opposite"
+    );
+
+    // The stored spelling is preserved, not rewritten to a canonical one.
+    assert_eq!(
+        work::load(&root, &later).expect("load").updated_at,
+        "2026-08-19T09:00:00-03:00"
+    );
+
+    for invalid in ["", "yesterday", "2026-08-19", "1755610000"] {
+        rewrite(&root, &later, |value| {
+            value["updated_at"] = json!(invalid);
+        });
+        let error = work::load(&root, &later).expect_err(invalid);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{invalid:?}");
+        assert!(error.message.contains("RFC3339"), "{error}");
     }
 }

@@ -864,27 +864,45 @@ and confirmed by nobody; unlike backlog it is not a domain of its own but a
 work object
 ├── state                 active | paused
 ├── summary?              the shortest useful checkpoint
-├── updated_at
+├── updated_at            RFC3339
 ├── next_item_id          monotonic, never reset
-├── dependencies[]
-│   ├── target            REQUIRED, engr:obj:<id> | engr:backlog:<id>
+├── dependencies[]        required, may be empty; targets are unique
+│   ├── target            required, engr:obj:<id> | engr:backlog:<id>
 │   └── reason?           <= 200 scalars
-├── blockers[]
+├── blockers[]            required, may be empty
 │   ├── reason?           <= 200 scalars
 │   └── target?           engr:obj:<id> | engr:backlog:<id>
 │   (at least one of the two MUST be present)
-└── items[]
+└── items[]               required, may be empty
     ├── id                integer, never reused
     ├── text              <= 160 scalars
     ├── state             pending | active | done
     ├── result?           <= 240 scalars
-    └── commits[]         full Git object ids
+    └── commits[]         required, may be empty; unique full Git object ids
 ```
+
+The four lists are **required and may be empty**: an omitted list and an empty
+one MUST NOT be two spellings of the same sidecar. More generally, a stored work
+object MUST be held to exactly what the write path can produce — a reader that
+accepts shapes the API refuses is a second, larger schema that only ever gets
+discovered by something that came to depend on it. A fault in a stored file is a
+**schema** fault, not a usage error: nobody currently running a command wrote it.
+
+`updated_at` MUST be a valid RFC3339 timestamp, and anything ordering work
+objects by it MUST compare **instants** rather than text — two valid values
+written in different offsets do not sort correctly as strings. The stored
+spelling is preserved for display.
 
 Stored at `.engr/work/objects/<object-id>.json`, one per object, carrying no
 `format` or `version` of its own — `.engr/format.json` remains the single schema
-authority. A work object MUST correspond to an existing object. Most objects
-have none, and absence means only that engr holds no operational memory.
+authority. Most objects have none, and absence means only that engr holds no
+operational memory.
+
+A work object MUST correspond to an existing object, and that MUST be held on
+**read** as well as on write. A sidecar names its object in its filename, so a
+copied file can name one that never existed; an implementation that only checked
+when writing would then read, list and hand back operational memory for nothing.
+An orphan sidecar is invalid work, not a row with a missing title.
 
 There is **no `engr:work:` reference**. Work is not an addressable resource,
 nothing points at it, and it has no identity beyond the object it belongs to.
@@ -907,9 +925,14 @@ design analysis, a session transcript, or a copy of git history.
 
 `ls`, `show` and `verify` are record surfaces and MUST NOT mix work into their
 output, for the same reason they exclude backlog. Every work surface MUST say
-what it is showing — and must say more than backlog's banner does, because the
-failure worth preventing here is not a reader trusting unconfirmed wording but a
-reader taking a finished checklist for a settled object.
+what it is showing, **including the structured one**: a machine-readable
+non-authoritative discriminator is required there, because JSON is the surface
+that travels furthest from any banner and `{"state": "active"}` on its own is
+indistinguishable from an object's own state.
+
+Text surfaces must say more than backlog's banner does, because the failure worth
+preventing here is not a reader trusting unconfirmed wording but a reader taking
+a finished checklist for a settled object.
 
 ### `paused` is a human saying stop
 
@@ -923,14 +946,24 @@ from an empty item list, not from an agent's own judgement that the work should
 wait. An agent MUST NOT set it, and MUST NOT clear it, without explicit human
 direction.
 
-engr cannot check that, because it cannot tell an agent from a human — so that
-half is a convention, stated here and in the Skill, exactly like the gate itself.
-What the implementation MUST enforce is that the signal is **sticky**: a paused
-work object MUST NOT be deleted. Otherwise an agent that found the instruction
-inconvenient could erase it and start again with a clean sidecar, and the one
-mechanically enforceable part of the rule would be worth nothing.
+The same rule covers deletion: an agent MUST NOT delete a paused work object
+without explicit human direction.
 
-An **active** work object may be deleted freely once it no longer carries useful
+All of that is **normative on the agent**, not mechanical. engr cannot check it,
+because it cannot tell an agent from a human — so it lives here and in the Skill,
+exactly like the gate itself does. An implementation MUST NOT turn it into a
+lifecycle rule by refusing the deletion: that would stop no agent willing to
+clear `paused` first, it would make a human's own instruction impossible to carry
+out directly, and it would invent a persisted transition whose only purpose is to
+satisfy the refusal. What an implementation SHOULD do is make sure the signal
+never disappears in silence — say, when a paused work object is deleted, that a
+human's stop signal went with it.
+
+Whether human direction should have a mechanical representation at all is an open
+question; see [What v0 does not
+solve](#work-has-no-mechanical-notion-of-human-direction).
+
+A work object may otherwise be deleted freely once it no longer carries useful
 handoff. Deleting says only that no operational memory is being kept; the object
 is untouched. Completed items may likewise be pruned once they stop helping the
 next agent. There is no archive: git holds what the sidecar used to say.
@@ -1033,6 +1066,25 @@ current again, that is what a new object says.
 
 The signal that would bring an operation in is a real case where the supersession
 itself was the mistake, rather than the design being replaced changing again.
+
+### Work has no mechanical notion of human direction
+
+`paused` is a human-directed stop signal, and several of its rules — do not set
+it, do not clear it, do not delete a paused sidecar — are obligations on the
+agent that engr cannot check. It has no way to tell an agent from a human, so
+every one of those is a convention, exactly as the gate is.
+
+The gate at least has a mechanism to lean on: a challenge code goes to one person
+and comes back. Work has nothing equivalent, and inventing one here would mean
+deciding what "explicit human direction" *is* as a representation — a confirmed
+record of it? a second signal only a human can produce? — which #12 does not
+define and which would pull Work back toward the gate it was deliberately put
+outside of.
+
+So v0 states the rules and reports what happens rather than preventing it. The
+signal that would bring a mechanism in is a real case where an agent ignored the
+rule and the loss mattered — at which point the question is what represents human
+direction, not whether to refuse one operation.
 
 ### Trailing whitespace in a body is significant by default
 

@@ -806,9 +806,12 @@ pub fn render_work_ls(root: &Path, entries: &[(String, work::Work)]) -> String {
             .iter()
             .filter(|entry| entry.state != work::ItemState::Done)
             .count();
+        // Loading a sidecar holds the owner invariant, so by the time a row is
+        // rendered the Object exists. No "(object not found)" fallback: an
+        // orphan is invalid Work and is refused as such, not drawn as a row.
         let title = ops::effective(root, id)
             .map(|object| object.title)
-            .unwrap_or_else(|_| "(object not found)".to_owned());
+            .unwrap_or_default();
         out.push_str(&format!(
             "{}  {:<8}  {:>2} open  {}  {}\n",
             abbrev(id, w),
@@ -886,6 +889,12 @@ pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
 pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
     let value = serde_json::json!({
         "object": id,
+        // Structured output is the surface that travels furthest from any
+        // banner — straight into another tool, with no screen in between — so
+        // the boundary has to be a field rather than a line somebody printed.
+        // `{"state": "active"}` on its own is indistinguishable from an Object's
+        // own state, which is exactly the confusion this domain must not cause.
+        "authority": "execution_memory",
         "state": item.state.as_str(),
         "standing": item.standing(),
         "blocked": item.is_blocked(),

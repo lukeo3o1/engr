@@ -128,7 +128,8 @@ pub struct Item {
     /// Full Git object ids, as navigation and evidence — never as an integrity
     /// anchor. A commit that a rebase made unreachable is a dead signpost, not a
     /// corrupt sidecar, and an item can be done with no commit at all.
-    #[serde(default)]
+    ///
+    /// Required, and may be empty, for the same reason the lists above are.
     pub commits: Vec<String>,
 }
 
@@ -158,11 +159,12 @@ pub struct Work {
     /// handoff note or a conversation keeps meaning the same step even after
     /// item 3 is pruned.
     pub next_item_id: u64,
-    #[serde(default)]
+    /// Required, and may be empty. Not `#[serde(default)]`: an omitted list and
+    /// an empty one would be the same sidecar written two ways, and a stored
+    /// shape the write path can never produce is a shadow schema that only ever
+    /// gets discovered by something depending on it.
     pub dependencies: Vec<Dependency>,
-    #[serde(default)]
     pub blockers: Vec<Blocker>,
-    #[serde(default)]
     pub items: Vec<Item>,
 }
 
@@ -222,13 +224,32 @@ impl Work {
     /// edit, and these files are meant to be read and diffed like any other
     /// tracked file.
     pub fn validate(&self) -> Result<()> {
+        // Every fault here is a fault in *stored* data, so they all read as
+        // schema rather than usage. A caller who typed something too long is
+        // refused earlier, by the same rule with the other exit code — a file
+        // this build cannot accept is not the current caller's mistake.
+        ensure!(
+            crate::backlog::instant(&self.updated_at).is_some(),
+            EXIT_SCHEMA,
+            "updated_at {:?} is not an RFC3339 timestamp",
+            self.updated_at
+        );
         if let Some(summary) = &self.summary {
-            check_text("summary", summary, SUMMARY_MAX)?;
+            bounded(EXIT_SCHEMA, "summary", summary, SUMMARY_MAX)?;
         }
+        let mut targets = std::collections::BTreeSet::new();
         for dependency in &self.dependencies {
             check_target("a work dependency", &dependency.target.reference)?;
+            // The write path refuses a second dependency on the same target, so
+            // a stored pair of them is a shape it could not have produced.
+            ensure!(
+                targets.insert(dependency.target.reference.as_str()),
+                EXIT_SCHEMA,
+                "{} is a dependency twice, and one prerequisite is one dependency",
+                dependency.target.reference
+            );
             if let Some(reason) = &dependency.reason {
-                check_text("a dependency reason", reason, REASON_MAX)?;
+                bounded(EXIT_SCHEMA, "a dependency reason", reason, REASON_MAX)?;
             }
         }
         for blocker in &self.blockers {
@@ -241,17 +262,24 @@ impl Work {
                 check_target("a work blocker", &target.reference)?;
             }
             if let Some(reason) = &blocker.reason {
-                check_text("a blocker reason", reason, REASON_MAX)?;
+                bounded(EXIT_SCHEMA, "a blocker reason", reason, REASON_MAX)?;
             }
         }
         let mut seen = std::collections::BTreeSet::new();
         for item in &self.items {
-            check_text("a work item", &item.text, ITEM_TEXT_MAX)?;
+            bounded(EXIT_SCHEMA, "a work item", &item.text, ITEM_TEXT_MAX)?;
             if let Some(result) = &item.result {
-                check_text("a work item result", result, ITEM_RESULT_MAX)?;
+                bounded(EXIT_SCHEMA, "a work item result", result, ITEM_RESULT_MAX)?;
             }
+            let mut commits = std::collections::BTreeSet::new();
             for commit in &item.commits {
                 crate::semantics::validate_pinned_commit("a work item commit", commit)?;
+                ensure!(
+                    commits.insert(commit.as_str()),
+                    EXIT_SCHEMA,
+                    "work item {} records {commit} twice",
+                    item.id
+                );
             }
             ensure!(
                 item.id < self.next_item_id,
@@ -268,6 +296,17 @@ impl Work {
             );
         }
         Ok(())
+    }
+
+    /// When this was last touched, as an instant rather than as text.
+    ///
+    /// Two valid RFC3339 values written in different offsets do not compare
+    /// correctly as strings, so anything that orders sidecars has to parse them.
+    /// Validation guarantees this parses; the stored spelling is what gets
+    /// displayed, so nothing here rewrites what an earlier writer chose.
+    pub fn updated_at(&self) -> time::OffsetDateTime {
+        crate::backlog::instant(&self.updated_at)
+            .expect("loading validates the timestamp, so a loaded Work always parses")
     }
 }
 
@@ -294,17 +333,27 @@ pub fn check_target(what: &str, reference: &str) -> Result<()> {
 }
 
 /// Every Work text field lands here, so one rule covers all of them.
-fn check_text(what: &str, text: &str, limit: usize) -> Result<()> {
-    ensure!(!text.trim().is_empty(), EXIT_USAGE, "{what} needs text");
+///
+/// The exit code is the caller's, because the same rule answers two different
+/// questions. A caller writing something too long made a usage mistake; a file
+/// on disk holding something too long is a schema fault, and reporting that as
+/// usage would blame whoever happened to run the next command.
+fn bounded(code: i32, what: &str, text: &str, limit: usize) -> Result<()> {
+    ensure!(!text.trim().is_empty(), code, "{what} needs text");
     let length = text.chars().count();
     ensure!(
         length <= limit,
-        EXIT_USAGE,
+        code,
         "{what} is a handoff note, not the work itself ({length} characters, limit \
          {limit}). Keep the part the next agent needs; unresolved reasoning belongs \
          in `engr backlog`, and settled knowledge belongs in the Object."
     );
     Ok(())
+}
+
+/// The same rule, at the moment a caller supplies the text.
+fn check_text(what: &str, text: &str, limit: usize) -> Result<()> {
+    bounded(EXIT_USAGE, what, text, limit)
 }
 
 fn now() -> String {
@@ -344,6 +393,16 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     );
     let work: Work = store::read_json(&path)?;
     work.validate()?;
+    // The owner invariant, held on the way *out* as well as on the way in. A
+    // sidecar names its Object in its filename, so a copied file can name one
+    // that never existed — and a check that only runs on the write path would
+    // let this build read, list and hand back operational memory for nothing.
+    ensure!(
+        crate::ops::effective(root, object).is_ok(),
+        EXIT_SCHEMA,
+        "{} belongs to no object: a sidecar is owned by an Object, and object {object} does not exist",
+        path.display()
+    );
     Ok(work)
 }
 
@@ -396,6 +455,9 @@ fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>)
 
 /// Begin keeping execution memory for an Object.
 pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+    if let Some(summary) = summary {
+        check_text("summary", summary, SUMMARY_MAX)?;
+    }
     locked(root, || {
         require_object(root, object)?;
         ensure!(
@@ -414,23 +476,39 @@ pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
 
 /// Forget the execution memory for an Object.
 ///
-/// Refused while `paused`, which is the one mechanical half of the human-direction
-/// rule engr can actually enforce. A paused sidecar is a human saying stop, and
-/// an agent that could delete it could erase the instruction and start again
-/// with a clean one — so the signal is sticky across deletion, not only across
-/// resumption. Deleting says nothing about the Object; the record is untouched.
-pub fn remove(root: &Path, object: &str) -> Result<()> {
+/// Deleting says nothing about the Object; the record is untouched.
+///
+/// A `paused` sidecar is deleted too, and that is deliberate. #12 makes "an
+/// agent MUST NOT delete a paused WorkObject without explicit human direction" a
+/// **normative agent rule**, not a confirmation-gate mutation — and refusing
+/// here would be neither. It would not stop a non-compliant agent, which can
+/// call [`set_state`] and then this; it would make a human's own "delete that"
+/// impossible to carry out directly; and it would invent a persisted
+/// `paused -> active` step whose only purpose is to satisfy the refusal, with a
+/// window where a crash has already discarded the stop signal.
+///
+/// So the rule stays where #12 put it, on the agent, stated in the protocol and
+/// the Skill. Whether human direction should have a mechanical representation at
+/// all is a real question and an open one; see `## What v0 does not solve`.
+/// [`Removed`] reports what was discarded so a caller can say so.
+pub fn remove(root: &Path, object: &str) -> Result<Removed> {
     locked(root, || {
         let work = load(root, object)?;
-        ensure!(
-            work.state != State::Paused,
-            EXIT_INVARIANT,
-            "work on {object} is paused, which is a human saying stop; deleting it \
-             would erase that. Resume it first, and only on explicit human direction."
-        );
         let path = path(root, object);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))
+        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        Ok(Removed {
+            was_paused: work.state == State::Paused,
+        })
     })
+}
+
+/// What deleting a sidecar threw away that a reader should hear about.
+#[derive(Debug)]
+pub struct Removed {
+    /// A human had stopped this. Deletion is still carried out — engr cannot
+    /// tell who asked — but a screen that said nothing would let the signal
+    /// disappear silently, which is the part worth reporting.
+    pub was_paused: bool,
 }
 
 /// Both directions of the human-directed stop signal.
@@ -448,6 +526,9 @@ pub fn set_state(root: &Path, object: &str, state: State) -> Result<Work> {
 }
 
 pub fn set_summary(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+    if let Some(summary) = summary {
+        check_text("summary", summary, SUMMARY_MAX)?;
+    }
     edit(root, object, |work| {
         work.summary = summary.map(str::to_owned);
         Ok(())
@@ -461,6 +542,9 @@ pub fn add_dependency(
     target: &str,
     reason: Option<&str>,
 ) -> Result<Work> {
+    if let Some(reason) = reason {
+        check_text("a dependency reason", reason, REASON_MAX)?;
+    }
     edit(root, object, |work| {
         let dependency = Dependency {
             target: EngrTarget::new(target),
@@ -501,6 +585,9 @@ pub fn add_blocker(
     reason: Option<&str>,
     target: Option<&str>,
 ) -> Result<Work> {
+    if let Some(reason) = reason {
+        check_text("a blocker reason", reason, REASON_MAX)?;
+    }
     edit(root, object, |work| {
         work.blockers.push(Blocker {
             reason: reason.map(str::to_owned),
@@ -528,6 +615,7 @@ pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
 }
 
 pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
+    check_text("a work item", text, ITEM_TEXT_MAX)?;
     edit(root, object, |work| {
         let id = work.take_id()?;
         work.items.push(Item {
@@ -550,6 +638,7 @@ pub fn set_item_state(root: &Path, object: &str, id: u64, state: ItemState) -> R
 }
 
 pub fn set_item_text(root: &Path, object: &str, id: u64, text: &str) -> Result<Work> {
+    check_text("a work item", text, ITEM_TEXT_MAX)?;
     edit(root, object, |work| {
         work.item_mut(id)?.text = text.to_owned();
         Ok(())
@@ -558,6 +647,9 @@ pub fn set_item_text(root: &Path, object: &str, id: u64, text: &str) -> Result<W
 }
 
 pub fn set_item_result(root: &Path, object: &str, id: u64, result: Option<&str>) -> Result<Work> {
+    if let Some(result) = result {
+        check_text("a work item result", result, ITEM_RESULT_MAX)?;
+    }
     edit(root, object, |work| {
         work.item_mut(id)?.result = result.map(str::to_owned);
         Ok(())

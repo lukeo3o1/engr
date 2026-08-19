@@ -242,12 +242,17 @@ everything is blocked, not because you judge the work should wait — those are
 what `blockers` and item states are for. And never clear it without being told
 to, in this conversation, by the human.
 
-engr cannot tell you from a human, so this one is on you. The one part it does
-enforce: a paused sidecar cannot be deleted. If you find that inconvenient, that
-is the rule working.
+**And never delete a paused sidecar** without being told to. `engr work rm` will
+do it — it cannot tell you from a human, so it carries the instruction out and
+then says a stop signal went with it. That line is not permission; it is the tool
+telling you what you just discarded.
 
-`engr work rm` on active work is fine — a sidecar that no longer helps the next
-agent is clutter, and git keeps what it said.
+All of this is on you. engr enforces none of it, the same way nothing stops you
+typing your own challenge code. It is the same kind of rule, and it fails the
+same way: quietly, and only a human ever finds out.
+
+`engr work rm` on work nobody paused is fine — a sidecar that no longer helps the
+next agent is clutter, and git keeps what it said.
 
 ### Dependencies are not blockers
 
