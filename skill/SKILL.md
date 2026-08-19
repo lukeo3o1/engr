@@ -119,6 +119,12 @@ engr show <id> --format json         # the same, structured
 engr ls --all --sections | grep <term>
 ```
 
+Both `show` surfaces print the object's canonical reference, and the structured
+one gives each section its own. That is the string every flag that takes a
+reference wants — `--ref`, `--subject`, `work depend --on`,
+`collection add --target` — so read it from there rather than trying to build
+one. `engr backlog show` prints its item's the same way.
+
 `show` puts the confirmed wording and its trustworthiness on the same screen.
 There is no second command to fetch the authoritative text — what you see is what
 was confirmed.

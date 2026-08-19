@@ -108,6 +108,18 @@ fn abbrev(id: &str, len: usize) -> &str {
     &id[..len.min(id.len())]
 }
 
+/// The canonical reference for a resource, as every reference-taking flag
+/// wants it written.
+///
+/// Falls back to the raw id if the compact encoding somehow fails, because a
+/// read surface refusing to print because one field could not be derived is
+/// worse than printing the rest — and the encoding cannot fail for a stored id.
+fn canonical_reference(id: &str) -> String {
+    crate::reference::encode_uuid_str(id)
+        .map(|compact| format!("engr:obj:{compact}"))
+        .unwrap_or_else(|_| id.to_owned())
+}
+
 /// The abbreviation width to use across one command's output.
 pub fn width(root: &Path) -> usize {
     store::object_ids(root)
@@ -258,6 +270,11 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
+    // The canonical reference, on the screen you land on when you want to name
+    // this object to something else. Every reference-taking flag wants this
+    // exact string, and until it was printed the only way to produce one was to
+    // implement Crockford Base32 outside engr.
+    out.push_str(&format!("{}\n", canonical_reference(&object.id)));
     for section in &object.sections {
         let status = assessment
             .iter()
@@ -367,6 +384,8 @@ pub fn render_show(root: &Path, object: &Object) -> String {
 #[derive(Serialize)]
 struct JsonSection<'a> {
     id: u64,
+    /// The section's own canonical reference, for `--ref` and `--subject`.
+    reference: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<&'static str>,
     text: &'a str,
@@ -398,6 +417,12 @@ struct JsonSummary {
 #[derive(Serialize)]
 struct JsonObject<'a> {
     id: &'a str,
+    /// The canonical form every reference-taking flag wants — `--subject`,
+    /// `--ref`, `work depend --on`, `collection add --target`. Without it an
+    /// agent holding this document cannot name this object to engr without
+    /// implementing Crockford Base32 itself, which is a workflow that leaves
+    /// the tool for no reason.
+    reference: String,
     title: &'a str,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     object_type: Option<&'static str>,
@@ -412,6 +437,7 @@ struct JsonObject<'a> {
 }
 
 pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
+    let compact = canonical_reference(&object.id);
     let assessment = assess(root, object);
     let tally = counts(&assessment);
     let sections = object
@@ -425,6 +451,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 .unwrap_or_default();
             JsonSection {
                 id: section.id,
+                reference: format!("{compact}:{}", section.id),
                 role: section.role.map(|role| role.as_str()),
                 text: &section.text,
                 content: &section.content,
@@ -442,6 +469,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         .collect();
     let value = JsonObject {
         id: &object.id,
+        reference: compact.clone(),
         title: &object.title,
         object_type: object.object_type.map(|value| value.as_str()),
         state: object.state.as_str(),
@@ -572,6 +600,13 @@ fn to_the_second(timestamp: &str) -> String {
         .unwrap_or_else(|| timestamp.to_owned())
 }
 
+/// The canonical reference for one unresolved point.
+fn backlog_reference(id: &str) -> String {
+    crate::reference::encode_uuid_str(id)
+        .map(|compact| format!("engr:backlog:{compact}"))
+        .unwrap_or_else(|_| id.to_owned())
+}
+
 pub fn backlog_width(root: &Path) -> usize {
     backlog::ids(root)
         .map(|ids| store::abbrev_len(&ids))
@@ -664,6 +699,9 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
         item.sections.len(),
         to_the_second(item.updated_at())
     ));
+    // The same line the record's `show` carries, for the same reason: this is
+    // where you land when you want to name this item to another command.
+    out.push_str(&format!("{}\n", backlog_reference(&item.id)));
     for section in &item.sections {
         out.push_str(&format!("\n── §{} ── unresolved\n", section.id));
         out.push_str(section.text.trim_end());
@@ -698,6 +736,10 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
 #[derive(Serialize)]
 struct JsonBacklogItem<'a> {
     id: &'a str,
+    /// The canonical form `--subject`, `work depend --on` and
+    /// `collection add --target` all want, for the same reason the object
+    /// surface carries one.
+    reference: String,
     topic: &'a str,
     authority: &'static str,
     next_section_id: u64,
@@ -708,6 +750,7 @@ struct JsonBacklogItem<'a> {
 pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
     serde_json::to_string_pretty(&JsonBacklogItem {
         id: &item.id,
+        reference: backlog_reference(&item.id),
         topic: &item.topic,
         // Structured output travels furthest from the banner, so the boundary
         // has to be a field rather than a line somebody printed once.

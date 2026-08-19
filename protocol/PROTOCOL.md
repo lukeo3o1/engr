@@ -482,6 +482,20 @@ An envelope that cannot carry that guarantee MUST be refused and re-prepared,
 never read as if absence meant protection. Candidates are local, uncommitted and
 short-lived, so this costs a moment.
 
+### Naming a resource to engr
+
+Every reference-taking surface — `refs[]`, backlog `subjects[]`, work
+dependencies and blockers, collection members — wants the canonical form
+`engr:obj:<26>` or `engr:backlog:<26>`. A read surface MUST therefore **print
+it**: `show` and its structured form, for objects and for backlog items alike,
+and each section MUST carry its own.
+
+This is not a convenience. Without it the only way to produce the argument those
+surfaces require is to implement the compact codec outside engr, which makes the
+ordinary workflow depend on reimplementing part of the tool — and an id that is
+printed in one alphabet and demanded in another is a gap a reader has no way to
+bridge.
+
 ### What a human is shown
 
 The **complete semantic change**, not the whole section again. Revisions use a

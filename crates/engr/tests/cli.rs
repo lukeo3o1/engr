@@ -3381,3 +3381,116 @@ fn collection_ls_lists_open_plans_before_closed_ones() {
     );
     assert!(listed.contains(&open[..4]), "{listed}");
 }
+
+/// engr can name its own resources to itself.
+///
+/// Every reference-taking flag across three domains wants
+/// `engr:obj:<26-char>` or `engr:backlog:<26-char>`, and until this landed no
+/// command printed one — an agent had to implement Crockford Base32 outside the
+/// tool to use `--subject`, `--on` or `--target` at all. The test is the round
+/// trip rather than the field, because the field is only worth having if what
+/// it prints is exactly what the flags accept.
+#[test]
+fn a_read_surface_prints_the_reference_every_flag_asks_for() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "refresh", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+
+    // Text and structured both carry it, for both domains.
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let reference = object["reference"].as_str().expect("reference").to_owned();
+    assert!(reference.starts_with("engr:obj:"), "{reference}");
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{reference}:1"),
+        "a section names itself too, for --ref and --subject"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).contains(&reference),
+        "the text surface prints it as well"
+    );
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    let staged_reference = staged["reference"].as_str().expect("reference").to_owned();
+    assert!(
+        staged_reference.starts_with("engr:backlog:"),
+        "{staged_reference}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["backlog", "show", &item]).stdout)
+            .contains(&staged_reference)
+    );
+
+    // And every flag that demanded this shape accepts exactly what was printed.
+    let plan = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    let plan_id = String::from_utf8_lossy(&plan.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    for (what, args) in [
+        (
+            "collection add --target, an object",
+            vec!["collection", "add", &plan_id, "--target", &reference],
+        ),
+        (
+            "collection add --target, a backlog item",
+            vec!["collection", "add", &plan_id, "--target", &staged_reference],
+        ),
+        (
+            "work depend --on",
+            vec!["work", "depend", &id, "--on", &staged_reference],
+        ),
+        (
+            "backlog new --subject",
+            vec![
+                "backlog",
+                "new",
+                "--topic",
+                "t",
+                "--text",
+                "x",
+                "--subject",
+                &reference,
+            ],
+        ),
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{what} refused what engr itself printed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
