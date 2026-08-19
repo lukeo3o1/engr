@@ -2913,3 +2913,261 @@ fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
         "and the record stores it"
     );
 }
+
+/// Execution memory is reachable, and reads as what it is.
+///
+/// Every screen that prints it says so, because the failure this domain can
+/// cause is not corruption — it is a reader taking a finished checklist for a
+/// settled decision.
+#[test]
+fn work_is_its_own_namespace_and_every_screen_says_it_is_not_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let empty = run_engr(root, &["work", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("EXECUTION MEMORY"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no execution memory"), "{shown}");
+
+    let started = run_engr(
+        root,
+        &[
+            "work",
+            "start",
+            &id,
+            "--summary",
+            "Parser done. show still uses the old resolver.",
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(run_engr(
+        root,
+        &["work", "item", "add", &id, "--text", "migrate the parser"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["work", "item", "state", &id, "--item", "1", "--state", "done"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "work",
+            "block",
+            &id,
+            "--reason",
+            "waiting on the compat result"
+        ]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["work", "ls"]).stdout).to_string();
+    assert!(listed.contains("blocked"), "derived, not stored: {listed}");
+    assert!(listed.contains("the auth design"), "{listed}");
+
+    // And the record's own commands are untouched by any of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["EXECUTION MEMORY", "migrate the parser", "compat result"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?} from the sidecar: {shown}"
+            );
+        }
+    }
+    let structured: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert!(structured.get("work").is_none(), "{structured}");
+    assert_eq!(structured["state"], "open", "the Object is where it was");
+
+    // Structured Work output travels furthest from any banner — into another
+    // tool, with no screen in between — so the boundary has to be a field.
+    // `{"state": "active"}` alone is indistinguishable from an Object's state.
+    let sidecar: Value =
+        serde_json::from_slice(&run_engr(root, &["work", "show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(
+        sidecar["authority"], "execution_memory",
+        "the JSON surface must say what it is: {sidecar}"
+    );
+    assert_eq!(sidecar["standing"], "blocked");
+    assert_eq!(sidecar["state"], "active");
+}
+
+/// A human said stop, and every screen that touches it says so.
+///
+/// The rule itself is the agent's to follow — engr cannot tell who asked, so it
+/// does not refuse. What it can do is never let the signal pass unremarked: the
+/// state screen states the rule, and deleting says what went with the sidecar.
+#[test]
+fn pausing_work_survives_an_agent_trying_to_delete_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "paused work"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["work", "show", &id]).stdout).to_string();
+    assert!(shown.contains("State      paused"), "{shown}");
+    assert!(
+        shown.contains("do not resume it on your own"),
+        "the screen states the rule the tool cannot enforce: {shown}"
+    );
+
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(
+        removed.status.success(),
+        "the deletion is carried out: the rule is normative, not mechanical"
+    );
+    assert!(
+        String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"),
+        "but it does not pass unremarked: {}",
+        String::from_utf8_lossy(&removed.stdout)
+    );
+    assert!(!run_engr(root, &["work", "show", &id]).status.success());
+
+    // Deleting an active one says only that there is nothing left to hand off.
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(removed.status.success());
+    assert!(!String::from_utf8_lossy(&removed.stdout).contains("stop signal"));
+}
+
+/// A work target names a whole Object or Backlog item, and must exist.
+#[test]
+fn work_targets_are_checked_at_the_command_line() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "depends"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let other = prepare(root, &["prepare", "--new", "--text", "the prerequisite"]);
+    confirm(root, &other);
+    let other = other["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&other).expect("compact");
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    let ok = run_engr(
+        root,
+        &[
+            "work",
+            "depend",
+            &id,
+            "--on",
+            &format!("engr:obj:{compact}"),
+            "--reason",
+            "the token format is confirmed there",
+        ],
+    );
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let shown = String::from_utf8_lossy(&ok.stdout).to_string();
+    assert!(shown.contains("Depends on"), "{shown}");
+    assert!(
+        shown.contains("the token format is confirmed there"),
+        "{shown}"
+    );
+
+    let absent = engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact");
+    for (spec, expected) in [
+        (format!("engr:obj:{compact}:1"), "whole Object"),
+        // A well-formed Collection id, so what refuses it is the kind and not the
+        // spelling: Work does not point at planning metadata.
+        ("engr:collection:0123456789".to_owned(), "cannot target"),
+        (format!("engr:obj:{absent}"), "does not exist"),
+        (format!("obj:{compact}"), "must be an engr: reference"),
+    ] {
+        let refused = run_engr(root, &["work", "depend", &id, "--on", &spec]);
+        assert!(!refused.status.success(), "{spec}");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{spec}: {message}");
+    }
+}
+
+/// Every surface an agent can reach describes the same rule.
+///
+/// `paused` has one behaviour and four places that state it: the protocol
+/// compiled into the binary, `--help`, the screens, and the source. When an
+/// accepted design moves, they have to move together — an agent that reads
+/// `--help` and concludes the opposite of `engr protocol` has been handed two
+/// rules and will follow the convenient one. Pinned here because the drift is
+/// invisible: nothing else fails when only the wording is stale.
+#[test]
+fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    // `--help` is the surface an agent reaches for first and the one most
+    // likely to disagree, because nothing breaks when it does.
+    let help = String::from_utf8_lossy(&run_engr(root, &["work", "rm", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["work", "--help"]).stdout);
+    for stale in ["Refused while paused", "refused", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help still claims the reverted rule ({stale:?}): {help}"
+        );
+    }
+
+    // The compiled-in protocol is canonical, and says the rule is the agent's.
+    // Whitespace-normalized, so a reflowed paragraph does not fail a test about
+    // meaning — the thing being pinned is what the sentence says.
+    let protocol = String::from_utf8_lossy(&run_engr(root, &["protocol"]).stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        protocol.contains("MUST NOT delete a paused work object"),
+        "the protocol states the normative rule"
+    );
+    assert!(
+        protocol.contains("MUST NOT turn it into a lifecycle rule by refusing the deletion"),
+        "and states that an implementation must not enforce it"
+    );
+
+    // And the behaviour itself, one more time, against the same binary the two
+    // documents above came out of.
+    let created = prepare(root, &["prepare", "--new", "--text", "surfaces agree"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"));
+}

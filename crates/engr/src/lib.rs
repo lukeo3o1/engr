@@ -14,6 +14,7 @@ pub mod reference;
 pub mod semantics;
 pub mod store;
 pub mod view;
+pub mod work;
 
 /// Schema version of `.engr/format.json`, the workspace-level authority.
 pub const WORKSPACE_VERSION: u32 = 1;

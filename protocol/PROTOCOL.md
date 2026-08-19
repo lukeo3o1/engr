@@ -853,6 +853,191 @@ travels furthest from any banner.
 into their output. `verify` stays record-oriented: staging validity is not part
 of what a record `PASS` claims.
 
+## Work
+
+**Execution memory an agent keeps for one object.** It answers "where does this
+currently stand" and nothing else. Like backlog it is agent-managed, git-tracked
+and confirmed by nobody; unlike backlog it is not a domain of its own but a
+**sidecar** hanging off an object.
+
+```text
+work object
+├── state                 active | paused
+├── summary?              the shortest useful checkpoint
+├── updated_at            RFC3339
+├── next_item_id          monotonic, never reset
+├── dependencies[]        required, may be empty; targets are unique
+│   ├── target            required, engr:obj:<id> | engr:backlog:<id>
+│   └── reason?           <= 200 scalars
+├── blockers[]            required, may be empty
+│   ├── reason?           <= 200 scalars
+│   └── target?           engr:obj:<id> | engr:backlog:<id>
+│   (at least one of the two MUST be present)
+└── items[]               required, may be empty
+    ├── id                integer, never reused
+    ├── text              <= 160 scalars
+    ├── state             pending | active | done
+    ├── result?           <= 240 scalars
+    └── commits[]         required, may be empty; unique full Git object ids
+```
+
+The four lists are **required and may be empty**: an omitted list and an empty
+one MUST NOT be two spellings of the same sidecar. More generally, a stored work
+object MUST be held to exactly what the write path can produce — a reader that
+accepts shapes the API refuses is a second, larger schema that only ever gets
+discovered by something that came to depend on it. A fault in a stored file is a
+**schema** fault, not a usage error: nobody currently running a command wrote it.
+
+`updated_at` MUST be a valid RFC3339 timestamp, and anything ordering work
+objects by it MUST compare **instants** rather than text — two valid values
+written in different offsets do not sort correctly as strings. The stored
+spelling is preserved for display.
+
+Stored at `.engr/work/objects/<object-id>.json`, one per object, carrying no
+`format` or `version` of its own — `.engr/format.json` remains the single schema
+authority. Most objects have none, and absence means only that engr holds no
+operational memory.
+
+A work object MUST correspond to an existing object, and that MUST be held on
+**read** as well as on write. A sidecar names its object in its filename, so a
+copied file can name one that never existed; an implementation that only checked
+when writing would then read, list and hand back operational memory for nothing.
+An orphan sidecar is invalid work, not a row with a missing title.
+
+There is **no `engr:work:` reference**. Work is not an addressable resource,
+nothing points at it, and it has no identity beyond the object it belongs to.
+
+### It owns no authority
+
+This is the whole of why it can live outside the gate.
+
+```text
+work never changes object semantic state
+work is never promoted wholesale into the record
+finishing every item settles nothing
+```
+
+An agent may complete every item it wrote and the object is exactly where it
+was. If a result turns out to be stable engineering knowledge, it reaches the
+record the only way anything does: `prepare`, a human, `confirm`. Unresolved
+reasoning belongs in backlog. `summary` is a checkpoint, not a decision record, a
+design analysis, a session transcript, or a copy of git history.
+
+`ls`, `show` and `verify` are record surfaces and MUST NOT mix work into their
+output, for the same reason they exclude backlog. Every work surface MUST say
+what it is showing, **including the structured one**: a machine-readable
+non-authoritative discriminator is required there, because JSON is the surface
+that travels furthest from any banner and `{"state": "active"}` on its own is
+indistinguishable from an object's own state.
+
+Text surfaces must say more than backlog's banner does, because the failure worth
+preventing here is not a reader trusting unconfirmed wording but a reader taking
+a finished checklist for a settled object.
+
+### `paused` is a human saying stop
+
+```text
+active    agents may keep advancing this on their own
+paused    a human suspended it; agents must not resume it on their own
+```
+
+`paused` MUST NOT be inferred. Not from a session ending, not from a blocker, not
+from an empty item list, not from an agent's own judgement that the work should
+wait. An agent MUST NOT set it, and MUST NOT clear it, without explicit human
+direction.
+
+The same rule covers deletion: an agent MUST NOT delete a paused work object
+without explicit human direction.
+
+All of that is **normative on the agent**, not mechanical. engr cannot check it,
+because it cannot tell an agent from a human — so it lives here and in the Skill,
+exactly like the gate itself does. An implementation MUST NOT turn it into a
+lifecycle rule by refusing the deletion: that would stop no agent willing to
+clear `paused` first, it would make a human's own instruction impossible to carry
+out directly, and it would invent a persisted transition whose only purpose is to
+satisfy the refusal. What an implementation SHOULD do is make sure the signal
+never disappears in silence — say, when a paused work object is deleted, that a
+human's stop signal went with it.
+
+Whether human direction should have a mechanical representation at all is an open
+question; see [What v0 does not
+solve](#work-has-no-mechanical-notion-of-human-direction).
+
+A work object may otherwise be deleted freely once it no longer carries useful
+handoff. Deleting says only that no operational memory is being kept; the object
+is untouched. Completed items may likewise be pruned once they stop helping the
+next agent. There is no archive: git holds what the sidecar used to say.
+
+### Derived standing
+
+```text
+active,  no blockers   -> active
+active,  blockers      -> blocked
+paused                 -> paused
+```
+
+`blocked` is **derived and never stored**, for the same reason attention is: two
+fields that can disagree eventually do. There is deliberately no `done` state at
+the work-object level either, and that absence is load-bearing — a completed
+sidecar must never become a second answer to "is this settled" competing with the
+object's own state.
+
+### Dependencies and blockers are different things
+
+```text
+dependency   a prerequisite this execution relies on; may hold while nothing is blocked
+blocker      a condition currently preventing useful progress; may be temporary
+```
+
+They are not collapsed into one list. The same target can legitimately be both,
+and when the blocking condition clears the dependency remains true.
+
+A dependency MUST name a target, because one without a target says nothing
+actionable. A blocker needs only one of reason or target, because real execution
+is stopped by things that are not engr resources — an approval, an environment, a
+vendor — and a blocker that could only be written as an edge would not be written
+at all. An empty blocker is invalid.
+
+Targets are **whole objects and whole backlog items only**. Not a section, file,
+symbol, collection, or another sidecar: the finer the target, the more it reads
+like `refs[]`, which pins wording and carries authority. Neither a dependency nor
+a blocker ever becomes an authoritative relation, and neither is promoted
+automatically.
+
+### Item ids and commits
+
+Item ids come from `next_item_id` and are **never reused**, including after
+pruning. Handoff notes and conversations say "work item 3"; letting a later step
+take that number would silently repoint every one of those sentences.
+
+`items[].commits[]` are **navigation and evidence, never integrity anchors**:
+
+```text
+done          does not require a commit
+a commit      does not mean done
+unreachable   is a dead signpost, not a corrupt sidecar
+```
+
+Research and validation produce no commit; a rebase can make a recorded one
+unreachable. This is deliberately weaker than `based_on` and `refs[].commit`,
+which do anchor, and an implementation MUST NOT treat a missing commit as
+corruption.
+
+### Bounds
+
+```text
+summary          300
+item.text        160
+item.result      240
+dependency.reason 200
+blocker.reason    200
+```
+
+Counted in Unicode scalar values, like everything else. Unlike a section there is
+no oversize exception: nothing here is authoritative enough to be worth admitting
+past its limit. Text that will not fit has somewhere better to be — the
+unresolved part in backlog, the settled part in the object.
+
 ## What v0 does not solve
 
 `prepare` prints the challenge code where the agent can read it, and the agent
@@ -881,6 +1066,25 @@ current again, that is what a new object says.
 
 The signal that would bring an operation in is a real case where the supersession
 itself was the mistake, rather than the design being replaced changing again.
+
+### Work has no mechanical notion of human direction
+
+`paused` is a human-directed stop signal, and several of its rules — do not set
+it, do not clear it, do not delete a paused sidecar — are obligations on the
+agent that engr cannot check. It has no way to tell an agent from a human, so
+every one of those is a convention, exactly as the gate is.
+
+The gate at least has a mechanism to lean on: a challenge code goes to one person
+and comes back. Work has nothing equivalent, and inventing one here would mean
+deciding what "explicit human direction" *is* as a representation — a confirmed
+record of it? a second signal only a human can produce? — which #12 does not
+define and which would pull Work back toward the gate it was deliberately put
+outside of.
+
+So v0 states the rules and reports what happens rather than preventing it. The
+signal that would bring a mechanism in is a real case where an agent ignored the
+rule and the loss mattered — at which point the question is what represents human
+direction, not whether to refuse one operation.
 
 ### Trailing whitespace in a body is significant by default
 
@@ -955,6 +1159,7 @@ hash — what it was.
   events/<uuid>.jsonl      append-only confirmed history
   candidates/<CODE>.json   awaiting a human     never commit this
   backlog/<uuid>.json      unresolved staging   commit this
+  work/objects/<uuid>.json execution memory      commit this
 ```
 
 Backlog is committed: git is its only history. A new optional directory is not
@@ -1024,6 +1229,10 @@ bring it in:
 | An operation that leaves `superseded` | The supersession itself was the mistake, rather than the design being replaced changing again |
 | A `text`, `markdown` or `note` content type | Something needs prose that is genuinely not the assertion, often enough to be worth a second place for wording |
 | Machine observations (test results, progress) | Those need to be in the record |
+| A `done` state on a work object | Something must distinguish "no items left" from "the work is over" that the object's own state cannot say |
+| Work sidecars for backlog items | Unresolved staging needs dependencies or blockers — and then they belong as fields of the backlog model, since no authority boundary separates them |
+| Owners, estimates, deadlines or labels on work | Work has to answer a question a bounded handoff cannot, at which point it has stopped being execution memory |
+| An archive for pruned work items | A pruned item has to be recoverable without git |
 | Splitting untyped `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
 | Untyped states between open and closed (`deferred`, `blocked`) | An untyped record is neither being worked on nor settled, and calling it one of the two loses something someone needed |
 | A priority on an object | Which record matters more has to be answered mechanically — a listing has to order by it |

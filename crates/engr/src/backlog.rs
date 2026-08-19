@@ -49,31 +49,11 @@ pub fn item_path(root: &Path, id: &str) -> PathBuf {
     dir(root).join(format!("{id}.json"))
 }
 
-/// The structural discriminator from the shared embedded reference form. `kind`
-/// is structural; `type` stays reserved for semantic classification.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum EngrKind {
-    #[serde(rename = "engr")]
-    Engr,
-}
-
-/// `{ "kind": "engr", "ref": "obj:<id>" }` — the shared embedded engr target.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct EngrTarget {
-    pub kind: EngrKind,
-    #[serde(rename = "ref")]
-    pub reference: String,
-}
-
-impl EngrTarget {
-    pub fn new(reference: impl Into<String>) -> Self {
-        Self {
-            kind: EngrKind::Engr,
-            reference: reference.into(),
-        }
-    }
-}
+/// The shared embedded engr target, defined once in [`crate::reference`] and
+/// re-exported here because Backlog was its first user. Work is its second, and
+/// two domains reaching for the same shape is exactly what "shared" was meant
+/// to mean — but only the syntax is shared, never the semantics.
+pub use crate::reference::{EngrKind, EngrTarget};
 
 /// What an unresolved point concerns.
 ///

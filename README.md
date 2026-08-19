@@ -75,8 +75,8 @@ word must not print `ok` over words nobody agreed to.
 compiled into the binary — `engr protocol` prints the copy that matches the
 build you are running, which is what makes "where this document and the
 implementation disagree" a question you can settle without a checkout.
-The tests cover the gate, the record, object semantics, unresolved staging and
-the command line.
+The tests cover the gate, the record, object semantics, unresolved staging,
+execution memory and the command line.
 
 An object may carry a `type` — `design`, `decision` or `risk` — and one `state`
 valid for it; untyped is a first-class answer, not a gap. What `engr ls` shows by
@@ -144,11 +144,28 @@ engr backlog revise <id> --section 2 --text "reworded"
 engr backlog rm <id> --section 2             # removing it is what says "settled"
 ```
 
-No confirmation, no challenge code, no event log — an agent edits it directly
-and git is its history. Nothing there is authority, every screen says so, and
-`ls`, `show` and `verify` never mix a word of it into the record.
+Where execution currently stands goes somewhere else again — a sidecar on one
+object, holding the shortest useful handoff to whoever picks it up next:
 
-**Commit `.engr/objects`, `.engr/events` and `.engr/backlog`.** Confirmed events are append-only
+```bash
+engr work ls                                 # objects with execution memory
+engr work show <id>                          # where this one stands
+engr work start <id> --summary "parser done; show still on the old resolver"
+engr work item add <id> --text "migrate engr show"
+engr work block <id> --reason "waiting for the compatibility result"
+```
+
+No confirmation, no challenge code, no event log — an agent edits both directly
+and git is their history. Nothing in either is authority, every screen says so,
+and `ls`, `show` and `verify` never mix a word of them into the record.
+
+Work is deliberately weak. Finishing every item settles nothing: the object is
+exactly where it was, because only a confirmation moves it. `paused` is the one
+signal that belongs to the human rather than the agent — and engr cannot tell
+them apart, so it enforces none of it. What it does instead is say what happened:
+deleting paused work reports that a human's stop signal went with it.
+
+**Commit `.engr/objects`, `.engr/events`, `.engr/backlog` and `.engr/work`.** Confirmed events are append-only
 history and audit evidence; sections remain the authority for current wording.
 This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —
