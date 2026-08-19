@@ -1,0 +1,520 @@
+//! What a plan is, and what grouping something in one does not mean.
+//!
+//! Collections are the third non-authoritative domain, and the one furthest
+//! from the record: Backlog holds wording nobody confirmed, Work holds progress
+//! nobody confirmed, and a Collection holds neither — only the claim that some
+//! things belong together and in what order. So the rules pinned here are about
+//! that claim staying small: membership changes nothing, priority belongs to the
+//! membership rather than the target, completing a plan proves nothing about
+//! what is in it, and a consumed member is shown rather than quietly repointed.
+
+use engr::collection::{self, Level, Priority, Schedule, State};
+use engr::model::{Action, Content, Object, Payload};
+use engr::{backlog, gate, ops, store};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
+
+fn workspace() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    store::init(&root).expect("init");
+    (dir, root)
+}
+
+fn admit(root: &Path, payload: Payload) -> Object {
+    let prepared = gate::prepare(root, payload).expect("prepare");
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    gate::confirm(root, &response).expect("confirm").object
+}
+
+fn new_object(root: &Path, title: &str) -> String {
+    let id = engr::model::new_id();
+    admit(
+        root,
+        Payload {
+            action: Action::ObjectCreated,
+            object: id.clone(),
+            content: Content {
+                text: title.to_owned(),
+                ..Content::default()
+            },
+        },
+    );
+    id
+}
+
+fn object_ref(id: &str) -> String {
+    format!(
+        "obj:{}",
+        engr::reference::encode_uuid_str(id).expect("compact")
+    )
+}
+
+fn backlog_ref(id: &str) -> String {
+    format!(
+        "backlog:{}",
+        engr::reference::encode_uuid_str(id).expect("compact")
+    )
+}
+
+fn plan(root: &Path, name: &str) -> collection::Collection {
+    collection::create(root, name, None, None).expect("create")
+}
+
+/// Edit a stored plan the way a text editor would.
+fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
+    let path = collection::path(root, id);
+    let mut value: Value = store::read_json(&path).expect("read");
+    edit(&mut value);
+    store::write_json(&path, &value).expect("write");
+}
+
+/// A plan has an identity of its own, and it says nothing.
+///
+/// Ten opaque characters: no date, no milestone number, no type. Every one of
+/// those would be a fact that can stop being true while the id cannot change,
+/// and renaming a plan must not make it a different plan.
+#[test]
+fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
+    let (_dir, root) = workspace();
+    let item = collection::create(&root, "Q3 authentication", None, None).expect("create");
+    assert_eq!(item.id.len(), 10);
+    assert!(item
+        .id
+        .bytes()
+        .all(|byte| "0123456789abcdefghjkmnpqrstvwxyz".contains(byte as char)));
+    assert_eq!(item.state, State::Open, "a new plan is being pursued");
+
+    // The canonical reference form resolves, and the id survives a rename.
+    engr::reference::EngrRef::parse_standalone(&format!("engr:collection:{}", item.id))
+        .expect("a collection reference");
+    let renamed = collection::rename(&root, &item.id, "Q4 authentication").expect("rename");
+    assert_eq!(renamed.id, item.id);
+    assert_eq!(renamed.name, "Q4 authentication");
+
+    // Ids are unique, and a prefix resolves the way object ids do.
+    let other = collection::create(&root, "another plan", None, None).expect("create");
+    assert_ne!(other.id, item.id);
+    assert_eq!(
+        collection::resolve_id(&root, &item.id[..6]).expect("prefix"),
+        item.id
+    );
+    assert_eq!(
+        collection::resolve_id(&root, &format!("engr:collection:{}", item.id)).expect("reference"),
+        item.id
+    );
+    let missing = collection::resolve_id(&root, "zzzzzz").expect_err("no such plan");
+    assert_eq!(missing.code, engr::EXIT_NOT_FOUND);
+
+    // The filename is the identity; a file that disagrees is two identities.
+    rewrite(&root, &item.id, |value| {
+        value["id"] = json!(other.id);
+    });
+    let error = collection::load(&root, &item.id).expect_err("one plan, one identity");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    // And no `format`/`version` of its own: the workspace answers that once.
+    let raw: Value = store::read_json(&collection::path(&root, &other.id)).expect("raw");
+    assert!(raw.get("format").is_none(), "{raw}");
+    assert!(raw.get("version").is_none(), "{raw}");
+}
+
+/// Planning state is declared, never inferred — and it is only about the plan.
+///
+/// `completed` does not claim its members are resolved. A milestone can be
+/// finished with work deliberately deferred or moved out of scope, and a plan
+/// that could only be completed once everything in it was would be a plan
+/// nobody could ever close honestly.
+#[test]
+fn completing_a_plan_declares_nothing_about_its_members() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "still being worked on");
+    let item = plan(&root, "Q3");
+    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("add");
+
+    let before = ops::effective(&root, &object).expect("object");
+    let completed = collection::set_state(&root, &item.id, State::Completed).expect("complete");
+    assert_eq!(completed.state, State::Completed);
+
+    let after = ops::effective(&root, &object).expect("object");
+    assert_eq!(after.state, before.state, "the member did not move");
+    assert_eq!(after.rev, before.rev, "and no event was appended");
+    assert!(
+        after.needs_attention(),
+        "a completed plan can hold work that still needs attention"
+    );
+
+    // Cancelled is a different fact from completed, and both are storable.
+    let cancelled = collection::set_state(&root, &item.id, State::Cancelled).expect("cancel");
+    assert_eq!(cancelled.state, State::Cancelled);
+    for invalid in ["archived", "closed", "open ", ""] {
+        rewrite(&root, &item.id, |value| {
+            value["state"] = json!(invalid);
+        });
+        assert!(
+            collection::load(&root, &item.id).is_err(),
+            "{invalid:?} is not a planning state"
+        );
+    }
+}
+
+/// Membership is a set, and a rank is a position only one member can hold.
+#[test]
+fn one_plan_holds_a_target_once_and_a_rank_once() {
+    let (_dir, root) = workspace();
+    let first = new_object(&root, "first");
+    let second = new_object(&root, "second");
+    let item = plan(&root, "ordering");
+
+    collection::add_member(&root, &item.id, &object_ref(&first), Some(10), None).expect("add");
+    collection::add_member(&root, &item.id, &object_ref(&second), Some(20), None).expect("add");
+
+    let twice = collection::add_member(&root, &item.id, &object_ref(&first), None, None)
+        .expect_err("one plan holds it once");
+    assert_eq!(twice.code, engr::EXIT_INVARIANT);
+
+    let clash = collection::set_order(&root, &item.id, &object_ref(&second), Some(10))
+        .expect_err("two members cannot both be tenth");
+    assert_eq!(clash.code, engr::EXIT_SCHEMA);
+    assert!(
+        clash.message.contains("says nothing at that point"),
+        "{clash}"
+    );
+
+    // Unranked is a real answer, and any number of members may share it.
+    let third = new_object(&root, "third");
+    collection::add_member(&root, &item.id, &object_ref(&third), None, None).expect("add");
+    let unranked = collection::set_order(&root, &item.id, &object_ref(&second), None)
+        .expect("unranking is allowed");
+    assert_eq!(
+        unranked
+            .members
+            .iter()
+            .filter(|member| member.order.is_none())
+            .count(),
+        2
+    );
+
+    // Reading order is by rank, then the unranked — never array position.
+    let planned: Vec<Option<i64>> = unranked
+        .planned()
+        .iter()
+        .map(|member| member.order)
+        .collect();
+    assert_eq!(planned, vec![Some(10), None, None]);
+
+    // Stored data is held to both rules too.
+    rewrite(&root, &item.id, |value| {
+        value["members"][1]["order"] = json!(10);
+    });
+    assert!(collection::load(&root, &item.id).is_err(), "a shared rank");
+}
+
+/// Priority belongs to the membership, not to the thing.
+///
+/// The same Object can be urgent in one plan and incidental in another, and a
+/// priority stored on the Object would make those two plans argue. `reason` is
+/// planning rationale — why it matters *here* — and never engineering
+/// rationale, which has one home and a gate in front of it.
+#[test]
+fn priority_belongs_to_the_membership_and_not_to_the_target() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "shared between plans");
+    let urgent = plan(&root, "this quarter");
+    let later = plan(&root, "someday");
+    let target = object_ref(&object);
+
+    collection::add_member(
+        &root,
+        &urgent.id,
+        &target,
+        Some(1),
+        Some(Priority {
+            level: Level::High,
+            reason: Some("Blocks the rest of the milestone.".to_owned()),
+        }),
+    )
+    .expect("add");
+    collection::add_member(
+        &root,
+        &later.id,
+        &target,
+        None,
+        Some(Priority {
+            level: Level::Low,
+            reason: None,
+        }),
+    )
+    .expect("add");
+
+    assert_eq!(
+        collection::load(&root, &urgent.id).expect("load").members[0]
+            .priority
+            .as_ref()
+            .expect("priority")
+            .level,
+        Level::High
+    );
+    assert_eq!(
+        collection::load(&root, &later.id).expect("load").members[0]
+            .priority
+            .as_ref()
+            .expect("priority")
+            .level,
+        Level::Low
+    );
+
+    // Nothing about either landed on the Object.
+    let raw: Value = store::read_json(&store::object_path(&root, &object)).expect("raw");
+    let text = raw.to_string();
+    assert!(!text.contains("priority"), "{raw}");
+    assert!(!text.contains("collection"), "{raw}");
+
+    // A reason without a level is not a priority, and clearing works.
+    let cleared = collection::set_priority(&root, &urgent.id, &target, None).expect("clear");
+    assert!(cleared.members[0].priority.is_none());
+    rewrite(&root, &urgent.id, |value| {
+        value["members"][0]["priority"] = json!({"reason": "no level"});
+    });
+    assert!(
+        collection::load(&root, &urgent.id).is_err(),
+        "a priority is its level"
+    );
+}
+
+/// A schedule is planning context, not a scheduler.
+#[test]
+fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
+    let (_dir, root) = workspace();
+    let dated = collection::create(
+        &root,
+        "with dates",
+        None,
+        Some(Schedule {
+            start: Some("2026-07-01".to_owned()),
+            end: Some("2026-09-30".to_owned()),
+            target: Some("2026-09-15".to_owned()),
+        }),
+    )
+    .expect("create");
+    let schedule = dated.schedule.as_ref().expect("schedule");
+    assert_eq!(schedule.start.as_deref(), Some("2026-07-01"));
+
+    // Each field is independent, and one is enough.
+    for single in [
+        Schedule {
+            start: Some("2026-07-01".to_owned()),
+            ..Schedule::default()
+        },
+        Schedule {
+            end: Some("2026-07-01".to_owned()),
+            ..Schedule::default()
+        },
+        Schedule {
+            target: Some("2026-07-01".to_owned()),
+            ..Schedule::default()
+        },
+    ] {
+        collection::set_schedule(&root, &dated.id, Some(single)).expect("one date is a schedule");
+    }
+    // A target need not sit between start and end: it is an intention.
+    collection::set_schedule(
+        &root,
+        &dated.id,
+        Some(Schedule {
+            start: Some("2026-07-01".to_owned()),
+            end: Some("2026-09-30".to_owned()),
+            target: Some("2026-12-01".to_owned()),
+        }),
+    )
+    .expect("a target outside the window is not a contradiction");
+
+    // Absent is valid; present-and-empty is not.
+    let cleared = collection::set_schedule(&root, &dated.id, None).expect("clear");
+    assert!(cleared.schedule.is_none());
+    let empty = collection::set_schedule(&root, &dated.id, Some(Schedule::default()))
+        .expect_err("an empty schedule");
+    assert_eq!(empty.code, engr::EXIT_USAGE);
+
+    for (what, schedule) in [
+        (
+            "a start after its end",
+            Schedule {
+                start: Some("2026-09-30".to_owned()),
+                end: Some("2026-07-01".to_owned()),
+                target: None,
+            },
+        ),
+        (
+            "a timestamp",
+            Schedule {
+                start: Some("2026-07-01T00:00:00Z".to_owned()),
+                ..Schedule::default()
+            },
+        ),
+        (
+            "an unpadded date",
+            Schedule {
+                start: Some("2026-7-1".to_owned()),
+                ..Schedule::default()
+            },
+        ),
+        (
+            "a date that does not exist",
+            Schedule {
+                end: Some("2026-02-30".to_owned()),
+                ..Schedule::default()
+            },
+        ),
+    ] {
+        let error = collection::set_schedule(&root, &dated.id, Some(schedule)).expect_err(what);
+        assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
+    }
+}
+
+/// A consumed Backlog member is shown, never silently repointed.
+///
+/// Backlog resolution is not one-to-one: a point can be settled by two Objects,
+/// by none, or by something nobody recorded. Retargeting the member at whatever
+/// the work became would change what the plan says while nobody was looking.
+#[test]
+fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
+    let (_dir, root) = workspace();
+    let item = backlog::create(
+        &root,
+        "refresh strategy",
+        "offline may invalidate it",
+        Vec::new(),
+    )
+    .expect("backlog");
+    let plan = plan(&root, "with a backlog member");
+    let target = backlog_ref(&item.id);
+    collection::add_member(&root, &plan.id, &target, Some(10), None).expect("add");
+
+    // The point is settled and removed from staging.
+    backlog::delete_item(&root, &item.id).expect("consume");
+    assert!(backlog::load(&root, &item.id).is_err());
+
+    // The plan still says what it said. Nothing was rewritten.
+    let after = collection::load(&root, &plan.id).expect("a dangling member is not corruption");
+    assert_eq!(after.members.len(), 1);
+    assert_eq!(after.members[0].target.reference, target);
+
+    // Removing it is an explicit act, not something that happened by itself.
+    let emptied = collection::remove_member(&root, &plan.id, &target).expect("remove");
+    assert!(emptied.members.is_empty());
+}
+
+/// A plan groups whole resources, and only ones that exist.
+#[test]
+fn members_are_whole_objects_and_backlog_items() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a member");
+    let item = plan(&root, "targets");
+    let compact = engr::reference::encode_uuid_str(&object).expect("compact");
+
+    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("legal");
+
+    for refused in [
+        format!("obj:{compact}:1"),
+        format!("collection:{}", item.id),
+        format!("obj:{compact}@HEAD"),
+        format!("engr:obj:{compact}"),
+        "obj:not-a-compact-id".to_owned(),
+    ] {
+        let error = collection::add_member(&root, &item.id, &refused, None, None)
+            .expect_err("a plan does not group that");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{refused}");
+    }
+}
+
+/// Deleting a plan is the agent's rule to follow, and engr says what went.
+///
+/// #10 makes "an agent MUST NOT delete a Collection unless explicitly directed
+/// by a human" normative agent behaviour, and says a stronger technical guard
+/// can be added later if real use shows one is needed. So this does not refuse:
+/// engr cannot tell who asked, and inventing the guard now is exactly what the
+/// issue deferred. What it does is report the planning context that went with
+/// it.
+#[test]
+fn deleting_a_plan_is_carried_out_and_reported_rather_than_refused() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a member");
+    let item = collection::create(&root, "Q3 authentication", None, None).expect("create");
+    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("add");
+
+    let removed = collection::remove(&root, &item.id).expect("the rule is the agent's");
+    assert_eq!(removed.name, "Q3 authentication");
+    assert_eq!(removed.members, 1, "and what went with it is reported");
+    assert!(collection::load(&root, &item.id).is_err());
+
+    // The member is exactly where it was.
+    let after = ops::effective(&root, &object).expect("object");
+    assert_eq!(after.rev, 1);
+    assert!(after.needs_attention());
+}
+
+/// Stored plans are held to what the write path can produce.
+#[test]
+fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a member");
+    let item = collection::create(
+        &root,
+        "schema",
+        Some("what this plan covers"),
+        Some(Schedule {
+            start: Some("2026-07-01".to_owned()),
+            ..Schedule::default()
+        }),
+    )
+    .expect("create");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&object),
+        Some(10),
+        Some(Priority {
+            level: Level::High,
+            reason: Some("first".to_owned()),
+        }),
+    )
+    .expect("add");
+
+    type Corruption = (&'static str, fn(&mut Value));
+    let corruptions: [Corruption; 8] = [
+        ("an unknown top-level field", |value| {
+            value["owner"] = json!("someone");
+        }),
+        ("an unknown member field", |value| {
+            value["members"][0]["estimate"] = json!("2d");
+        }),
+        ("an unknown priority field", |value| {
+            value["members"][0]["priority"]["weight"] = json!(3);
+        }),
+        ("an unknown schedule field", |value| {
+            value["schedule"]["due"] = json!("2026-07-01");
+        }),
+        ("a priority level outside the vocabulary", |value| {
+            value["members"][0]["priority"]["level"] = json!("urgent");
+        }),
+        ("a member kind a plan does not group", |value| {
+            value["members"][0]["target"]["ref"] = json!("collection:0123456789");
+        }),
+        ("an omitted members list", |value| {
+            value.as_object_mut().expect("object").remove("members");
+        }),
+        ("a name that is only whitespace", |value| {
+            value["name"] = json!("   ");
+        }),
+    ];
+
+    let sound: Value = store::read_json(&collection::path(&root, &item.id)).expect("read");
+    for (what, corrupt) in corruptions {
+        store::write_json(&collection::path(&root, &item.id), &sound).expect("restore");
+        rewrite(&root, &item.id, corrupt);
+        let error = collection::load(&root, &item.id).expect_err(what);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+    }
+}

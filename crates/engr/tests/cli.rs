@@ -3171,3 +3171,146 @@ fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
     );
     assert!(String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"));
 }
+
+/// Planning is reachable, reads as planning, and stays out of the record.
+#[test]
+fn collections_are_their_own_namespace_and_never_reach_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    let empty = run_engr(root, &["collection", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("PLANNING"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no collections"), "{shown}");
+
+    let made = run_engr(
+        root,
+        &[
+            "collection",
+            "new",
+            "--name",
+            "Q3 authentication",
+            "--start",
+            "2026-07-01",
+            "--end",
+            "2026-09-30",
+        ],
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let plan = String::from_utf8_lossy(&made.stdout).to_string();
+    let plan_id = plan
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("the id is on the screen")
+        .trim()
+        .to_owned();
+
+    let added = run_engr(
+        root,
+        &[
+            "collection",
+            "add",
+            &plan_id,
+            "--target",
+            &format!("engr:obj:{compact}"),
+            "--order",
+            "10",
+            "--priority",
+            "high",
+            "--reason",
+            "Blocks the rest of the milestone.",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let shown = String::from_utf8_lossy(&added.stdout).to_string();
+    assert!(shown.contains("[high]"), "{shown}");
+    assert!(
+        shown.contains("Blocks the rest of the milestone."),
+        "{shown}"
+    );
+    // Derived attention, not `open`: half the vocabulary does not have that.
+    assert!(shown.contains("attention"), "{shown}");
+    assert!(shown.contains("the auth design"), "{shown}");
+
+    // The record's own commands see none of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["PLANNING", "Q3 authentication", "Blocks the rest"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?}: {shown}"
+            );
+        }
+    }
+
+    // Structured planning output says what it is, like the other two domains.
+    let structured: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan_id, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(structured["authority"], "planning", "{structured}");
+    assert_eq!(structured["state"], "open");
+    assert_eq!(structured["schedule"]["start"], "2026-07-01");
+    assert_eq!(structured["members"][0]["priority"]["level"], "high");
+}
+
+/// Deleting a plan is the agent's rule to follow, and the screen says what went.
+#[test]
+fn deleting_a_collection_reports_the_planning_context_it_discarded() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan_id = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    let deleted = run_engr(root, &["collection", "delete", &plan_id]);
+    assert!(
+        deleted.status.success(),
+        "the rule is normative, not mechanical: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    let said = String::from_utf8_lossy(&deleted.stdout).to_string();
+    assert!(said.contains("planning context"), "{said}");
+    assert!(!run_engr(root, &["collection", "show", &plan_id])
+        .status
+        .success());
+
+    // And the help does not claim a refusal the tool does not perform.
+    let help = String::from_utf8_lossy(&run_engr(root, &["collection", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["collection", "delete", "--help"]).stdout);
+    for stale in ["Refused", "refuses", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help claims a guard that is not there: {help}"
+        );
+    }
+}

@@ -1038,6 +1038,131 @@ no oversize exception: nothing here is authoritative enough to be worth admittin
 past its limit. Text that will not fit has somewhere better to be — the
 unresolved part in backlog, the settled part in the object.
 
+## Collections
+
+**Planning metadata: which work is grouped together, and in what order.** The
+third domain outside the record, and the furthest from it — backlog holds
+wording nobody confirmed, work holds progress nobody confirmed, and a collection
+holds neither. It holds only the claim that some things belong together.
+
+```text
+collection
+├── id                 10 lowercase Crockford Base32 characters, immutable
+├── name               the line a listing prints
+├── description?
+├── state              open | completed | cancelled
+├── schedule?          optional calendar context
+│   ├── start?         YYYY-MM-DD
+│   ├── end?           YYYY-MM-DD
+│   └── target?        YYYY-MM-DD
+│   (at least one MUST be present; if start and end, start <= end)
+└── members[]          required, may be empty
+    ├── target         engr:obj:<id> | engr:backlog:<id>
+    ├── order?         intended sequencing; absent means unranked
+    └── priority?
+        ├── level      low | normal | high
+        └── reason?    why it matters *in this plan*
+```
+
+Stored at `.engr/collections/<id>.json`, carrying no `format` or `version` —
+`.engr/format.json` remains the single schema authority. The stored `id` MUST
+match the filename.
+
+Unlike work, a collection **is** an addressable resource:
+`engr:collection:<id>`. The id is opaque on purpose — no date, no milestone
+number, no type — because each of those is a fact that can stop being true while
+an id cannot change. Renaming a plan does not make it a different plan.
+
+### Grouping something means nothing about it
+
+```text
+membership never changes what a member means
+priority belongs to the membership, not to the target
+completing a plan is a declaration, not a proof
+```
+
+The same object may be `high` in one plan and `low` in another; a priority
+stored on the object would make those two plans argue. `reason` is **planning**
+rationale — why this matters here — and never engineering rationale, which has
+one home and a gate in front of it.
+
+`ls`, `show` and `verify` are record surfaces and MUST NOT mix planning into
+their output. Every collection surface MUST say what it is, the structured one
+included, with a machine-readable discriminator for the same reason work and
+backlog carry one.
+
+### State is declared, never inferred
+
+```text
+open        still being pursued
+completed   the planner considers it finished
+cancelled   no longer being pursued
+```
+
+Not derived from dates and not derived from members. `completed` does **not**
+require every member to be resolved: a milestone can be finished with work
+deliberately deferred or moved out of scope, and a plan that could only close
+once everything in it had would be a plan nobody could close honestly. A reader
+may derive a diagnostic such as "2 members need attention", and that is a
+reading rather than stored state.
+
+Diagnostics about members MUST speak in terms of **derived attention** rather
+than `open`, because a typed object has no `open` state and a diagnostic phrased
+that way would describe a vocabulary half the members do not have.
+
+`completed` and `cancelled` stay distinct: one plan reached the end it aimed at,
+the other stopped being pursued. Retention is a separate question — a closed plan
+may stay readable for as long as it is useful, and `archived` MUST NOT be added
+to the state enum to express that. Git holds what a plan used to say.
+
+### Members
+
+Whole objects and whole backlog items. Not sections, files, symbols, or other
+collections: a plan groups work, and v0 has no hierarchy.
+
+```text
+the same target MUST NOT appear twice in one collection
+non-null order values MUST be unique within one collection
+```
+
+Both are structural, and neither makes a collection authoritative. A rank that
+two members shared would be a sequence with a tie it cannot break; unranked
+members may of course share their absence, and a partly ordered plan is the
+normal state of a plan. Array position is **not** an ordering — a reader sorts
+by `order` and leaves the rest explicitly unranked.
+
+A member whose target is later consumed or removed MUST NOT be silently
+retargeted. Backlog resolution is not one-to-one: a point can be settled by two
+objects, by none, or by something nobody recorded, and repointing the member at
+whatever the work became would change what the plan says while nobody was
+looking. Surface it, and let a human or agent update the plan explicitly.
+
+### Schedule
+
+Optional, and generic: with no collection type there is nothing to make the shape
+depend on. All three values are **ISO calendar dates**, `YYYY-MM-DD`, with no
+time and no offset — a collection carries planning context, not a schedule
+somebody executes, and accepting a timestamp would claim a precision it does not
+have.
+
+No schedule value changes any state anywhere. `overdue` is a question a reader
+asks, never something engr stores. A `target` need not fall between `start` and
+`end`: a target before the end is an intention, not a contradiction.
+
+### Deleting a plan
+
+> An agent MUST NOT delete a collection unless explicitly directed by a human.
+
+Normative on the agent, and **not** enforced — the same shape as the `paused`
+rules on work, and for the same reasons. An implementation MUST NOT refuse the
+deletion: it cannot tell an agent from a human, refusing makes a human's own
+instruction impossible to carry out directly, and #10 explicitly defers a
+stronger technical guard until real use shows one is needed. What an
+implementation SHOULD do is report the planning context that went with it.
+
+Ordinary create, rename, describe, state, schedule, member, order and priority
+changes are agent-managed with no such rule.
+
 ## What v0 does not solve
 
 `prepare` prints the challenge code where the agent can read it, and the agent
@@ -1160,6 +1285,7 @@ hash — what it was.
   candidates/<CODE>.json   awaiting a human     never commit this
   backlog/<uuid>.json      unresolved staging   commit this
   work/objects/<uuid>.json execution memory      commit this
+  collections/<id>.json    planning metadata      commit this
 ```
 
 Backlog is committed: git is its only history. A new optional directory is not
@@ -1229,6 +1355,9 @@ bring it in:
 | An operation that leaves `superseded` | The supersession itself was the mistake, rather than the design being replaced changing again |
 | A `text`, `markdown` or `note` content type | Something needs prose that is genuinely not the assertion, often enough to be worth a second place for wording |
 | Machine observations (test results, progress) | Those need to be in the record |
+| A collection type (`milestone`, `roadmap`) | Real behaviour depends on which kind of plan it is, rather than the two merely reading differently |
+| Collection hierarchy | A plan has to contain a plan, and expressing it as two collections and a shared member loses something |
+| A persisted `overdue`, or any date-derived status | Something must act on it mechanically, which first means a reader cannot compute it |
 | A `done` state on a work object | Something must distinguish "no items left" from "the work is over" that the object's own state cannot say |
 | Work sidecars for backlog items | Unresolved staging needs dependencies or blockers — and then they belong as fields of the backlog model, since no authority boundary separates them |
 | Owners, estimates, deadlines or labels on work | Work has to answer a question a bounded handoff cannot, at which point it has stopped being execution memory |

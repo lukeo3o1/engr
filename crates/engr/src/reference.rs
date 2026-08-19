@@ -489,3 +489,18 @@ impl EngrTarget {
         }
     }
 }
+
+/// A fresh workspace-scoped collection id: fifty random bits as ten Crockford
+/// Base32 characters.
+///
+/// Deliberately opaque and deliberately not a uuid. A collection id is short
+/// enough to say out loud and carries nothing — no date, no milestone number,
+/// no type — because every one of those would be a fact that can stop being
+/// true while the id cannot change.
+pub fn random_collection_id() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..10)
+        .map(|_| CROCKFORD[rng.gen_range(0..32)] as char)
+        .collect()
+}

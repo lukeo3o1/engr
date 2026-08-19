@@ -10,7 +10,7 @@ use crate::backlog;
 use crate::git;
 use crate::model::{Object, Ref};
 use crate::semantics::{Relation, Supplement};
-use crate::{ops, store, work, Result};
+use crate::{collection, ops, store, work, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -904,6 +904,173 @@ pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
         "dependencies": item.dependencies,
         "blockers": item.blockers,
         "items": item.items,
+    });
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
+}
+
+// ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+/// Planning, and never the thing being planned.
+///
+/// The confusion worth preventing here is different again from Backlog's and
+/// Work's: nothing in a collection is even *about* what a record says, so the
+/// banner has to stop a reader concluding anything at all about the members
+/// from where they sit in a plan.
+pub const PLANNING_BANNER: &str =
+    "PLANNING — agent-managed, confirmed by nobody, and says nothing about what its members mean\n";
+
+pub fn collection_width(root: &Path) -> usize {
+    collection::ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(4)
+}
+
+/// What a member currently is, from the domain that owns it.
+///
+/// Never an error, and never a state a collection stores. A consumed backlog
+/// item is a member pointing at nothing, which is a fact worth showing and
+/// never a reason to silently retarget it at whatever the work became.
+fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
+    let Ok(parsed) = crate::reference::EngrRef::parse_embedded(&target.reference) else {
+        return "unreadable".to_owned();
+    };
+    let Ok(uuid) = crate::reference::decode_uuid(parsed.id()) else {
+        return "unreadable".to_owned();
+    };
+    let id = uuid.to_string();
+    match parsed.kind() {
+        crate::reference::ResourceKind::Backlog => match backlog::load(root, &id) {
+            Ok(item) => format!("unresolved  {}", item.topic),
+            Err(_) => "gone (consumed or removed)".to_owned(),
+        },
+        _ => match ops::effective(root, &id) {
+            // Derived attention, not `open`: a typed Object has no such state,
+            // and a plan that spoke in those terms would be describing a
+            // vocabulary half its members do not have.
+            Ok(object) => format!(
+                "{:<10}  {}",
+                if object.needs_attention() {
+                    "attention"
+                } else {
+                    "settled"
+                },
+                object.title
+            ),
+            Err(_) => "gone".to_owned(),
+        },
+    }
+}
+
+pub fn render_collection_ls(root: &Path, collections: &[collection::Collection]) -> String {
+    let w = collection_width(root);
+    let mut out = String::from(PLANNING_BANNER);
+    if collections.is_empty() {
+        out.push_str("no collections\n");
+        return out;
+    }
+    for item in collections {
+        let attention = item
+            .members
+            .iter()
+            .filter(|member| needs_attention(root, &member.target))
+            .count();
+        out.push_str(&format!(
+            "{}  {:<9}  {:>2} members  {:>2} need attention  {}\n",
+            abbrev(&item.id, w),
+            item.state.as_str(),
+            item.members.len(),
+            attention,
+            item.name
+        ));
+    }
+    out
+}
+
+/// Whether one member is something somebody still has to look at.
+fn needs_attention(root: &Path, target: &crate::reference::EngrTarget) -> bool {
+    let Ok(parsed) = crate::reference::EngrRef::parse_embedded(&target.reference) else {
+        return false;
+    };
+    let Ok(uuid) = crate::reference::decode_uuid(parsed.id()) else {
+        return false;
+    };
+    let id = uuid.to_string();
+    match parsed.kind() {
+        // An unresolved point is by definition unresolved, so a plan holding one
+        // is holding something outstanding.
+        crate::reference::ResourceKind::Backlog => backlog::load(root, &id).is_ok(),
+        _ => ops::effective(root, &id)
+            .map(|object| object.needs_attention())
+            .unwrap_or(false),
+    }
+}
+
+pub fn render_collection_show(root: &Path, item: &collection::Collection) -> String {
+    let mut out = String::from(PLANNING_BANNER);
+    out.push_str(&format!(
+        "Collection {}\nState      {}\nName       {}\n",
+        item.id,
+        item.state.as_str(),
+        item.name
+    ));
+    if let Some(schedule) = &item.schedule {
+        let mut parts = Vec::new();
+        for (label, value) in [
+            ("start", &schedule.start),
+            ("end", &schedule.end),
+            ("target", &schedule.target),
+        ] {
+            if let Some(value) = value {
+                parts.push(format!("{label} {value}"));
+            }
+        }
+        out.push_str(&format!("Schedule   {}\n", parts.join("  ")));
+    }
+    if let Some(description) = &item.description {
+        out.push('\n');
+        out.push_str(description.trim_end());
+        out.push('\n');
+    }
+    if item.members.is_empty() {
+        out.push_str("\nno members\n");
+        return out;
+    }
+    out.push('\n');
+    for member in item.planned() {
+        let rank = match member.order {
+            Some(order) => format!("{order:>4}"),
+            None => "  --".to_owned(),
+        };
+        let priority = match &member.priority {
+            Some(priority) => format!("[{}] ", priority.level.as_str()),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "{rank}  engr:{}\n      {priority}{}\n",
+            member.target.reference,
+            member_note(root, &member.target)
+        ));
+        if let Some(reason) = member.priority.as_ref().and_then(|it| it.reason.as_deref()) {
+            out.push_str(&format!("      {reason}\n"));
+        }
+    }
+    out
+}
+
+pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
+    let value = serde_json::json!({
+        "id": item.id,
+        // The same field Backlog and Work carry, for the same reason: structured
+        // output leaves the screen that would otherwise have said so.
+        "authority": "planning",
+        "name": item.name,
+        "description": item.description,
+        "state": item.state.as_str(),
+        "schedule": item.schedule,
+        "members": item.members,
     });
     serde_json::to_string_pretty(&value)
         .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))

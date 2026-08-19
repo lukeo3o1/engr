@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{gate, git, ops, store, view, work};
+use engr::{collection, gate, git, ops, store, view, work};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,9 @@ enum Command {
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
     #[command(subcommand)]
     Work(Work),
+    /// Planning metadata: what is grouped together. Nothing here is confirmed
+    #[command(subcommand)]
+    Collection(CollectionCommand),
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
@@ -670,6 +673,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
         Command::Work(command) => work_command(&root, command),
+        Command::Collection(command) => collection_command(&root, command),
     }
 }
 
@@ -2023,6 +2027,318 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
             let id = resolve_object_argument(root, "object", &object)?;
             let work = work::remove_item(root, &id, item)?;
             print!("{}", view::render_work_show(root, &id, &work));
+        }
+    }
+    Ok(())
+}
+
+/// Planning metadata: what is grouped together, and in what order.
+///
+/// Its own namespace, like `backlog` and `work`, and for the same reason:
+/// nothing here goes through the gate, so it must not be reachable by a command
+/// that looks like one that does.
+#[derive(Subcommand)]
+enum CollectionCommand {
+    /// Start a plan
+    New {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+    },
+    /// List plans
+    Ls,
+    /// Show one plan, its schedule and its members
+    Show {
+        collection: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Replace the name
+    Rename {
+        collection: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Replace the description. Omit --text to clear it
+    Describe {
+        collection: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Declare where the plan stands
+    State {
+        collection: String,
+        #[arg(long, value_enum)]
+        state: CollectionStateArg,
+    },
+    /// Replace the schedule. Give none of the dates to clear it
+    Schedule {
+        collection: String,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+    },
+    /// Put something in the plan
+    Add {
+        collection: String,
+        /// engr:obj:<id> or engr:backlog:<id>
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        /// Intended sequencing. Omit to leave it unranked
+        #[arg(long)]
+        order: Option<i64>,
+        #[arg(long, value_enum)]
+        priority: Option<LevelArg>,
+        /// Why it has that priority in this plan
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Take something out of the plan
+    Rm {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+    },
+    /// Rank a member, or omit --order to unrank it
+    Order {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        #[arg(long)]
+        order: Option<i64>,
+    },
+    /// Set a member's priority, or omit --priority to clear it
+    Priority {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        #[arg(long, value_enum)]
+        priority: Option<LevelArg>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Delete the whole plan. Only on explicit human direction
+    Delete { collection: String },
+}
+
+#[derive(Args)]
+struct ScheduleArgs {
+    /// Expected beginning, as YYYY-MM-DD
+    #[arg(long)]
+    start: Option<String>,
+    /// Expected end, as YYYY-MM-DD
+    #[arg(long)]
+    end: Option<String>,
+    /// Desired achievement point, as YYYY-MM-DD
+    #[arg(long)]
+    target_date: Option<String>,
+}
+
+impl ScheduleArgs {
+    /// `None` when the caller named no date at all, which is how a schedule is
+    /// left off or cleared — a schedule that is present says something.
+    fn build(&self) -> Option<collection::Schedule> {
+        let schedule = collection::Schedule {
+            start: self.start.clone(),
+            end: self.end.clone(),
+            target: self.target_date.clone(),
+        };
+        let empty = schedule.start.is_none() && schedule.end.is_none() && schedule.target.is_none();
+        (!empty).then_some(schedule)
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CollectionStateArg {
+    Open,
+    Completed,
+    Cancelled,
+}
+
+impl From<CollectionStateArg> for collection::State {
+    fn from(value: CollectionStateArg) -> Self {
+        match value {
+            CollectionStateArg::Open => collection::State::Open,
+            CollectionStateArg::Completed => collection::State::Completed,
+            CollectionStateArg::Cancelled => collection::State::Cancelled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LevelArg {
+    Low,
+    Normal,
+    High,
+}
+
+impl From<LevelArg> for collection::Level {
+    fn from(value: LevelArg) -> Self {
+        match value {
+            LevelArg::Low => collection::Level::Low,
+            LevelArg::Normal => collection::Level::Normal,
+            LevelArg::High => collection::Level::High,
+        }
+    }
+}
+
+/// A member target, held to what a plan is allowed to group.
+fn collection_target(root: &Path, spec: &str) -> Result<String> {
+    let relative = spec.strip_prefix("engr:").ok_or_else(|| {
+        Error::new(
+            EXIT_USAGE,
+            format!("--target {spec:?} must be an engr: reference"),
+        )
+    })?;
+    collection::check_target("--target", relative)
+        .map_err(|error| malformed_argument("--target", spec, error))?;
+    // Resolved for existence as well as shape. A member added by typo is a plan
+    // silently covering nothing; a member that is *later* consumed is a
+    // different thing entirely and is shown rather than repaired.
+    let id = engr::reference::EngrRef::parse_embedded(relative)
+        .and_then(|parsed| engr::reference::decode_uuid(parsed.id()))
+        .map_err(|error| malformed_argument("--target", spec, error))?
+        .to_string();
+    let known = if relative.starts_with("backlog:") {
+        backlog::load(root, &id).is_ok()
+    } else {
+        ops::effective(root, &id).is_ok()
+    };
+    if !known {
+        return Err(Error::new(
+            EXIT_NOT_FOUND,
+            format!("--target {spec:?} does not exist"),
+        ));
+    }
+    Ok(relative.to_owned())
+}
+
+fn priority_of(
+    level: Option<LevelArg>,
+    reason: Option<String>,
+) -> Result<Option<collection::Priority>> {
+    match (level, reason) {
+        (Some(level), reason) => Ok(Some(collection::Priority {
+            level: level.into(),
+            reason,
+        })),
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(Error::new(
+            EXIT_USAGE,
+            "--reason explains a priority, so it needs --priority".to_owned(),
+        )),
+    }
+}
+
+fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
+    match command {
+        CollectionCommand::New {
+            name,
+            description,
+            schedule,
+        } => {
+            let item = collection::create(root, &name, description.as_deref(), schedule.build())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Ls => {
+            let mut found = Vec::new();
+            for id in collection::ids(root)? {
+                found.push(collection::load(root, &id)?);
+            }
+            // Open plans first, then by name: what is still being pursued is
+            // what a listing is for, and nothing here records activity to sort
+            // by instead.
+            found.sort_by(|left, right| {
+                (left.state.as_str(), left.name.to_lowercase())
+                    .cmp(&(right.state.as_str(), right.name.to_lowercase()))
+            });
+            print!("{}", view::render_collection_ls(root, &found));
+        }
+        CollectionCommand::Show { collection, format } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::load(root, &id)?;
+            match format {
+                Format::Text => print!("{}", view::render_collection_show(root, &item)),
+                Format::Json => println!("{}", view::render_collection_json(&item)?),
+            }
+        }
+        CollectionCommand::Rename { collection, name } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::rename(root, &id, &name)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Describe { collection, text } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::describe(root, &id, text.as_deref())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::State { collection, state } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::set_state(root, &id, state.into())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Schedule {
+            collection,
+            schedule,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::set_schedule(root, &id, schedule.build())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Add {
+            collection,
+            target,
+            order,
+            priority,
+            reason,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = collection_target(root, &target)?;
+            let priority = priority_of(priority, reason)?;
+            let item = collection::add_member(root, &id, &target, order, priority)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Rm { collection, target } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let item = collection::remove_member(root, &id, &target)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Order {
+            collection,
+            target,
+            order,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let item = collection::set_order(root, &id, &target, order)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Priority {
+            collection,
+            target,
+            priority,
+            reason,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let priority = priority_of(priority, reason)?;
+            let item = collection::set_priority(root, &id, &target, priority)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Delete { collection } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let removed = collection::remove(root, &id)?;
+            // Carried out and reported, not refused. #10 makes this a rule for
+            // the agent and says a technical guard can come later if real use
+            // shows one is needed; engr cannot tell who asked, so it says what
+            // was discarded rather than pretending it can.
+            println!(
+                "deleted collection {id} — {:?}, {} member(s) of planning context",
+                removed.name, removed.members
+            );
         }
     }
     Ok(())

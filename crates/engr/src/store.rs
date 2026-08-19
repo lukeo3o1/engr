@@ -9,6 +9,7 @@
 //!   candidates/<CODE>.json   awaiting a human
 //!   backlog/<uuid>.json      unresolved staging, confirmed by nobody
 //!   work/objects/<uuid>.json execution memory, owned by an object, confirmed by nobody
+//!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
 use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
@@ -143,6 +144,7 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         candidates_dir(root),
         crate::backlog::dir(root),
         crate::work::dir(root),
+        crate::collection::dir(root),
     ] {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
