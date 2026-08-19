@@ -5,8 +5,9 @@ description: >-
   whose every word a human confirmed. Propose sections through the gate and wait
   for the human's challenge code, re-render a pending candidate instead of
   re-preparing it, read current wording and staleness with `engr show`, act on a
-  section whose git basis or referenced section has moved, and park work that is
-  still unresolved in `engr backlog` rather than the record. Not for application
+  section whose git basis or referenced section has moved, park work that is
+  still unresolved in `engr backlog` rather than the record, and keep the
+  shortest useful execution handoff for an Object in `engr work`. Not for application
   event-sourcing architecture, EventStoreDB or Kafka work, ordinary logs,
   personal journals, private session checkpoints, or writing decision documents
   outside an adopted project.
@@ -99,9 +100,10 @@ significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
 
-Also run `engr backlog ls` — an unresolved point recorded there is exactly the
-context a previous session left for you, and re-deciding something already being
-worked on is the failure it exists to prevent.
+Also run `engr backlog ls` and `engr work ls` — an unresolved point recorded in
+one and an execution checkpoint left in the other are exactly the context a
+previous session left for you, and re-deciding or redoing something an earlier
+session already handled is the failure they exist to prevent.
 
 After a durable decision, constraint, assumption, or rationale is established,
 consider capturing it when a future agent would need it. Do not record transient
@@ -187,6 +189,81 @@ that path is dirty — commit it first, or pass `--subject-commit <rev>`. Use
 `--subject engr:obj:<id>:<section>` for a record section the point concerns;
 that is context, not a dependency, and it does not make the record depend on
 anything unconfirmed.
+
+## Where execution stands
+
+Backlog is for what is not decided. **Work** is for what is being done: the
+shortest useful handoff to whoever picks this up next, hanging off one Object.
+
+```bash
+engr work ls                             # objects with execution memory
+engr work show <object>                  # where this one stands
+engr work start <object> --summary "..."
+engr work summary <object> --text "..."  # replace the checkpoint
+engr work item add <object> --text "one step"
+engr work item state <object> --item 2 --state active
+engr work item result <object> --item 2 --text "what it produced"
+engr work item commit <object> --item 2 --commit HEAD
+engr work item rm <object> --item 2      # prune it once it stops helping
+engr work depend <object> --on engr:obj:<id> --reason "why it matters here"
+engr work block <object> --reason "waiting for the customer"
+engr work unblock <object> --index 0
+engr work rm <object>                    # when there is nothing left to hand off
+```
+
+No confirmation, no challenge code — you write this directly, like backlog. What
+makes that safe is that **finishing it settles nothing**. You can mark every item
+done and the Object has not moved. If something you learned is stable knowledge,
+propose it through the gate; if it is still an open question, put it in backlog.
+
+Start by reading it, not by writing it. `engr work ls` is the first thing to run
+when resuming: it says which Objects have execution memory, which are blocked and
+which a human stopped.
+
+**Write the shortest useful handoff, not the history of the work.** One action or
+point per item, concrete verbs, outcomes rather than reasoning. The limits are
+enforced — 300 characters for the summary, 160 for an item, 240 for a result, 200
+for a reason — and there is no oversize exception, because nothing here is worth
+admitting past its limit. If it will not fit, it belongs in backlog or the Object.
+
+Keep the language already in the sidecar; if it has none, follow the repository's
+working language. Do not translate existing entries because this conversation is
+in another language.
+
+### `paused` means a human said stop
+
+```text
+active    keep going
+paused    a human suspended this; do not resume it on your own
+```
+
+**Never set `paused` yourself.** Not because your session is ending, not because
+everything is blocked, not because you judge the work should wait — those are
+what `blockers` and item states are for. And never clear it without being told
+to, in this conversation, by the human.
+
+engr cannot tell you from a human, so this one is on you. The one part it does
+enforce: a paused sidecar cannot be deleted. If you find that inconvenient, that
+is the rule working.
+
+`engr work rm` on active work is fine — a sidecar that no longer helps the next
+agent is clutter, and git keeps what it said.
+
+### Dependencies are not blockers
+
+- `depend` — something this work relies on. It stays true even when nothing is
+  currently stopping you.
+- `block` — a condition preventing progress right now. It may be temporary, and
+  it does not need a target: "waiting for the customer" is a real blocker.
+
+The same Object can be both. Neither is an authoritative relation — if the
+dependency turns out to be a stable engineering fact, that goes in the record
+through the gate, and `implemented_by` is a different thing entirely.
+
+Targets are whole Objects or backlog items, never sections.
+
+Commits on an item are signposts, not proof. An item can be done with no commit,
+and a rebase can strand one. Do not treat a missing commit as a problem.
 
 ## Choosing an action
 
@@ -347,3 +424,8 @@ it to everyone with repository access.
   no redaction.
 - Do not batch several unrelated changes into one section so it passes in one
   confirmation. One point per section, or merging and referencing stop working.
+- Do not treat a finished work sidecar as a settled Object. Every item done means
+  the steps you wrote are done, and nothing else. The Object moves through the
+  gate or it does not move.
+- Do not set or clear `paused` on your own, and do not delete a paused sidecar.
+  That signal is the human's, not yours.

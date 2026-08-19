@@ -22,6 +22,7 @@ crates/engr/src/semantics.rs    type/state, attention, roles, relations, bounded
 crates/engr/src/gate.rs         prepare, confirm, candidates
 crates/engr/src/confirmation.rs the shared, domain-neutral admission primitive
 crates/engr/src/backlog.rs      unresolved staging: subjects, produced, reconciliation
+crates/engr/src/work.rs         execution memory: the sidecar an agent keeps for an object
 crates/engr/src/store.rs        filesystem layout, locking, atomic writes
 crates/engr/src/git.rs          HEAD, distance, uncommitted, path provenance
 crates/engr/src/ops.rs          reconcile, verify
@@ -32,6 +33,7 @@ crates/engr/tests/gate.rs       what may enter the record
 crates/engr/tests/semantics.rs  what an object is, and what a section may carry
 crates/engr/tests/record.rs     what the record then guarantees
 crates/engr/tests/backlog.rs    what staging is, and what it is not
+crates/engr/tests/work.rs       what execution memory is, and what it owns (nothing)
 crates/engr/tests/cli.rs        what the command line promises the outside world
 ```
 

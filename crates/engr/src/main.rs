@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{gate, git, ops, store, view};
+use engr::{gate, git, ops, store, view, work};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +58,9 @@ enum Command {
     },
     /// Recompute section hashes
     Verify { object: Option<String> },
+    /// Execution memory an agent keeps for an Object. Nothing here is confirmed
+    #[command(subcommand)]
+    Work(Work),
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
@@ -666,6 +669,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
+        Command::Work(command) => work_command(&root, command),
     }
 }
 
@@ -1694,4 +1698,321 @@ fn warn_uncommitted(root: &Path, id: &str) {
             store::DIR
         );
     }
+}
+
+/// Execution memory an agent keeps for an Object.
+///
+/// Its own namespace, like `backlog`, and for the same reason: nothing here
+/// goes through the gate, so it must not be reachable by a command that looks
+/// like one that does. `ls`, `show` and `verify` still mean confirmed record
+/// and nothing else.
+#[derive(Subcommand)]
+enum Work {
+    /// Begin keeping execution memory for an Object
+    Start {
+        object: String,
+        /// Where execution currently stands
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    /// List the Objects with execution memory
+    Ls,
+    /// Show one Object's execution memory
+    Show {
+        object: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Replace the checkpoint. Omit --text to clear it
+    Summary {
+        object: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Suspend autonomous execution. Only on explicit human direction
+    Pause { object: String },
+    /// Resume it. Only on explicit human direction
+    Resume { object: String },
+    /// Stop keeping execution memory. Refused while paused
+    Rm { object: String },
+    /// Record something this work relies on
+    Depend {
+        object: String,
+        /// engr:obj:<id> or engr:backlog:<id>
+        #[arg(long = "on", value_name = "ENGR_REF")]
+        on: String,
+        /// Why the target matters here
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Drop a dependency
+    Undepend {
+        object: String,
+        #[arg(long = "on", value_name = "ENGR_REF")]
+        on: String,
+    },
+    /// Record a condition preventing useful progress
+    Block {
+        object: String,
+        #[arg(long)]
+        reason: Option<String>,
+        /// engr:obj:<id> or engr:backlog:<id>
+        #[arg(long, value_name = "ENGR_REF")]
+        target: Option<String>,
+    },
+    /// Clear a blocker by its position
+    Unblock {
+        object: String,
+        #[arg(long)]
+        index: usize,
+    },
+    /// The steps of the current decomposition
+    #[command(subcommand)]
+    Item(WorkItem),
+}
+
+#[derive(Subcommand)]
+enum WorkItem {
+    /// Add a step
+    Add {
+        object: String,
+        #[arg(long)]
+        text: String,
+    },
+    /// Reword a step
+    Revise {
+        object: String,
+        #[arg(long)]
+        item: u64,
+        #[arg(long)]
+        text: String,
+    },
+    /// Move a step's progress
+    State {
+        object: String,
+        #[arg(long)]
+        item: u64,
+        #[arg(long, value_enum)]
+        state: ItemStateArg,
+    },
+    /// Record what a step produced. Omit --text to clear it
+    Result {
+        object: String,
+        #[arg(long)]
+        item: u64,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Point a step at a commit, as navigation rather than proof
+    Commit {
+        object: String,
+        #[arg(long)]
+        item: u64,
+        #[arg(long, value_name = "REVISION")]
+        commit: String,
+    },
+    /// Prune a step. Its id is not reused
+    Rm {
+        object: String,
+        #[arg(long)]
+        item: u64,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ItemStateArg {
+    Pending,
+    Active,
+    Done,
+}
+
+impl From<ItemStateArg> for work::ItemState {
+    fn from(value: ItemStateArg) -> Self {
+        match value {
+            ItemStateArg::Pending => work::ItemState::Pending,
+            ItemStateArg::Active => work::ItemState::Active,
+            ItemStateArg::Done => work::ItemState::Done,
+        }
+    }
+}
+
+/// A dependency or blocker target, held to what Work is allowed to point at.
+///
+/// Objects and Backlog items only. Not sections, files, symbols or another
+/// sidecar: Work says what this execution is waiting on, and the finer the
+/// target the more it reads like the authoritative dependency it must never
+/// become.
+fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
+    let relative = spec.strip_prefix("engr:").ok_or_else(|| {
+        Error::new(
+            EXIT_USAGE,
+            format!("{field} {spec:?} must be an engr: reference"),
+        )
+    })?;
+    work::check_target(field, relative).map_err(|error| malformed_argument(field, spec, error))?;
+    // Resolved for existence as well as shape, because a target nobody can
+    // follow is a note to the next agent that wastes their time. Backlog items
+    // do get consumed, so this is checked when written and reported when read.
+    let id = engr::reference::EngrRef::parse_embedded(relative)
+        .and_then(|parsed| engr::reference::decode_uuid(parsed.id()))
+        .map_err(|error| malformed_argument(field, spec, error))?
+        .to_string();
+    let known = if relative.starts_with("backlog:") {
+        backlog::load(root, &id).is_ok()
+    } else {
+        ops::effective(root, &id).is_ok()
+    };
+    ensure_found(known, field, spec)?;
+    Ok(relative.to_owned())
+}
+
+fn ensure_found(known: bool, field: &str, spec: &str) -> Result<()> {
+    if known {
+        Ok(())
+    } else {
+        Err(Error::new(
+            EXIT_NOT_FOUND,
+            format!("{field} {spec:?} does not exist"),
+        ))
+    }
+}
+
+fn work_command(root: &Path, command: Work) -> Result<()> {
+    match command {
+        Work::Start { object, summary } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            work::start(root, &id, summary.as_deref())?;
+            print!(
+                "{}",
+                view::render_work_show(root, &id, &work::load(root, &id)?)
+            );
+        }
+        Work::Ls => {
+            let mut entries = Vec::new();
+            for id in work::ids(root)? {
+                entries.push((id.clone(), work::load(root, &id)?));
+            }
+            entries.sort_by(|left, right| right.1.updated_at.cmp(&left.1.updated_at));
+            print!("{}", view::render_work_ls(root, &entries));
+        }
+        Work::Show { object, format } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::load(root, &id)?;
+            match format {
+                Format::Text => print!("{}", view::render_work_show(root, &id, &item)),
+                Format::Json => println!("{}", view::render_work_json(&id, &item)?),
+            }
+        }
+        Work::Summary { object, text } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::set_summary(root, &id, text.as_deref())?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Pause { object } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::set_state(root, &id, work::State::Paused)?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Resume { object } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::set_state(root, &id, work::State::Active)?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Rm { object } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            work::remove(root, &id)?;
+            println!(
+                "no execution memory for {}",
+                shorten(&id, view::width(root))
+            );
+        }
+        Work::Depend { object, on, reason } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let target = work_target(root, "--on", &on)?;
+            let item = work::add_dependency(root, &id, &target, reason.as_deref())?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Undepend { object, on } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let target = on.strip_prefix("engr:").unwrap_or(&on).to_owned();
+            let item = work::remove_dependency(root, &id, &target)?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Block {
+            object,
+            reason,
+            target,
+        } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let target = target
+                .map(|spec| work_target(root, "--target", &spec))
+                .transpose()?;
+            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref())?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Unblock { object, index } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::remove_blocker(root, &id, index)?;
+            print!("{}", view::render_work_show(root, &id, &item));
+        }
+        Work::Item(command) => return work_item_command(root, command),
+    }
+    Ok(())
+}
+
+fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
+    match command {
+        WorkItem::Add { object, text } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let item = work::add_item(root, &id, &text)?;
+            println!("work item {item}");
+            print!(
+                "{}",
+                view::render_work_show(root, &id, &work::load(root, &id)?)
+            );
+        }
+        WorkItem::Revise { object, item, text } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let work = work::set_item_text(root, &id, item, &text)?;
+            print!("{}", view::render_work_show(root, &id, &work));
+        }
+        WorkItem::State {
+            object,
+            item,
+            state,
+        } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let work = work::set_item_state(root, &id, item, state.into())?;
+            print!("{}", view::render_work_show(root, &id, &work));
+        }
+        WorkItem::Result { object, item, text } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let work = work::set_item_result(root, &id, item, text.as_deref())?;
+            print!("{}", view::render_work_show(root, &id, &work));
+        }
+        WorkItem::Commit {
+            object,
+            item,
+            commit,
+        } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            // Resolved here so `HEAD` and short ids are accepted as input while
+            // the sidecar stores the full object id — the same rule every other
+            // commit in engr follows, even though this one anchors nothing.
+            let resolved = git::resolve(root, &commit).ok_or_else(|| {
+                Error::new(
+                    EXIT_NOT_FOUND,
+                    format!("--commit {commit:?} does not name a commit in this repository"),
+                )
+            })?;
+            let work = work::add_item_commit(root, &id, item, &resolved)?;
+            print!("{}", view::render_work_show(root, &id, &work));
+        }
+        WorkItem::Rm { object, item } => {
+            let id = resolve_object_argument(root, "object", &object)?;
+            let work = work::remove_item(root, &id, item)?;
+            print!("{}", view::render_work_show(root, &id, &work));
+        }
+    }
+    Ok(())
 }

@@ -10,7 +10,7 @@ use crate::backlog;
 use crate::git;
 use crate::model::{Object, Ref};
 use crate::semantics::{Relation, Supplement};
-use crate::{ops, store, Result};
+use crate::{ops, store, work, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -750,4 +750,152 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Work
+// ---------------------------------------------------------------------------
+
+/// Louder than the Backlog banner, and for a different reason.
+///
+/// Backlog says "nobody confirmed this". Work says that *and* that finishing it
+/// settles nothing — the failure mode worth preventing is an agent reading a
+/// sidecar with every item done and concluding the Object is decided.
+pub const WORK_BANNER: &str =
+    "EXECUTION MEMORY — agent-managed, confirmed by nobody, and not what the record says\n";
+
+/// Whether a Work target still resolves.
+///
+/// Never an error, exactly like a Backlog subject: these are signposts for the
+/// next agent, and a sidecar that refused to load because a Backlog item was
+/// consumed would make operational memory more fragile than the record it is
+/// not part of.
+fn work_target_note(root: &Path, target: &crate::reference::EngrTarget) -> Option<&'static str> {
+    let parsed = crate::reference::EngrRef::parse_embedded(&target.reference).ok()?;
+    let id = crate::reference::decode_uuid(parsed.id()).ok()?.to_string();
+    let found = match parsed.kind() {
+        crate::reference::ResourceKind::Backlog => backlog::load(root, &id).is_ok(),
+        _ => ops::effective(root, &id).is_ok(),
+    };
+    (!found).then_some("  (not found)")
+}
+
+fn work_target(root: &Path, target: &crate::reference::EngrTarget) -> String {
+    format!(
+        "engr:{}{}",
+        target.reference,
+        work_target_note(root, target).unwrap_or("")
+    )
+}
+
+/// One line per Object that has execution memory.
+///
+/// The state column shows the derived standing rather than the stored field,
+/// because `blocked` is the answer someone scanning this actually wants and
+/// `active` on a sidecar with three blockers would be true and useless.
+pub fn render_work_ls(root: &Path, entries: &[(String, work::Work)]) -> String {
+    let w = width(root);
+    let mut out = String::from(WORK_BANNER);
+    if entries.is_empty() {
+        out.push_str("no execution memory\n");
+        return out;
+    }
+    for (id, item) in entries {
+        let open = item
+            .items
+            .iter()
+            .filter(|entry| entry.state != work::ItemState::Done)
+            .count();
+        let title = ops::effective(root, id)
+            .map(|object| object.title)
+            .unwrap_or_else(|_| "(object not found)".to_owned());
+        out.push_str(&format!(
+            "{}  {:<8}  {:>2} open  {}  {}\n",
+            abbrev(id, w),
+            item.standing(),
+            open,
+            to_the_second(&item.updated_at),
+            title
+        ));
+    }
+    out
+}
+
+/// The whole sidecar, in the order a resuming agent reads it: where things
+/// stand, what is stopping them, what is left, what was already done.
+pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
+    let w = width(root);
+    let mut out = String::from(WORK_BANNER);
+    out.push_str(&format!(
+        "Object     {}\nState      {}\nUpdated    {}\n",
+        abbrev(id, w),
+        item.standing(),
+        to_the_second(&item.updated_at)
+    ));
+    if item.state == work::State::Paused {
+        out.push_str("           a human stopped this; do not resume it on your own\n");
+    }
+    if let Some(summary) = &item.summary {
+        out.push('\n');
+        out.push_str(summary.trim_end());
+        out.push('\n');
+    }
+    if !item.dependencies.is_empty() {
+        out.push_str("\nDepends on\n");
+        for dependency in &item.dependencies {
+            out.push_str(&format!("  {}\n", work_target(root, &dependency.target)));
+            if let Some(reason) = &dependency.reason {
+                out.push_str(&format!("    {reason}\n"));
+            }
+        }
+    }
+    if !item.blockers.is_empty() {
+        out.push_str("\nBlocked by\n");
+        for (index, blocker) in item.blockers.iter().enumerate() {
+            let head = match (&blocker.reason, &blocker.target) {
+                (Some(reason), _) => reason.clone(),
+                (None, Some(target)) => work_target(root, target),
+                (None, None) => "(nothing stated)".to_owned(),
+            };
+            out.push_str(&format!("  [{index}] {head}\n"));
+            if let (Some(_), Some(target)) = (&blocker.reason, &blocker.target) {
+                out.push_str(&format!("      {}\n", work_target(root, target)));
+            }
+        }
+    }
+    if !item.items.is_empty() {
+        out.push('\n');
+        for entry in &item.items {
+            out.push_str(&format!(
+                "{:>3}. {:<7}  {}\n",
+                entry.id,
+                entry.state.as_str(),
+                entry.text
+            ));
+            if let Some(result) = &entry.result {
+                out.push_str(&format!("     -> {result}\n"));
+            }
+            for commit in &entry.commits {
+                out.push_str(&format!("     {}\n", &commit[..8.min(commit.len())]));
+            }
+        }
+    }
+    out
+}
+
+pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
+    let value = serde_json::json!({
+        "object": id,
+        "state": item.state.as_str(),
+        "standing": item.standing(),
+        "blocked": item.is_blocked(),
+        "summary": item.summary,
+        "updated_at": item.updated_at,
+        "next_item_id": item.next_item_id,
+        "dependencies": item.dependencies,
+        "blockers": item.blockers,
+        "items": item.items,
+    });
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }

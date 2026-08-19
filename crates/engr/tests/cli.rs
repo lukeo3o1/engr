@@ -2913,3 +2913,181 @@ fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
         "and the record stores it"
     );
 }
+
+/// Execution memory is reachable, and reads as what it is.
+///
+/// Every screen that prints it says so, because the failure this domain can
+/// cause is not corruption — it is a reader taking a finished checklist for a
+/// settled decision.
+#[test]
+fn work_is_its_own_namespace_and_every_screen_says_it_is_not_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let empty = run_engr(root, &["work", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("EXECUTION MEMORY"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no execution memory"), "{shown}");
+
+    let started = run_engr(
+        root,
+        &[
+            "work",
+            "start",
+            &id,
+            "--summary",
+            "Parser done. show still uses the old resolver.",
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(run_engr(
+        root,
+        &["work", "item", "add", &id, "--text", "migrate the parser"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["work", "item", "state", &id, "--item", "1", "--state", "done"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "work",
+            "block",
+            &id,
+            "--reason",
+            "waiting on the compat result"
+        ]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["work", "ls"]).stdout).to_string();
+    assert!(listed.contains("blocked"), "derived, not stored: {listed}");
+    assert!(listed.contains("the auth design"), "{listed}");
+
+    // And the record's own commands are untouched by any of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["EXECUTION MEMORY", "migrate the parser", "compat result"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?} from the sidecar: {shown}"
+            );
+        }
+    }
+    let structured: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert!(structured.get("work").is_none(), "{structured}");
+    assert_eq!(structured["state"], "open", "the Object is where it was");
+}
+
+/// A human said stop, and the command line will not help an agent around it.
+#[test]
+fn pausing_work_survives_an_agent_trying_to_delete_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "paused work"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["work", "show", &id]).stdout).to_string();
+    assert!(shown.contains("State      paused"), "{shown}");
+    assert!(
+        shown.contains("do not resume it on your own"),
+        "the screen states the rule the tool cannot enforce: {shown}"
+    );
+
+    let refused = run_engr(root, &["work", "rm", &id]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("human saying stop"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(run_engr(root, &["work", "show", &id]).status.success());
+
+    assert!(run_engr(root, &["work", "resume", &id]).status.success());
+    assert!(run_engr(root, &["work", "rm", &id]).status.success());
+    assert!(!run_engr(root, &["work", "show", &id]).status.success());
+}
+
+/// A work target names a whole Object or Backlog item, and must exist.
+#[test]
+fn work_targets_are_checked_at_the_command_line() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "depends"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let other = prepare(root, &["prepare", "--new", "--text", "the prerequisite"]);
+    confirm(root, &other);
+    let other = other["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&other).expect("compact");
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    let ok = run_engr(
+        root,
+        &[
+            "work",
+            "depend",
+            &id,
+            "--on",
+            &format!("engr:obj:{compact}"),
+            "--reason",
+            "the token format is confirmed there",
+        ],
+    );
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let shown = String::from_utf8_lossy(&ok.stdout).to_string();
+    assert!(shown.contains("Depends on"), "{shown}");
+    assert!(
+        shown.contains("the token format is confirmed there"),
+        "{shown}"
+    );
+
+    let absent = engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact");
+    for (spec, expected) in [
+        (format!("engr:obj:{compact}:1"), "whole Object"),
+        // A well-formed Collection id, so what refuses it is the kind and not the
+        // spelling: Work does not point at planning metadata.
+        ("engr:collection:0123456789".to_owned(), "cannot target"),
+        (format!("engr:obj:{absent}"), "does not exist"),
+        (format!("obj:{compact}"), "must be an engr: reference"),
+    ] {
+        let refused = run_engr(root, &["work", "depend", &id, "--on", &spec]);
+        assert!(!refused.status.success(), "{spec}");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{spec}: {message}");
+    }
+}
