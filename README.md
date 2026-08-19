@@ -161,8 +161,9 @@ and `ls`, `show` and `verify` never mix a word of them into the record.
 
 Work is deliberately weak. Finishing every item settles nothing: the object is
 exactly where it was, because only a confirmation moves it. `paused` is the one
-signal that belongs to the human rather than the agent — engr cannot tell them
-apart, so it enforces the half it can and refuses to delete a paused sidecar.
+signal that belongs to the human rather than the agent — and engr cannot tell
+them apart, so it enforces none of it. What it does instead is say what happened:
+deleting paused work reports that a human's stop signal went with it.
 
 **Commit `.engr/objects`, `.engr/events`, `.engr/backlog` and `.engr/work`.** Confirmed events are append-only
 history and audit evidence; sections remain the authority for current wording.

@@ -1733,7 +1733,7 @@ enum Work {
     Pause { object: String },
     /// Resume it. Only on explicit human direction
     Resume { object: String },
-    /// Stop keeping execution memory. Refused while paused
+    /// Stop keeping execution memory. Deleting paused work says so
     Rm { object: String },
     /// Record something this work relies on
     Depend {

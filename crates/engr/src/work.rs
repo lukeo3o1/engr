@@ -146,10 +146,13 @@ pub struct Work {
     ///
     /// `paused` is a **human-directed** stop signal. An agent must not set it
     /// because a session is ending, because nothing is currently actionable, or
-    /// because it judged the work should wait; and must not clear it without
-    /// being told to. engr cannot tell an agent from a human, so that half is a
-    /// convention — what the tool enforces is that the signal is sticky: see
-    /// [`remove`].
+    /// because it judged the work should wait; must not clear it without being
+    /// told to; and must not delete a paused sidecar without being told to.
+    ///
+    /// All of that is normative on the agent and **none of it is enforced**.
+    /// engr cannot tell an agent from a human, so this is the same kind of rule
+    /// as the gate itself, and it fails the same way — quietly. What the tool
+    /// does is refuse to let the signal disappear unremarked: see [`remove`].
     pub state: State,
     /// The shortest useful checkpoint for whoever picks this up next.
     #[serde(default, skip_serializing_if = "Option::is_none")]

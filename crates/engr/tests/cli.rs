@@ -3113,3 +3113,61 @@ fn work_targets_are_checked_at_the_command_line() {
         assert!(message.contains(expected), "{spec}: {message}");
     }
 }
+
+/// Every surface an agent can reach describes the same rule.
+///
+/// `paused` has one behaviour and four places that state it: the protocol
+/// compiled into the binary, `--help`, the screens, and the source. When an
+/// accepted design moves, they have to move together — an agent that reads
+/// `--help` and concludes the opposite of `engr protocol` has been handed two
+/// rules and will follow the convenient one. Pinned here because the drift is
+/// invisible: nothing else fails when only the wording is stale.
+#[test]
+fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    // `--help` is the surface an agent reaches for first and the one most
+    // likely to disagree, because nothing breaks when it does.
+    let help = String::from_utf8_lossy(&run_engr(root, &["work", "rm", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["work", "--help"]).stdout);
+    for stale in ["Refused while paused", "refused", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help still claims the reverted rule ({stale:?}): {help}"
+        );
+    }
+
+    // The compiled-in protocol is canonical, and says the rule is the agent's.
+    // Whitespace-normalized, so a reflowed paragraph does not fail a test about
+    // meaning — the thing being pinned is what the sentence says.
+    let protocol = String::from_utf8_lossy(&run_engr(root, &["protocol"]).stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        protocol.contains("MUST NOT delete a paused work object"),
+        "the protocol states the normative rule"
+    );
+    assert!(
+        protocol.contains("MUST NOT turn it into a lifecycle rule by refusing the deletion"),
+        "and states that an implementation must not enforce it"
+    );
+
+    // And the behaviour itself, one more time, against the same binary the two
+    // documents above came out of.
+    let created = prepare(root, &["prepare", "--new", "--text", "surfaces agree"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"));
+}
