@@ -456,11 +456,48 @@ six-character challenge from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — no `0`/`O` o
 
 `prepare` **refuses up front**, so nothing that cannot apply ever reaches a
 human: the reducer is preflighted, `based_on` must name a real commit, and every
-reference must resolve to an existing section whose current hash matches what is
-being pinned. The target wording at `refs[].commit` MUST recompute to
-`refs[].sha256`; an uncommitted target wording cannot be referenced. Deferring
-reference checks to `verify` is what let one mistyped id in the previous design
-poison a global health check permanently, with no way back.
+reference must resolve to an existing section whose current content matches what
+is being pinned. Deferring reference checks to `verify` is what let one mistyped
+id in the previous design poison a global health check permanently, with no way
+back.
+
+#### A reference pins content, not a claim about content
+
+`section.sha256` and `refs[].sha256` are related and are **not** the same thing:
+
+| | |
+| --- | --- |
+| `section.sha256` | the target section's confirmed integrity seal |
+| `refs[].sha256` | the content this section was actually written against |
+
+The pin MUST therefore be produced by **recomputing** the target's canonical
+semantic content — the same representation the section seal covers, never a
+second ref-specific or text-only hash — and never by copying the stored seal. A
+seal is a claim about what was admitted; a section rewritten outside the gate
+keeps its old seal while saying something else, so a pin copied from the seal
+would record agreement to wording nobody confirmed.
+
+Admission is ordered, and the order is load-bearing:
+
+1. Load the effective target section.
+2. Recompute its content hash.
+3. Refuse unless that equals the target's own `section.sha256` — a target whose
+   wording no longer matches its seal cannot be referenced at all.
+4. Pin the recomputed value.
+5. Refuse unless the target content at `refs[].commit` recomputes to it. An
+   uncommitted target wording cannot be referenced.
+
+So at the moment a reference is admitted:
+
+```text
+recompute(current target content)
+  == target.section.sha256
+  == refs[].sha256
+  == recompute(target content at refs[].commit)
+```
+
+Content identity decides drift; git history explains it. `refs[].commit` remains
+provenance and recovery, not identity.
 
 There is **one live candidate per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.
@@ -680,11 +717,21 @@ unverified wording under an `ok` is worse than one that prints nothing: it is an
 assertion, and this record's whole claim is that a human agreed to these words.
 
 A section MUST also be marked when a section it references fails **its** hash.
-Comparing `refs[].sha256` against the target's stored `sha256` cannot see this —
-an edit that rewrites the target's text and leaves its stored hash alone moves
+Comparing `refs[].sha256` against the target's *stored* `sha256` cannot see this
+— an edit that rewrites the target's text and leaves its stored hash alone moves
 neither side of that comparison, so the reference looks untouched while the
-wording under it was replaced. Only the directly referenced section is checked;
-the target's own read covers what *it* stands on.
+wording under it was replaced. So the current identity a read reports MUST also
+be recomputed from the target's content, and the two comparisons then say
+different things:
+
+| | |
+| --- | --- |
+| recomputed ≠ target's `section.sha256` | the wording was changed outside the gate — **tampered** |
+| recomputed = seal, ≠ `refs[].sha256` | the target was revised through the gate — **drift** |
+| recomputed = seal = `refs[].sha256` | unchanged |
+
+Only the directly referenced section is checked; the target's own read covers
+what *it* stands on.
 
 Corruption outranks staleness. A section whose content does not match its hash
 is not a section that drifted, and its drift assessment describes something
@@ -697,7 +744,7 @@ Two signals, both computed at read time, both needing nobody to be reading.
 | Signal | Computed from |
 | --- | --- |
 | The basis moved | `based_on` versus HEAD: commits ahead, files changed |
-| A dependency changed | `refs[].sha256` versus the target section's current `sha256` |
+| A dependency changed | `refs[].sha256` versus the target section's recomputed content hash |
 
 Sections without `based_on` have no basis-movement signal. Both signals are
 reported as **information, not a verdict**. A threshold nobody has

@@ -329,10 +329,19 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
     assert!(!status.is_ok(), "it stands on wording nobody confirmed");
     assert_eq!(status.label(), "REF TAMPERED");
     assert_eq!(status.key(), "ref_tampered");
-    assert_eq!(
+    // The reported current hash is recomputed from what the target actually
+    // says, so rewritten wording moves it. What did not move is the target's
+    // stored seal — and that gap between content and seal is what makes this
+    // tampering rather than an ordinary revision.
+    assert_ne!(
         status.drifted[0].current_sha256.as_deref(),
         Some(pinned.as_str()),
-        "the stored hash did not move, which is exactly why comparing hashes is not enough"
+        "content identity has to follow the content"
+    );
+    assert_eq!(
+        store::load_object(&root, &target).expect("target").sections[0].sha256,
+        pinned,
+        "the seal still claims the wording nobody changed it back to"
     );
 
     let report = ops::verify(&root, &source).expect("verify");
@@ -652,5 +661,130 @@ fn verify_reads_referenced_targets_through_effective_authority() {
     assert!(
         report.passed(),
         "and the source stands on it as soundly as it did before"
+    );
+}
+
+/// A reference pins content identity, not the target's seal.
+///
+/// `section.sha256` is the target's confirmed integrity seal — a claim about
+/// what was admitted. `refs[].sha256` is what this section was actually written
+/// against. They are only ever allowed to be equal, and the way to establish
+/// that is to recompute the target's content rather than to copy its claim: a
+/// section rewritten outside the gate keeps its old seal while saying something
+/// else, so a pin taken from the seal would record agreement to wording nobody
+/// confirmed.
+///
+/// The invariant at admission is the whole chain:
+///
+/// ```text
+/// recompute(current target content)
+///   == target.section.sha256
+///   == refs[].sha256
+///   == recompute(target content at refs[].commit)
+/// ```
+#[test]
+fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+    );
+    let stored = store::load_object(&root, &target).expect("target").sections[0].clone();
+    let recomputed = stored.recomputed_sha256().expect("recompute");
+    assert_eq!(
+        recomputed, stored.sha256,
+        "an intact target's content and seal agree, which is the only case a ref may be built from"
+    );
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: recomputed.clone(),
+        commit: commit.clone(),
+    }];
+    admit(&root, with_ref);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    let object = store::load_object(&root, &source).expect("source");
+    assert!(view::assess(&root, &object)[0].1.is_ok());
+
+    // (a) Rewritten outside the gate: the content moves, the seal does not.
+    // Creating a reference to it is refused, because pinning the rewritten
+    // wording would make an unconfirmed edit look agreed.
+    tamper(&root, &target, |value| {
+        value["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
+    });
+    let rewritten = store::load_object(&root, &target).expect("target").sections[0].clone();
+    assert_eq!(rewritten.sha256, recomputed, "the seal did not move");
+    assert_ne!(
+        rewritten.recomputed_sha256().expect("recompute"),
+        recomputed,
+        "the content did"
+    );
+
+    let mut to_forged = payload(
+        Action::SectionAdded,
+        &source,
+        "depends on rewritten wording",
+    );
+    to_forged.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: recomputed.clone(),
+        commit: commit.clone(),
+    }];
+    let error = gate::prepare(&root, to_forged).expect_err("that target cannot be referenced");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("changed outside the gate"),
+        "{error}"
+    );
+
+    // And the existing reference reports it as tampering, with a current hash
+    // that followed the content rather than the claim.
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(status.stands_on_tampered());
+    assert_ne!(
+        status.drifted[0].current_sha256.as_deref(),
+        Some(recomputed.as_str())
+    );
+
+    // (b) Revised through the gate: content and seal move together, so it is
+    // drift rather than tampering — the distinction this whole scheme exists
+    // to keep.
+    store::write_json(&store::object_path(&root, &target), &{
+        let mut restored: Value =
+            store::read_json(&store::object_path(&root, &target)).expect("read");
+        restored["sections"][0]["text"] = Value::String("Reason codes are numeric.".into());
+        restored
+    })
+    .expect("restore");
+    admit(
+        &root,
+        payload(
+            Action::SectionRevised { section: 1 },
+            &target,
+            "Reason codes are numeric, and stable across releases.",
+        ),
+    );
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(
+        !status.stands_on_tampered(),
+        "a confirmed revision is not a forgery"
+    );
+    assert_eq!(status.drifted.len(), 1);
+    let revised = store::load_object(&root, &target).expect("target").sections[0].clone();
+    assert_eq!(
+        status.drifted[0].current_sha256.as_deref(),
+        Some(revised.recomputed_sha256().expect("recompute").as_str()),
+        "and the reported current identity is the target's actual content"
+    );
+    assert_eq!(
+        revised.sha256,
+        revised.recomputed_sha256().expect("recompute")
     );
 }

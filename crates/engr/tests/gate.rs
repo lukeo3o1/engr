@@ -531,7 +531,10 @@ fn references_are_checked_at_the_gate() {
     let error = gate::prepare(&root, forged_current)
         .expect_err("a reference cannot trust a stale stored target hash");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(error.message.contains("current wording"));
+    assert!(
+        error.message.contains("changed outside the gate"),
+        "{error}"
+    );
     "depended upon".clone_into(&mut tampered.sections[0].text);
     store::save_object(&root, &tampered).expect("restore target");
 

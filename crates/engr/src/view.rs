@@ -159,7 +159,14 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         .ok()
         .and_then(|target| target.section(reference.section).ok().cloned());
     let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
-    let current = target.map(|section| section.sha256);
+    // Recomputed from the target's actual content, not read off its stored
+    // seal. The seal is a claim about what was confirmed; it is not the
+    // content, and a file rewritten behind the gate keeps the old seal while
+    // saying something else. Reporting the seal here made the two verdicts
+    // agree by accident — "was X, now X" for a section whose wording had
+    // changed — because the value being compared was the very value that had
+    // not moved. Content identity decides drift; the seal decides tampering.
+    let current = target.and_then(|section| section.recomputed_sha256().ok());
     let moved = current.as_deref() != Some(reference.sha256.as_str());
     // Worth offering whenever the target is not what was pinned, whether it was
     // revised through the gate or rewritten behind it.
