@@ -2604,6 +2604,15 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                 .map(|basis| basis.resolve(root, &rule.id))
                 .collect();
             if json {
+                // Nothing reaches stdout until the rule is known to be usable.
+                // Printing first and failing after left a machine surface whose
+                // successful-looking document was indistinguishable from a real
+                // one — a caller that drops the exit status would consume
+                // normative wording as reviewable when engr had already
+                // established that it is not. The human surface may say
+                // "UNUSABLE" and then fail, because a person reads the line; a
+                // parser reads the document.
+                resolved?;
                 let value = serde_json::json!({
                     "id": rule.id,
                     "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
@@ -2616,7 +2625,7 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                     serde_json::to_string_pretty(&value)
                         .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rule: {error}")) })?
                 );
-                return resolved.map(|_| ());
+                return Ok(());
             }
             let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
             println!("Rule       {}", rule.id);
