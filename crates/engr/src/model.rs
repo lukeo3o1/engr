@@ -499,6 +499,23 @@ impl Action {
         )
     }
 
+    /// The actions that refuse to run on an Object nobody is looking at.
+    ///
+    /// Exactly the ones an atomic classification is for, and the list is shared
+    /// with the guard rather than written twice: an action that sets the state
+    /// itself cannot also be handed one, and `object_superseded` is exempt from
+    /// the guard entirely, so neither takes a destination.
+    pub fn requires_attention(&self) -> bool {
+        matches!(
+            self,
+            Action::ObjectRenamed
+                | Action::SectionAdded
+                | Action::SectionRevised { .. }
+                | Action::SectionMerged { .. }
+                | Action::SectionDeleted { .. }
+        )
+    }
+
     /// Actions that add wording as a new Section rather than replacing existing
     /// wording or a label.
     pub fn adds_section(&self) -> bool {
@@ -523,8 +540,32 @@ pub struct Payload {
     #[serde(flatten)]
     pub action: Action,
     pub object: String,
+    /// A destination type and state applied atomically with this action.
+    ///
+    /// Absent on every action that sets the state itself, and absent by default
+    /// — skipped when empty, so a payload that does not carry one serializes and
+    /// hashes exactly as it did before this field existed.
+    ///
+    /// It exists because #9 permits revising a no-attention Object in **one**
+    /// confirmed operation when that operation atomically returns it to a state
+    /// that needs attention. Without it the only path was to confirm a
+    /// reclassification the Object was never really in, and then confirm the
+    /// revision — two authoritative statements for one piece of work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classify: Option<Classification>,
     #[serde(flatten)]
     pub content: Content,
+}
+
+/// Where an atomic classification lands the Object.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Classification {
+    /// Absent means untyped, explicitly — the same first-class answer it is
+    /// everywhere else.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<ObjectType>,
+    pub state: State,
 }
 
 impl Payload {
@@ -682,6 +723,30 @@ pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(
 /// event.
 pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     let content = &event.payload.content;
+    // Applied before the action, so the attention guard below sees the state
+    // this confirmation *arrives at* rather than the one it left.
+    //
+    // This is what makes #9's rule reachable: a no-attention Object may be
+    // revised in one confirmed operation **only if** that same operation
+    // atomically moves it to a state that needs attention. The guard is
+    // unchanged — it still refuses to let confirmed wording change while nobody
+    // is looking — but the object is no longer out of sight by the time the
+    // section mutation applies, so no artificial intermediate state has to be
+    // confirmed first.
+    //
+    // A destination that does not need attention is therefore still refused,
+    // by the same guard, for the same reason.
+    if let Some(classify) = &event.payload.classify {
+        ensure!(
+            event.payload.action.requires_attention(),
+            EXIT_INVARIANT,
+            "{} sets the object's own state, so it cannot also carry one",
+            event.payload.action.label()
+        );
+        validate_state(EXIT_INVARIANT, classify.object_type, classify.state)?;
+        object.object_type = classify.object_type;
+        object.state = classify.state;
+    }
     match &event.payload.action {
         Action::ObjectCreated => {
             ensure!(
@@ -822,6 +887,7 @@ mod tests {
         let payload = Payload {
             action: Action::SectionAdded,
             object: id.to_owned(),
+            classify: None,
             content: Content {
                 text: text.to_owned(),
                 ..Content::default()

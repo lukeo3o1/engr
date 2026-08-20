@@ -44,6 +44,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
+        classify: None,
         content: Content {
             text: text.to_owned(),
             based_on: None,
@@ -363,11 +364,13 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
     let added = Payload {
         action: Action::SectionAdded,
         object: object.clone(),
+        classify: None,
         content: content.clone(),
     };
     let deleted = Payload {
         action: Action::SectionDeleted { section: 1 },
         object,
+        classify: None,
         content: content.clone(),
     };
 
@@ -452,5 +455,80 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     assert!(
         !status.stands_on_unreadable(),
         "absence is not unreadable authority: {status:?}"
+    );
+}
+
+/// `verify` reports a reference it cannot check, rather than skipping it.
+///
+/// Both `continue`s that used to be here were silent passes on the one path
+/// whose whole job is to say whether the record adds up: an unreadable target
+/// let the source PASS while standing on authority nobody could read, and a
+/// missing one reported health for a dependency that is not there.
+#[test]
+fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, with_ref);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    // (a) the target is present and will not load.
+    let path = store::object_path(&root, &target);
+    let sound: Value = store::read_json(&path).expect("read");
+    let mut broken = sound.clone();
+    broken["state"] = Value::String("not-a-state".into());
+    store::write_json(&path, &broken).expect("write");
+
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(!report.passed(), "unreadable authority is not a pass");
+    assert_eq!(report.standing_on_unreadable.len(), 1);
+    assert!(report.standing_on_missing.is_empty());
+    assert!(
+        report.standing_on_tampered.is_empty(),
+        "unreadable is not the same claim as tampered"
+    );
+    assert!(
+        !report.standing_on_unreadable[0].reason.is_empty(),
+        "and it says why"
+    );
+
+    // (b) the target is gone entirely.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(
+        !report.passed(),
+        "a dependency that is not there is not a pass"
+    );
+    assert_eq!(report.standing_on_missing.len(), 1);
+    assert!(report.standing_on_unreadable.is_empty());
+
+    // (c) the target loads, but the referenced section is not in it.
+    store::write_json(&path, &sound).expect("restore");
+    let mut without: Value = store::read_json(&path).expect("read");
+    without["sections"] = serde_json::json!([]);
+    store::write_json(&path, &without).expect("write");
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(!report.passed());
+    assert_eq!(
+        report.standing_on_missing.len(),
+        1,
+        "a missing section is absence, like a missing object"
     );
 }

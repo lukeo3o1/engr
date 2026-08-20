@@ -399,10 +399,21 @@ Use `--untyped` to say explicitly that an object has no type. There is no
 transition order to follow: any state valid for the destination type is
 reachable, and every hop is a separate confirmation.
 
-**A no-attention object refuses section work.** That is the old "reopen first"
-rule in the wider vocabulary: classify it back into `draft`, `proposed` or
-`identified`, then revise. Renewed engineering work returns to the default
-listing rather than happening where nobody sees it.
+**A no-attention object refuses section work** — unless the same command puts it
+back in the listing. Add `--type <TYPE>` (or `--untyped`) and `--state <STATE>`
+to the revision itself and both land in one confirmation:
+
+```bash
+engr prepare --object <id> --revise 1 --text "..." --type design --state proposed
+```
+
+Prefer that to reclassifying first and revising second. Two confirmations means
+two authoritative statements, and the intermediate one is a state the object was
+never really in — a reader three months out cannot tell that from a real one.
+
+A destination that still needs no attention is refused, because that is the whole
+point: renewed engineering work returns to the default listing rather than
+happening where nobody sees it.
 
 `--supersede` is the exception, because it is not renewed work — it is how an
 object stops being current, and the object it exists for is an `accepted` one.

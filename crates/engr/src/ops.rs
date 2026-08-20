@@ -65,6 +65,28 @@ pub struct StandsOnTampered {
     pub target_section: u64,
 }
 
+/// A section here is sound, but what it leans on is not there at all.
+///
+/// Absence, kept apart from the two failures below: a reference whose target
+/// was never created or has been removed is a different fact from one whose
+/// target will not load, and reporting them the same way hides which is which.
+#[derive(Debug)]
+pub struct StandsOnMissing {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+}
+
+/// A section here is sound, and what it leans on cannot be read at all.
+#[derive(Debug)]
+pub struct StandsOnUnreadable {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+    /// Why it would not load, kept so the report can say rather than imply.
+    pub reason: String,
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub object: String,
@@ -72,13 +94,19 @@ pub struct Report {
     pub sections: usize,
     pub tampered: Vec<u64>,
     pub standing_on_tampered: Vec<StandsOnTampered>,
+    pub standing_on_missing: Vec<StandsOnMissing>,
+    pub standing_on_unreadable: Vec<StandsOnUnreadable>,
     pub unprojected: usize,
     pub uncommitted: Option<bool>,
 }
 
 impl Report {
     pub fn passed(&self) -> bool {
-        self.tampered.is_empty() && self.standing_on_tampered.is_empty() && self.unprojected == 0
+        self.tampered.is_empty()
+            && self.standing_on_tampered.is_empty()
+            && self.standing_on_missing.is_empty()
+            && self.standing_on_unreadable.is_empty()
+            && self.unprojected == 0
     }
 }
 
@@ -110,15 +138,45 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let projection_rev = persisted.as_ref().map_or(0, |object| object.rev);
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
+    let mut standing_on_missing = Vec::new();
+    let mut standing_on_unreadable = Vec::new();
     for section in &object.sections {
         if section.recomputed_sha256()? != section.sha256 {
             tampered.push(section.id);
         }
         for reference in &section.refs {
-            let Ok(target) = store::load_object(root, &reference.object) else {
-                continue;
+            // Neither `continue` that used to be here was safe. Skipping an
+            // unreadable target let a source object PASS while standing on
+            // authority nobody could read, and skipping a missing one reported
+            // health for a dependency that is not there. This is the
+            // authoritative trust path: absence and malformed authority are
+            // both findings, and they are different findings.
+            let target = match store::load_object(root, &reference.object) {
+                Ok(target) => target,
+                Err(error) if error.code == EXIT_NOT_FOUND => {
+                    standing_on_missing.push(StandsOnMissing {
+                        section: section.id,
+                        target: reference.object.clone(),
+                        target_section: reference.section,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    standing_on_unreadable.push(StandsOnUnreadable {
+                        section: section.id,
+                        target: reference.object.clone(),
+                        target_section: reference.section,
+                        reason: error.message,
+                    });
+                    continue;
+                }
             };
             let Ok(target_section) = target.section(reference.section) else {
+                standing_on_missing.push(StandsOnMissing {
+                    section: section.id,
+                    target: reference.object.clone(),
+                    target_section: reference.section,
+                });
                 continue;
             };
             if target_section.recomputed_sha256()? != target_section.sha256 {
@@ -136,6 +194,8 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         sections: object.sections.len(),
         tampered,
         standing_on_tampered,
+        standing_on_missing,
+        standing_on_unreadable,
         unprojected: events
             .iter()
             .filter(|event| event.rev > projection_rev)

@@ -851,19 +851,39 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     } else {
         Action::ObjectSuperseded
     };
-    if command.state.is_some() && !command.classify {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--state sets a destination for --classify; --close, --reopen and --supersede already \
-             name the state they produce",
-        ));
-    }
-    if (command.object_type.is_some() || command.untyped) && !command.classify {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--type and --untyped set a destination for --classify",
-        ));
-    }
+    // A destination belongs either to `--classify`, which is only a
+    // classification, or to an action that needs the object back in the
+    // attention set to run at all — where it is applied in the same
+    // confirmation, so no state the object was never really in gets recorded on
+    // the way. Every other action already names the state it produces.
+    let classify = if command.classify {
+        None
+    } else if command.state.is_some() || command.object_type.is_some() || command.untyped {
+        if !action.requires_attention() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{} already names the state it produces, so it takes no destination",
+                    action.label()
+                ),
+            ));
+        }
+        if command.object_type.is_none() && !command.untyped {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "a destination needs its type: --type <TYPE>, or --untyped",
+            ));
+        }
+        Some(model::Classification {
+            object_type: command.object_type.map(TypeArg::model),
+            state: command
+                .state
+                .ok_or_else(|| Error::new(EXIT_USAGE, "a destination needs a --state"))?
+                .model(),
+        })
+    } else {
+        None
+    };
 
     let object = match (&action, &command.object) {
         (Action::ObjectCreated, Some(_)) => {
@@ -976,6 +996,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     let payload = Payload {
         action,
         object,
+        classify,
         content,
     };
     let prepared = if command.oversize {
@@ -1378,12 +1399,24 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // The whole destination, both halves, because that is what is being
     // confirmed: a state read without the type it belongs to is a word that
     // means different things on different objects.
-    if let Action::ObjectClassified { object_type, state } = &candidate.payload.action {
+    // Both spellings of a destination reach this screen the same way: one is a
+    // classification on its own, the other rides along with a section action to
+    // bring the object back into attention in the same confirmation. Either way
+    // it is part of what is being confirmed, so it is part of what is shown.
+    let destination = match &candidate.payload.action {
+        Action::ObjectClassified { object_type, state } => Some((*object_type, *state)),
+        _ => candidate
+            .payload
+            .classify
+            .as_ref()
+            .map(|classify| (classify.object_type, classify.state)),
+    };
+    if let Some((object_type, state)) = destination {
         out.push_str(&format!(
             "Type       {}\nState      {}\nAttention  {}\n",
             object_type.map_or("none", |value| value.as_str()),
             state.as_str(),
-            if semantics::needs_attention(*object_type, *state) {
+            if semantics::needs_attention(object_type, state) {
                 "yes — it stays in the default listing"
             } else {
                 "no — it leaves the default listing"
@@ -1675,6 +1708,26 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 stood.section,
                 shorten(&stood.target, width),
                 stood.target_section
+            );
+        }
+        // Said separately from tampering, and from each other. "Not there" and
+        // "will not load" are different problems with different answers, and
+        // both used to be silence.
+        for stood in &report.standing_on_missing {
+            println!(
+                "          §{} stands on {} §{}, which is not there",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section
+            );
+        }
+        for stood in &report.standing_on_unreadable {
+            println!(
+                "          §{} stands on {} §{}, which will not load: {}",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section,
+                stood.reason
             );
         }
         if report.unprojected > 0 {

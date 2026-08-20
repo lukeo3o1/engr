@@ -152,6 +152,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: target.clone(),
+            classify: None,
             content: Content {
                 text: "target".to_owned(),
                 based_on: None,
@@ -171,6 +172,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: target.clone(),
+            classify: None,
             content: Content {
                 text: "projection wording".to_owned(),
                 based_on: None,
@@ -199,6 +201,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionRevised { section: 1 },
             object: target.clone(),
+            classify: None,
             content: Content {
                 text: "effective crash-tail wording".to_owned(),
                 based_on: None,
@@ -230,6 +233,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: source.clone(),
+            classify: None,
             content: Content {
                 text: "source".to_owned(),
                 based_on: None,
@@ -248,6 +252,7 @@ fn reference_admission_uses_the_effective_target_projection() {
     let stale_projection_ref = Payload {
         action: Action::SectionAdded,
         object: source.clone(),
+        classify: None,
         content: Content {
             text: "cannot pin stale projection".to_owned(),
             based_on: None,
@@ -299,6 +304,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: source,
+            classify: None,
             content: Content {
                 text: "historically verified effective wording".to_owned(),
                 based_on: None,
@@ -326,6 +332,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::ObjectCreated,
             object: id.clone(),
+            classify: None,
             content: Content {
                 text: "candidate state".to_owned(),
                 based_on: None,
@@ -343,6 +350,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            classify: None,
             content: Content {
                 text: "apply once".to_owned(),
                 based_on: None,
@@ -391,6 +399,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            classify: None,
             content: Content {
                 text: "stale candidate".to_owned(),
                 based_on: None,
@@ -406,6 +415,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id,
+            classify: None,
             content: Content {
                 text: "overtaking mutation".to_owned(),
                 based_on: None,
@@ -1210,6 +1220,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload = Payload {
         action: Action::SectionAdded,
         object: id,
+        classify: None,
         content: Content {
             text: "event wording".to_owned(),
             based_on: None,
@@ -1425,6 +1436,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
     let payload = Payload {
         action: Action::SectionAdded,
         object: object.clone(),
+        classify: None,
         content: Content {
             text: "reconcile under lock".to_owned(),
             based_on: None,
@@ -1721,6 +1733,7 @@ fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
         Payload {
             action: Action::SectionAdded,
             object: object.clone(),
+            classify: None,
             content: Content {
                 text: "what the work produced".to_owned(),
                 based_on: None,
@@ -1921,6 +1934,7 @@ fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
         Payload {
             action: Action::SectionAdded,
             object: object.clone(),
+            classify: None,
             content: Content {
                 text: "what the work produced".to_owned(),
                 based_on: None,
@@ -2439,7 +2453,8 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
     );
 }
 
-/// A destination is only ever stated by the action that has one.
+/// A destination belongs to `--classify`, or to an action that needs the object
+/// back in the attention set — and to nothing else.
 #[test]
 fn type_and_state_flags_belong_to_classify_and_nothing_else() {
     let workspace = TempDir::new().expect("temp dir");
@@ -2452,7 +2467,7 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
     for (args, expected) in [
         (
             vec!["prepare", "--object", &id, "--close", "--state", "closed"],
-            "--state sets a destination for --classify",
+            "already names the state it produces",
         ),
         (
             vec!["prepare", "--object", &id, "--classify", "--state", "open"],
@@ -2470,7 +2485,7 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
                 "--type",
                 "design",
             ],
-            "--type and --untyped set a destination for --classify",
+            "a destination needs a --state",
         ),
         (
             vec!["prepare", "--object", &id, "--close", "--role", "decision"],

@@ -105,6 +105,22 @@ so exempting it would narrow that to "the sections have settled" rather than the
 whole object. For an untyped object this is exactly the old "reopen it first"
 rule, unchanged.
 
+The guard reads the state the confirmation **arrives at**, not the one it left.
+A no-attention object may therefore be revised in **one** confirmed operation
+when that same operation atomically returns it to a state that needs attention:
+the payload carries an optional destination (`type?` and `state`) applied before
+the action, and the guard then sees the object back in the listing. A
+destination that still needs no attention is refused by the same guard, which is
+the "only if" half of the rule.
+
+This exists so that no state an object was never really in has to be confirmed on
+the way. The two-confirmation `reclassify, then revise` path remains available
+and means something different: two authoritative statements, because there were
+two. An action that sets the object's own state — `object_closed`,
+`object_reopened`, `object_classified` — carries no destination, and neither does
+`object_superseded`, which is exempt from the guard entirely. A payload with no
+destination serializes and hashes exactly as it did before the field existed.
+
 The rule is about **renewed engineering work** — wording confirmed once being
 changed again out of sight of everyone reading the default listing.
 `object_superseded` is therefore exempt, and the exemption is the rule rather
