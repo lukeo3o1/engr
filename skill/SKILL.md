@@ -415,6 +415,12 @@ A destination that still needs no attention is refused, because that is the whol
 point: renewed engineering work returns to the default listing rather than
 happening where nobody sees it.
 
+**And it only works on an object that is out of the listing.** If the object
+already needs attention, adding `--type`/`--state` to a section action is
+refused — there is nothing to unblock, so it would be an unrelated change riding
+along inside a confirmation about something else. Classify it separately with
+`--classify`, where a reader can see it as its own statement.
+
 `--supersede` is the exception, because it is not renewed work — it is how an
 object stops being current, and the object it exists for is an `accepted` one.
 Supersede it where it stands.

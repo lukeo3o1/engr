@@ -501,10 +501,12 @@ impl Action {
 
     /// The actions that refuse to run on an Object nobody is looking at.
     ///
-    /// Exactly the ones an atomic classification is for, and the list is shared
-    /// with the guard rather than written twice: an action that sets the state
-    /// itself cannot also be handed one, and `object_superseded` is exempt from
-    /// the guard entirely, so neither takes a destination.
+    /// Exactly the ones a [`Payload::becomes`] destination is for, and the list
+    /// is shared with the guard rather than written twice. That sharing is the
+    /// whole rule: a destination is admissible on an action *because* the guard
+    /// would otherwise refuse it. An action that sets the Object's own state
+    /// cannot also be handed one, and `object_superseded` is exempt from the
+    /// guard entirely, so neither takes a destination.
     pub fn requires_attention(&self) -> bool {
         matches!(
             self,
@@ -540,27 +542,38 @@ pub struct Payload {
     #[serde(flatten)]
     pub action: Action,
     pub object: String,
-    /// A destination type and state applied atomically with this action.
+    /// Where this action leaves the Object, applied atomically with it.
     ///
-    /// Absent on every action that sets the state itself, and absent by default
-    /// — skipped when empty, so a payload that does not carry one serializes and
-    /// hashes exactly as it did before this field existed.
+    /// It exists because a no-attention Object may be revised in **one**
+    /// confirmed operation when that operation returns it to attention. Without
+    /// it the only path was to confirm a reclassification the Object was never
+    /// really in, and then confirm the revision — two authoritative statements
+    /// for one piece of work.
     ///
-    /// It exists because #9 permits revising a no-attention Object in **one**
-    /// confirmed operation when that operation atomically returns it to a state
-    /// that needs attention. Without it the only path was to confirm a
-    /// reclassification the Object was never really in, and then confirm the
-    /// revision — two authoritative statements for one piece of work.
+    /// Narrow on purpose. `becomes` is admissible only on an Object that does
+    /// **not** currently need attention, only on the actions the attention guard
+    /// would otherwise refuse, and only towards a destination that does need
+    /// attention. An Object already in the listing has no use for it: nothing is
+    /// being unblocked, so a destination there would be an unrelated change
+    /// riding along inside someone else's confirmation. That is what
+    /// `object_classified` is for.
+    ///
+    /// Absent by default and skipped when empty, so a payload that does not
+    /// carry one serializes and hashes exactly as it did before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classify: Option<Classification>,
+    pub becomes: Option<Destination>,
     #[serde(flatten)]
     pub content: Content,
 }
 
-/// Where an atomic classification lands the Object.
+/// Where a [`Payload::becomes`] lands the Object.
+///
+/// Field-for-field what [`Action::ObjectClassified`] carries, and deliberately
+/// so: a destination means the same thing whether it is the whole operation or
+/// the half of one that makes the other half legal.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct Classification {
+pub struct Destination {
     /// Absent means untyped, explicitly — the same first-class answer it is
     /// everywhere else.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
@@ -726,7 +739,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     // Applied before the action, so the attention guard below sees the state
     // this confirmation *arrives at* rather than the one it left.
     //
-    // This is what makes #9's rule reachable: a no-attention Object may be
+    // This is what makes the rule reachable: a no-attention Object may be
     // revised in one confirmed operation **only if** that same operation
     // atomically moves it to a state that needs attention. The guard is
     // unchanged — it still refuses to let confirmed wording change while nobody
@@ -734,18 +747,40 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     // section mutation applies, so no artificial intermediate state has to be
     // confirmed first.
     //
-    // A destination that does not need attention is therefore still refused,
-    // by the same guard, for the same reason.
-    if let Some(classify) = &event.payload.classify {
+    // All three conditions are stated here rather than left to fall out of the
+    // guard below. A destination that still needs no attention would be caught
+    // either way, but "you may not put it *there*" and "you may not do this at
+    // all" are different refusals, and a reducer that says the second when it
+    // means the first sends someone to fix the wrong half.
+    if let Some(becomes) = &event.payload.becomes {
         ensure!(
             event.payload.action.requires_attention(),
             EXIT_INVARIANT,
             "{} sets the object's own state, so it cannot also carry one",
             event.payload.action.label()
         );
-        validate_state(EXIT_INVARIANT, classify.object_type, classify.state)?;
-        object.object_type = classify.object_type;
-        object.state = classify.state;
+        // The narrow reading, and the one that keeps a confirmation honest: a
+        // destination is admissible because it is what makes this action legal,
+        // not as a second operation smuggled into the same signature. An Object
+        // already in the listing is not blocked, so there is nothing to unblock
+        // — and `object_classified` already says what it would be trying to say.
+        ensure!(
+            !object.needs_attention(),
+            EXIT_INVARIANT,
+            "{} already needs attention, so a destination here would be a second, unrelated change inside one confirmation; classify it on its own",
+            object.id
+        );
+        validate_state(EXIT_INVARIANT, becomes.object_type, becomes.state)?;
+        ensure!(
+            needs_attention(becomes.object_type, becomes.state),
+            EXIT_INVARIANT,
+            "a destination of {} needs no attention, so it cannot be what lets {} run; use one of {}",
+            becomes.state.as_str(),
+            event.payload.action.label(),
+            crate::semantics::attention_states(becomes.object_type)
+        );
+        object.object_type = becomes.object_type;
+        object.state = becomes.state;
     }
     match &event.payload.action {
         Action::ObjectCreated => {
@@ -887,7 +922,7 @@ mod tests {
         let payload = Payload {
             action: Action::SectionAdded,
             object: id.to_owned(),
-            classify: None,
+            becomes: None,
             content: Content {
                 text: text.to_owned(),
                 ..Content::default()

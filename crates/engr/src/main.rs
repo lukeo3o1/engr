@@ -856,7 +856,13 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     // attention set to run at all — where it is applied in the same
     // confirmation, so no state the object was never really in gets recorded on
     // the way. Every other action already names the state it produces.
-    let classify = if command.classify {
+    //
+    // Only the shape is settled here. Whether *this* object may take a
+    // destination at all depends on the state it is in, and that is the
+    // reducer's call, not the parser's: `gate::prepare` projects a trial event,
+    // so an object that already needs attention is refused there, once, with
+    // the authority that will still be enforcing it when the event replays.
+    let becomes = if command.classify {
         None
     } else if command.state.is_some() || command.object_type.is_some() || command.untyped {
         if !action.requires_attention() {
@@ -874,7 +880,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 "a destination needs its type: --type <TYPE>, or --untyped",
             ));
         }
-        Some(model::Classification {
+        Some(model::Destination {
             object_type: command.object_type.map(TypeArg::model),
             state: command
                 .state
@@ -996,7 +1002,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     let payload = Payload {
         action,
         object,
-        classify,
+        becomes,
         content,
     };
     let prepared = if command.oversize {
@@ -1407,9 +1413,9 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         Action::ObjectClassified { object_type, state } => Some((*object_type, *state)),
         _ => candidate
             .payload
-            .classify
+            .becomes
             .as_ref()
-            .map(|classify| (classify.object_type, classify.state)),
+            .map(|becomes| (becomes.object_type, becomes.state)),
     };
     if let Some((object_type, state)) = destination {
         out.push_str(&format!(

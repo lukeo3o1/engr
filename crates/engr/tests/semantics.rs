@@ -59,7 +59,7 @@ fn payload(action: Action, object: &str, content: Content) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
-        classify: None,
+        becomes: None,
         content,
     }
 }
@@ -1501,12 +1501,18 @@ fn a_literal_body_keeps_every_byte_it_was_written_with() {
 
 /// A no-attention Object is revised in **one** confirmation, not two.
 ///
-/// #9 permits this exactly when the same operation atomically returns the
-/// Object to a state that needs attention. The rule it replaces is not relaxed:
-/// a bare revision is still refused, and so is one whose destination still
-/// needs no attention. What is gone is the artificial intermediate — the
-/// `proposed` an object was never really in, confirmed only so the next
-/// confirmation could land.
+/// Permitted exactly when the same operation atomically returns the Object to a
+/// state that needs attention. The rule it replaces is not relaxed: a bare
+/// revision is still refused, and so is one whose destination still needs no
+/// attention. What is gone is the artificial intermediate — the `proposed` an
+/// object was never really in, confirmed only so the next confirmation could
+/// land.
+///
+/// And it is narrow in the other direction too. A destination is admissible
+/// *because* it is what makes the action legal, so an Object that already needs
+/// attention cannot carry one: there would be nothing to unblock, and the
+/// destination would be a second, unrelated change hidden inside someone else's
+/// confirmation.
 #[test]
 fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmation() {
     let (_dir, root) = workspace();
@@ -1526,7 +1532,7 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
     let revise = || Payload {
         action: Action::SectionRevised { section: 1 },
         object: id.clone(),
-        classify: None,
+        becomes: None,
         content: wording("Use short-lived tokens, capped at 15 minutes."),
     };
 
@@ -1537,7 +1543,7 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
     // And refused when the destination would leave it out of the listing, which
     // is the "only if" half of the rule.
     let mut still_hidden = revise();
-    still_hidden.classify = Some(engr::model::Classification {
+    still_hidden.becomes = Some(engr::model::Destination {
         object_type: Some(ObjectType::Design),
         state: State::Rejected,
     });
@@ -1546,7 +1552,7 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
 
     // One confirmation that does both.
     let mut atomic = revise();
-    atomic.classify = Some(engr::model::Classification {
+    atomic.becomes = Some(engr::model::Destination {
         object_type: Some(ObjectType::Design),
         state: State::Proposed,
     });
@@ -1563,9 +1569,32 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
         "one operation, one event — no intermediate state was ever confirmed"
     );
 
+    // Now that it needs attention, a destination is no longer admissible on it.
+    // Nothing is blocked any more, so one would be a second, unrelated change
+    // riding along inside someone else's confirmation — and `object_classified`
+    // already says that on its own, where a reader can see it.
+    let mut piggybacked = Payload {
+        action: Action::SectionRevised { section: 1 },
+        object: id.clone(),
+        becomes: Some(engr::model::Destination {
+            object_type: Some(ObjectType::Design),
+            state: State::Draft,
+        }),
+        content: wording("Use short-lived tokens, capped at 10 minutes."),
+    };
+    let error = gate::prepare(&root, piggybacked.clone()).expect_err("it already needs attention");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("already needs attention"), "{error}");
+
+    // The very same revision without one is admitted, which is what makes the
+    // refusal about the destination rather than about the revision.
+    piggybacked.becomes = None;
+    let object = admit(&root, piggybacked);
+    assert_eq!(object.state, State::Proposed);
+
     // An action that names its own state takes no destination.
     let mut confused = payload(Action::ObjectClosed, &id, engr::model::Content::default());
-    confused.classify = Some(engr::model::Classification {
+    confused.becomes = Some(engr::model::Destination {
         object_type: None,
         state: State::Open,
     });
@@ -1577,5 +1606,21 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
 
     // A payload carrying no destination is byte-for-byte what it always was.
     let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
-    assert!(!raw.to_string().contains("classify"), "{raw}");
+    assert!(!raw.to_string().contains("becomes"), "{raw}");
+
+    // The wire key is part of the ruling, not an implementation detail, so it is
+    // asserted on the confirmed events rather than left to the Rust field name.
+    // Exactly one event carries it: the one that needed it to be legal.
+    let events = std::fs::read_to_string(store::events_path(&root, &id)).expect("events");
+    let carrying: Vec<&str> = events
+        .lines()
+        .filter(|line| line.contains("\"becomes\""))
+        .collect();
+    assert_eq!(carrying.len(), 1, "{events}");
+    assert!(
+        carrying[0].contains("\"section_revised\"")
+            && carrying[0].contains("\"state\":\"proposed\""),
+        "{}",
+        carrying[0]
+    );
 }

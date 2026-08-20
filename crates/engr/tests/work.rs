@@ -35,7 +35,7 @@ fn new_object(root: &Path, title: &str) -> String {
         Payload {
             action: Action::ObjectCreated,
             object: id.clone(),
-            classify: None,
+            becomes: None,
             content: Content {
                 text: title.to_owned(),
                 ..Content::default()
@@ -387,7 +387,7 @@ fn completing_every_item_changes_nothing_about_the_object() {
                 state: ObjectState::Draft,
             },
             object: id.clone(),
-            classify: None,
+            becomes: None,
             content: Content::default(),
         },
     );

@@ -44,7 +44,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
-        classify: None,
+        becomes: None,
         content: Content {
             text: text.to_owned(),
             based_on: None,
@@ -364,13 +364,13 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
     let added = Payload {
         action: Action::SectionAdded,
         object: object.clone(),
-        classify: None,
+        becomes: None,
         content: content.clone(),
     };
     let deleted = Payload {
         action: Action::SectionDeleted { section: 1 },
         object,
-        classify: None,
+        becomes: None,
         content: content.clone(),
     };
 

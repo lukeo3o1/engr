@@ -44,7 +44,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
-        classify: None,
+        becomes: None,
         content: Content {
             text: text.to_owned(),
             based_on: None,

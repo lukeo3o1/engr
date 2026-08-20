@@ -107,19 +107,43 @@ rule, unchanged.
 
 The guard reads the state the confirmation **arrives at**, not the one it left.
 A no-attention object may therefore be revised in **one** confirmed operation
-when that same operation atomically returns it to a state that needs attention:
-the payload carries an optional destination (`type?` and `state`) applied before
-the action, and the guard then sees the object back in the listing. A
-destination that still needs no attention is refused by the same guard, which is
-the "only if" half of the rule.
+when that same operation atomically returns it to a state that needs attention.
+The payload carries an optional `becomes`, applied before the action, and the
+guard then sees the object back in the listing:
 
-This exists so that no state an object was never really in has to be confirmed on
-the way. The two-confirmation `reclassify, then revise` path remains available
-and means something different: two authoritative statements, because there were
-two. An action that sets the object's own state — `object_closed`,
-`object_reopened`, `object_classified` — carries no destination, and neither does
-`object_superseded`, which is exempt from the guard entirely. A payload with no
-destination serializes and hashes exactly as it did before the field existed.
+```json
+{
+  "action": "section_revised",
+  "section": 3,
+  "object": "...",
+  "becomes": { "type": "design", "state": "proposed" },
+  "text": "..."
+}
+```
+
+`becomes` is admissible under **all three** of these conditions, and each is
+enforced separately so that a refusal says which one failed:
+
+1. The action is one the attention guard would otherwise refuse —
+   `object_renamed`, `section_added`, `section_revised`, `section_merged`,
+   `section_deleted`. An action that sets the object's own state
+   (`object_created`, `object_closed`, `object_reopened`, `object_classified`,
+   `object_superseded`) never carries one.
+2. The object **does not currently need attention**. A destination is admissible
+   *because* it is what makes the action legal; on an object already in the
+   listing there is nothing to unblock, and a destination there would be a
+   second, unrelated change hidden inside someone else's confirmation. Use
+   `object_classified` for that, on its own, where a reader can see it.
+3. The destination `(type, state)` is valid for the type and **needs
+   attention**. That is the "only if" half of the rule.
+
+The primary action and `becomes` are **one** confirmed operation: one candidate,
+one confirmation, one event, one `rev` increment, and no intermediate
+authoritative state. This exists so that no state an object was never really in
+has to be confirmed on the way. The two-confirmation `reclassify, then revise`
+path remains available and means something different: two authoritative
+statements, because there were two. A payload with no destination serializes and
+hashes exactly as it did before the field existed.
 
 The rule is about **renewed engineering work** — wording confirmed once being
 changed again out of sight of everyone reading the default listing.
