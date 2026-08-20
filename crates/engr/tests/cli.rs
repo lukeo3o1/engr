@@ -3835,3 +3835,79 @@ fn backlog_json_sections_do_not_repeat_a_key() {
         .unwrap_or_else(|error| panic!("a strict reader must accept this: {error}\n{raw}"));
     assert_eq!(parsed.sections.len(), 2);
 }
+
+/// A pending candidate presents the identity it was prepared with.
+///
+/// The screen names the Object by title, which makes the title part of the
+/// confirmation context — and a live lookup at render time would have left that
+/// part outside the candidate and outside `integrity_sha256`. A title rewritten
+/// in the projection afterwards would then change what the candidate presents
+/// while its payload hash, its integrity hash and `expected_rev` all still
+/// checked out, which is exactly what #20 says must be impossible.
+#[test]
+fn a_pending_candidate_shows_the_title_it_was_prepared_with() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Use short-lived tokens.",
+        ],
+    );
+    confirm(root, &added);
+
+    let candidate = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Use short-lived tokens, capped at 15 minutes.",
+        ],
+    );
+    let code = candidate["challenge"]
+        .as_str()
+        .expect("challenge")
+        .to_owned();
+    let before =
+        String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(before.contains("the auth design"), "{before}");
+
+    // Rewrite the title in the projection the way a text editor would, leaving
+    // `rev` alone so the candidate stays fresh by its own binding.
+    let path = store::object_path(root, &id);
+    let mut stored: Value = store::read_json(&path).expect("object");
+    stored["title"] = Value::String("a record this candidate is not about".into());
+    store::write_json(&path, &stored).expect("rewrite title");
+
+    let after = String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        !after.contains("a record this candidate is not about"),
+        "a pending candidate must not present an identity nobody prepared: {after}"
+    );
+    assert!(after.contains("the auth design"), "{after}");
+    assert_eq!(before, after, "the same candidate renders the same screen");
+
+    // And it is still admissible: the projection changed, the prepared context
+    // did not, so nothing about the candidate's own integrity moved.
+    let admitted = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+}

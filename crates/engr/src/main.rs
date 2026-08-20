@@ -1408,9 +1408,15 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     //
     // The object gets its title for the same reason. A human asked to assent to
     // a change is entitled to be told which record they are changing by a name
-    // they would recognise, not only by an abbreviated uuid. It is read through
-    // the effective authority and simply omitted when there is none, which is
-    // the case for `object.created`, whose title is the wording below.
+    // they would recognise, not only by an abbreviated uuid.
+    //
+    // It comes from the prepared context, never from a fresh read. A live
+    // lookup would put part of the confirmation identity outside the candidate
+    // and outside its integrity value, so a title rewritten afterwards would
+    // change what a pending candidate presents while the payload hash, the
+    // integrity hash and `expected_rev` all still checked out. Omitted when
+    // there is none, which is the case for `object.created` — its title is the
+    // wording below — and for candidates prepared before the snapshot existed.
     let subject = match &candidate.payload.action {
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
@@ -1425,10 +1431,11 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         ),
         _ => String::new(),
     };
-    let title = ops::effective(root, &candidate.payload.object)
-        .ok()
-        .filter(|object| !object.title.is_empty())
-        .map(|object| format!("  {}", object.title))
+    let title = candidate
+        .context
+        .object_title
+        .as_deref()
+        .map(|title| format!("  {title}"))
         .unwrap_or_default();
     out.push_str(&format!(
         "Candidate  {}{}\nObject     {}{}\n",

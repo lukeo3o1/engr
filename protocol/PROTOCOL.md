@@ -561,6 +561,19 @@ the confirmation hash, which is what stops `delete §3` becoming `delete §5`
 after it was displayed; that guarantee is worth nothing if the display never
 said which section it was.
 
+Both MUST come from the prepared candidate, never from a fresh read at render
+time. The section selector already travels inside the payload hash. A
+recognisable name does not exist in the payload at all, so it MUST be
+**snapshotted at prepare into the integrity-covered prepared context** — a live
+lookup would put part of the confirmation identity outside the candidate, and a
+name rewritten afterwards would change what a pending candidate presents while
+its payload hash, its integrity value and its binding all still checked out. The
+same candidate re-rendered later represents the exact context it was prepared
+with, or the confirmation means less than it appears to.
+
+A candidate that predates the snapshot carries no name and MUST render without
+one rather than acquiring a current one.
+
 Then the **complete semantic change**, not the whole section again. Revisions use a
 unified line diff with limited unchanged context and separately show old/new
 `based_on`, old/new `role`, added and removed refs and relations — including

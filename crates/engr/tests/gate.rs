@@ -854,6 +854,12 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
             Box::new(|value: &mut serde_json::Value| value["oversize"] = serde_json::json!(true)),
         ),
         (
+            "object_title",
+            Box::new(|value: &mut serde_json::Value| {
+                value["object_title"] = serde_json::json!("a record this is not")
+            }),
+        ),
+        (
             "backlog",
             Box::new(|value: &mut serde_json::Value| {
                 value["backlog"] = serde_json::to_value(vec![backlog::Source {
@@ -893,6 +899,7 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
             produced: Vec::new(),
             resolves: true,
         }],
+        object_title: Some("the record being changed".to_owned()),
     };
     let declared: BTreeSet<String> = serde_json::to_value(&populated)
         .expect("context")

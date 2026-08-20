@@ -74,6 +74,23 @@ pub struct PreparedContext {
     /// the resolution basis it was prepared against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backlog: Vec<backlog::Source>,
+    /// The Object's title as it stood at prepare, for the screen to name the
+    /// record by something a human recognises.
+    ///
+    /// A snapshot, not a lookup. Reading the current title at render time would
+    /// put a piece of the confirmation identity outside the candidate and
+    /// outside `integrity_sha256` — so a title rewritten in the projection
+    /// afterwards would change what a pending candidate presents while the
+    /// candidate file, its payload hash and its `expected_rev` all still
+    /// checked out. #20 requires the opposite: the same candidate re-rendered
+    /// later represents the exact prepared confirmation context.
+    ///
+    /// Absent for `object_created`, which has no prior title — its title is the
+    /// wording on the screen already — and absent on candidates prepared before
+    /// this field existed, which therefore hash exactly as they did and go on
+    /// rendering without a title rather than being invalidated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_title: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -868,6 +885,10 @@ fn prepare_locked(
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
         oversize: admission == Admission::Oversize,
         backlog: pin_sources(root, sources, &projected)?,
+        object_title: object
+            .as_ref()
+            .map(|object| object.title.clone())
+            .filter(|title| !title.is_empty()),
     };
     let gate = crate::confirmation::Candidate::prepare_with(
         payload,
