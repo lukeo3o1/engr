@@ -82,7 +82,7 @@ fn a_rule_is_identified_by_its_id_and_located_by_its_filename() {
     assert_eq!(rules[0].based_on.len(), 1);
     assert_eq!(rules[0].based_on[0].path, "AGENTS.md");
     assert!(rules[0].based_on[0].commit.is_none());
-    assert!(rules[0].body.starts_with("# Architecture consistency"));
+    assert!(rules[0].body.contains("# Architecture consistency"));
 
     // Renaming the file does not create a different rule. The filename is a
     // locator; the id is the identity, and anything that pinned this rule
@@ -92,7 +92,7 @@ fn a_rule_is_identified_by_its_id_and_located_by_its_filename() {
     let renamed = rules::load_all(&root).expect("rules");
     assert_eq!(renamed.len(), 1);
     assert_eq!(renamed[0].id, "architecture-consistency");
-    assert_eq!(renamed[0].raw, rules[0].raw, "and it says the same thing");
+    assert_eq!(renamed[0].body, rules[0].body, "and it says the same thing");
 }
 
 #[test]
@@ -533,7 +533,161 @@ fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
     .expect_err("an unusable rule blocks");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
 
-    // A domain with no rules needs no attestation at all.
-    rules::check(&root, Domain::Collection, mutation, precondition, "", &[])
-        .expect("nothing governs collections here");
+    // A domain with no rules still has a binding, and this layer still checks
+    // it. What an empty set *means* is the domain's call — no review required
+    // for most, and the thing that blocks autonomous Object admission for one —
+    // so the rule layer must not decide it by short-circuiting.
+    let empty = rules::bind(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    assert!(empty.rule_ids().is_empty());
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+        &empty.sha256().expect("hash"),
+        &[],
+    )
+    .expect("an empty set is still a subject");
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation,
+        precondition,
+        "not the hash",
+        &[],
+    )
+    .expect_err("and it is still checked");
+}
+
+/// Standard YAML, then a strict Rule schema — two layers, and both must hold.
+///
+/// #25 settles the syntax layer as standard YAML rather than an engr subset, so
+/// spellings a conforming parser accepts are accepted here. What engr still
+/// decides is whether the parsed document is a *Rule*: an unknown field, a
+/// domain this version does not have, or an id outside the canonical grammar is
+/// refused, because reading past any of them would review against a rule only
+/// partly understood.
+#[test]
+fn front_matter_is_standard_yaml_judged_by_a_strict_rule_schema() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+
+    // Flow style, quoted scalars and inline maps are ordinary YAML. The old
+    // hand parser rejected every one of them, which narrowed the format past
+    // what the canonical contract says.
+    for (why, text) in [
+        (
+            "flow sequences",
+            "---\nid: flow-style\napplies:\n  domains: [object, backlog]\nbased_on: [{path: AGENTS.md}]\n---\n\n# Flow\n\nThe rule.\n",
+        ),
+        (
+            "quoted scalars",
+            "---\nid: \"quoted-id\"\napplies:\n  domains:\n    - \"object\"\n---\n\n# Quoted\n\nThe rule.\n",
+        ),
+        (
+            "an inline mapping with a commit",
+            &format!(
+                "---\nid: inline\napplies:\n  domains: [object]\nbased_on:\n  - {{path: AGENTS.md, commit: {}}}\n---\n\n# Inline\n\nThe rule.\n",
+                "a".repeat(40)
+            ),
+        ),
+    ] {
+        write_rule(&root, "yaml", text);
+        let rule = rules::load_all(&root)
+            .unwrap_or_else(|error| panic!("{why} is ordinary yaml: {error}"))
+            .remove(0);
+        assert!(rule.domains.contains(&Domain::Object), "{why}");
+    }
+
+    // Valid YAML is still not automatically a valid Rule.
+    for (why, text) in [
+        (
+            "a field a newer version might mean something by",
+            "---\nid: x\napplies:\n  domains: [object]\nseverity: blocking\n---\n\n# body\n",
+        ),
+        (
+            "a selector v1 deliberately does not have",
+            "---\nid: x\napplies:\n  domains: [object]\n  actions: [revise]\n---\n\n# body\n",
+        ),
+        (
+            "an id outside the canonical grammar",
+            "---\nid: Architecture Consistency\napplies:\n  domains: [object]\n---\n\n# body\n",
+        ),
+        (
+            "an id with an underscore, which the grammar does not have",
+            "---\nid: architecture_consistency\napplies:\n  domains: [object]\n---\n\n# body\n",
+        ),
+    ] {
+        write_rule(&root, "yaml", text);
+        let error = rules::load_all(&root).expect_err(why);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{why}: {error}");
+    }
+}
+
+/// The normative body is stored exactly as written.
+///
+/// The text a review surface shows has to be the text a review identifies, and
+/// trimming would make those two different. Emptiness is decided by refusing,
+/// never by rewriting.
+#[test]
+fn the_normative_body_is_never_rewritten() {
+    let (_dir, root) = workspace();
+    let text = "---\nid: spacing\napplies:\n  domains: [object]\n---\n\n\n   # Indented heading\n\n   Body text.   \n\n";
+    write_rule(&root, "spacing", text);
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    assert_eq!(
+        rule.body, "\n\n   # Indented heading\n\n   Body text.   \n\n",
+        "every byte of the rule is the rule"
+    );
+
+    write_rule(
+        &root,
+        "spacing",
+        "---\nid: spacing\napplies:\n  domains: [object]\n---\n\n   \n\n",
+    );
+    let error = rules::load_all(&root).expect_err("a body of whitespace is no body");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// A basis cannot leave the project by following a link.
+///
+/// Rejecting `..` and absolute spellings is not enough, because reading follows
+/// symlinks: a tracked `policy.md -> /outside/policy.md` would make a rule rest
+/// on mutable material nobody in the project can see or review.
+#[test]
+#[cfg(unix)]
+fn a_basis_cannot_escape_the_project_through_a_link() {
+    let (_dir, root) = workspace();
+    let outside = TempDir::new().expect("outside");
+    let target = outside.path().join("policy.md");
+    std::fs::write(&target, "material nobody here can review\n").expect("outside file");
+    std::os::unix::fs::symlink(&target, root.join("policy.md")).expect("symlink");
+
+    write_rule(
+        &root,
+        "escape",
+        "---\nid: escape\napplies:\n  domains: [object]\nbased_on:\n  - path: policy.md\n---\n\n# Escape\n\nThe rule.\n",
+    );
+    let rule = rules::load_all(&root)
+        .expect("the rule itself is fine")
+        .remove(0);
+    let error = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect_err("a basis outside the project is not project material");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("outside the project"), "{error}");
+
+    // A link that stays inside the project is fine: the rule is about the
+    // boundary, not about links.
+    std::fs::write(root.join("real.md"), "material anyone here can read\n").expect("inside file");
+    std::fs::remove_file(root.join("policy.md")).expect("remove");
+    std::os::unix::fs::symlink(root.join("real.md"), root.join("policy.md")).expect("symlink");
+    let resolved = rule.based_on[0].resolve(&root, &rule.id).expect("inside");
+    assert_eq!(resolved.content, "material anyone here can read\n");
 }

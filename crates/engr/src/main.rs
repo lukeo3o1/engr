@@ -2564,13 +2564,14 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                 return Ok(());
             }
             if all.is_empty() {
+                // What an empty set means belongs to the domain, not here: for
+                // most it means no review is required, and for autonomous
+                // agent Object admission it is what blocks the path.
                 match domain {
-                    Some(domain) => println!(
-                        "No rule governs {}, so a {} mutation needs no review.",
-                        domain.as_str(),
-                        domain.as_str()
-                    ),
-                    None => println!("No project rules. Nothing requires review."),
+                    Some(domain) => {
+                        println!("No rule governs {}.", domain.as_str())
+                    }
+                    None => println!("No project rules."),
                 }
                 return Ok(());
             }

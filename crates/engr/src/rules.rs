@@ -23,7 +23,7 @@
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -77,10 +77,11 @@ impl Domain {
 /// that exact historical content — which does **not** license it to keep
 /// governing forever, because the current file may since have said something
 /// else. See [`Basis::resolve`].
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Basis {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
 }
 
@@ -169,7 +170,14 @@ impl Basis {
                 ),
             )
         })?;
-        std::fs::read_to_string(&path).map_err(|error| {
+        // Resolved, then checked against the project boundary. Rejecting `..`
+        // and absolute spellings is not enough on its own: reading follows
+        // symlinks, so a tracked `policy.md -> /outside/policy.md` would make a
+        // rule rest on mutable material outside the repository entirely — and a
+        // basis nobody in the project can see or review is not project
+        // material. The comparison is on resolved paths, because that is the
+        // only form in which the question has an answer.
+        let resolved = std::fs::canonicalize(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 Error::new(
                     EXIT_NOT_FOUND,
@@ -178,7 +186,16 @@ impl Basis {
             } else {
                 tool_error(path.display(), error)
             }
-        })
+        })?;
+        let inside =
+            std::fs::canonicalize(root).map_err(|error| tool_error(root.display(), error))?;
+        ensure!(
+            resolved.starts_with(&inside),
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} resolves outside the project, so it is not project material anyone here can review",
+            self.path
+        );
+        std::fs::read_to_string(&resolved).map_err(|error| tool_error(resolved.display(), error))
     }
 }
 
@@ -213,12 +230,6 @@ pub struct Rule {
     /// Where it was found. Not part of identity and not hashed.
     #[serde(skip)]
     pub source: PathBuf,
-    /// The whole file, byte for byte. This is what the review binding covers:
-    /// "the exact canonical Rule definition" is the definition as written, not
-    /// a re-serialization of a parse of it, which would let two spellings of
-    /// the same policy produce two hashes — or worse, one.
-    #[serde(skip)]
-    pub raw: String,
 }
 
 impl Rule {
@@ -266,8 +277,11 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
 
 /// The Rules that govern a mutation in this domain, in a stable order.
 ///
-/// An empty result means no review is required. That is a real answer, not a
-/// gap: a project that has written no Rule for a domain has not asked for one.
+/// What an **empty** result means is not this layer's to say. For most domains
+/// it means no review is required; for autonomous Agent Object admission the
+/// accepted #25 refinement makes the presence of a usable object Rule the
+/// capability itself, so an empty set blocks that path instead. This function
+/// reports the set; the domain that owns the mutation decides what it implies.
 pub fn applicable(root: &Path, domain: Domain) -> Result<Vec<Rule>> {
     Ok(load_all(root)?
         .into_iter()
@@ -285,15 +299,17 @@ pub fn load(path: &Path) -> Result<Rule> {
     })?;
     parse(&raw, path)
 }
-
-/// Split the front matter from the body and read the front matter strictly.
+/// Split standard YAML front matter from the normative body.
 ///
-/// Strictly, and deliberately. The front matter is a machine contract, and #25
-/// requires that unknown or newer semantics affecting a Rule's meaning fail
-/// closed rather than being ignored — an older implementation that skipped a
-/// key it did not recognise would admit data under an incomplete reading of the
-/// Rule. So every key, every nesting level and every value is either one this
-/// version understands or a refusal naming the line.
+/// Two layers, kept apart because #25 keeps them apart: a conforming YAML
+/// parser decides whether the front matter is *syntactically* valid, and the
+/// schema below decides whether it is a valid Rule. A document can be perfectly
+/// good YAML and still be refused here.
+///
+/// The schema is strict by `deny_unknown_fields`, which is the fail-closed
+/// requirement: a field a newer version might mean something by is a refusal
+/// rather than something read past, because reading past it would review
+/// against a Rule this version only partly understood.
 fn parse(raw: &str, path: &Path) -> Result<Rule> {
     let where_ = path.display().to_string();
     let rest = raw
@@ -312,195 +328,95 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         )
     })?;
 
-    let mut id: Option<String> = None;
-    let mut domains: Vec<Domain> = Vec::new();
-    let mut based_on: Vec<Basis> = Vec::new();
-    let mut saw_applies = false;
-    let mut saw_domains = false;
-    let mut section = Section::None;
+    let front: FrontMatter = serde_norway::from_str(front)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{where_}: {error}")))?;
 
-    for (index, line) in front.lines().enumerate() {
-        let number = index + 2;
-        if line.trim().is_empty() {
-            continue;
-        }
-        ensure!(
-            !line.starts_with('\t'),
-            EXIT_SCHEMA,
-            "{where_}:{number}: indent with spaces, not tabs"
-        );
-        let indent = line.len() - line.trim_start().len();
-        let trimmed = line.trim_end();
-        let content = trimmed.trim_start();
-        match (indent, section) {
-            (0, _) => {
-                let (key, value) = split_key(content, &where_, number)?;
-                match key {
-                    "id" => {
-                        ensure!(
-                            id.is_none(),
-                            EXIT_SCHEMA,
-                            "{where_}:{number}: id is given twice"
-                        );
-                        let value = require_value(value, "id", &where_, number)?;
-                        ensure!(
-                            !value.is_empty()
-                                && value.chars().all(|character| {
-                                    character.is_ascii_lowercase()
-                                        || character.is_ascii_digit()
-                                        || character == '-'
-                                }),
-                            EXIT_SCHEMA,
-                            "{where_}:{number}: rule id {value:?} must be lowercase letters, digits and hyphens"
-                        );
-                        id = Some(value.to_owned());
-                        section = Section::None;
-                    }
-                    "applies" => {
-                        ensure!(
-                            value.is_empty(),
-                            EXIT_SCHEMA,
-                            "{where_}:{number}: applies takes a nested domains list, not a value"
-                        );
-                        saw_applies = true;
-                        section = Section::Applies;
-                    }
-                    "based_on" => {
-                        ensure!(
-                            value.is_empty(),
-                            EXIT_SCHEMA,
-                            "{where_}:{number}: based_on takes a nested list, not a value"
-                        );
-                        section = Section::BasedOn;
-                    }
-                    other => {
-                        return Err(Error::new(
-                            EXIT_SCHEMA,
-                            format!(
-                                "{where_}:{number}: {other:?} is not a rule field this version understands; it is refused rather than ignored, because ignoring it would review against an incomplete rule"
-                            ),
-                        ))
-                    }
-                }
-            }
-            (2, Section::Applies) => {
-                let (key, value) = split_key(content, &where_, number)?;
-                ensure!(
-                    key == "domains" && value.is_empty(),
-                    EXIT_SCHEMA,
-                    "{where_}:{number}: applies takes exactly one key, domains, with a nested list"
-                );
-                saw_domains = true;
-                section = Section::Domains;
-            }
-            (4, Section::Domains) => {
-                let value = require_item(content, &where_, number)?;
-                let domain = Domain::parse(value).ok_or_else(|| Error::new(
-                    EXIT_SCHEMA,
-                    format!("{where_}:{number}: {value:?} is not a domain; v1 has object, backlog, collection and work"),
-                ))?;
-                ensure!(
-                    !domains.contains(&domain),
-                    EXIT_SCHEMA,
-                    "{where_}:{number}: domain {value:?} is listed twice"
-                );
-                domains.push(domain);
-            }
-            (2, Section::BasedOn) => {
-                let value = require_item(content, &where_, number)?;
-                let (key, value) = split_key(value, &where_, number)?;
-                ensure!(
-                    key == "path",
-                    EXIT_SCHEMA,
-                    "{where_}:{number}: a based_on entry starts with path"
-                );
-                let value = require_value(value, "path", &where_, number)?;
-                based_on.push(Basis {
-                    path: value.to_owned(),
-                    commit: None,
-                });
-            }
-            (4, Section::BasedOn) => {
-                let (key, value) = split_key(content, &where_, number)?;
-                ensure!(
-                    key == "commit",
-                    EXIT_SCHEMA,
-                    "{where_}:{number}: a based_on entry takes path and an optional commit"
-                );
-                let value = require_value(value, "commit", &where_, number)?;
-                let entry = based_on.last_mut().ok_or_else(|| {
-                    Error::new(
-                        EXIT_SCHEMA,
-                        format!("{where_}:{number}: commit belongs to a based_on path"),
-                    )
-                })?;
-                ensure!(
-                    entry.commit.is_none(),
-                    EXIT_SCHEMA,
-                    "{where_}:{number}: this based_on entry already pins a commit"
-                );
-                entry.commit = Some(value.to_owned());
-            }
-            _ => {
-                return Err(Error::new(
-                    EXIT_SCHEMA,
-                    format!("{where_}:{number}: this line is indented {indent} spaces, which is not where the rule format puts anything"),
-                ))
-            }
-        }
-    }
-
-    let id = id.ok_or_else(|| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("{where_}: a rule needs an id, which is its stable identity"),
-        )
-    })?;
     ensure!(
-        saw_applies && saw_domains,
+        !front.id.is_empty()
+            && front.id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }),
         EXIT_SCHEMA,
-        "{where_}: rule {id} does not say what it applies to"
+        "{where_}: rule id {:?} is not canonical; v1 ids are [a-z0-9-]+",
+        front.id
     );
+
+    let mut domains = Vec::new();
+    for name in &front.applies.domains {
+        let domain = Domain::parse(name).ok_or_else(|| Error::new(
+            EXIT_SCHEMA,
+            format!("{where_}: {name:?} is not a domain; v1 has object, backlog, collection and work"),
+        ))?;
+        ensure!(
+            !domains.contains(&domain),
+            EXIT_SCHEMA,
+            "{where_}: domain {name:?} is listed twice"
+        );
+        domains.push(domain);
+    }
     ensure!(
         !domains.is_empty(),
         EXIT_SCHEMA,
-        "{where_}: rule {id} lists no domains, so nothing would ever be reviewed against it"
+        "{where_}: rule {} lists no domains, so nothing would ever be reviewed against it",
+        front.id
     );
-    // Sorted by name, not by the order the enum happens to be declared in. The
-    // review hash covers this list, so its order is part of a machine contract
-    // and must not move when someone rearranges a Rust enum.
+    // Sorted by name, not by the order the enum happens to be declared in, and
+    // not by the order they were written. Both lists are semantically
+    // order-insensitive and both are hashed, so their order is part of a machine
+    // contract: reordering a rule's domains must not change the identity of a
+    // review, and rearranging a Rust enum must not either.
     domains.sort_by_key(|domain| domain.as_str());
-    let body = body.trim();
-    ensure!(
-        !body.is_empty(),
-        EXIT_SCHEMA,
-        "{where_}: rule {id} has no body, and the body is the rule"
-    );
+
+    let mut based_on = front.based_on;
     let mut paths: BTreeSet<&str> = BTreeSet::new();
     for basis in &based_on {
         ensure!(
             paths.insert(basis.path.as_str()),
             EXIT_SCHEMA,
-            "{where_}: rule {id} lists based_on {:?} twice",
+            "{where_}: rule {} lists based_on {:?} twice",
+            front.id,
             basis.path
         );
     }
+    based_on.sort_by(|left, right| left.path.cmp(&right.path));
+
+    // The body is stored exactly as written. Trimming it would rewrite the
+    // normative material — leading and trailing whitespace can carry meaning in
+    // Markdown, and more to the point, the text a review surface shows has to be
+    // the text a review identifies. Emptiness is judged on the trimmed form and
+    // decided by refusing, never by rewriting.
+    ensure!(
+        !body.trim().is_empty(),
+        EXIT_SCHEMA,
+        "{where_}: rule {} has no body, and the body is the rule",
+        front.id
+    );
     Ok(Rule {
-        id,
+        id: front.id,
         domains,
         based_on,
         body: body.to_owned(),
         source: path.to_path_buf(),
-        raw: raw.to_owned(),
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
-    None,
-    Applies,
-    Domains,
-    BasedOn,
+/// The Rule schema, applied to whatever the YAML parser produced.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrontMatter {
+    id: String,
+    applies: Applies,
+    #[serde(default)]
+    based_on: Vec<Basis>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Applies {
+    /// Read as strings and mapped afterwards, so an unsupported value is
+    /// refused by name with the supported set spelled out, rather than by a
+    /// deserializer talking about variants.
+    domains: Vec<String>,
 }
 
 fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
@@ -512,35 +428,6 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
         offset += line.len();
     }
     None
-}
-
-fn split_key<'a>(content: &'a str, where_: &str, number: usize) -> Result<(&'a str, &'a str)> {
-    let (key, value) = content.split_once(':').ok_or_else(|| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("{where_}:{number}: expected `key: value`"),
-        )
-    })?;
-    Ok((key.trim(), value.trim()))
-}
-
-fn require_value<'a>(value: &'a str, key: &str, where_: &str, number: usize) -> Result<&'a str> {
-    let value = value.trim().trim_matches('"');
-    ensure!(
-        !value.is_empty(),
-        EXIT_SCHEMA,
-        "{where_}:{number}: {key} needs a value"
-    );
-    Ok(value)
-}
-
-fn require_item<'a>(content: &'a str, where_: &str, number: usize) -> Result<&'a str> {
-    content.strip_prefix("- ").map(str::trim).ok_or_else(|| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("{where_}:{number}: expected a `- ` list item"),
-        )
-    })
 }
 
 /// The exact subject of a review, fingerprinted.
@@ -579,14 +466,19 @@ pub struct ReviewBinding {
 #[derive(Serialize)]
 pub struct BoundRule {
     pub id: String,
-    /// The rule file exactly as written, front matter and body together.
-    ///
-    /// Not a re-serialization of a parse: hashing the parse would let two
-    /// spellings of one policy produce one hash, and a rule edited in a way
-    /// this version does not model would go unnoticed by the very value whose
-    /// job is to notice.
-    pub definition: String,
+    /// Sorted, because the set is semantically order-insensitive.
+    pub domains: Vec<Domain>,
+    /// Sorted by path, for the same reason.
     pub based_on: Vec<ResolvedBasis>,
+    /// The normative text, exactly as written and never normalized.
+    ///
+    /// Built from parsed semantics plus this exact body rather than from the
+    /// file's raw bytes. Raw bytes would make review identity depend on
+    /// incidental YAML spelling: reordering `applies.domains` changes nothing
+    /// about what the rule means or what a reviewer had to read, and it must
+    /// not invalidate an attestation. The body is the one part where every
+    /// byte is meaning, so it is carried untouched.
+    pub body: String,
 }
 
 pub const BINDING: &str = "engr-rule-review";
@@ -632,8 +524,9 @@ pub fn bind(
         }
         bound.push(BoundRule {
             id: rule.id,
-            definition: rule.raw,
+            domains: rule.domains,
             based_on,
+            body: rule.body,
         });
     }
     Ok(ReviewBinding {
@@ -669,9 +562,6 @@ pub fn check(
     let binding = bind(root, domain, mutation, precondition)?;
     let expected = binding.sha256()?;
     let ids = binding.rule_ids();
-    if ids.is_empty() {
-        return Ok(());
-    }
     let mut named: Vec<String> = reviewed.to_vec();
     named.sort();
     named.dedup();
