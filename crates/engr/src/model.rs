@@ -315,9 +315,21 @@ impl Object {
     /// listing.
     ///
     /// The rule is about *renewed* engineering work: wording that was confirmed
-    /// once being changed again while nobody is looking. Reclassify, then
-    /// revise — two confirmations, and the object is visible in the default
-    /// listing for the second.
+    /// once being changed again while nobody is looking.
+    ///
+    /// It does **not** mean two confirmations are required. The guard reads the
+    /// state the confirmation *arrives at*, so a guarded action may carry a
+    /// [`Payload::becomes`] to a destination that needs attention and land both
+    /// halves in one confirmed operation. That is the canonical path, and this
+    /// function is what makes it legal rather than something it routes around.
+    /// Classifying separately first remains available and says something
+    /// different — two authoritative statements, because there were two. It is
+    /// a choice, not the required route.
+    ///
+    /// So the refusal below fires on a guarded action carrying no destination,
+    /// and on `object.closed`, which is not an action a destination is
+    /// admissible on: for that one, classifying first really is the only way
+    /// through.
     ///
     /// `object.superseded` is deliberately not one of the callers, and the
     /// exemption is the rule rather than a hole in it. Superseding is not
