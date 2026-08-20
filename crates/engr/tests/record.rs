@@ -788,3 +788,63 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
         revised.recomputed_sha256().expect("recompute")
     );
 }
+
+/// A section standing on a target that is gone does not verify, on any surface.
+///
+/// `verify` already treated a missing referenced target as a failure while
+/// `show` called it ordinary drift — one workspace state with two verdicts,
+/// which is exactly the cross-surface disagreement the roadmap review named.
+/// The ruling settled it as failure: a section that explicitly leans on another
+/// section which no longer exists is not out of date, it is standing on
+/// nothing.
+#[test]
+fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, with_ref);
+
+    let object = ops::effective(&root, &source).expect("source");
+    assert!(view::assess(&root, &object)[0].1.is_ok());
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    // The target stops existing: projection and durable history both.
+    std::fs::remove_file(store::object_path(&root, &target)).expect("remove");
+    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
+
+    let status = &view::assess(&root, &object)[0].1;
+    assert!(status.stands_on_missing(), "{status:?}");
+    assert!(
+        status.forged(),
+        "standing on nothing is not a section whose wording can be trusted"
+    );
+    assert!(!status.is_ok());
+    assert_eq!(status.label(), "REF MISSING");
+    assert_eq!(status.key(), "ref_missing");
+    assert!(
+        !status.stands_on_unreadable(),
+        "absence and unreadable authority stay different facts"
+    );
+    assert!(!status.stands_on_tampered());
+
+    // And the two surfaces now say the same thing about the same state.
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(!report.passed());
+    assert_eq!(report.standing_on_missing.len(), 1);
+}

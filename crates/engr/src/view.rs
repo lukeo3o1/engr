@@ -32,6 +32,14 @@ pub struct RefDrift {
     /// record can legitimately report, while unreadable authority is a failure
     /// and must never be downgraded into "moved", "gone", or a clean verify.
     pub target_unreadable: bool,
+    /// The target is not there at all.
+    ///
+    /// A failure, by the ruling on review comment 5360513209, and not ordinary
+    /// drift: a Section that explicitly stands on another Section which no
+    /// longer exists is not merely out of date, it is standing on nothing. That
+    /// `verify` already treated it as a failure while this surface called it
+    /// drift was one workspace state with two verdicts.
+    pub target_missing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -54,6 +62,11 @@ impl SectionStatus {
         self.drifted.iter().any(|drift| drift.target_tampered)
     }
 
+    /// A section standing on nothing: the target is gone.
+    pub fn stands_on_missing(&self) -> bool {
+        self.drifted.iter().any(|drift| drift.target_missing)
+    }
+
     /// A section standing on authority nothing could read. Reported apart from
     /// tampering because they are different facts — one says the words were
     /// changed behind the gate, the other says nobody can tell what the words
@@ -65,7 +78,10 @@ impl SectionStatus {
     /// Whether the wording here can be trusted at all — either it was forged,
     /// or what it explicitly leans on was.
     pub fn forged(&self) -> bool {
-        self.tampered || self.stands_on_tampered() || self.stands_on_unreadable()
+        self.tampered
+            || self.stands_on_tampered()
+            || self.stands_on_unreadable()
+            || self.stands_on_missing()
     }
 
     pub fn label(&self) -> &'static str {
@@ -77,6 +93,9 @@ impl SectionStatus {
         }
         if self.stands_on_unreadable() {
             return "REF UNREADABLE";
+        }
+        if self.stands_on_missing() {
+            return "REF MISSING";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -95,6 +114,9 @@ impl SectionStatus {
         }
         if self.stands_on_unreadable() {
             return "ref_unreadable";
+        }
+        if self.stands_on_missing() {
+            return "ref_missing";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -158,6 +180,7 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
     let target = loaded
         .ok()
         .and_then(|target| target.section(reference.section).ok().cloned());
+    let target_missing = target.is_none() && !target_unreadable;
     let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
     // Recomputed from the target's actual content, not read off its stored
     // seal. The seal is a claim about what was confirmed; it is not the
@@ -186,6 +209,7 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         lookback,
         target_tampered,
         target_unreadable,
+        target_missing,
     }
 }
 
@@ -409,6 +433,14 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 // "gone" would send someone to recreate a file that is right
                 // there. The protocol names those words as the ones malformed
                 // authority must never be reported in.
+                _ if drift.target_missing => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} no longer exists; what this section stood on is gone
+",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
+                }
                 _ if drift.target_unreadable => {
                     out.push_str(&format!(
                         "    advice   {} §{} is there and will not load; what this section stands on cannot be read\n",
@@ -600,21 +632,61 @@ pub fn tampered_count(objects: &[Object]) -> usize {
 }
 
 /// One line per section, so grep can reach the text.
+///
+/// Every row carries its own trust status, immediately before the wording.
+/// This is the surface the Skill recommends for searching before a decision, so
+/// a hit here is something an agent is about to act on — and wording that was
+/// forged, or that stands on authority which was, must not arrive looking
+/// exactly like wording a human confirmed. A count on stderr did not do that
+/// job: it says how many, never which, and it is the first thing a pipe drops.
+///
+/// The status sits before the text rather than after it because the text is the
+/// only field that can contain spaces; anything following it is not a column.
 pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
     for object in objects {
+        let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
         for section in &object.sections {
+            let status = assessment
+                .iter()
+                .find(|(id, _)| *id == section.id)
+                .map(|(_, status)| status.key())
+                .unwrap_or("ok");
             out.push_str(&format!(
-                "{} §{:<3} {:<20}  {}\n",
+                "{} §{:<3} {:<20}  {:<14}  {}\n",
                 abbrev(&object.id, w),
                 section.id,
                 classification(object),
+                status,
                 section.text.replace('\n', " ").trim()
             ));
         }
     }
     out
+}
+
+/// Which sections cannot be trusted, named rather than counted.
+///
+/// "3 sections do not match their hashes" tells a reader that something is
+/// wrong and nothing about where, which turns a warning into a chore. The
+/// listing above already marks each row; this is for the caller that wants to
+/// say so once, loudly, on the stream a pipe does not swallow.
+pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
+    let w = width(root);
+    let mut found = Vec::new();
+    for object in objects {
+        for (id, status) in assess(root, object) {
+            if status.forged() {
+                found.push(format!(
+                    "{} §{id} {}",
+                    abbrev(&object.id, w),
+                    status.label()
+                ));
+            }
+        }
+    }
+    found
 }
 
 /// Every Backlog surface opens with this line.

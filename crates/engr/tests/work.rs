@@ -633,3 +633,51 @@ fn updated_at_is_validated_and_compared_as_an_instant() {
         assert!(error.message.contains("RFC3339"), "{error}");
     }
 }
+
+/// A dependency or blocker may name only something that exists, whichever door
+/// the caller comes through.
+///
+/// The rule used to live in the CLI alone, so the direct library path admitted
+/// targets the command line refused — the same split that was fixed for
+/// collection membership, and the fix's own reasoning applies here: what a
+/// sidecar may contain must not depend on how it was written.
+///
+/// It stays a write-time rule. A target that goes missing afterwards is
+/// expected and reported on read; one that was never there is a note pointing
+/// at nothing from birth.
+#[test]
+fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "the work");
+    work::start(&root, &object, Some("underway")).expect("start");
+
+    let absent = format!(
+        "obj:{}",
+        engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact")
+    );
+    let error = work::add_dependency(&root, &object, &absent, None)
+        .expect_err("the library path is not a way around the rule");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+    let error = work::add_blocker(&root, &object, Some("waiting"), Some(&absent))
+        .expect_err("a blocker target is the same rule");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+    let stored = work::load(&root, &object).expect("work");
+    assert!(stored.dependencies.is_empty());
+    assert!(
+        stored.blockers.is_empty(),
+        "nothing inadmissible was written"
+    );
+
+    // A target that exists is admitted, and a blocker with no target at all
+    // stays legal — a blocker can be a condition rather than a thing.
+    let other = new_object(&root, "the dependency");
+    let present = format!(
+        "obj:{}",
+        engr::reference::encode_uuid_str(&other).expect("compact")
+    );
+    work::add_dependency(&root, &object, &present, Some("needs it first")).expect("add");
+    work::add_blocker(&root, &object, Some("waiting on review"), None).expect("blocker");
+    let stored = work::load(&root, &object).expect("work");
+    assert_eq!(stored.dependencies.len(), 1);
+    assert_eq!(stored.blockers.len(), 1);
+}

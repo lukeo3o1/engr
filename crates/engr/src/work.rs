@@ -442,6 +442,37 @@ fn require_object(root: &Path, object: &str) -> Result<()> {
     crate::ops::effective(root, object).map(|_| ())
 }
 
+/// A dependency or blocker may name only something that exists **now**.
+///
+/// Checked here rather than at the command line, so the rule holds whichever
+/// door a caller comes through. It is a write-time rule and only a write-time
+/// rule: a Backlog item gets consumed, a rebase strands an Object, and Work
+/// deliberately keeps the dangling note rather than rewriting history nobody
+/// asked it to rewrite. What it will not do is admit a target that was already
+/// gone when it was written, which is a note pointing at nothing from birth.
+fn require_target(root: &Path, target: &str) -> Result<()> {
+    let parsed = crate::reference::EngrRef::parse_embedded(target)?;
+    let uuid = crate::reference::decode_uuid(parsed.id())?.to_string();
+    let outcome = match parsed.kind() {
+        ResourceKind::Backlog => crate::backlog::load(root, &uuid).map(|_| ()),
+        _ => crate::ops::effective(root, &uuid).map(|_| ()),
+    };
+    // Absence and unreadable authority stay apart. "Does not exist" would send
+    // someone to create what is already there and hide the fault that needs
+    // looking at.
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == EXIT_NOT_FOUND => Err(Error::new(
+            EXIT_NOT_FOUND,
+            format!("{target} does not exist"),
+        )),
+        Err(error) => Err(Error::new(
+            error.code,
+            format!("{target} cannot be read: {}", error.message),
+        )),
+    }
+}
+
 /// Read, change, stamp, write — under the lock, with the invariants checked on
 /// both sides of the change.
 fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>) -> Result<T> {
@@ -548,7 +579,16 @@ pub fn add_dependency(
     if let Some(reason) = reason {
         check_text("a dependency reason", reason, REASON_MAX)?;
     }
+    check_target("a dependency target", target)?;
     edit(root, object, |work| {
+        // Inside the lock, because the check is what defines admission. It used
+        // to live only in the CLI, so what a sidecar could name depended on
+        // which door it came through — the same split that was fixed for
+        // collection membership. A target that goes missing *afterwards* is
+        // still expected and still reported on read; one that was never there
+        // is a different thing, and only a shared critical section tells them
+        // apart.
+        require_target(root, target)?;
         let dependency = Dependency {
             target: EngrTarget::new(target),
             reason: reason.map(str::to_owned),
@@ -591,7 +631,13 @@ pub fn add_blocker(
     if let Some(reason) = reason {
         check_text("a blocker reason", reason, REASON_MAX)?;
     }
+    if let Some(target) = target {
+        check_target("a blocker target", target)?;
+    }
     edit(root, object, |work| {
+        if let Some(target) = target {
+            require_target(root, target)?;
+        }
         work.blockers.push(Blocker {
             reason: reason.map(str::to_owned),
             target: target.map(EngrTarget::new),
