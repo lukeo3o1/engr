@@ -159,7 +159,16 @@ impl Basis {
     /// attestations that rested on the old text, which is the fail-closed
     /// direction.
     fn current(&self, root: &Path, rule: &str) -> Result<String> {
-        let path = safe_join(root, &self.path).ok_or_else(|| {
+        // Resolved against the **repository** top level, which is what
+        // "repository-relative" means and what `git show <commit>:<path>` uses
+        // no matter where the workspace sits. `.engr` may live in a
+        // subdirectory, and reading current material from there while reading
+        // pinned material through git compared two different files: a rule
+        // naming `AGENTS.md` in `repo/sub/.engr` bound `repo/sub/AGENTS.md`
+        // now and `repo/AGENTS.md` at the pin, so it could be called stale or
+        // current on the strength of a file it never named.
+        let project = project_root(root);
+        let path = safe_join(&project, &self.path).ok_or_else(|| {
             Error::new(
                 EXIT_SCHEMA,
                 format!(
@@ -185,8 +194,8 @@ impl Basis {
                 tool_error(path.display(), error)
             }
         })?;
-        let inside =
-            std::fs::canonicalize(root).map_err(|error| tool_error(root.display(), error))?;
+        let inside = std::fs::canonicalize(&project)
+            .map_err(|error| tool_error(project.display(), error))?;
         ensure!(
             resolved.starts_with(&inside),
             EXIT_SCHEMA,
@@ -195,6 +204,15 @@ impl Basis {
         );
         std::fs::read_to_string(&resolved).map_err(|error| tool_error(resolved.display(), error))
     }
+}
+
+/// The root a repository-relative path is relative to.
+///
+/// The repository top level when there is a repository, and the workspace root
+/// otherwise — without git, "repository-relative" has no other meaning, and the
+/// workspace is the only project boundary there is.
+fn project_root(root: &Path) -> PathBuf {
+    git::repo_root(root).unwrap_or_else(|| root.to_path_buf())
 }
 
 /// Repository-relative, and staying there. A basis is project material, so a

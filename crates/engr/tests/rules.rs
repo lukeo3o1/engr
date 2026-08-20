@@ -493,3 +493,76 @@ fn a_basis_cannot_escape_the_project_through_a_link() {
     let resolved = rule.based_on[0].resolve(&root, &rule.id).expect("inside");
     assert_eq!(resolved.content, "material anyone here can read\n");
 }
+
+/// One stored path names one file, wherever the workspace sits.
+///
+/// #25 defines `based_on.path` as repository-relative, and engr allows `.engr`
+/// to live below the repository top level. Current material was read from the
+/// workspace root while pinned material came through `git show <commit>:<path>`,
+/// which always resolves from the top level — so in `repo/sub/.engr` a rule
+/// naming `AGENTS.md` bound `repo/sub/AGENTS.md` now and `repo/AGENTS.md` at the
+/// pin. It could then be called stale, or current, on the strength of a file it
+/// never named.
+///
+/// The fixture puts the same filename at both levels with different contents,
+/// so the test proves which bytes are bound rather than only that something
+/// loaded.
+#[test]
+fn a_basis_path_names_the_same_file_from_both_directions() {
+    let dir = TempDir::new().expect("temp dir");
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    std::fs::create_dir_all(repo.join("sub")).expect("sub");
+    std::fs::write(repo.join("AGENTS.md"), "the repository contract\n").expect("root basis");
+    std::fs::write(repo.join("sub/AGENTS.md"), "a different file entirely\n").expect("sub file");
+
+    let root = repo.join("sub");
+    store::init(&root).expect("init");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    let pinned_at = commit_all(repo, "both files");
+
+    for (why, commit) in [
+        ("floating", String::new()),
+        ("pinned", format!("\n    commit: {pinned_at}")),
+    ] {
+        write_rule(
+            &root,
+            "basis",
+            &format!(
+                "---\nid: basis\napplies:\n  domains: [object]\nbased_on:\n  - path: AGENTS.md{commit}\n---\n\n# Basis\n\nThe rule.\n"
+            ),
+        );
+        let rule = rules::load_all(&root).expect("rules").remove(0);
+        let resolved = rule.based_on[0].resolve(&root, &rule.id).expect(why);
+        assert_eq!(
+            resolved.content, "the repository contract\n",
+            "{why}: a repository-relative path is relative to the repository"
+        );
+    }
+
+    // And the two agree, which is the property the whole pinned/current
+    // comparison rests on: a pin is only meaningful if both sides name one file.
+    write_rule(
+        &root,
+        "basis",
+        &format!(
+            "---\nid: basis\napplies:\n  domains: [object]\nbased_on:\n  - path: AGENTS.md\n    commit: {pinned_at}\n---\n\n# Basis\n\nThe rule.\n"
+        ),
+    );
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect("unchanged material is not stale");
+
+    // Editing the file the rule actually names stales it; editing the
+    // same-named file beside the workspace does not.
+    std::fs::write(repo.join("sub/AGENTS.md"), "still a different file\n").expect("edit sub");
+    rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect("a file this rule does not name cannot stale it");
+    std::fs::write(repo.join("AGENTS.md"), "a revised contract\n").expect("edit root");
+    let error = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect_err("the named material moved");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}

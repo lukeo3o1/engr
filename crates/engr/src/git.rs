@@ -9,7 +9,7 @@
 use crate::model::{Object, OBJECT_FORMAT};
 use crate::{ensure, Error, Result, EXIT_SCHEMA, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION};
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn run(root: &Path, args: &[&str]) -> Option<String> {
@@ -301,4 +301,15 @@ pub fn blob_at(root: &Path, commit: &str, path: &str) -> Option<String> {
         return None;
     }
     String::from_utf8(output.stdout).ok()
+}
+
+/// The repository's top level, which is what a repository-relative path is
+/// relative to.
+///
+/// Not the same as the engr workspace root: `.engr` may sit in a subdirectory,
+/// and `git show <commit>:<path>` resolves from the top level regardless. A
+/// caller that reads current material from the workspace root while reading
+/// pinned material through git is comparing two different files.
+pub fn repo_root(root: &Path) -> Option<PathBuf> {
+    run(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
