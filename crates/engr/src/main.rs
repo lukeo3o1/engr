@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{collection, gate, git, ops, store, view, work};
+use engr::{collection, gate, git, ops, rules, store, view, work};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,53 @@ enum Command {
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
+    /// Project rules an agent must read before a semantic mutation
+    #[command(subcommand)]
+    Rules(RulesCommand),
+}
+
+/// Rules are project policy data, so this surface is read-only.
+///
+/// engr does not author or edit a rule. There is no `rules new`, no gate, no
+/// event: a rule is a file in the repository, and git is its history. What engr
+/// owes an agent is the ability to see exactly which rules govern a mutation
+/// and exactly what they rest on — everything a review has to have covered.
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// What rules exist, and what they govern
+    Ls {
+        /// Only rules governing this domain
+        #[arg(long, value_enum, value_name = "DOMAIN")]
+        domain: Option<DomainArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One rule in full, with its bases resolved to what must be read
+    Show {
+        /// The rule's stable id, not its filename
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DomainArg {
+    Object,
+    Backlog,
+    Collection,
+    Work,
+}
+
+impl DomainArg {
+    fn model(self) -> rules::Domain {
+        match self {
+            Self::Object => rules::Domain::Object,
+            Self::Backlog => rules::Domain::Backlog,
+            Self::Collection => rules::Domain::Collection,
+            Self::Work => rules::Domain::Work,
+        }
+    }
 }
 
 /// Backlog edits do not go through the gate, and must not look as though they
@@ -677,6 +724,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
+        Command::Rules(command) => rules_command(&root, command),
         Command::Work(command) => work_command(&root, command),
         Command::Collection(command) => collection_command(&root, command),
     }
@@ -2477,4 +2525,132 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read-only, because a rule is project data rather than an engr resource.
+///
+/// The listing says whether each rule is *usable*, which is the question an
+/// agent actually has: a rule whose basis cannot be resolved, or whose pinned
+/// basis no longer matches the project, cannot be reviewed against — and under
+/// #25 that blocks the mutations it covers rather than being quietly skipped.
+/// Saying so here means the agent finds out while reading, not at admission.
+fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
+    store::require_current(root)?;
+    match command {
+        RulesCommand::Ls { domain, json } => {
+            let domain = domain.map(DomainArg::model);
+            let all = match domain {
+                Some(domain) => rules::applicable(root, domain)?,
+                None => rules::load_all(root)?,
+            };
+            if json {
+                let listed: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|rule| {
+                        serde_json::json!({
+                            "id": rule.id,
+                            "domains": rule.domains.iter().map(|domain| domain.as_str()).collect::<Vec<_>>(),
+                            "based_on": rule.based_on,
+                            "usable": basis_trouble(root, rule).is_none(),
+                            "authority": "project_policy",
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&listed)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rules: {error}")) })?
+                );
+                return Ok(());
+            }
+            if all.is_empty() {
+                match domain {
+                    Some(domain) => println!(
+                        "No rule governs {}, so a {} mutation needs no review.",
+                        domain.as_str(),
+                        domain.as_str()
+                    ),
+                    None => println!("No project rules. Nothing requires review."),
+                }
+                return Ok(());
+            }
+            println!("PROJECT POLICY — read these before the mutation they govern\n");
+            for rule in &all {
+                let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+                println!("{}  {}", rule.id, domains.join(", "));
+                for basis in &rule.based_on {
+                    match &basis.commit {
+                        Some(commit) => {
+                            println!("    based on {} at {}", basis.path, shorten(commit, 8))
+                        }
+                        None => println!("    based on {} (current)", basis.path),
+                    }
+                }
+                if let Some(trouble) = basis_trouble(root, rule) {
+                    println!("    UNUSABLE  {trouble}");
+                }
+            }
+            Ok(())
+        }
+        RulesCommand::Show { id, json } => {
+            let rule = rules::load_all(root)?
+                .into_iter()
+                .find(|rule| rule.id == id)
+                .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("no rule with id {id:?}")))?;
+            let resolved: Result<Vec<_>> = rule
+                .based_on
+                .iter()
+                .map(|basis| basis.resolve(root, &rule.id))
+                .collect();
+            if json {
+                let value = serde_json::json!({
+                    "id": rule.id,
+                    "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+                    "based_on": rule.based_on,
+                    "body": rule.body,
+                    "authority": "project_policy",
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rule: {error}")) })?
+                );
+                return resolved.map(|_| ());
+            }
+            let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+            println!("Rule       {}", rule.id);
+            println!("Governs    {}", domains.join(", "));
+            match &resolved {
+                Ok(bases) if bases.is_empty() => {
+                    println!("Based on   nothing outside the rule itself")
+                }
+                Ok(bases) => {
+                    for basis in bases {
+                        match &basis.commit {
+                            Some(commit) => println!(
+                                "Based on   {} at {} — read it, it is part of this rule",
+                                basis.path,
+                                shorten(commit, 8)
+                            ),
+                            None => println!(
+                                "Based on   {} (current) — read it, it is part of this rule",
+                                basis.path
+                            ),
+                        }
+                    }
+                }
+                Err(error) => println!("Based on   UNUSABLE — {}", error.message),
+            }
+            println!("\n{}", rule.body);
+            resolved.map(|_| ())
+        }
+    }
+}
+
+/// The first reason this rule cannot be reviewed against, if there is one.
+fn basis_trouble(root: &Path, rule: &rules::Rule) -> Option<String> {
+    rule.based_on
+        .iter()
+        .find_map(|basis| basis.resolve(root, &rule.id).err())
+        .map(|error| error.message)
 }

@@ -284,3 +284,21 @@ pub fn uncommitted(root: &Path, path: &Path) -> Option<bool> {
     )?;
     Some(!status.trim().is_empty())
 }
+
+/// The exact bytes of `path` at `commit`, as text.
+///
+/// Deliberately not routed through [`run`], which trims — a trailing newline is
+/// content, and a basis that hashes differently depending on whether something
+/// stripped its last byte is not a basis.
+pub fn blob_at(root: &Path, commit: &str, path: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", &format!("{commit}:{path}")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
