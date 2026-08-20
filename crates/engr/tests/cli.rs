@@ -3911,3 +3911,66 @@ fn a_pending_candidate_shows_the_title_it_was_prepared_with() {
         String::from_utf8_lossy(&admitted.stderr)
     );
 }
+
+/// `--ref` refuses a target whose file was rewritten outside the gate.
+///
+/// The pin is derived by recomputing the target's content, not by copying its
+/// stored seal, so the disagreement between the two is caught where the
+/// reference is built rather than several layers later. Copying the seal would
+/// have produced a reference that records agreement to wording nobody confirmed.
+#[test]
+fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+
+    let target = prepare(root, &["prepare", "--new", "--text", "upstream decision"]);
+    confirm(root, &target);
+    let target = target["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &target,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Reason codes are numeric.",
+        ],
+    );
+    confirm(root, &added);
+
+    let source = prepare(root, &["prepare", "--new", "--text", "downstream decision"]);
+    confirm(root, &source);
+    let source = source["object"].as_str().expect("object id").to_owned();
+
+    // The wording changes; the seal beside it does not.
+    let path = store::object_path(root, &target);
+    let mut stored: Value = store::read_json(&path).expect("object");
+    stored["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
+    store::write_json(&path, &stored).expect("rewrite");
+
+    let reference = format!("{target}:1");
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &source,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "So the UI renders integers.",
+            "--ref",
+            &reference,
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(
+        message.contains("changed outside the gate"),
+        "the refusal must name what is actually wrong: {message}"
+    );
+}

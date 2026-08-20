@@ -1102,6 +1102,30 @@ fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<Stri
     backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
+/// The content identity to pin, recomputed from what the target actually says.
+///
+/// Not `section.sha256`. That value is the target's confirmed integrity seal —
+/// a claim about what was admitted — and copying a claim is not the same as
+/// checking it. A section rewritten outside the gate keeps its old seal, so a
+/// ref built from the seal would pin a hash the current wording does not
+/// produce, and the pin would look like agreement to text nobody confirmed.
+///
+/// Recomputing and then refusing the mismatch keeps the two roles apart:
+/// `section.sha256` says what was confirmed, `refs[].sha256` says what this
+/// section was actually written against, and they are only allowed to be equal.
+fn pin_target(target: &engr::model::Section, object: &str, section: u64) -> Result<String> {
+    let actual = target.recomputed_sha256()?;
+    if actual != target.sha256 {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{object} §{section} does not match its own confirmed hash; its wording was changed outside the gate, so it cannot be referenced until that is resolved"
+            ),
+        ));
+    }
+    Ok(actual)
+}
+
 fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
@@ -1124,6 +1148,11 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
             .section()
             .expect("checked before canonicalization");
         let target_section = ops::effective_section(root, &id, section)?;
+        // Content identity before provenance, in that order. What the target
+        // says is the question a reference is about; which commit it was read
+        // at explains the answer. Asking for a repository first would refuse a
+        // rewritten target with a message about git.
+        let sha256 = pin_target(&target_section, &id, section)?;
         let commit = match canonical.snapshot() {
             Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
@@ -1136,7 +1165,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         return Ok(Ref {
             object: id,
             section,
-            sha256: target_section.sha256.clone(),
+            sha256,
             commit,
         });
     }
@@ -1154,6 +1183,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     })?;
     let id = resolve_object_argument(root, "--ref", prefix)?;
     let target_section = ops::effective_section(root, &id, section)?;
+    let sha256 = pin_target(&target_section, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
@@ -1163,7 +1193,7 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
     Ok(Ref {
         object: id,
         section,
-        sha256: target_section.sha256.clone(),
+        sha256,
         commit,
     })
 }

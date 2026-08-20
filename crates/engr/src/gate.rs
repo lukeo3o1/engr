@@ -1062,21 +1062,29 @@ fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
                 }
             },
         )?;
+        // Content first, seal second, pin third — in that order, because they
+        // answer different questions and the order is what keeps them from
+        // covering for each other. A stored seal is a claim about what was
+        // confirmed; recomputing is the only thing that establishes what the
+        // target actually says now. Comparing the pin against the seal first
+        // would let a target rewritten behind the gate pass the comparison that
+        // matters most, since neither side of it moved.
+        let actual = section.recomputed_sha256()?;
         ensure!(
-            section.sha256 == reference.sha256,
+            actual == section.sha256,
+            EXIT_INVARIANT,
+            "reference target {} §{} does not match its own confirmed hash; its wording was changed outside the gate, and pinning it would make that change look agreed",
+            reference.object,
+            reference.section
+        );
+        ensure!(
+            actual == reference.sha256,
             EXIT_INVARIANT,
             "reference to {} §{} pins {} but that section is now {}",
             reference.object,
             reference.section,
             &reference.sha256[..8.min(reference.sha256.len())],
-            &section.sha256[..8.min(section.sha256.len())]
-        );
-        ensure!(
-            section.recomputed_sha256()? == reference.sha256,
-            EXIT_INVARIANT,
-            "reference target {} §{} current wording does not match its recorded hash",
-            reference.object,
-            reference.section
+            &actual[..8.min(actual.len())]
         );
         let committed = git::object_at(root, &reference.commit, &reference.object)?
             .and_then(|object| object.section(reference.section).ok().cloned())
