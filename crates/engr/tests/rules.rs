@@ -485,12 +485,33 @@ fn a_basis_cannot_escape_the_project_through_a_link() {
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("outside the project"), "{error}");
 
-    // A link that stays inside the project is fine: the rule is about the
-    // boundary, not about links.
+    // And a link that stays inside the project is refused too, for a different
+    // reason: a basis has to name one material, and a link names a path that
+    // names a file. `git show <commit>:policy.md` yields the link blob — the
+    // target's *name* — where a working-tree read yields the target's
+    // *contents*, so a pinned basis over an unchanged link is stale forever.
     std::fs::write(root.join("real.md"), "material anyone here can read\n").expect("inside file");
     std::fs::remove_file(root.join("policy.md")).expect("remove");
     std::os::unix::fs::symlink(root.join("real.md"), root.join("policy.md")).expect("symlink");
-    let resolved = rule.based_on[0].resolve(&root, &rule.id).expect("inside");
+    let error = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect_err("a link is not the file itself");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("is a link rather than the file"),
+        "{error}"
+    );
+
+    // Naming the file directly is what works, which is the whole ask.
+    write_rule(
+        &root,
+        "escape",
+        "---\nid: escape\napplies:\n  domains: [object]\nbased_on:\n  - path: real.md\n---\n\n# Escape\n\nThe rule.\n",
+    );
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    let resolved = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect("a real file");
     assert_eq!(resolved.content, "material anyone here can read\n");
 }
 
@@ -565,4 +586,78 @@ fn a_basis_path_names_the_same_file_from_both_directions() {
         .resolve(&root, &rule.id)
         .expect_err("the named material moved");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// A pinned basis over a link would be stale forever, so the link is refused.
+///
+/// This is the same identity invariant as the nested-workspace case, one level
+/// deeper: `git show <commit>:<path>` on a symlink returns the link blob — the
+/// target's name as text — while a working-tree read returns the target's
+/// contents. The two halves of one persisted path would compare `real
+/// contents` against `real.md`, and no change anyone could make to the project
+/// would ever bring them together.
+///
+/// Refused rather than followed. Following would mean re-implementing link
+/// resolution over historical git trees — cycles, depth, escapes, missing
+/// targets — for a case no project has asked for, and every one of those edges
+/// is a way for a basis to mean something other than what it names.
+#[test]
+#[cfg(unix)]
+fn a_pinned_basis_cannot_be_taken_through_a_link() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("real.md"), "the contract\n").expect("file");
+    std::os::unix::fs::symlink("real.md", root.join("policy.md")).expect("symlink");
+    let pinned_at = commit_all(&root, "a file and a link to it");
+
+    // git really does store the two differently — this is the whole finding.
+    assert_eq!(
+        engr::git::blob_at(&root, &pinned_at, "policy.md").expect("blob"),
+        "real.md",
+        "the pinned side sees the link's target name"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("policy.md")).expect("disk"),
+        "the contract\n",
+        "and the current side sees the target's contents"
+    );
+
+    for (why, path) in [("floating", "policy.md"), ("pinned", "policy.md")] {
+        let commit = if why == "pinned" {
+            format!("\n    commit: {pinned_at}")
+        } else {
+            String::new()
+        };
+        write_rule(
+            &root,
+            "linked",
+            &format!(
+                "---\nid: linked\napplies:\n  domains: [object]\nbased_on:\n  - path: {path}{commit}\n---\n\n# Linked\n\nThe rule.\n"
+            ),
+        );
+        let rule = rules::load_all(&root).expect("rules").remove(0);
+        let error = rule.based_on[0]
+            .resolve(&root, &rule.id)
+            .expect_err(why)
+            .message;
+        assert!(
+            error.contains("is a link rather than the file"),
+            "{why}: {error}"
+        );
+    }
+
+    // The file itself pins and stays current, which is what the link was
+    // standing in for.
+    write_rule(
+        &root,
+        "linked",
+        &format!(
+            "---\nid: linked\napplies:\n  domains: [object]\nbased_on:\n  - path: real.md\n    commit: {pinned_at}\n---\n\n# Linked\n\nThe rule.\n"
+        ),
+    );
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    let resolved = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect("the file itself");
+    assert_eq!(resolved.content, "the contract\n");
 }

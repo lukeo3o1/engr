@@ -202,6 +202,28 @@ impl Basis {
             "rule {rule}: based_on {} resolves outside the project, so it is not project material anyone here can review",
             self.path
         );
+        // One path, one material. A link is a path that denotes another path, and
+        // the two halves of a basis cannot follow it the same way: reading from
+        // disk yields the target file's contents, while `git show <commit>:<path>`
+        // yields the link *blob* — the target's name as text. So a pinned basis
+        // over an unchanged in-repository link compares `real contents` against
+        // `real.md` and is stale forever, with nothing anyone can do to the
+        // project to make it current again.
+        //
+        // Following it on both sides would mean re-implementing link resolution
+        // over historical git trees — cycles, depth, escapes, missing targets —
+        // for a case no project has asked for. Refusing keeps the invariant by
+        // construction: what a basis names is what a basis is.
+        let direct = self
+            .path
+            .split('/')
+            .fold(inside.clone(), |path, part| path.join(part));
+        ensure!(
+            resolved == direct,
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} is a link rather than the file itself, and a link cannot be pinned: git records its target's name where the working tree gives the target's contents. Name the file directly",
+            self.path
+        );
         std::fs::read_to_string(&resolved).map_err(|error| tool_error(resolved.display(), error))
     }
 }
