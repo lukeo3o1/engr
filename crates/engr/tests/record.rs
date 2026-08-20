@@ -532,3 +532,97 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
         "a missing section is absence, like a missing object"
     );
 }
+
+/// `verify` reads a referenced target through the same authority `show` does.
+///
+/// `show` and reference admission both go through `ops::effective`, so a target
+/// is read with its recoverable crash tail applied. `verify` used to load the
+/// stored projection directly, which answered a different question and got two
+/// different wrong answers for it: a target whose durable tail will not
+/// reconcile has a projection that loads fine, so the source PASSed while `show`
+/// called the same dependency unreadable; and a target whose projection is gone
+/// but whose events rebuild it is authority that is present, so calling it
+/// missing was wrong the other way.
+///
+/// Malformed authority must not be downgraded into a healthy verification
+/// result, and absence must stay absence. Both surfaces have to agree on which
+/// is which.
+#[test]
+fn verify_reads_referenced_targets_through_effective_authority() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "upstream decision");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+    );
+    let pinned = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "downstream decision");
+    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
+    with_ref.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, with_ref);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    // (a) The projection is untouched and self-consistent; the durable tail
+    // behind it will not read. `store::load_object` succeeds here — which is
+    // exactly why loading it directly reported a pass.
+    let events = store::events_path(&root, &target);
+    let sound_events = std::fs::read_to_string(&events).expect("events");
+    std::fs::write(
+        &events,
+        format!("{sound_events}{{\"format\":\"engr-event\"}}\n"),
+    )
+    .expect("write events");
+    assert!(
+        store::load_object(&root, &target).is_ok(),
+        "the projection alone still loads, which is the trap"
+    );
+    assert!(
+        ops::effective(&root, &target).is_err(),
+        "and the authority behind it does not"
+    );
+
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(!report.passed(), "unreadable authority is not a pass");
+    assert_eq!(report.standing_on_unreadable.len(), 1);
+    assert!(report.standing_on_missing.is_empty());
+    assert!(report.standing_on_tampered.is_empty());
+
+    // And `show` says the same thing about the same dependency.
+    let object = ops::effective(&root, &source).expect("source");
+    assert!(
+        view::assess(&root, &object)
+            .iter()
+            .any(|(_, status)| status.stands_on_unreadable()),
+        "show and verify must agree on target readability"
+    );
+
+    // (b) The projection is gone, and the durable events rebuild it. That is
+    // present authority, not absence — the recovery path exists precisely so a
+    // crash between appending and projecting is not data loss.
+    std::fs::write(&events, &sound_events).expect("restore events");
+    std::fs::remove_file(store::object_path(&root, &target)).expect("remove projection");
+    assert!(
+        ops::effective(&root, &target).is_ok(),
+        "the events reconstruct it"
+    );
+
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(
+        report.standing_on_missing.is_empty(),
+        "authority recoverable from its own events is not missing"
+    );
+    assert!(report.standing_on_unreadable.is_empty());
+    assert!(
+        report.passed(),
+        "and the source stands on it as soundly as it did before"
+    );
+}

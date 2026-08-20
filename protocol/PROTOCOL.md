@@ -1360,6 +1360,32 @@ Adding the Phase 3 fields did not move the workspace version: they are absent
 when empty, so a workspace that uses none of them is byte-for-byte — and hash for
 hash — what it was.
 
+### Event versions are semantic compatibility generations
+
+An Event envelope version identifies a **generation of meaning**, not a count of
+schema revisions. The test is whether two readers could both accept the same
+Event and derive different authoritative meaning from it.
+
+An additive change stays in the current version when an older reader either
+interprets the Event without changing what it authoritatively means, or does not
+understand the addition and **fails closed before accepting or replaying a
+different meaning**. Rejecting an Event you do not understand is not
+disagreement about what it means — it is the absence of a second opinion.
+
+The version MUST change when an existing field or action changes meaning; when a
+valid representation is removed in a way that changes what readers accept; when
+an incompatible required field or envelope shape appears; when canonicalization
+or hashing semantics change incompatibly; or when an older and a newer reader
+could both succeed on one Event and disagree about it.
+
+`becomes` is additive and optional. Its absence preserves the previous meaning
+exactly, and an older reader confronted with one fails closed on the
+confirmation hash rather than replaying a revision while missing the
+classification that made it legal. It therefore stays within Event version 1.
+
+Confirmed history is never rewritten to normalize versions. An Event says what
+it said when a human confirmed it.
+
 ```text
 .engr/
   format.json              workspace format and version

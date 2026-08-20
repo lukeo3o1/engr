@@ -358,7 +358,8 @@ struct Prepare {
     /// The object to act on. Any unique id prefix. Omit only with --new
     #[arg(long)]
     object: Option<String>,
-    /// Destination type, with --classify
+    /// Destination type. With --classify, or with a section action on a settled
+    /// object to do both in one confirmation
     #[arg(
         long = "type",
         value_enum,
@@ -366,7 +367,7 @@ struct Prepare {
         conflicts_with = "untyped"
     )]
     object_type: Option<TypeArg>,
-    /// Destination is an untyped object, with --classify
+    /// Destination is an untyped object. Same two uses as --type
     #[arg(long)]
     untyped: bool,
     /// Destination state, valid for the destination type

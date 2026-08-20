@@ -592,3 +592,52 @@ fn a_stored_collection_name_carries_no_surrounding_whitespace() {
     });
     assert_eq!(collection::load(&root, &item.id).expect("load").name, "Q3");
 }
+
+/// Admission is decided inside the workspace lock, not before it.
+///
+/// A member that goes dangling *after* it was admitted is intended, and the test
+/// above pins that. This is the other case: a target that stopped existing
+/// *before* the membership was written. Backlog consumption takes the same
+/// workspace lock a collection edit takes, so an existence check outside that
+/// lock can observe a live target, lose the race, and then persist a membership
+/// that was never admissible.
+///
+/// Made deterministic by the lock itself rather than by timing. The target is
+/// deleted while this thread holds the lock, so whenever `add_member` acquires
+/// it the target is already gone — no interleaving exists in which the check,
+/// done inside, can see it. The sleep only makes the *pre-fix* failure reliable
+/// by giving the outside check time to run first; the assertion below does not
+/// depend on it.
+#[test]
+fn a_target_consumed_before_the_membership_is_written_is_not_admitted() {
+    let (_dir, root) = workspace();
+    let item = backlog::create(&root, "still staging", "for now", Vec::new()).expect("backlog");
+    let plan = plan(&root, "racing a consumer");
+    let target = backlog_ref(&item.id);
+    let path = backlog::item_path(&root, &item.id);
+
+    let outcome = store::with_lock(&root, || {
+        let racer = std::thread::spawn({
+            let root = root.clone();
+            let plan = plan.id.clone();
+            let target = target.clone();
+            move || collection::add_member(&root, &plan, &target, None, None)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_file(&path).expect("consume the target");
+        Ok(racer)
+    })
+    .expect("locked")
+    .join()
+    .expect("joined");
+
+    let error = outcome.expect_err("the target was gone before the membership was written");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+    assert!(
+        collection::load(&root, &plan.id)
+            .expect("plan")
+            .members
+            .is_empty(),
+        "nothing that was never admissible may be persisted"
+    );
+}

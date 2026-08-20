@@ -151,7 +151,21 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             // health for a dependency that is not there. This is the
             // authoritative trust path: absence and malformed authority are
             // both findings, and they are different findings.
-            let target = match store::load_object(root, &reference.object) {
+            //
+            // Read through [`effective`], not the persisted projection. The
+            // source is judged on the bytes actually stored — that is the point
+            // of `persisted` above, and an unrepaired projection there is a
+            // finding of its own. A *target* is a different question: it is
+            // being asked "can this authority be read, and does it still say
+            // what was pinned", which is the question `show` and reference
+            // admission already ask through the same path. Loading it directly
+            // answered a third question nobody asked, and answered it two ways
+            // that both contradict `show` — a target whose durable tail will not
+            // reconcile has a projection that loads fine, so it passed; and a
+            // target whose projection is gone but whose events rebuild it is
+            // present authority, so calling it missing was wrong in the other
+            // direction.
+            let target = match effective(root, &reference.object) {
                 Ok(target) => target,
                 Err(error) if error.code == EXIT_NOT_FOUND => {
                     standing_on_missing.push(StandsOnMissing {

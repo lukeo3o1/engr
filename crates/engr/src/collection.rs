@@ -589,10 +589,18 @@ pub fn add_member(
 ) -> Result<Collection> {
     // Shape first, so a malformed reference is refused as malformed rather than
     // as missing — `decode_uuid` on nonsense would otherwise answer the wrong
-    // question.
+    // question. This one needs no lock: it reads the argument, not the
+    // workspace.
     check_target("a collection member", target)?;
-    require_target(root, target)?;
     edit(root, id, |collection| {
+        // Existence is checked **inside** the lock, because the check is what
+        // defines admission. Backlog consumption takes the same workspace lock,
+        // so a check outside it can observe a target, lose the race, and then
+        // persist a membership that was already dangling at the instant it was
+        // admitted. A member that goes dangling *afterwards* is intended and
+        // left alone; one that was never admissible is a different thing, and
+        // only a shared critical section can tell them apart.
+        require_target(root, target)?;
         ensure!(
             collection.member(target).is_err(),
             EXIT_INVARIANT,

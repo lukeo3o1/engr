@@ -360,11 +360,16 @@ makes sense.
 | An untyped object has settled | `--close` |
 | What kind of thing this is, or where it now stands | `--classify` |
 | Another object has replaced this one | `--supersede <object>` |
+| A **settled** object needs work again | that same action, plus `--type` and `--state` — [one confirmation](#type-state-and-attention), not two |
 
-`--rename` replaces the title and nothing else, and an object nobody is looking
-at refuses it — bring it back into the attention set first. Do not reach for it
-to record that the work changed shape: that belongs in a section, where it can
-say why.
+The last row is the one most easily missed. `--add`, `--revise`, `--merge`,
+`--delete` and `--rename` all refuse an object nobody is looking at — but they
+refuse it *bare*. Give the same command a destination that needs attention and
+it does both in one confirmed operation. Reclassifying first and acting second
+is still allowed and is a different statement; it is not the required route.
+
+`--rename` replaces the title and nothing else. Do not reach for it to record
+that the work changed shape: that belongs in a section, where it can say why.
 
 Prefer `--revise` over delete-then-add. A revision keeps the section's id, so
 every reference to it stays meaningful; delete-then-add breaks them, and the id
