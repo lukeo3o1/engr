@@ -447,14 +447,42 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     assert_eq!(status.label(), "REF UNREADABLE");
     assert_eq!(status.key(), "ref_unreadable");
 
+    // The header was never the problem. The line a reader acts on said the
+    // target was gone — the exact words the protocol names as the ones
+    // malformed authority must never be reported in — which sends someone to
+    // recreate a file that is sitting right there, unread.
+    let unreadable = view::render_show(&root, &object);
+    assert!(
+        unreadable.contains("will not load"),
+        "the advice must say what is actually wrong: {unreadable}"
+    );
+    for forbidden in ["no longer exists", "is gone"] {
+        assert!(
+            !unreadable.contains(forbidden),
+            "{forbidden:?} must not appear for unreadable authority: {unreadable}"
+        );
+    }
+
     // A target that is genuinely absent is the other answer, and stays drift.
+    // Its events go too: a projection alone is not the authority, and while the
+    // durable tail survives, the target is recoverable rather than gone.
     store::write_json(&path, &raw).expect("restore the broken file");
     std::fs::remove_file(&path).expect("remove");
+    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
     let object = ops::effective(&root, &source).expect("source");
     let status = &view::assess(&root, &object)[0].1;
     assert!(
         !status.stands_on_unreadable(),
         "absence is not unreadable authority: {status:?}"
+    );
+
+    // And it reads differently. Two distinct facts about a dependency that
+    // rendered the same sentence were two facts a reader could not act on.
+    let absent = view::render_show(&root, &object);
+    assert!(absent.contains("no longer exists"), "{absent}");
+    assert_ne!(
+        unreadable.lines().find(|line| line.contains("advice")),
+        absent.lines().find(|line| line.contains("advice")),
     );
 }
 

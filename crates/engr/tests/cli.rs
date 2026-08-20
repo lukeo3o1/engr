@@ -3684,3 +3684,154 @@ fn a_zero_section_selector_is_refused_everywhere() {
         String::from_utf8_lossy(&refused.stderr)
     );
 }
+
+/// The screen a human is required to read names what the action applies to.
+///
+/// `Payload`'s rustdoc promises that "delete §3 cannot become delete §5 after it
+/// was displayed". The hash kept that promise; the screen did not print the
+/// section at all, so with two sections carrying identical wording, deleting the
+/// first and deleting the second rendered byte-for-byte the same thing. Section
+/// ids are never reused, so confirming the wrong one breaks every reference
+/// pinning it with no way to put it back.
+#[test]
+fn a_candidate_screen_distinguishes_two_sections_that_say_the_same_thing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "retry policy"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    for _ in 0..2 {
+        let added = prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "Retry with backoff.",
+            ],
+        );
+        confirm(root, &added);
+    }
+
+    let screen = |section: &str| {
+        let candidate = prepare(root, &["prepare", "--object", &id, "--delete", section]);
+        let code = candidate["challenge"]
+            .as_str()
+            .expect("challenge")
+            .to_owned();
+        let shown =
+            String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+        run_engr(root, &["confirm", &format!("CONFIRM {code} no")]);
+        shown
+    };
+    let first = screen("1");
+    let second = screen("2");
+
+    assert!(first.contains("section.deleted §1"), "{first}");
+    assert!(second.contains("section.deleted §2"), "{second}");
+    assert_ne!(
+        first.lines().next(),
+        second.lines().next(),
+        "two different mutations must not render the same first line"
+    );
+
+    // And the object is named by something a human recognises, not only by an
+    // abbreviated uuid they have no way to check.
+    assert!(first.contains("retry policy"), "{first}");
+}
+
+/// The hard ceiling is not a threshold with an override, and must not read as
+/// one. Both refusals used to end with the same sentence, so an agent that
+/// learned to add `--oversize` for the first would add it for the second — and
+/// burn a cycle discovering the flag it was just told to use does nothing.
+#[test]
+fn the_two_size_refusals_do_not_end_the_same_way() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "bounds"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let refusal = |text: &str, oversize: bool| {
+        let mut args = vec![
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            text,
+        ];
+        if oversize {
+            args.push("--oversize");
+        }
+        let output = run_engr(root, &args);
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let normal = refusal(&"x".repeat(2000), false);
+    assert!(
+        normal.contains("prepare it again with --oversize"),
+        "the first refusal offers the retry: {normal}"
+    );
+
+    let hard = refusal(&"x".repeat(6000), false);
+    assert!(
+        !hard.contains("prepare it again with --oversize"),
+        "the hard ceiling must not read as a threshold with an override: {hard}"
+    );
+    assert!(hard.contains("no flag for this one"), "{hard}");
+
+    // And it means it: the flag an agent might reach for anyway is refused the
+    // same way rather than quietly letting the oversize record through.
+    let retried = refusal(&"x".repeat(6000), true);
+    assert!(retried.contains("no flag for this one"), "{retried}");
+}
+
+/// A machine-readable surface has to be readable by a strict machine.
+///
+/// The section wrapper added an explicit `id` beside a flattened section that
+/// already had one, so every section object carried the key twice. Permissive
+/// parsers take the last and happen to be right; a typed deserializer — including
+/// the one this crate uses — refuses the document outright.
+#[test]
+fn backlog_json_sections_do_not_repeat_a_key() {
+    // Deserialized from the raw text, not from a `Value`. Parsing into a
+    // `Value` first collapses a repeated key silently, which is exactly the
+    // reading that made this defect invisible.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StrictSection {
+        id: u64,
+        reference: String,
+        text: String,
+        updated_at: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StrictItem {
+        id: String,
+        reference: String,
+        sections: Vec<StrictSection>,
+    }
+
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let item = engr::backlog::create(root, "strictness", "a point", Vec::new()).expect("backlog");
+    engr::backlog::add_section(root, &item.id, "a second point", Vec::new()).expect("second");
+
+    let shown = run_engr(root, &["backlog", "show", &item.id, "--format", "json"]);
+    assert!(shown.status.success());
+    let raw = String::from_utf8_lossy(&shown.stdout).into_owned();
+    let parsed: StrictItem = serde_json::from_str(&raw)
+        .unwrap_or_else(|error| panic!("a strict reader must accept this: {error}\n{raw}"));
+    assert_eq!(parsed.sections.len(), 2);
+}

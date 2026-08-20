@@ -396,6 +396,19 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                         lookback
                     ));
                 }
+                // Absence and unreadable authority get different advice,
+                // because they need different work. The header already
+                // separates them; this line is what a reader acts on, and
+                // "gone" would send someone to recreate a file that is right
+                // there. The protocol names those words as the ones malformed
+                // authority must never be reported in.
+                _ if drift.target_unreadable => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} is there and will not load; what this section stands on cannot be read\n",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
+                }
                 _ => {
                     out.push_str(&format!(
                         "    advice   {} §{} no longer exists; what this section stood on is gone\n",
@@ -767,10 +780,15 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
 
 #[derive(Serialize)]
 struct JsonBacklogSection<'a> {
-    id: u64,
     /// The section's own canonical reference. An addressable entity exposes
     /// one on a machine-readable path; a `--subject` naming a backlog section
     /// is exactly what this is for.
+    ///
+    /// `id` is deliberately not repeated here. The flattened section already
+    /// carries one, and emitting it twice makes a document that a strict
+    /// parser rejects and a typed deserializer — `serde_json` included —
+    /// refuses outright. A machine-readable contract that only permissive
+    /// readers can read is not one.
     reference: String,
     #[serde(flatten)]
     section: &'a backlog::Section,
@@ -804,7 +822,6 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
             .sections
             .iter()
             .map(|section| JsonBacklogSection {
-                id: section.id,
                 reference: format!("{}:{}", backlog_reference(&item.id), section.id),
                 section,
             })

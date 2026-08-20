@@ -550,7 +550,18 @@ resource kind supports a section selector at all stays a domain rule.
 
 ### What a human is shown
 
-The **complete semantic change**, not the whole section again. Revisions use a
+**What the change is being applied to**, first. The display MUST name the
+section a `section_revised`, `section_deleted` or `section_merged` candidate
+acts on, and MUST identify the Object by a name a reader would recognise as well
+as by its id. Two sections may carry identical wording, and then a screen that
+names neither renders two materially different mutations identically — while
+section ids are never reused, so confirming the wrong one breaks every reference
+pinning it with no way back. The payload has always carried the section inside
+the confirmation hash, which is what stops `delete §3` becoming `delete §5`
+after it was displayed; that guarantee is worth nothing if the display never
+said which section it was.
+
+Then the **complete semantic change**, not the whole section again. Revisions use a
 unified line diff with limited unchanged context and separately show old/new
 `based_on`, old/new `role`, added and removed refs and relations — including
 their pinned hashes and commits — and supplementary content entry by entry,

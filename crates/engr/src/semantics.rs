@@ -579,6 +579,20 @@ result belongs outside the record, with only the smallest relevant excerpt kept 
 here. If this really is one bounded assertion, prepare it again with --oversize \
 and the candidate will say so where the human can see it.";
 
+/// The same destinations, and no flag.
+///
+/// The last sentence of [`OVERSIZE_ADVICE`] must not appear here. An agent that
+/// reads one refusal as "add the flag" learns to add it to both, which is
+/// exactly what a ceiling with no override cannot afford — so the two refusals
+/// have to end differently, not merely begin differently.
+pub const HARD_LIMIT_ADVICE: &str = "\
+An independent engineering point belongs in another Section. Unresolved \
+reasoning or an open question belongs in `engr backlog`. Actual implementation \
+belongs behind an implemented_by relation rather than copied in. A large log or \
+result belongs outside the record, with only the smallest relevant excerpt kept \
+here. There is no flag for this one: the hard ceiling always refuses, and \
+--oversize will refuse it again.";
+
 /// Refuse the proposal, or let an explicit retry through.
 ///
 /// The hard ceiling is not a threshold with an override — it always refuses, and
@@ -600,7 +614,7 @@ pub fn check_size(text: &str, content: &[Supplement], oversize: bool) -> Result<
             format!(
                 "this Section is past what the record will hold at all: {}. {}",
                 breaches(true),
-                OVERSIZE_ADVICE
+                HARD_LIMIT_ADVICE
             ),
         ));
     }
