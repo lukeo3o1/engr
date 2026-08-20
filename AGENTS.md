@@ -12,7 +12,61 @@ and confirmed by no one, which is the whole reason the record can stay strict �
 there is somewhere else for unresolved material to go.
 
 Read [protocol/PROTOCOL.md](protocol/PROTOCOL.md) before changing behaviour. It is
-normative, and it explains why each rule exists rather than just stating it.
+normative for the implementation in this branch, and it explains why each rule
+exists rather than just stating it.
+
+## Accepted next direction — not implemented in this branch
+
+The trust model above describes the current v0 implementation, but it is no
+longer the complete design direction. Do not infer from the current code that
+all future Object content must always enter through the Human Gate.
+
+The accepted direction being coordinated in #25, with corresponding baseline
+updates to #9/#16, is **rule-governed agent admission of Object knowledge**:
+
+- A project may define agent-readable Rules under `.engr/rules/*.md`.
+- Autonomous Object admission is project opt-in through Rules: an Agent may add
+  Object content autonomously only when at least one valid, applicable
+  `domain=object` Rule resolves successfully. No usable applicable Object Rule
+  means the mutation must fall back to the Human Gate path.
+- This prerequisite applies to adding agent-admitted Sections to existing
+  Objects as well as creating an Object containing agent-admitted Sections; an
+  existing Object is not an escape hatch around Rule governance.
+- Object Sections are moving toward explicit admission/trust provenance rather
+  than treating the whole Object as uniformly human-authoritative. The current
+  working distinction is human-admitted authoritative content versus
+  rule-reviewed agent-admitted unconfirmed content. The exact persisted field
+  name/schema is still subject to the owning design issue; do not invent it.
+- Agent admission must not let an Agent silently rewrite or delete
+  human-admitted authoritative Sections, demote their authority, or manufacture
+  authoritative lifecycle/relationship effects. Promotion of exact current
+  agent wording to human authority goes through the Human Gate.
+- Human-authoritative dependency semantics must not transitively depend on
+  unconfirmed agent wording. Any representation change needed to preserve that
+  invariant belongs in the design work, not an ad-hoc implementation shortcut.
+- Rule Review is stateless in v1. A review binding hashes the exact mutation,
+  target precondition/current-state fingerprint, applicable Rules, and resolved
+  Rule bases. Admission recomputes it and fails closed if the reviewed subject
+  changed.
+- Rule `based_on` entries may be floating current paths or may include an exact
+  Git commit. An exact-commit basis becomes stale only when the relevant current
+  path content differs from the reviewed historical content, not merely because
+  repository HEAD advanced.
+- Rules may bound review attempts. The Agent reports the attempt number in v1;
+  engr does not yet persist or independently prove attempt history. Backlog may
+  soft-admit exhausted review with `rule_review { attempts, limit }`; Object
+  exhaustion may escalate to human confirmation according to the final Rule
+  policy. Do not invent Collection/Work overflow semantics until specified.
+- Confirmed EventStore history remains the history of human-admitted semantic
+  authority; autonomous Agent edits should not flood it with pseudo-confirmed
+  Events merely to reuse the old mechanism.
+
+This is a coordination notice, not permission to implement the proposal inside
+PR #27. PR #27 remains the known-good v0 baseline. When work targets the next
+trust model, read the latest accepted refinements on #25/#9/#16 before changing
+persisted representation, admission semantics, EventStore semantics, or the
+Human Gate. If those sources still leave a trust-boundary choice unresolved,
+stop rather than inventing one.
 
 ## Layout
 
@@ -42,7 +96,8 @@ crates/engr/tests/cli.rs        what the command line promises the outside world
 ## If you are the agent using engr, not editing it
 
 Propose with `prepare`; never look for another way in, because there is not one
-and adding one would defeat the point.
+in the current v0 implementation. Do not confuse that implementation fact with
+the accepted next design direction described above.
 
 `engr candidate <code>` re-renders a pending candidate. Use it when a human comes
 back later — **re-running `prepare` mints a new code and voids the one they are
