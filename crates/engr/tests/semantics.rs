@@ -59,6 +59,7 @@ fn payload(action: Action, object: &str, content: Content) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
+        becomes: None,
         content,
     }
 }
@@ -1496,4 +1497,130 @@ fn a_literal_body_keeps_every_byte_it_was_written_with() {
         .expect_err("an empty body is not content");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("cannot be empty"), "{error}");
+}
+
+/// A no-attention Object is revised in **one** confirmation, not two.
+///
+/// Permitted exactly when the same operation atomically returns the Object to a
+/// state that needs attention. The rule it replaces is not relaxed: a bare
+/// revision is still refused, and so is one whose destination still needs no
+/// attention. What is gone is the artificial intermediate — the `proposed` an
+/// object was never really in, confirmed only so the next confirmation could
+/// land.
+///
+/// And it is narrow in the other direction too. A destination is admissible
+/// *because* it is what makes the action legal, so an Object that already needs
+/// attention cannot carry one: there would be nothing to unblock, and the
+/// destination would be a second, unrelated change hidden inside someone else's
+/// confirmation.
+#[test]
+fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmation() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "the auth design");
+    admit(
+        &root,
+        payload(
+            Action::SectionAdded,
+            &id,
+            wording("Use short-lived tokens."),
+        ),
+    );
+    classified(&root, &id, Some(ObjectType::Design), State::Accepted);
+    let before = ops::effective(&root, &id).expect("object");
+    assert!(!before.needs_attention());
+
+    let revise = || Payload {
+        action: Action::SectionRevised { section: 1 },
+        object: id.clone(),
+        becomes: None,
+        content: wording("Use short-lived tokens, capped at 15 minutes."),
+    };
+
+    // Still refused on its own: nothing about the guard was loosened.
+    let error = gate::prepare(&root, revise()).expect_err("nobody is looking at it");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // And refused when the destination would leave it out of the listing, which
+    // is the "only if" half of the rule.
+    let mut still_hidden = revise();
+    still_hidden.becomes = Some(engr::model::Destination {
+        object_type: Some(ObjectType::Design),
+        state: State::Rejected,
+    });
+    let error = gate::prepare(&root, still_hidden).expect_err("rejected needs no attention");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // One confirmation that does both.
+    let mut atomic = revise();
+    atomic.becomes = Some(engr::model::Destination {
+        object_type: Some(ObjectType::Design),
+        state: State::Proposed,
+    });
+    let object = admit(&root, atomic);
+    assert_eq!(object.state, State::Proposed);
+    assert!(object.needs_attention());
+    assert_eq!(
+        object.sections[0].text,
+        "Use short-lived tokens, capped at 15 minutes."
+    );
+    assert_eq!(
+        object.rev,
+        before.rev + 1,
+        "one operation, one event — no intermediate state was ever confirmed"
+    );
+
+    // Now that it needs attention, a destination is no longer admissible on it.
+    // Nothing is blocked any more, so one would be a second, unrelated change
+    // riding along inside someone else's confirmation — and `object_classified`
+    // already says that on its own, where a reader can see it.
+    let mut piggybacked = Payload {
+        action: Action::SectionRevised { section: 1 },
+        object: id.clone(),
+        becomes: Some(engr::model::Destination {
+            object_type: Some(ObjectType::Design),
+            state: State::Draft,
+        }),
+        content: wording("Use short-lived tokens, capped at 10 minutes."),
+    };
+    let error = gate::prepare(&root, piggybacked.clone()).expect_err("it already needs attention");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("already needs attention"), "{error}");
+
+    // The very same revision without one is admitted, which is what makes the
+    // refusal about the destination rather than about the revision.
+    piggybacked.becomes = None;
+    let object = admit(&root, piggybacked);
+    assert_eq!(object.state, State::Proposed);
+
+    // An action that names its own state takes no destination.
+    let mut confused = payload(Action::ObjectClosed, &id, engr::model::Content::default());
+    confused.becomes = Some(engr::model::Destination {
+        object_type: None,
+        state: State::Open,
+    });
+    let error = gate::prepare(&root, confused).expect_err("close sets the state itself");
+    assert!(
+        error.code == engr::EXIT_INVARIANT || error.code == engr::EXIT_USAGE,
+        "{error}"
+    );
+
+    // A payload carrying no destination is byte-for-byte what it always was.
+    let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
+    assert!(!raw.to_string().contains("becomes"), "{raw}");
+
+    // The wire key is part of the ruling, not an implementation detail, so it is
+    // asserted on the confirmed events rather than left to the Rust field name.
+    // Exactly one event carries it: the one that needed it to be legal.
+    let events = std::fs::read_to_string(store::events_path(&root, &id)).expect("events");
+    let carrying: Vec<&str> = events
+        .lines()
+        .filter(|line| line.contains("\"becomes\""))
+        .collect();
+    assert_eq!(carrying.len(), 1, "{events}");
+    assert!(
+        carrying[0].contains("\"section_revised\"")
+            && carrying[0].contains("\"state\":\"proposed\""),
+        "{}",
+        carrying[0]
+    );
 }

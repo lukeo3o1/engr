@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{gate, git, ops, store, view, work};
+use engr::{collection, gate, git, ops, store, view, work};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ enum Command {
         /// One line per section, so grep can reach the text
         #[arg(long)]
         sections: bool,
-        /// Only what needs attention
+        /// Sections whose basis or references moved, or that will not verify
         #[arg(long)]
         stale: bool,
     },
@@ -61,6 +61,9 @@ enum Command {
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
     #[command(subcommand)]
     Work(Work),
+    /// Planning metadata: what is grouped together. Nothing here is confirmed
+    #[command(subcommand)]
+    Collection(CollectionCommand),
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
@@ -355,7 +358,8 @@ struct Prepare {
     /// The object to act on. Any unique id prefix. Omit only with --new
     #[arg(long)]
     object: Option<String>,
-    /// Destination type, with --classify
+    /// Destination type. With --classify, or with a section action on a settled
+    /// object to do both in one confirmation
     #[arg(
         long = "type",
         value_enum,
@@ -363,7 +367,7 @@ struct Prepare {
         conflicts_with = "untyped"
     )]
     object_type: Option<TypeArg>,
-    /// Destination is an untyped object, with --classify
+    /// Destination is an untyped object. Same two uses as --type
     #[arg(long)]
     untyped: bool,
     /// Destination state, valid for the destination type
@@ -670,6 +674,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
         Command::Work(command) => work_command(&root, command),
+        Command::Collection(command) => collection_command(&root, command),
     }
 }
 
@@ -847,19 +852,45 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     } else {
         Action::ObjectSuperseded
     };
-    if command.state.is_some() && !command.classify {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--state sets a destination for --classify; --close, --reopen and --supersede already \
-             name the state they produce",
-        ));
-    }
-    if (command.object_type.is_some() || command.untyped) && !command.classify {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--type and --untyped set a destination for --classify",
-        ));
-    }
+    // A destination belongs either to `--classify`, which is only a
+    // classification, or to an action that needs the object back in the
+    // attention set to run at all — where it is applied in the same
+    // confirmation, so no state the object was never really in gets recorded on
+    // the way. Every other action already names the state it produces.
+    //
+    // Only the shape is settled here. Whether *this* object may take a
+    // destination at all depends on the state it is in, and that is the
+    // reducer's call, not the parser's: `gate::prepare` projects a trial event,
+    // so an object that already needs attention is refused there, once, with
+    // the authority that will still be enforcing it when the event replays.
+    let becomes = if command.classify {
+        None
+    } else if command.state.is_some() || command.object_type.is_some() || command.untyped {
+        if !action.requires_attention() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{} already names the state it produces, so it takes no destination",
+                    action.label()
+                ),
+            ));
+        }
+        if command.object_type.is_none() && !command.untyped {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "a destination needs its type: --type <TYPE>, or --untyped",
+            ));
+        }
+        Some(model::Destination {
+            object_type: command.object_type.map(TypeArg::model),
+            state: command
+                .state
+                .ok_or_else(|| Error::new(EXIT_USAGE, "a destination needs a --state"))?
+                .model(),
+        })
+    } else {
+        None
+    };
 
     let object = match (&action, &command.object) {
         (Action::ObjectCreated, Some(_)) => {
@@ -972,6 +1003,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     let payload = Payload {
         action,
         object,
+        becomes,
         content,
     };
     let prepared = if command.oversize {
@@ -1374,12 +1406,24 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // The whole destination, both halves, because that is what is being
     // confirmed: a state read without the type it belongs to is a word that
     // means different things on different objects.
-    if let Action::ObjectClassified { object_type, state } = &candidate.payload.action {
+    // Both spellings of a destination reach this screen the same way: one is a
+    // classification on its own, the other rides along with a section action to
+    // bring the object back into attention in the same confirmation. Either way
+    // it is part of what is being confirmed, so it is part of what is shown.
+    let destination = match &candidate.payload.action {
+        Action::ObjectClassified { object_type, state } => Some((*object_type, *state)),
+        _ => candidate
+            .payload
+            .becomes
+            .as_ref()
+            .map(|becomes| (becomes.object_type, becomes.state)),
+    };
+    if let Some((object_type, state)) = destination {
         out.push_str(&format!(
             "Type       {}\nState      {}\nAttention  {}\n",
             object_type.map_or("none", |value| value.as_str()),
             state.as_str(),
-            if semantics::needs_attention(*object_type, *state) {
+            if semantics::needs_attention(object_type, state) {
                 "yes — it stays in the default listing"
             } else {
                 "no — it leaves the default listing"
@@ -1673,6 +1717,26 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 stood.target_section
             );
         }
+        // Said separately from tampering, and from each other. "Not there" and
+        // "will not load" are different problems with different answers, and
+        // both used to be silence.
+        for stood in &report.standing_on_missing {
+            println!(
+                "          §{} stands on {} §{}, which is not there",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section
+            );
+        }
+        for stood in &report.standing_on_unreadable {
+            println!(
+                "          §{} stands on {} §{}, which will not load: {}",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section,
+                stood.reason
+            );
+        }
         if report.unprojected > 0 {
             println!(
                 "          {} events are not reflected in the sections",
@@ -1857,23 +1921,23 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
         .and_then(|parsed| engr::reference::decode_uuid(parsed.id()))
         .map_err(|error| malformed_argument(field, spec, error))?
         .to_string();
-    let known = if relative.starts_with("backlog:") {
-        backlog::load(root, &id).is_ok()
+    let outcome = if relative.starts_with("backlog:") {
+        backlog::load(root, &id).map(|_| ())
     } else {
-        ops::effective(root, &id).is_ok()
+        ops::effective(root, &id).map(|_| ())
     };
-    ensure_found(known, field, spec)?;
-    Ok(relative.to_owned())
-}
-
-fn ensure_found(known: bool, field: &str, spec: &str) -> Result<()> {
-    if known {
-        Ok(())
-    } else {
-        Err(Error::new(
+    // Absence and unreadable authority stay apart: "does not exist" would send
+    // someone to create what is already there and hide the real fault.
+    match outcome {
+        Ok(()) => Ok(relative.to_owned()),
+        Err(error) if error.code == EXIT_NOT_FOUND => Err(Error::new(
             EXIT_NOT_FOUND,
             format!("{field} {spec:?} does not exist"),
-        ))
+        )),
+        Err(error) => Err(Error::new(
+            error.code,
+            format!("{field} {spec:?} cannot be read: {}", error.message),
+        )),
     }
 }
 
@@ -2023,6 +2087,318 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
             let id = resolve_object_argument(root, "object", &object)?;
             let work = work::remove_item(root, &id, item)?;
             print!("{}", view::render_work_show(root, &id, &work));
+        }
+    }
+    Ok(())
+}
+
+/// Planning metadata: what is grouped together, and in what order.
+///
+/// Its own namespace, like `backlog` and `work`, and for the same reason:
+/// nothing here goes through the gate, so it must not be reachable by a command
+/// that looks like one that does.
+#[derive(Subcommand)]
+enum CollectionCommand {
+    /// Start a plan
+    New {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+    },
+    /// List plans
+    Ls,
+    /// Show one plan, its schedule and its members
+    Show {
+        collection: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Replace the name
+    Rename {
+        collection: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Replace the description. Omit --text to clear it
+    Describe {
+        collection: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Declare where the plan stands
+    State {
+        collection: String,
+        #[arg(long, value_enum)]
+        state: CollectionStateArg,
+    },
+    /// Replace the schedule. Give none of the dates to clear it
+    Schedule {
+        collection: String,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+    },
+    /// Put something in the plan
+    Add {
+        collection: String,
+        /// engr:obj:<id> or engr:backlog:<id>
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        /// Intended sequencing. Omit to leave it unranked
+        #[arg(long)]
+        order: Option<i64>,
+        #[arg(long, value_enum)]
+        priority: Option<LevelArg>,
+        /// Why it has that priority in this plan
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Take something out of the plan
+    Rm {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+    },
+    /// Rank a member, or omit --order to unrank it
+    Order {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        #[arg(long)]
+        order: Option<i64>,
+    },
+    /// Set a member's priority, or omit --priority to clear it
+    Priority {
+        collection: String,
+        #[arg(long, value_name = "ENGR_REF")]
+        target: String,
+        #[arg(long, value_enum)]
+        priority: Option<LevelArg>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Delete the whole plan. Only on explicit human direction
+    Delete { collection: String },
+}
+
+#[derive(Args)]
+struct ScheduleArgs {
+    /// Expected beginning, as YYYY-MM-DD
+    #[arg(long)]
+    start: Option<String>,
+    /// Expected end, as YYYY-MM-DD
+    #[arg(long)]
+    end: Option<String>,
+    /// Desired achievement point, as YYYY-MM-DD
+    #[arg(long)]
+    target_date: Option<String>,
+}
+
+impl ScheduleArgs {
+    /// `None` when the caller named no date at all, which is how a schedule is
+    /// left off or cleared — a schedule that is present says something.
+    fn build(&self) -> Option<collection::Schedule> {
+        let schedule = collection::Schedule {
+            start: self.start.clone(),
+            end: self.end.clone(),
+            target: self.target_date.clone(),
+        };
+        let empty = schedule.start.is_none() && schedule.end.is_none() && schedule.target.is_none();
+        (!empty).then_some(schedule)
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CollectionStateArg {
+    Open,
+    Completed,
+    Cancelled,
+}
+
+impl From<CollectionStateArg> for collection::State {
+    fn from(value: CollectionStateArg) -> Self {
+        match value {
+            CollectionStateArg::Open => collection::State::Open,
+            CollectionStateArg::Completed => collection::State::Completed,
+            CollectionStateArg::Cancelled => collection::State::Cancelled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LevelArg {
+    Low,
+    Normal,
+    High,
+}
+
+impl From<LevelArg> for collection::Level {
+    fn from(value: LevelArg) -> Self {
+        match value {
+            LevelArg::Low => collection::Level::Low,
+            LevelArg::Normal => collection::Level::Normal,
+            LevelArg::High => collection::Level::High,
+        }
+    }
+}
+
+/// A member target, held to what a plan is allowed to group.
+/// Strip the `engr:` prefix a caller writes, leaving the embedded form the
+/// domain stores.
+///
+/// Shape and existence are **not** checked here. They used to be, and that was
+/// the bug: the command line enforced a membership rule the library did not, so
+/// what a plan could contain depended on which door it came through. The rule
+/// lives in `collection::add_member` now, and this only translates the spelling.
+fn collection_target(spec: &str) -> Result<String> {
+    spec.strip_prefix("engr:")
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                format!("--target {spec:?} must be an engr: reference"),
+            )
+        })
+}
+
+fn priority_of(
+    level: Option<LevelArg>,
+    reason: Option<String>,
+) -> Result<Option<collection::Priority>> {
+    match (level, reason) {
+        (Some(level), reason) => Ok(Some(collection::Priority {
+            level: level.into(),
+            reason,
+        })),
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(Error::new(
+            EXIT_USAGE,
+            "--reason explains a priority, so it needs --priority".to_owned(),
+        )),
+    }
+}
+
+fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
+    match command {
+        CollectionCommand::New {
+            name,
+            description,
+            schedule,
+        } => {
+            let item = collection::create(root, &name, description.as_deref(), schedule.build())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Ls => {
+            let mut found = Vec::new();
+            for id in collection::ids(root)? {
+                found.push(collection::load(root, &id)?);
+            }
+            // Open plans first, then by name: what is still being pursued is
+            // what a listing is for, and nothing here records activity to sort
+            // by instead.
+            //
+            // By an explicit rank, not by the state's spelling. Alphabetically
+            // `cancelled` and `completed` both precede `open`, so sorting on the
+            // name of the state puts every abandoned plan above every live one —
+            // exactly backwards, and silently, because the code above says the
+            // opposite and nothing checks.
+            found.sort_by_key(|item| {
+                (
+                    match item.state {
+                        collection::State::Open => 0,
+                        collection::State::Completed => 1,
+                        collection::State::Cancelled => 2,
+                    },
+                    item.name.to_lowercase(),
+                )
+            });
+            print!("{}", view::render_collection_ls(root, &found));
+        }
+        CollectionCommand::Show { collection, format } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::load(root, &id)?;
+            match format {
+                Format::Text => print!("{}", view::render_collection_show(root, &item)),
+                Format::Json => println!("{}", view::render_collection_json(&item)?),
+            }
+        }
+        CollectionCommand::Rename { collection, name } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::rename(root, &id, &name)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Describe { collection, text } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::describe(root, &id, text.as_deref())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::State { collection, state } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::set_state(root, &id, state.into())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Schedule {
+            collection,
+            schedule,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let item = collection::set_schedule(root, &id, schedule.build())?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Add {
+            collection,
+            target,
+            order,
+            priority,
+            reason,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = collection_target(&target)?;
+            let priority = priority_of(priority, reason)?;
+            let item = collection::add_member(root, &id, &target, order, priority)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Rm { collection, target } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let item = collection::remove_member(root, &id, &target)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Order {
+            collection,
+            target,
+            order,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let item = collection::set_order(root, &id, &target, order)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Priority {
+            collection,
+            target,
+            priority,
+            reason,
+        } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let priority = priority_of(priority, reason)?;
+            let item = collection::set_priority(root, &id, &target, priority)?;
+            print!("{}", view::render_collection_show(root, &item));
+        }
+        CollectionCommand::Delete { collection } => {
+            let id = collection::resolve_id(root, &collection)?;
+            let removed = collection::remove(root, &id)?;
+            // Carried out and reported, not refused. #10 makes this a rule for
+            // the agent and says a technical guard can come later if real use
+            // shows one is needed; engr cannot tell who asked, so it says what
+            // was discarded rather than pretending it can.
+            println!(
+                "deleted collection {id} — {:?}, {} member(s) of planning context",
+                removed.name, removed.members
+            );
         }
     }
     Ok(())

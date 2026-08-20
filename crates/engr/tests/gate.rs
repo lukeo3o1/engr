@@ -51,6 +51,7 @@ fn payload(action: Action, object: &str, text: &str) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
+        becomes: None,
         content: content(text),
     }
 }
@@ -59,6 +60,7 @@ fn empty(action: Action, object: &str) -> Payload {
     Payload {
         action,
         object: object.to_owned(),
+        becomes: None,
         content: Content {
             text: String::new(),
             based_on: None,

@@ -7,7 +7,8 @@ description: >-
   re-preparing it, read current wording and staleness with `engr show`, act on a
   section whose git basis or referenced section has moved, park work that is
   still unresolved in `engr backlog` rather than the record, and keep the
-  shortest useful execution handoff for an Object in `engr work`. Not for application
+  shortest useful execution handoff for an Object in `engr work`, and group work
+  into plans with `engr collection`. Not for application
   event-sourcing architecture, EventStoreDB or Kafka work, ordinary logs,
   personal journals, private session checkpoints, or writing decision documents
   outside an adopted project.
@@ -94,13 +95,18 @@ the one they are holding.
 
 ## Reading the record
 
-At the start of engineering work, run `engr ls --stale`; it includes relevant
-objects outside the default attention set. Before making or revisiting a
+At the start of engineering work, run `engr ls --stale`. It lists **sections that
+no longer verify cleanly** — a moved basis, a rewritten reference, wording that
+was tampered with, or a dependency that will not load — and it marks the ones
+belonging to objects nobody is looking at, which is where that goes unnoticed.
+It is not a second spelling of `engr ls`: that one answers what needs attention,
+this one answers what stopped adding up. Before making or revisiting a
 significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
 
-Also run `engr backlog ls` and `engr work ls` — an unresolved point recorded in
+Also run `engr backlog ls`, `engr work ls` and `engr collection ls` — an
+unresolved point recorded in
 one and an execution checkpoint left in the other are exactly the context a
 previous session left for you, and re-deciding or redoing something an earlier
 session already handled is the failure they exist to prevent.
@@ -116,6 +122,12 @@ engr show <id>                       # sections, and how far each can be trusted
 engr show <id> --format json         # the same, structured
 engr ls --all --sections | grep <term>
 ```
+
+Both `show` surfaces print the object's canonical reference, and the structured
+one gives each section its own. That is the string every flag that takes a
+reference wants — `--ref`, `--subject`, `work depend --on`,
+`collection add --target` — so read it from there rather than trying to build
+one. `engr backlog show` prints its item's the same way.
 
 `show` puts the confirmed wording and its trustworthiness on the same screen.
 There is no second command to fetch the authoritative text — what you see is what
@@ -133,10 +145,11 @@ the abbreviation for you.
 | --- | --- |
 | `TAMPERED` / `tampered` | This section's wording does not match the hash confirmed with it |
 | `REF TAMPERED` / `ref_tampered` | A section this one stands on does not match *its* hash |
+| `REF UNREADABLE` / `ref_unreadable` | A section this one stands on will not load at all — malformed authority, not a missing one |
 | `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
 | `refs moved` / `stale_refs` | A section this one references was rewritten through the gate |
 
-The first two are a different kind of problem from the last two, and they are
+The first three are a different kind of problem from the last two, and they are
 not something to work around. **Stop and tell the human.** Someone edited the
 stored file directly rather than going through the gate, so nothing about that
 wording was agreed to by anyone. `show` hands you `git show <commit>:<path>` —
@@ -270,6 +283,71 @@ Targets are whole Objects or backlog items, never sections.
 Commits on an item are signposts, not proof. An item can be done with no commit,
 and a rebase can strand one. Do not treat a missing commit as a problem.
 
+## What is grouped together
+
+Backlog is what is not decided. Work is what is being done on one Object.
+**Collections** are the plan: which work belongs together, and in what order.
+
+```bash
+engr collection ls                       # plans, and how many members need attention
+engr collection show <id>                # the plan, its schedule, its members in order
+engr collection new --name "Q3 authentication" \
+                    --description "..." --start 2026-07-01 --end 2026-09-30
+engr collection add <id> --target engr:obj:<object> --order 10 \
+                         --priority high --reason "Blocks the rest of this plan"
+engr collection order <id> --target engr:obj:<object> --order 20
+engr collection priority <id> --target engr:obj:<object> --priority low
+engr collection rm <id> --target engr:obj:<object>
+engr collection state <id> --state completed
+engr collection delete <id>              # only on explicit human direction
+```
+
+No confirmation, no challenge code — you edit this directly, like backlog and
+work. **Grouping something changes nothing about it.** An Object in a plan means
+exactly what its confirmed sections say; moving it, ranking it, or calling the
+plan complete is planning activity and nothing more.
+
+Members are whole Objects or whole backlog items, given as
+`engr:obj:<id>` or `engr:backlog:<id>` — never a section.
+
+**Priority belongs to the membership, not the thing.** The same Object can be
+`high` in this quarter's plan and `low` in the someday one. `--reason` says why
+it matters *here*; engineering rationale belongs in the Object, through the gate.
+
+`--order` is intended sequencing. Leaving it off means **unranked**, which is a
+real answer — most plans are partly ordered. Two members cannot share a rank.
+Never read the order of members in the file as the plan's order.
+
+### Completing a plan proves nothing
+
+```text
+open        still being pursued
+completed   you consider it finished
+cancelled   no longer being pursued
+```
+
+You declare this. It is never inferred from dates or from what the members are
+doing, and `completed` does **not** require every member to be resolved — work
+gets deferred and moved out of scope, and a plan that could only close once
+everything in it had would be a plan nobody could close honestly. Say which of
+`completed` and `cancelled` you mean; they are different facts.
+
+### Two things not to do
+
+**Never delete a collection unless a human told you to, in this conversation.**
+`engr collection delete` will do it and then tell you how much planning context
+went with it. That report is not permission. Same kind of rule as `paused` on
+work, and as the gate itself: engr enforces none of it.
+
+**Never repoint a member whose target is gone.** A backlog item you added may
+later be consumed; the plan will show it as gone. Resolution is not one-to-one —
+the point may have become two Objects, or none — so retargeting it would change
+what the plan says on a guess. Remove the member or add the real one, explicitly.
+
+Dates are calendar dates, `YYYY-MM-DD`, and change nothing on their own. There is
+no `overdue` state; a schedule is context for judging whether the plan still
+makes sense.
+
 ## Choosing an action
 
 | Situation | Action |
@@ -282,11 +360,16 @@ and a rebase can strand one. Do not treat a missing commit as a problem.
 | An untyped object has settled | `--close` |
 | What kind of thing this is, or where it now stands | `--classify` |
 | Another object has replaced this one | `--supersede <object>` |
+| A **settled** object needs work again | that same action, plus `--type` and `--state` — [one confirmation](#type-state-and-attention), not two |
 
-`--rename` replaces the title and nothing else, and an object nobody is looking
-at refuses it — bring it back into the attention set first. Do not reach for it
-to record that the work changed shape: that belongs in a section, where it can
-say why.
+The last row is the one most easily missed. `--add`, `--revise`, `--merge`,
+`--delete` and `--rename` all refuse an object nobody is looking at — but they
+refuse it *bare*. Give the same command a destination that needs attention and
+it does both in one confirmed operation. Reclassifying first and acting second
+is still allowed and is a different statement; it is not the required route.
+
+`--rename` replaces the title and nothing else. Do not reach for it to record
+that the work changed shape: that belongs in a section, where it can say why.
 
 Prefer `--revise` over delete-then-add. A revision keeps the section's id, so
 every reference to it stays meaningful; delete-then-add breaks them, and the id
@@ -321,10 +404,27 @@ Use `--untyped` to say explicitly that an object has no type. There is no
 transition order to follow: any state valid for the destination type is
 reachable, and every hop is a separate confirmation.
 
-**A no-attention object refuses section work.** That is the old "reopen first"
-rule in the wider vocabulary: classify it back into `draft`, `proposed` or
-`identified`, then revise. Renewed engineering work returns to the default
-listing rather than happening where nobody sees it.
+**A no-attention object refuses section work** — unless the same command puts it
+back in the listing. Add `--type <TYPE>` (or `--untyped`) and `--state <STATE>`
+to the revision itself and both land in one confirmation:
+
+```bash
+engr prepare --object <id> --revise 1 --text "..." --type design --state proposed
+```
+
+Prefer that to reclassifying first and revising second. Two confirmations means
+two authoritative statements, and the intermediate one is a state the object was
+never really in — a reader three months out cannot tell that from a real one.
+
+A destination that still needs no attention is refused, because that is the whole
+point: renewed engineering work returns to the default listing rather than
+happening where nobody sees it.
+
+**And it only works on an object that is out of the listing.** If the object
+already needs attention, adding `--type`/`--state` to a section action is
+refused — there is nothing to unblock, so it would be an unrelated change riding
+along inside a confirmation about something else. Classify it separately with
+`--classify`, where a reader can see it as its own statement.
 
 `--supersede` is the exception, because it is not renewed work — it is how an
 object stops being current, and the object it exists for is an `accepted` one.
@@ -434,3 +534,7 @@ it to everyone with repository access.
   gate or it does not move.
 - Do not set or clear `paused` on your own, and do not delete a paused sidecar.
   That signal is the human's, not yours.
+- Do not treat membership in a plan as a fact about the member. A collection
+  groups work; it says nothing about what any Object means or how settled it is.
+- Do not delete a collection, or repoint a member whose target is gone, on your
+  own judgement. Both discard planning somebody made.

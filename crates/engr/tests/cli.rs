@@ -152,6 +152,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "target".to_owned(),
                 based_on: None,
@@ -171,6 +172,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "projection wording".to_owned(),
                 based_on: None,
@@ -199,6 +201,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionRevised { section: 1 },
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "effective crash-tail wording".to_owned(),
                 based_on: None,
@@ -230,6 +233,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: source.clone(),
+            becomes: None,
             content: Content {
                 text: "source".to_owned(),
                 based_on: None,
@@ -248,6 +252,7 @@ fn reference_admission_uses_the_effective_target_projection() {
     let stale_projection_ref = Payload {
         action: Action::SectionAdded,
         object: source.clone(),
+        becomes: None,
         content: Content {
             text: "cannot pin stale projection".to_owned(),
             based_on: None,
@@ -299,6 +304,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: source,
+            becomes: None,
             content: Content {
                 text: "historically verified effective wording".to_owned(),
                 based_on: None,
@@ -326,6 +332,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::ObjectCreated,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "candidate state".to_owned(),
                 based_on: None,
@@ -343,6 +350,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "apply once".to_owned(),
                 based_on: None,
@@ -391,6 +399,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "stale candidate".to_owned(),
                 based_on: None,
@@ -406,6 +415,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id,
+            becomes: None,
             content: Content {
                 text: "overtaking mutation".to_owned(),
                 based_on: None,
@@ -1210,6 +1220,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload = Payload {
         action: Action::SectionAdded,
         object: id,
+        becomes: None,
         content: Content {
             text: "event wording".to_owned(),
             based_on: None,
@@ -1425,6 +1436,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
     let payload = Payload {
         action: Action::SectionAdded,
         object: object.clone(),
+        becomes: None,
         content: Content {
             text: "reconcile under lock".to_owned(),
             based_on: None,
@@ -1721,6 +1733,7 @@ fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
         Payload {
             action: Action::SectionAdded,
             object: object.clone(),
+            becomes: None,
             content: Content {
                 text: "what the work produced".to_owned(),
                 based_on: None,
@@ -1921,6 +1934,7 @@ fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
         Payload {
             action: Action::SectionAdded,
             object: object.clone(),
+            becomes: None,
             content: Content {
                 text: "what the work produced".to_owned(),
                 based_on: None,
@@ -2439,7 +2453,13 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
     );
 }
 
-/// A destination is only ever stated by the action that has one.
+/// A destination belongs to `--classify`, or to an action that needs the object
+/// back in the attention set — and to nothing else.
+///
+/// "Needs the object back" is the operative half. On an object that already
+/// needs attention there is nothing to bring back, so a destination on a section
+/// action is refused there too: it would be an unrelated change riding along
+/// inside a confirmation about something else.
 #[test]
 fn type_and_state_flags_belong_to_classify_and_nothing_else() {
     let workspace = TempDir::new().expect("temp dir");
@@ -2452,7 +2472,7 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
     for (args, expected) in [
         (
             vec!["prepare", "--object", &id, "--close", "--state", "closed"],
-            "--state sets a destination for --classify",
+            "already names the state it produces",
         ),
         (
             vec!["prepare", "--object", &id, "--classify", "--state", "open"],
@@ -2470,7 +2490,23 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
                 "--type",
                 "design",
             ],
-            "--type and --untyped set a destination for --classify",
+            "a destination needs a --state",
+        ),
+        (
+            vec![
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "x",
+                "--type",
+                "design",
+                "--state",
+                "proposed",
+            ],
+            "already needs attention",
         ),
         (
             vec!["prepare", "--object", &id, "--close", "--role", "decision"],
@@ -3170,4 +3206,481 @@ fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
         String::from_utf8_lossy(&removed.stderr)
     );
     assert!(String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"));
+}
+
+/// Planning is reachable, reads as planning, and stays out of the record.
+#[test]
+fn collections_are_their_own_namespace_and_never_reach_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    let empty = run_engr(root, &["collection", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("PLANNING"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no collections"), "{shown}");
+
+    let made = run_engr(
+        root,
+        &[
+            "collection",
+            "new",
+            "--name",
+            "Q3 authentication",
+            "--start",
+            "2026-07-01",
+            "--end",
+            "2026-09-30",
+        ],
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let plan = String::from_utf8_lossy(&made.stdout).to_string();
+    let plan_id = plan
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("the id is on the screen")
+        .trim()
+        .to_owned();
+
+    let added = run_engr(
+        root,
+        &[
+            "collection",
+            "add",
+            &plan_id,
+            "--target",
+            &format!("engr:obj:{compact}"),
+            "--order",
+            "10",
+            "--priority",
+            "high",
+            "--reason",
+            "Blocks the rest of the milestone.",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let shown = String::from_utf8_lossy(&added.stdout).to_string();
+    assert!(shown.contains("[high]"), "{shown}");
+    assert!(
+        shown.contains("Blocks the rest of the milestone."),
+        "{shown}"
+    );
+    // Derived attention, not `open`: half the vocabulary does not have that.
+    assert!(shown.contains("attention"), "{shown}");
+    assert!(shown.contains("the auth design"), "{shown}");
+
+    // The record's own commands see none of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["PLANNING", "Q3 authentication", "Blocks the rest"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?}: {shown}"
+            );
+        }
+    }
+
+    // Structured planning output says what it is, like the other two domains.
+    let structured: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan_id, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(structured["authority"], "planning", "{structured}");
+    assert_eq!(structured["state"], "open");
+    assert_eq!(structured["schedule"]["start"], "2026-07-01");
+    assert_eq!(structured["members"][0]["priority"]["level"], "high");
+}
+
+/// Deleting a plan is the agent's rule to follow, and the screen says what went.
+#[test]
+fn deleting_a_collection_reports_the_planning_context_it_discarded() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan_id = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    let deleted = run_engr(root, &["collection", "delete", &plan_id]);
+    assert!(
+        deleted.status.success(),
+        "the rule is normative, not mechanical: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    let said = String::from_utf8_lossy(&deleted.stdout).to_string();
+    assert!(said.contains("planning context"), "{said}");
+    assert!(!run_engr(root, &["collection", "show", &plan_id])
+        .status
+        .success());
+
+    // And the help does not claim a refusal the tool does not perform.
+    let help = String::from_utf8_lossy(&run_engr(root, &["collection", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["collection", "delete", "--help"]).stdout);
+    for stale in ["Refused", "refuses", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help claims a guard that is not there: {help}"
+        );
+    }
+}
+
+/// The listing puts what is still being pursued first.
+///
+/// Pinned with all three states because the bug it replaces was invisible with
+/// one: sorting by the *name* of the state puts `cancelled` and `completed`
+/// above `open` alphabetically, which is the exact reverse of what a planning
+/// listing is for, and nothing about a single open plan would have shown it.
+#[test]
+fn collection_ls_lists_open_plans_before_closed_ones() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let make = |name: &str| -> String {
+        let made = run_engr(root, &["collection", "new", "--name", name]);
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        String::from_utf8_lossy(&made.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("Collection "))
+            .expect("id")
+            .trim()
+            .to_owned()
+    };
+    // Named so that alphabetical order by name would also get this wrong.
+    let cancelled = make("aaa dropped");
+    let completed = make("bbb finished");
+    let open = make("zzz current");
+    assert!(run_engr(
+        root,
+        &["collection", "state", &cancelled, "--state", "cancelled"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["collection", "state", &completed, "--state", "completed"]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["collection", "ls"]).stdout).to_string();
+    // Rows only: the banner says "what its members mean", which a looser filter
+    // would count as a row and quietly shift every position by one.
+    let order: Vec<&str> = listed
+        .lines()
+        .filter(|line| line.contains("need attention"))
+        .map(|line| {
+            if line.contains("zzz current") {
+                "open"
+            } else if line.contains("bbb finished") {
+                "completed"
+            } else {
+                "cancelled"
+            }
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["open", "completed", "cancelled"],
+        "open plans come first: {listed}"
+    );
+    assert!(listed.contains(&open[..4]), "{listed}");
+}
+
+/// engr can name its own resources to itself.
+///
+/// Every reference-taking flag across three domains wants
+/// `engr:obj:<26-char>` or `engr:backlog:<26-char>`, and until this landed no
+/// command printed one — an agent had to implement Crockford Base32 outside the
+/// tool to use `--subject`, `--on` or `--target` at all. The test is the round
+/// trip rather than the field, because the field is only worth having if what
+/// it prints is exactly what the flags accept.
+#[test]
+fn a_read_surface_prints_the_reference_every_flag_asks_for() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "refresh", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+
+    // Text and structured both carry it, for both domains.
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let reference = object["reference"].as_str().expect("reference").to_owned();
+    assert!(reference.starts_with("engr:obj:"), "{reference}");
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{reference}:1"),
+        "a section names itself too, for --ref and --subject"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).contains(&reference),
+        "the text surface prints it as well"
+    );
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    let staged_reference = staged["reference"].as_str().expect("reference").to_owned();
+    assert!(
+        staged_reference.starts_with("engr:backlog:"),
+        "{staged_reference}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["backlog", "show", &item]).stdout)
+            .contains(&staged_reference)
+    );
+
+    // And every flag that demanded this shape accepts exactly what was printed.
+    let plan = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    let plan_id = String::from_utf8_lossy(&plan.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    for (what, args) in [
+        (
+            "collection add --target, an object",
+            vec!["collection", "add", &plan_id, "--target", &reference],
+        ),
+        (
+            "collection add --target, a backlog item",
+            vec!["collection", "add", &plan_id, "--target", &staged_reference],
+        ),
+        (
+            "work depend --on",
+            vec!["work", "depend", &id, "--on", &staged_reference],
+        ),
+        (
+            "backlog new --subject",
+            vec![
+                "backlog",
+                "new",
+                "--topic",
+                "t",
+                "--text",
+                "x",
+                "--subject",
+                &reference,
+            ],
+        ),
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{what} refused what engr itself printed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Every addressable entity says its own canonical reference, exactly.
+///
+/// The contract is the machine-readable path — an agent must be able to obtain
+/// a reference without reimplementing the codec — so this asserts the exact
+/// values rather than only that one of them round-trips. Sections included:
+/// they are addressable too, and `--ref` and `--subject` take them.
+#[test]
+fn every_addressable_entity_exposes_its_canonical_reference() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "t", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    // The exact values, derived independently of the surfaces under test.
+    let object_ref = format!(
+        "engr:obj:{}",
+        engr::reference::encode_uuid_str(&id).expect("compact")
+    );
+    let item_ref = format!(
+        "engr:backlog:{}",
+        engr::reference::encode_uuid_str(&item).expect("compact")
+    );
+    let plan_ref = format!("engr:collection:{plan}");
+
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(object["reference"], object_ref);
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{object_ref}:1")
+    );
+    assert_eq!(object["id"], id, "identity is not replaced by addressing");
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(staged["reference"], item_ref);
+    assert_eq!(staged["sections"][0]["reference"], format!("{item_ref}:1"));
+    assert_eq!(
+        staged["sections"][0]["id"], 1,
+        "the section keeps its own id"
+    );
+    assert_eq!(staged["id"], item);
+
+    let planned: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(planned["reference"], plan_ref);
+    assert_eq!(planned["id"], plan);
+
+    // Each one is accepted where it is meant to be used.
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "u",
+            "--text",
+            "x",
+            "--subject",
+            &format!("{object_ref}:1")
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["collection", "add", &plan, "--target", &item_ref])
+            .status
+            .success()
+    );
+}
+
+/// `:0` names a section that cannot exist, so the shared parser refuses it.
+#[test]
+fn a_zero_section_selector_is_refused_everywhere() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    for spelling in [
+        format!("engr:obj:{compact}:0"),
+        format!("obj:{compact}:0"),
+        format!("engr:backlog:{compact}:0"),
+    ] {
+        let error = engr::reference::EngrRef::parse_embedded(
+            spelling.strip_prefix("engr:").unwrap_or(&spelling),
+        )
+        .expect_err("section ids start at 1");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{spelling}");
+        assert!(error.message.contains("positive integer"), "{error}");
+    }
+    // One is still fine, and so is the parser's own error for a non-integer.
+    assert!(engr::reference::EngrRef::parse_embedded(&format!("obj:{compact}:1")).is_ok());
+
+    // And it is refused at the command line, through the same parser.
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "t",
+            "--text",
+            "x",
+            "--subject",
+            &format!("engr:obj:{compact}:0"),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("positive integer"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }
