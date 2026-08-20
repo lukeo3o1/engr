@@ -400,12 +400,31 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     // sidecar names its Object in its filename, so a copied file can name one
     // that never existed — and a check that only runs on the write path would
     // let this build read, list and hand back operational memory for nothing.
-    ensure!(
-        crate::ops::effective(root, object).is_ok(),
-        EXIT_SCHEMA,
-        "{} belongs to no object: a sidecar is owned by an Object, and object {object} does not exist",
-        path.display()
-    );
+    // `is_ok()` used to answer this, which collapsed "the Object is not there"
+    // and "the Object will not load" into one sentence — and the sentence it
+    // chose was the wrong one, sending a reader to create a record that is
+    // already on disk while hiding the fault that actually needs looking at.
+    // Unreadable authority is not absence, on this path as on every other.
+    if let Err(error) = crate::ops::effective(root, object) {
+        return Err(if error.code == EXIT_NOT_FOUND {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{} belongs to no object: a sidecar is owned by an Object, and object {object} does not exist",
+                    path.display()
+                ),
+            )
+        } else {
+            Error::new(
+                error.code,
+                format!(
+                    "{} belongs to object {object}, which cannot be read: {}",
+                    path.display(),
+                    error.message
+                ),
+            )
+        });
+    }
     Ok(work)
 }
 

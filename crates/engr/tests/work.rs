@@ -681,3 +681,42 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
     assert_eq!(stored.dependencies.len(), 1);
     assert_eq!(stored.blockers.len(), 1);
 }
+
+/// A sidecar whose Object will not load says so, rather than that it is absent.
+///
+/// The owner check answered with `is_ok()`, which collapsed "the Object is not
+/// there" and "the Object will not load" into one sentence — and picked the
+/// wrong one. A reader told the Object does not exist goes and creates a record
+/// that is already on disk, while the fault that actually needs looking at goes
+/// unmentioned. Unreadable authority is not absence, on this path as on every
+/// other.
+#[test]
+fn work_says_its_owner_is_unreadable_rather_than_absent() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "the owner");
+    work::start(&root, &object, Some("underway")).expect("start");
+    work::load(&root, &object).expect("a sound owner");
+
+    // Present on disk, and not loadable.
+    let path = store::object_path(&root, &object);
+    let mut stored: serde_json::Value = store::read_json(&path).expect("read");
+    stored["state"] = serde_json::json!("not-a-state");
+    store::write_json(&path, &stored).expect("write");
+
+    let error = work::load(&root, &object).expect_err("the owner will not load");
+    assert!(
+        error.message.contains("cannot be read"),
+        "the refusal must name the real fault: {error}"
+    );
+    assert!(
+        !error.message.contains("does not exist"),
+        "and must not send someone to create what is already there: {error}"
+    );
+
+    // Genuine absence still reads as absence, which is the distinction being
+    // kept rather than merely a different message.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::remove_file(store::events_path(&root, &object)).expect("remove events");
+    let error = work::load(&root, &object).expect_err("the owner is gone");
+    assert!(error.message.contains("does not exist"), "{error}");
+}
