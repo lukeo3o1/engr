@@ -1,8 +1,9 @@
 //! The gate is the only way in. These tests pin that.
 
 use engr::model::{Action, Content, Payload, Ref};
-use engr::semantics::State;
-use engr::{gate, ops, store};
+use engr::semantics::{Relation, Role, State, Supplement};
+use engr::{backlog, gate, ops, store};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -76,6 +77,10 @@ fn admit(root: &Path, payload: Payload) -> engr::model::Object {
     let response = format!("CONFIRM {}", prepared.candidate.challenge);
     gate::confirm(root, &response).expect("confirm").object
 }
+
+/// One way a stored candidate can be rewritten on disk, named so the matrix
+/// below reads as a list of risks rather than a list of closure types.
+type Tamper = (&'static str, Box<dyn Fn(&mut serde_json::Value)>);
 
 fn new_object(root: &Path, title: &str) -> String {
     let id = engr::model::new_id();
@@ -771,17 +776,21 @@ fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
 /// change against. Rewriting either on disk would let a candidate present or
 /// bind a different confirmation context and still pass its own hash, so one
 /// integrity value covers all of it.
+///
+/// Exhaustive by construction, not by sample. Every field of `PreparedContext`
+/// has a case below, and the assertion after the loop fails when one does not —
+/// because the way a field silently stops being hashed is by being moved out of
+/// the context struct, and a sampled list would never notice.
 #[test]
 fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "candidate integrity");
     admit(&root, payload(Action::SectionAdded, &id, "old wording"));
 
-    for (name, tamper) in [
+    let cases: Vec<Tamper> = vec![
         (
-            "binding",
-            Box::new(|value: &mut serde_json::Value| value["expected_rev"] = serde_json::json!(0))
-                as Box<dyn Fn(&mut serde_json::Value)>,
+            "expected_rev",
+            Box::new(|value: &mut serde_json::Value| value["expected_rev"] = serde_json::json!(0)),
         ),
         (
             "previous_text",
@@ -812,7 +821,104 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
                 value["previous_semantics_recorded"] = serde_json::json!(false)
             }),
         ),
-    ] {
+        // The four below arrived with Phase 3 and Phase 4. Each is skipped when
+        // empty, so tampering means introducing one that was never prepared —
+        // which is the shape the risk actually takes: an exception nobody
+        // granted, a supplementary body nobody was shown, a Backlog source
+        // nobody named.
+        (
+            "previous_role",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_role"] = serde_json::to_value(Role::Decision).expect("role")
+            }),
+        ),
+        (
+            "previous_content",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_content"] =
+                    serde_json::to_value(vec![Supplement::new("code.rs", "fn main() {}")])
+                        .expect("content")
+            }),
+        ),
+        (
+            "previous_relations",
+            Box::new(|value: &mut serde_json::Value| {
+                value["previous_relations"] = serde_json::to_value(vec![Relation::superseded_by(
+                    format!("obj:{}", "0".repeat(26)),
+                )])
+                .expect("relations")
+            }),
+        ),
+        (
+            "oversize",
+            Box::new(|value: &mut serde_json::Value| value["oversize"] = serde_json::json!(true)),
+        ),
+        (
+            "object_title",
+            Box::new(|value: &mut serde_json::Value| {
+                value["object_title"] = serde_json::json!("a record this is not")
+            }),
+        ),
+        (
+            "backlog",
+            Box::new(|value: &mut serde_json::Value| {
+                value["backlog"] = serde_json::to_value(vec![backlog::Source {
+                    item: engr::model::new_id(),
+                    section: 1,
+                    basis_sha256: "0".repeat(64),
+                    produced: Vec::new(),
+                    resolves: true,
+                }])
+                .expect("backlog")
+            }),
+        ),
+    ];
+
+    // Every field of `PreparedContext` is exercised above. The comparison is
+    // against the struct's own serialized keys rather than a list written out
+    // here, so adding a field to the prepared context without proving it is
+    // hashed fails this test instead of passing quietly.
+    let populated = gate::PreparedContext {
+        previous_text: Some("wording".to_owned()),
+        previous_based_on: Some("0".repeat(40)),
+        previous_refs: vec![Ref {
+            object: engr::model::new_id(),
+            section: 1,
+            sha256: "0".repeat(64),
+            commit: "0".repeat(40),
+        }],
+        previous_role: Some(Role::Decision),
+        previous_content: vec![Supplement::new("code.rs", "fn main() {}")],
+        previous_relations: vec![Relation::superseded_by(format!("obj:{}", "0".repeat(26)))],
+        previous_semantics_recorded: true,
+        oversize: true,
+        backlog: vec![backlog::Source {
+            item: engr::model::new_id(),
+            section: 1,
+            basis_sha256: "0".repeat(64),
+            produced: Vec::new(),
+            resolves: true,
+        }],
+        object_title: Some("the record being changed".to_owned()),
+    };
+    let declared: BTreeSet<String> = serde_json::to_value(&populated)
+        .expect("context")
+        .as_object()
+        .expect("an object")
+        .keys()
+        .cloned()
+        .collect();
+    let exercised: BTreeSet<String> = cases
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .filter(|name| name != "expected_rev")
+        .collect();
+    assert_eq!(
+        declared, exercised,
+        "a prepared-context field with no case here is a field nothing proves is hashed"
+    );
+
+    for (name, tamper) in cases {
         let prepared = gate::prepare(
             &root,
             payload(Action::SectionRevised { section: 1 }, &id, "new wording"),

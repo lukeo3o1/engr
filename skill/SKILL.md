@@ -501,7 +501,14 @@ thing you relied on changes. A section cannot directly reference itself.
 ## Committing
 
 Objects and confirmed history live in the repository. **Remind the human to
-commit `.engr/objects`, `.engr/events` and `.engr/backlog`.**
+commit `.engr/objects`, `.engr/events`, `.engr/backlog`, `.engr/work` and
+`.engr/collections`.**
+
+All five, not the first three. Work and Collections are non-authoritative, but
+git is the only history they have — an uncommitted plan or handoff is simply
+lost, and losing it silently is worse than never writing it. `.engr/candidates`
+is the one directory that must never be committed, and `.gitignore` already
+excludes it.
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and

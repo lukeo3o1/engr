@@ -340,8 +340,8 @@ struct Prepare {
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
-    /// Declare an untyped object finished. Shorthand for --classify --untyped
-    /// --state closed
+    /// Declare an untyped object finished. Not a spelling of --classify: it is
+    /// its own action, and it refuses an object nobody is looking at
     #[arg(long)]
     close: bool,
     /// Take a finished untyped object back up
@@ -358,8 +358,8 @@ struct Prepare {
     /// The object to act on. Any unique id prefix. Omit only with --new
     #[arg(long)]
     object: Option<String>,
-    /// Destination type. With --classify, or with a section action on a settled
-    /// object to do both in one confirmation
+    /// Destination type. With --classify, or on a settled object with --add,
+    /// --revise, --merge, --delete or --rename, to do both in one confirmation
     #[arg(
         long = "type",
         value_enum,
@@ -633,7 +633,11 @@ fn run(cli: Cli) -> Result<()> {
                 "CONFIRMED  {}  {}  rev {}",
                 shorten(&admitted.object.id, view::width(&root)),
                 admitted.event.payload.action.label(),
-                admitted.object.rev
+                // The event's rev, not the object's. They coincide except on
+                // the already-applied retry — the one path that exists to
+                // reassure someone after a crash, and the one where naming a
+                // later revision would say the wrong thing happened.
+                admitted.event.rev
             );
             report_backlog(&root, &admitted.backlog);
             warn_uncommitted(&root, &admitted.object.id);
@@ -1394,10 +1398,51 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     let width = view::width(root);
     let backlog_width = view::backlog_width(root);
     let mut out = String::new();
+    // The action names what is being done; without the section it applies to,
+    // it does not name *what to*. Two sections can carry identical wording, and
+    // then `--delete 1` and `--delete 2` render the same screen for two
+    // mutations that are not interchangeable: ids are never reused, so
+    // confirming the wrong one breaks every reference pinning it with no way
+    // back. `Payload`'s own rustdoc promises "delete §3 cannot become delete §5
+    // after it was displayed" — the hash kept that promise, the screen did not.
+    //
+    // The object gets its title for the same reason. A human asked to assent to
+    // a change is entitled to be told which record they are changing by a name
+    // they would recognise, not only by an abbreviated uuid.
+    //
+    // It comes from the prepared context, never from a fresh read. A live
+    // lookup would put part of the confirmation identity outside the candidate
+    // and outside its integrity value, so a title rewritten afterwards would
+    // change what a pending candidate presents while the payload hash, the
+    // integrity hash and `expected_rev` all still checked out. Omitted when
+    // there is none, which is the case for `object.created` — its title is the
+    // wording below — and for candidates prepared before the snapshot existed.
+    let subject = match &candidate.payload.action {
+        Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+            format!(" §{section}")
+        }
+        Action::SectionMerged { absorbs } => format!(
+            " absorbing {}",
+            absorbs
+                .iter()
+                .map(|section| format!("§{section}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => String::new(),
+    };
+    let title = candidate
+        .context
+        .object_title
+        .as_deref()
+        .map(|title| format!("  {title}"))
+        .unwrap_or_default();
     out.push_str(&format!(
-        "Candidate  {}\nObject     {}\n",
+        "Candidate  {}{}\nObject     {}{}\n",
         candidate.payload.action.label(),
-        shorten(&candidate.payload.object, width)
+        subject,
+        shorten(&candidate.payload.object, width),
+        title
     ));
     // A title is a label, not wording written against code, so the commit it
     // happened to be typed at says nothing about the change being confirmed.
