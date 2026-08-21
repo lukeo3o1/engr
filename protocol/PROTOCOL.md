@@ -1497,6 +1497,31 @@ abandonment record, and no pending-review resource — which is the same decisio
 seen from the other side, since any of those would be the durable counter this
 is not.
 
+### Unordered sets have one order
+
+Every field whose semantics are a set — a rule's domains, its bases, the
+applicable rule set itself — is canonicalized the same way before it is hashed:
+
+```text
+1. canonicalize each element on its own
+2. sort by the lexicographic order of those canonical bytes
+3. reject duplicate canonical elements
+4. hash the resulting sequence
+```
+
+Sorting by whichever field looks natural is the trap this replaces, and it is
+not obviously wrong: bases sorted by `path` are deterministic and stable. They
+are still in a different order, because canonical JSON sorts keys, so a basis's
+bytes begin with `commit` and a pinned basis precedes a floating one whatever
+the paths say. Two implementations, one sorting by path and one by canonical
+bytes, would hash the same rule differently — and a hash contract that two
+conforming implementations disagree about is not a contract.
+
+The order a surface *shows* is a separate question with a separate answer: bases
+are listed by path because that is what a reader is looking for, and the
+applicable set is reported by id because an agent must be able to name the set
+without first reproducing the hash.
+
 The **effective** values are what participate in review identity — not whether
 the YAML happened to spell a default out. These two are one rule, and a binding
 over either produces the same hash:

@@ -1788,3 +1788,120 @@ fn a_review_attempt_is_counted_from_one_and_zero_is_not_a_value() {
         })
     );
 }
+
+/// The hashed order of an unordered set is the protocol's, not whichever field
+/// looked natural to sort by.
+///
+/// `based_on` was sorted by `path`, which is deterministic, stable, and still
+/// wrong: canonical JSON sorts keys, so a basis's canonical bytes begin with
+/// `commit`, and a pinned basis therefore precedes a floating one whatever the
+/// paths say. Two conforming implementations — one sorting by path, one by
+/// canonical bytes — would hash the same rule differently, which is exactly what
+/// a shared hash contract cannot allow.
+///
+/// The case is built so the two orders disagree by construction rather than by
+/// luck: `"commit"` sorts before `"content"`, so the pinned basis wins the
+/// comparison before either path is ever examined.
+#[test]
+fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("a-floating.md"), "current material\n").expect("floating");
+    std::fs::write(root.join("z-pinned.md"), "pinned material\n").expect("pinned");
+    let commit = commit_all(&root, "bases");
+
+    write_rule(
+        &root,
+        "ordering",
+        &format!(
+            "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-floating.md\n  - path: z-pinned.md\n    commit: {commit}\n---\n\n# Ordering\n\nBoth bases matter.\n"
+        ),
+    );
+
+    // Read order stays human-friendly: by path.
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    assert_eq!(
+        rule.based_on
+            .iter()
+            .map(|basis| basis.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-floating.md", "z-pinned.md"],
+    );
+
+    // Hashed order is canonical: the pinned basis carries a `commit` key, and
+    // `"commit"` precedes `"content"`, so it sorts first despite its path.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(
+        bound.rules()[0]
+            .based_on
+            .iter()
+            .map(|basis| basis.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-pinned.md", "a-floating.md"],
+        "the hashed set is in canonical-bytes order, not path order"
+    );
+}
+
+/// The applicable rule set is hashed canonically, and reported by id.
+///
+/// Those are different orders on purpose. Canonical bytes begin with a rule's
+/// bases, which is right for a hash and useless to a person — and useless for
+/// comparing what an agent claims it reviewed, since the agent would have to
+/// reproduce the hash to reproduce the order. So the set question is answered in
+/// the one order both sides can produce independently.
+#[test]
+fn the_reported_rule_set_is_by_id_even_though_the_hash_is_not() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    // `zebra` has no bases; `alpha` does. Canonical bytes put the one with
+    // bases first, so hash order and id order disagree.
+    write_rule(
+        &root,
+        "alpha",
+        ARCHITECTURE
+            .replace("architecture-consistency", "alpha")
+            .as_str(),
+    );
+    write_rule(
+        &root,
+        "zebra",
+        "---\nid: zebra\napplies:\n  domains:\n    - backlog\n---\n\n# Zebra\n\nNo bases.\n",
+    );
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+
+    assert_eq!(
+        bound.rule_ids(),
+        vec!["alpha".to_owned(), "zebra".to_owned()],
+        "reported by id, so an agent can name the set without computing a hash"
+    );
+    assert_eq!(
+        bound
+            .rules()
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zebra", "alpha"],
+        "hashed in canonical-bytes order, which begins with `based_on`: an empty \
+         list sorts before a populated one, so the two orders genuinely disagree"
+    );
+
+    // And `check` accepts that same id set, which is the property the ordering
+    // split exists to preserve.
+    rules::check(
+        &root,
+        Domain::Backlog,
+        mutation,
+        precondition,
+        &bound.sha256().expect("hash"),
+        &["zebra".to_owned(), "alpha".to_owned()],
+    )
+    .expect("the named set is a set, whatever order it arrives in");
+}

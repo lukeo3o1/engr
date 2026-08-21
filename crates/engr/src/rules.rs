@@ -1000,9 +1000,53 @@ impl ReviewBinding {
     }
 
     /// Every rule id this review must cover, in the order the hash saw them.
+    /// Sorted by id, which is **not** the order the hash saw them.
+    ///
+    /// The hashed order is the protocol's canonical-bytes order, which for a
+    /// rule begins with its bases rather than its name. That is right for a
+    /// hash and useless for a person or for comparing what an agent said it
+    /// reviewed, so this answers the set question in the one order both sides
+    /// can produce independently.
     pub fn rule_ids(&self) -> Vec<String> {
-        self.rules.iter().map(|rule| rule.id.clone()).collect()
+        let mut ids: Vec<String> = self.rules.iter().map(|rule| rule.id.clone()).collect();
+        ids.sort();
+        ids
     }
+}
+
+/// Put an unordered collection into the one order the protocol defines.
+///
+/// Canonicalize each element, sort by the lexicographic order of those canonical
+/// bytes, and refuse duplicates. That is the protocol-wide rule for any field
+/// whose semantics are a set, and it exists to keep implementation-specific
+/// ordering — Rust's `derive(Ord)`, struct declaration order, or sorting by
+/// whichever field seemed natural — out of a hash contract two implementations
+/// must agree on.
+///
+/// Sorting by one field is the trap this replaces, and it is not obviously
+/// wrong: `based_on` sorted by `path` is deterministic and stable. It is still a
+/// different order, because canonical JSON sorts keys, so a basis's bytes begin
+/// with `commit` rather than `path`. Two conforming implementations would then
+/// hash the same rule differently.
+fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
+    let mut keyed: Vec<(String, T)> = Vec::with_capacity(items.len());
+    for item in std::mem::take(items) {
+        let value = serde_json::to_value(&item)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))?;
+        let canonical = serde_json::to_string(&value)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))?;
+        keyed.push((canonical, item));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in keyed.windows(2) {
+        ensure!(
+            pair[0].0 != pair[1].0,
+            EXIT_SCHEMA,
+            "the same {what} appears twice"
+        );
+    }
+    items.extend(keyed.into_iter().map(|(_, item)| item));
+    Ok(())
 }
 
 /// Freeze what a review of this mutation has to cover.
@@ -1023,14 +1067,22 @@ pub fn bind(
         for basis in &rule.based_on {
             based_on.push(basis.resolve(root, &rule.id)?);
         }
+        // Every set that reaches the hash goes through the one protocol rule.
+        // `Rule::based_on` is kept in path order for reading; the *hashed* order
+        // is this one, because the two answer different questions and only one
+        // of them is a contract.
+        canonical_order(&mut based_on, "basis")?;
+        let mut domains = rule.domains;
+        canonical_order(&mut domains, "domain")?;
         bound.push(BoundRule {
             id: rule.id,
-            domains: rule.domains,
+            domains,
             based_on,
             review: rule.review,
             body: rule.body,
         });
     }
+    canonical_order(&mut bound, "applicable rule")?;
     Ok(ReviewBinding {
         binding: BINDING,
         version: BINDING_VERSION,
