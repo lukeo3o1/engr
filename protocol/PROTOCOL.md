@@ -1499,15 +1499,25 @@ is not.
 
 ### Unordered sets have one order
 
-Every field whose semantics are a set — a rule's domains, its bases, the
-applicable rule set itself — is canonicalized the same way before it is hashed:
+Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable
+serialization. Every field whose semantics are a set — a rule's domains, its
+bases, the applicable rule set itself — is canonicalized the same way before it
+is hashed:
 
 ```text
-1. canonicalize each element on its own
+1. JCS each element on its own
 2. sort by the lexicographic order of those canonical bytes
-3. reject duplicate canonical elements
-4. hash the resulting sequence
+3. reject canonical-equivalent duplicates
+4. JCS the resulting structure and hash it
 ```
+
+Naming a standard is the point: JCS orders object members by **UTF-16** code
+units and fixes number formatting, so a second implementation in another
+language computes the same bytes. A stable serializer gives determinism for one
+implementation, which is a weaker claim wearing the same word — and a review
+hash is exactly where the difference bites, because an attestation is meant to
+be checkable by whoever recomputes it. The orders genuinely differ: `U+1F600`
+precedes `U+E000` under UTF-16 and follows it under UTF-8.
 
 Sorting by whichever field looks natural is the trap this replaces, and it is
 not obviously wrong: bases sorted by `path` are deterministic and stable. They

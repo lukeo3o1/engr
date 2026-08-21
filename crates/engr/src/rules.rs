@@ -986,13 +986,30 @@ impl ReviewBinding {
 }
 
 impl ReviewBinding {
-    /// SHA-256 over the canonical JSON form.
+    /// SHA-256 over the **RFC 8785 (JCS)** bytes of this binding.
     ///
-    /// The same primitive the confirmation gate uses, so key order comes from a
-    /// `BTreeMap` rather than from declaration order, and the rule and basis
-    /// lists were sorted before they got here.
+    /// Deliberately not [`crate::confirmation::fingerprint`], which this used to
+    /// delegate to. That primitive canonicalizes through `serde_json`, which is
+    /// stable for one implementation and is not JCS — and every value it hashes
+    /// is already persisted in confirmed Events and Section seals, so changing
+    /// it changes hashes that exist. That is a coordinated workspace migration,
+    /// not a refactor, and it is not this slice's.
+    ///
+    /// Which leaves engr with **two canonicalizations at once**, and that is
+    /// worth saying out loud rather than discovering later: this one is JCS, the
+    /// gate's is serde. They agree on everything engr's own schema produces and
+    /// disagree on exotic object keys and number formats. Unifying them is the
+    /// open question, recorded on the PR — not something to settle by quietly
+    /// pointing one at the other.
+    ///
+    /// The rule and basis lists were put in canonical order before they got
+    /// here; see [`canonical_order`].
     pub fn sha256(&self) -> Result<String> {
-        crate::confirmation::fingerprint(self)
+        let canonical = canonical_bytes(self, "review binding")?;
+        Ok(format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(canonical.as_bytes())
+        ))
     }
 
     pub fn rules(&self) -> &[BoundRule] {
@@ -1014,6 +1031,24 @@ impl ReviewBinding {
     }
 }
 
+/// The canonical bytes of one value, as **RFC 8785 (JCS)**.
+///
+/// Not `serde_json::to_string`, and the difference is not academic. JCS orders
+/// object members by their **UTF-16** code units, while `serde_json`'s map is
+/// ordered by Rust string comparison, which is UTF-8 order. For keys `U+E000`
+/// and `U+1F600` the two disagree — `U+1F600`'s first UTF-16 unit is `D83D`,
+/// which precedes `E000`, while in UTF-8 `U+E000` sorts first. JCS also fixes
+/// number formatting, which stable serde output does not promise.
+///
+/// The point of naming a standard is that a second implementation, in another
+/// language, computes the same bytes. "Deterministic for us" is a weaker claim
+/// wearing the same word, and a review hash is exactly where the difference
+/// bites: an attestation is meant to be checkable by whoever recomputes it.
+fn canonical_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
+    serde_jcs::to_string(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))
+}
+
 /// Put an unordered collection into the one order the protocol defines.
 ///
 /// Canonicalize each element, sort by the lexicographic order of those canonical
@@ -1031,10 +1066,7 @@ impl ReviewBinding {
 fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
     let mut keyed: Vec<(String, T)> = Vec::with_capacity(items.len());
     for item in std::mem::take(items) {
-        let value = serde_json::to_value(&item)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))?;
-        let canonical = serde_json::to_string(&value)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))?;
+        let canonical = canonical_bytes(&item, what)?;
         keyed.push((canonical, item));
     }
     keyed.sort_by(|left, right| left.0.cmp(&right.0));

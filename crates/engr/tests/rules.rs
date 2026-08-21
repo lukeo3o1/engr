@@ -1905,3 +1905,68 @@ fn the_reported_rule_set_is_by_id_even_though_the_hash_is_not() {
     )
     .expect("the named set is a set, whatever order it arrives in");
 }
+
+/// The canonical bytes are RFC 8785, not "whatever serde produces stably".
+///
+/// The two are easy to confuse, because serde's output *is* deterministic for
+/// one implementation — that is the weaker claim wearing the same word. An
+/// attestation is meant to be checkable by whoever recomputes it, possibly in
+/// another language, which is the entire reason a standard is named.
+///
+/// The divergence is concrete. JCS orders object members by **UTF-16** code
+/// units; `serde_json`'s map is ordered by Rust string comparison, which is
+/// UTF-8 order. `U+1F600` begins with the UTF-16 unit `D83D`, which precedes
+/// `E000`, while in UTF-8 `U+E000` sorts first. The subject below carries both
+/// keys, so the two canonicalizations disagree about it.
+///
+/// Pinned as an exact digest rather than a property. A property test would have
+/// to reproduce the binding's shape to compare against, and a reconstruction
+/// that drifts from the real one silently stops testing anything — which is how
+/// the first version of this test passed while the implementation used serde
+/// bytes. **This value is the contract**: it should change only when the binding
+/// deliberately changes, and never because a serializer did.
+#[test]
+fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "fixed",
+        "---\nid: fixed\napplies:\n  domains:\n    - backlog\n---\n\n# Fixed\n\nExact bytes.\n",
+    );
+    let mutation = serde_json::json!({
+        "action": "backlog.section_added",
+        "keys": { "\u{1F600}": "emoji", "\u{E000}": "private use" }
+    });
+    let precondition = serde_json::json!({"item": "01a0", "sections": 2});
+
+    // The case genuinely separates the two orderings; if this ever stops being
+    // true, the digest below is no longer proving what it claims and the case
+    // needs sharpening rather than the assertion relaxing.
+    assert_ne!(
+        serde_json::to_string(&mutation).expect("serde"),
+        serde_jcs::to_string(&mutation).expect("jcs"),
+        "the subject must separate UTF-8 order from UTF-16 order"
+    );
+
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    assert_eq!(
+        bound.sha256().expect("hash"),
+        "47eb5a407a4d4769325129310bd877e50a30e0584377c761cab3ed3c88eebd5d",
+        "the review binding digest is SHA-256 over its RFC 8785 bytes"
+    );
+
+    // Nothing is remembered, so recomputation is the same value.
+    assert_eq!(
+        rules::bind(&root, Domain::Backlog, mutation, precondition)
+            .expect("bind")
+            .sha256()
+            .expect("hash"),
+        bound.sha256().expect("hash")
+    );
+}
