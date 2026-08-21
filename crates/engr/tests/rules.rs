@@ -727,3 +727,49 @@ fn the_rules_directory_cannot_be_redirected_elsewhere() {
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("link to somewhere else"), "{error}");
 }
+
+/// `.md` is a name, not a kind.
+///
+/// Refusing links was not enough: the enumeration handed every other `*.md`
+/// entry straight to a read. A directory fails noisily, but on Unix a FIFO
+/// named `policy.md` makes the read block until someone opens the other end —
+/// so a filesystem object nobody can commit turns into a workspace that will
+/// not load rules at all, and the failure is a hang rather than an answer.
+///
+/// Checked before reading, because that is while it can still be a refusal.
+#[test]
+fn a_rule_entry_must_be_a_regular_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    rules::load_all(&root).expect("sound to begin with");
+
+    // Portable: a directory whose name ends in `.md`.
+    let shaped = rules::dir(&root).join("directory.md");
+    std::fs::create_dir(&shaped).expect("directory");
+    let error = rules::load_all(&root).expect_err("a directory is not a rule");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("must be a regular file"), "{error}");
+    std::fs::remove_dir(&shaped).expect("remove");
+
+    // Unix: the case that would otherwise hang rather than fail.
+    #[cfg(unix)]
+    {
+        let pipe = rules::dir(&root).join("policy.md");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let error = rules::load_all(&root).expect_err("a pipe is not a rule");
+        assert_eq!(error.code, engr::EXIT_SCHEMA);
+        assert!(error.message.contains("must be a regular file"), "{error}");
+        std::fs::remove_file(&pipe).expect("remove");
+    }
+
+    // And the real rule beside them still loads, so the refusal is about the
+    // entry rather than about the directory it was found in.
+    let rules = rules::load_all(&root).expect("rules");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].id, "architecture-consistency");
+}

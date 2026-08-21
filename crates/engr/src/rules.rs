@@ -328,6 +328,21 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
             "{}: a rule file is a link rather than the rule itself; git records a link's target name where the loader would read the target's contents, so the two would not agree on what the rule says",
             path.display()
         );
+        // And a regular file, not merely something that is not a link. `.md` is a
+        // name, not a kind: a FIFO called `policy.md` makes `read_to_string`
+        // block until someone opens the other end, so an entry nobody can
+        // commit becomes a workspace that will not load rules at all. Devices
+        // and sockets have no place in a model where a rule's bytes are what
+        // git tracks for that path.
+        //
+        // Checked before reading, for the same reason as the link check: the
+        // refusal has to happen while it can still be a refusal.
+        ensure!(
+            kind.is_file(),
+            EXIT_SCHEMA,
+            "{}: a rule file must be a regular file; this is not one, so it is not something git can track as project policy",
+            path.display()
+        );
         files.push(path);
     }
     files.sort();
