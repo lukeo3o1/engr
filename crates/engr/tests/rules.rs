@@ -786,3 +786,169 @@ fn a_rule_entry_must_be_a_regular_file() {
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].id, "architecture-consistency");
 }
+
+/// A basis names a real regular file, exactly as a rule file must.
+///
+/// The path and symlink checks pass a FIFO happily, and then the read blocks
+/// until someone opens the other end — so a project file nobody can commit
+/// becomes a rule that can never be resolved, and the failure is a hang rather
+/// than an answer. Bounded here for the same reason it is bounded for rule
+/// files: a test that hangs to prove resolution cannot hang has proved nothing.
+#[test]
+#[cfg(unix)]
+fn a_basis_must_be_a_regular_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect("a real file");
+
+    std::fs::remove_file(root.join("AGENTS.md")).expect("remove");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(root.join("AGENTS.md"))
+        .status()
+        .expect("mkfifo")
+        .success());
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let probe = root.clone();
+    std::thread::spawn(move || {
+        let rule = rules::load_all(&probe).expect("rules").remove(0);
+        let _ = sender.send(rule.based_on[0].resolve(&probe, &rule.id).map(|_| ()));
+    });
+    let outcome = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("resolving a basis must not block on a pipe");
+    let error = outcome.expect_err("a pipe is not project material");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("not a regular file"), "{error}");
+}
+
+/// A pinned basis checks what git recorded, not only what git prints.
+///
+/// `git show <commit>:<path>` prints a symlink's *target name* as though it
+/// were content. So a historical link whose target name happens to equal a
+/// later regular file's contents compares equal, and the pin reads as current
+/// across a change from a link to a file — the one transition the no-symlink
+/// rule exists to keep visible. The tree entry mode is the only place that
+/// distinction survives.
+#[test]
+#[cfg(unix)]
+fn a_pinned_basis_checks_the_recorded_mode_and_not_only_the_bytes() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("real.md"), "the contract\n").expect("file");
+    std::os::unix::fs::symlink("real.md", root.join("policy.md")).expect("symlink");
+    let pinned_at = commit_all(&root, "a link and its target");
+
+    // The trap: replace the link with a regular file whose literal contents are
+    // the link's old target name. Byte-for-byte, both sides now read `real.md`.
+    std::fs::remove_file(root.join("policy.md")).expect("remove");
+    std::fs::write(root.join("policy.md"), "real.md").expect("same bytes");
+    assert_eq!(
+        engr::git::blob_at(&root, &pinned_at, "policy.md").expect("blob"),
+        std::fs::read_to_string(root.join("policy.md")).expect("disk"),
+        "the two sides agree on content, which is exactly the trap"
+    );
+
+    write_rule(
+        &root,
+        "pinned",
+        &format!(
+            "---\nid: pinned\napplies:\n  domains: [object]\nbased_on:\n  - path: policy.md\n    commit: {pinned_at}\n---\n\n# Pinned\n\nThe rule.\n"
+        ),
+    );
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    let error = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect_err("the historical entry was a link, whatever its bytes said");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("not a regular file at"), "{error}");
+}
+
+/// A `based_on` commit names a commit, not a tag that points at one.
+#[test]
+fn a_pinned_basis_refuses_an_object_that_is_not_a_commit() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    commit_all(&root, "the contract");
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "tag",
+            "-a",
+            "v1",
+            "-m",
+            "annotated",
+        ],
+    );
+    let tag = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "v1"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+
+    // It reaches a commit — which is why a reachability check accepted it — and
+    // it is not one.
+    assert!(engr::git::exists(&root, &tag));
+    assert_eq!(
+        engr::git::object_type(&root, &tag).as_deref(),
+        Some("tag"),
+        "an annotated tag is its own object"
+    );
+
+    write_rule(
+        &root,
+        "tagged",
+        &format!(
+            "---\nid: tagged\napplies:\n  domains: [object]\nbased_on:\n  - path: AGENTS.md\n    commit: {tag}\n---\n\n# Tagged\n\nThe rule.\n"
+        ),
+    );
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    let error = rule.based_on[0]
+        .resolve(&root, &rule.id)
+        .expect_err("a tag id is not a commit id");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("is not a commit"), "{error}");
+}
+
+/// A broken `rules` link is not an empty rule set.
+///
+/// `Path::exists()` follows links, so a dangling `.engr/rules` answered "no" and
+/// took the empty-set path — reporting that a workspace has no policy when what
+/// it has is policy pointing somewhere unreadable. Absence and a broken
+/// redirection are different facts, and only the first is an empty set.
+#[test]
+#[cfg(unix)]
+fn a_dangling_rules_directory_is_not_an_absent_one() {
+    let (_dir, root) = workspace();
+    std::fs::remove_dir_all(rules::dir(&root)).expect("remove");
+    std::os::unix::fs::symlink(root.join("nowhere"), rules::dir(&root)).expect("symlink");
+    assert!(
+        !rules::dir(&root).exists(),
+        "following the link finds nothing"
+    );
+
+    let error = rules::load_all(&root).expect_err("a broken redirection is not absence");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("link to somewhere else"), "{error}");
+
+    // Genuine absence still reports an empty set, which is the fact being kept
+    // distinct rather than a message being changed.
+    std::fs::remove_file(rules::dir(&root)).expect("remove link");
+    assert!(rules::load_all(&root).expect("absent").is_empty());
+}

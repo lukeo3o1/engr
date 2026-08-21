@@ -313,3 +313,24 @@ pub fn blob_at(root: &Path, commit: &str, path: &str) -> Option<String> {
 pub fn repo_root(root: &Path) -> Option<PathBuf> {
     run(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
+
+/// The type of the object this id names, without peeling it.
+///
+/// [`exists`] asks whether a revision *reaches* a commit, which is the right
+/// question for a revision and the wrong one for a stored id: an annotated tag
+/// peels to a commit, so its own object id passes while the value recorded is
+/// not a commit id at all. A field specified as a commit id has to be one.
+pub fn object_type(root: &Path, oid: &str) -> Option<String> {
+    run(root, &["cat-file", "-t", oid])
+}
+
+/// The tree entry mode for `path` at `commit`, as git records it.
+///
+/// The mode is the only place the distinction survives. `git show <commit>:<p>`
+/// prints a symlink's *target name* as though it were file content, so content
+/// alone cannot tell a regular file from a link — and a link whose target name
+/// happens to equal a later regular file's contents compares equal.
+pub fn tree_entry_mode(root: &Path, commit: &str, path: &str) -> Option<String> {
+    let listed = run(root, &["ls-tree", commit, "--", path])?;
+    listed.split_whitespace().next().map(str::to_owned)
+}

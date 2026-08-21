@@ -1485,11 +1485,29 @@ file's text against a filename and is stale forever, with nothing anyone can do
 to the project to make it current. Rules are git-tracked policy, and a rule whose
 bytes git does not hold is not a rule.
 
-A rule entry must also be a **regular file**. `.md` is a name, not a kind: a FIFO
-so named makes a read block until someone opens the other end, turning an entry
-nobody can commit into a workspace that cannot load rules at all — a hang rather
-than an answer. Both checks happen **before** reading, which is while they can
-still be refusals.
+A rule entry and a basis must both be **regular files**. `.md` is a name, not a
+kind: a FIFO so named makes a read block until someone opens the other end,
+turning an entry nobody can commit into a workspace that cannot load rules at
+all — a hang rather than an answer. Every one of these checks happens **before**
+reading, which is while it can still be a refusal.
+
+A **pinned** basis is checked against what git *recorded*, not only what git
+prints. `git show <commit>:<path>` prints a symlink's target name as though it
+were content, so a historical link whose target name equals a later regular
+file's contents would compare equal and the pin would read as current across
+exactly the change this prohibition exists to make visible. The tree entry mode
+MUST be a regular blob.
+
+A declared `commit` MUST name a commit object, not merely reach one. An
+annotated tag peels to a commit, so a reachability check accepts its id while
+the stored value is a tag id — a field specified as a commit id that quietly
+holds something else is a persisted representation nobody can rely on reading
+back.
+
+A **broken** rules directory is not an absent one. Absence is an empty rule set;
+a dangling redirection is a refusal, and following the link to decide would
+report a workspace as having no policy when what it has is policy pointing
+somewhere unreadable.
 
 ## Layout
 

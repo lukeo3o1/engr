@@ -124,6 +124,38 @@ impl Basis {
             "rule {rule}: based_on {} pins commit {commit}, which this repository does not have",
             self.path
         );
+        // The id must *be* a commit, not merely reach one. An annotated tag
+        // peels, so its own object id would pass a reachability check while the
+        // value stored is a tag id — and a field specified as a commit id that
+        // silently holds something else is a persisted representation nobody
+        // can rely on reading back.
+        ensure!(
+            git::object_type(root, commit).as_deref() == Some("commit"),
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} pins {commit}, which is not a commit; a based_on commit names the commit itself, not a tag that points at one",
+            self.path
+        );
+        // And the entry at that commit must be an ordinary file. The mode is the
+        // only place this survives: `git show <commit>:<path>` prints a
+        // symlink's target *name* as though it were content, so a historical
+        // link whose target name equals a later regular file's contents would
+        // compare equal and the pin would look current across a change from a
+        // link to a file.
+        let mode = git::tree_entry_mode(root, commit, &self.path).ok_or_else(|| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "rule {rule}: based_on {} is not present at commit {commit}",
+                    self.path
+                ),
+            )
+        })?;
+        ensure!(
+            mode == "100644" || mode == "100755",
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} was not a regular file at {commit} (git mode {mode}); a basis names a real file, and git records a link as its target's name rather than the file's contents",
+            self.path
+        );
         let pinned = git::blob_at(root, commit, &self.path).ok_or_else(|| {
             Error::new(
                 EXIT_NOT_FOUND,
@@ -224,6 +256,20 @@ impl Basis {
             "rule {rule}: based_on {} is a link rather than the file itself, and a link cannot be pinned: git records its target's name where the working tree gives the target's contents. Name the file directly",
             self.path
         );
+        // A basis names a real regular file, the same rule rule *files* follow.
+        // `.md` is a name, not a kind: a FIFO passes every path check above and
+        // then blocks in the read until someone opens the other end, so a
+        // project file nobody can commit becomes a rule that can never be
+        // resolved — a hang rather than an answer.
+        let kind = std::fs::metadata(&resolved)
+            .map_err(|error| tool_error(resolved.display(), error))?
+            .file_type();
+        ensure!(
+            kind.is_file(),
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} is not a regular file, so it is not project material git can track as this rule's basis",
+            self.path
+        );
         std::fs::read_to_string(&resolved).map_err(|error| tool_error(resolved.display(), error))
     }
 }
@@ -284,9 +330,28 @@ impl Rule {
 /// filesystem enumeration order — the hash depends on this.
 pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     let dir = dir(root);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+    // `exists()` follows links, so a dangling `rules` symlink answered "no" and
+    // took the empty-set path — reporting that a workspace has no policy when
+    // what it actually has is policy pointing somewhere unreadable. Absence and
+    // a broken redirection are different facts, and only the first is an empty
+    // set. Asked without following, so the answer is about `rules` itself.
+    let listed = match std::fs::symlink_metadata(&dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(tool_error(dir.display(), error)),
+    };
+    ensure!(
+        !listed.file_type().is_symlink(),
+        EXIT_SCHEMA,
+        "{}: the rules directory is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
+        dir.display()
+    );
+    ensure!(
+        listed.is_dir(),
+        EXIT_SCHEMA,
+        "{}: the rules directory is not a directory",
+        dir.display()
+    );
     // The directory itself must be where it says it is. A redirected `rules`
     // would make every rule in the workspace come from somewhere the workspace
     // does not track, which is the same failure as a redirected rule file and
