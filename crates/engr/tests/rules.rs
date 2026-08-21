@@ -1088,3 +1088,200 @@ fn a_link_anywhere_on_the_way_to_a_rule_is_refused() {
     std::fs::rename(root.join("real-engr"), store::engr_dir(&root)).expect("restore");
     assert_eq!(rules::load_all(&root).expect("restored").len(), 1);
 }
+
+fn subject() -> (serde_json::Value, serde_json::Value) {
+    (
+        serde_json::json!({"action": "backlog.section_added", "text": "still unresolved"}),
+        serde_json::json!({"item": "01a0", "sections": 2}),
+    )
+}
+
+/// The hash is the identity of an exact review subject.
+///
+/// Same subject, same value — across processes, because nothing about it is
+/// remembered. Different subject in *any* of its parts, different value, so an
+/// attestation stops naming anything the moment what it covered moves.
+#[test]
+fn the_review_hash_is_the_identity_of_what_had_to_be_reviewed() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let (mutation, precondition) = subject();
+
+    let hash = |mutation: &serde_json::Value, precondition: &serde_json::Value| {
+        rules::bind(
+            &root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+    let original = hash(&mutation, &precondition);
+    assert_eq!(
+        original,
+        hash(&mutation, &precondition),
+        "nothing is remembered, so recomputation is the same value"
+    );
+
+    // The mutation.
+    assert_ne!(
+        original,
+        hash(
+            &serde_json::json!({"action": "backlog.section_added", "text": "something else"}),
+            &precondition
+        )
+    );
+    // The target it is being applied to, with the proposal untouched. Without
+    // this in the binding, another agent could move the target under a review
+    // and the attestation would still verify.
+    assert_ne!(
+        original,
+        hash(
+            &mutation,
+            &serde_json::json!({"item": "01a0", "sections": 3})
+        )
+    );
+    // The rule's own text.
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace("silently contradicts", "contradicts"),
+    );
+    let after_rule_edit = hash(&mutation, &precondition);
+    assert_ne!(original, after_rule_edit);
+    write_rule(&root, "architecture", ARCHITECTURE);
+
+    // The material the rule rests on.
+    std::fs::write(root.join("AGENTS.md"), "a different contract\n").expect("edit");
+    assert_ne!(original, hash(&mutation, &precondition));
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("restore");
+    assert_eq!(original, hash(&mutation, &precondition));
+
+    // The applicable set. Another rule for this domain is another thing that
+    // had to be read, so the review that did not read it no longer stands.
+    write_rule(
+        &root,
+        "second",
+        "---\nid: backlog-quality\napplies:\n  domains:\n    - backlog\n---\n\n# Backlog quality\n\nUnresolved matters only.\n",
+    );
+    assert_ne!(original, hash(&mutation, &precondition));
+
+    // And a rule for a different domain changes nothing here.
+    write_rule(
+        &root,
+        "third",
+        "---\nid: work-handoff\napplies:\n  domains:\n    - work\n---\n\n# Work handoff\n\nSay what is left.\n",
+    );
+    let with_other_domain = hash(&mutation, &precondition);
+    std::fs::remove_file(rules::dir(&root).join("third.md")).expect("remove");
+    assert_eq!(
+        with_other_domain,
+        hash(&mutation, &precondition),
+        "a rule that does not govern this domain is not part of this review"
+    );
+}
+
+#[test]
+fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let (mutation, precondition) = subject();
+    let reviewed = vec!["architecture-consistency".to_owned()];
+
+    let binding = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let attested = binding.sha256().expect("hash");
+    assert_eq!(binding.rule_ids(), reviewed);
+
+    rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect("an unchanged subject");
+
+    // Naming the wrong set is refused even when the hash is right — an agent
+    // that names something else has told us its review covered something else.
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &["something-else".to_owned()],
+    )
+    .expect_err("the wrong rules");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // The material moves; the attestation stops naming anything that exists.
+    std::fs::write(root.join("AGENTS.md"), "a different contract\n").expect("edit");
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect_err("the subject moved");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("was of something else"), "{error}");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("restore");
+
+    // A rule that cannot be resolved blocks what it governs rather than being
+    // skipped. An unusable rule is not a rule that does not apply.
+    std::fs::remove_file(root.join("AGENTS.md")).expect("remove basis");
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect_err("an unusable rule blocks");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+
+    // A domain with no rules still has a binding, and this layer still checks
+    // it. What an empty set *means* is the domain's call — no review required
+    // for most, and the thing that blocks autonomous Object admission for one —
+    // so the rule layer must not decide it by short-circuiting.
+    let empty = rules::bind(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    assert!(empty.rule_ids().is_empty());
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+        &empty.sha256().expect("hash"),
+        &[],
+    )
+    .expect("an empty set is still a subject");
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation,
+        precondition,
+        "not the hash",
+        &[],
+    )
+    .expect_err("and it is still checked");
+}

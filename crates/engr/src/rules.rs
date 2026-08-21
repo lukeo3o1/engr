@@ -20,7 +20,9 @@
 //! file. Changing one changes what the *next* mutation must be reviewed
 //! against, and nothing already admitted.
 
-use crate::{ensure, git, store, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA};
+use crate::{
+    ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -600,4 +602,159 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
         offset += line.len();
     }
     None
+}
+
+/// The exact subject of a review, fingerprinted.
+///
+/// This is the whole mechanism. An attestation is not a claim that an agent
+/// understood anything — it is a claim that it reviewed *this* mutation against
+/// *these* rules resting on *this* material. So the binding names all three
+/// exactly, and the hash over it is the identity of that subject. Change any of
+/// them and the hash changes, and the previous attestation stops naming
+/// anything that exists.
+///
+/// Deterministic and stateless by construction. There is no pending review
+/// object, no nonce, no session: a process that restarts recomputes the same
+/// value from the same inputs, and admission recomputes it from current state
+/// rather than trusting anything it was handed.
+#[derive(Serialize)]
+pub struct ReviewBinding {
+    /// A discriminator, so a hash from this version can never be mistaken for
+    /// one produced under different binding rules.
+    binding: &'static str,
+    version: u32,
+    domain: Domain,
+    /// The exact semantic mutation, as the domain canonicalizes it.
+    mutation: serde_json::Value,
+    /// The exact state the mutation is being applied to.
+    ///
+    /// Without this the binding would cover only the proposed output, and
+    /// another agent could change the target underneath a review while leaving
+    /// the proposal untouched — the attestation would still verify, against a
+    /// subject that no longer exists.
+    precondition: serde_json::Value,
+    rules: Vec<BoundRule>,
+}
+
+/// One rule as it stood, with everything it rests on resolved.
+#[derive(Serialize)]
+pub struct BoundRule {
+    pub id: String,
+    /// Sorted, because the set is semantically order-insensitive.
+    pub domains: Vec<Domain>,
+    /// Sorted by path, for the same reason.
+    pub based_on: Vec<ResolvedBasis>,
+    /// The normative text, exactly as written and never normalized.
+    ///
+    /// Built from parsed semantics plus this exact body rather than from the
+    /// file's raw bytes. Raw bytes would make review identity depend on
+    /// incidental YAML spelling: reordering `applies.domains` changes nothing
+    /// about what the rule means or what a reviewer had to read, and it must
+    /// not invalidate an attestation. The body is the one part where every
+    /// byte is meaning, so it is carried untouched.
+    pub body: String,
+}
+
+pub const BINDING: &str = "engr-rule-review";
+pub const BINDING_VERSION: u32 = 1;
+
+impl ReviewBinding {
+    /// SHA-256 over the canonical JSON form.
+    ///
+    /// The same primitive the confirmation gate uses, so key order comes from a
+    /// `BTreeMap` rather than from declaration order, and the rule and basis
+    /// lists were sorted before they got here.
+    pub fn sha256(&self) -> Result<String> {
+        crate::confirmation::fingerprint(self)
+    }
+
+    pub fn rules(&self) -> &[BoundRule] {
+        &self.rules
+    }
+
+    /// Every rule id this review must cover, in the order the hash saw them.
+    pub fn rule_ids(&self) -> Vec<String> {
+        self.rules.iter().map(|rule| rule.id.clone()).collect()
+    }
+}
+
+/// Freeze what a review of this mutation has to cover.
+///
+/// Fails closed if any applicable rule cannot be fully resolved. An unusable
+/// rule is not a rule that does not apply: admitting under an incomplete set is
+/// the one outcome this mechanism exists to prevent, so the mutation it governs
+/// is blocked until the rule is repaired.
+pub fn bind(
+    root: &Path,
+    domain: Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+) -> Result<ReviewBinding> {
+    let mut bound = Vec::new();
+    for rule in applicable(root, domain)? {
+        let mut based_on = Vec::new();
+        for basis in &rule.based_on {
+            based_on.push(basis.resolve(root, &rule.id)?);
+        }
+        bound.push(BoundRule {
+            id: rule.id,
+            domains: rule.domains,
+            based_on,
+            body: rule.body,
+        });
+    }
+    Ok(ReviewBinding {
+        binding: BINDING,
+        version: BINDING_VERSION,
+        domain,
+        mutation,
+        precondition,
+        rules: bound,
+    })
+}
+
+/// Check an attestation against the subject as it stands right now.
+///
+/// Recomputed, never looked up. The hash an agent submits is only meaningful if
+/// the thing it names is recomputed from current state at the moment of
+/// admission — otherwise the interval between review and admission is exactly
+/// where the subject can change.
+///
+/// The rule ids are checked as well as the hash. They are redundant against a
+/// correct implementation, and they are not redundant against a confused one: an
+/// agent that names the wrong set has told us its review covered something else,
+/// and it is better to say so than to accept a hash it may have obtained without
+/// reading what the hash was over.
+pub fn check(
+    root: &Path,
+    domain: Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+    attested: &str,
+    reviewed: &[String],
+) -> Result<()> {
+    let binding = bind(root, domain, mutation, precondition)?;
+    let expected = binding.sha256()?;
+    let ids = binding.rule_ids();
+    let mut named: Vec<String> = reviewed.to_vec();
+    named.sort();
+    named.dedup();
+    ensure!(
+        named == ids,
+        EXIT_INVARIANT,
+        "the review names {}, and what governs this {} mutation is {}",
+        if named.is_empty() {
+            "no rules".to_owned()
+        } else {
+            named.join(", ")
+        },
+        domain.as_str(),
+        ids.join(", ")
+    );
+    ensure!(
+        attested == expected,
+        EXIT_INVARIANT,
+        "this review was of something else: the mutation, its target, a rule, or a rule's material has changed since it was reviewed. Review the current subject and attest to {expected}"
+    );
+    Ok(())
 }
