@@ -287,13 +287,48 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    // The directory itself must be where it says it is. A redirected `rules`
+    // would make every rule in the workspace come from somewhere the workspace
+    // does not track, which is the same failure as a redirected rule file and
+    // costs one check to refuse.
+    let anchored = store::engr_dir(root);
+    let anchored = std::fs::canonicalize(&anchored)
+        .map_err(|error| tool_error(anchored.display(), error))?
+        .join(DIR);
+    let resolved = std::fs::canonicalize(&dir).map_err(|error| tool_error(dir.display(), error))?;
+    ensure!(
+        resolved == anchored,
+        EXIT_SCHEMA,
+        "{}: the rules directory is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
+        dir.display()
+    );
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
         let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("md") {
-            files.push(path);
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
         }
+        // A rule file is read for its bytes, and `read_to_string` follows links
+        // — so a locator pointing outside would let engr enforce policy the
+        // repository does not track, and one pointing inside would still differ from
+        // git, which records a link as its target's *name* rather than the
+        // target's contents. Rules are git-tracked project data and git is
+        // their history; a rule whose bytes git does not hold is not one.
+        //
+        // Refused rather than followed, and refused before reading: the
+        // enumeration decided this path is a rule, so this path is what has to
+        // be a rule.
+        let kind = entry
+            .file_type()
+            .map_err(|error| tool_error(path.display(), error))?;
+        ensure!(
+            !kind.is_symlink(),
+            EXIT_SCHEMA,
+            "{}: a rule file is a link rather than the rule itself; git records a link's target name where the loader would read the target's contents, so the two would not agree on what the rule says",
+            path.display()
+        );
+        files.push(path);
     }
     files.sort();
     let mut rules: Vec<Rule> = Vec::new();

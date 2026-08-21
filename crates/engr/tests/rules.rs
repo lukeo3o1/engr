@@ -661,3 +661,69 @@ fn a_pinned_basis_cannot_be_taken_through_a_link() {
         .expect("the file itself");
     assert_eq!(resolved.content, "the contract\n");
 }
+
+/// A rule is the file the workspace tracks, not a link to one.
+///
+/// `read_to_string` follows links, so a locator pointing outside the repository
+/// let engr enforce policy the project does not track — and one pointing inside
+/// still disagreed with git, which records a link as its target's *name* where
+/// the loader reads the target's *contents*. #25 makes rules git-tracked project
+/// data with git as their history; a rule whose bytes git does not hold is not
+/// one.
+///
+/// Refused before reading, because the enumeration already decided that this
+/// path is a rule — so this path is what has to be a rule.
+#[test]
+#[cfg(unix)]
+fn a_rule_file_is_the_file_itself_and_not_a_link_to_one() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let outside = TempDir::new().expect("outside");
+    let elsewhere = outside.path().join("policy.md");
+    std::fs::write(&elsewhere, ARCHITECTURE).expect("outside rule");
+    std::fs::write(root.join("real-rule.md"), ARCHITECTURE).expect("inside rule");
+
+    for (why, target) in [
+        ("outside the repository", elsewhere.clone()),
+        ("inside it", root.join("real-rule.md")),
+    ] {
+        let locator = rules::dir(&root).join("architecture.md");
+        std::os::unix::fs::symlink(&target, &locator).expect("symlink");
+        let error = rules::load_all(&root).expect_err(why);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{why}: {error}");
+        assert!(
+            error.message.contains("a link rather than the rule itself"),
+            "{why}: {error}"
+        );
+        std::fs::remove_file(&locator).expect("remove");
+    }
+
+    // The same bytes, written as a rule file rather than pointed at, load.
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let rules = rules::load_all(&root).expect("a real file");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].id, "architecture-consistency");
+}
+
+/// The rules directory is where it says it is.
+///
+/// A redirected `rules` would make every rule in the workspace come from
+/// somewhere the workspace does not track — the same failure as a redirected
+/// rule file, one level up, and reached without touching a single rule.
+#[test]
+#[cfg(unix)]
+fn the_rules_directory_cannot_be_redirected_elsewhere() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    rules::load_all(&root).expect("sound to begin with");
+
+    let outside = TempDir::new().expect("outside");
+    std::fs::write(outside.path().join("architecture.md"), ARCHITECTURE).expect("outside rule");
+    std::fs::remove_dir_all(rules::dir(&root)).expect("remove");
+    std::os::unix::fs::symlink(outside.path(), rules::dir(&root)).expect("symlink");
+
+    let error = rules::load_all(&root).expect_err("the whole policy came from elsewhere");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("link to somewhere else"), "{error}");
+}
