@@ -725,7 +725,10 @@ fn the_rules_directory_cannot_be_redirected_elsewhere() {
 
     let error = rules::load_all(&root).expect_err("the whole policy came from elsewhere");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("link to somewhere else"), "{error}");
+    assert!(
+        error.message.contains("is a link to somewhere else"),
+        "{error}"
+    );
 }
 
 /// `.md` is a name, not a kind.
@@ -945,7 +948,10 @@ fn a_dangling_rules_directory_is_not_an_absent_one() {
 
     let error = rules::load_all(&root).expect_err("a broken redirection is not absence");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("link to somewhere else"), "{error}");
+    assert!(
+        error.message.contains("is a link to somewhere else"),
+        "{error}"
+    );
 
     // Genuine absence still reports an empty set, which is the fact being kept
     // distinct rather than a message being changed.
@@ -1010,4 +1016,62 @@ fn no_public_loader_accepts_what_another_refuses() {
             "{why}: {error}"
         );
     }
+}
+
+/// A link anywhere on the way to a rule redirects the whole policy.
+///
+/// Checking `.engr/rules` and each `*.md` entry was not enough. The anchor was
+/// built by canonicalizing `.engr` first, so a link *there* cancelled out of the
+/// comparison — both sides followed it, and `repo/.engr -> /outside/workspace`
+/// compared equal. Git would then track `.engr` as a link rather than the rule
+/// bytes, which is the policy-versus-source mismatch the no-symlink rule exists
+/// to prevent.
+///
+/// The tree behind the link is entirely well-formed. That is the point: nothing
+/// about the rules themselves is wrong, and the loader must still refuse,
+/// because what is wrong is how they were reached.
+#[test]
+#[cfg(unix)]
+fn a_link_anywhere_on_the_way_to_a_rule_is_refused() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+
+    // A perfectly good workspace, built somewhere else.
+    let outside = TempDir::new().expect("outside");
+    let elsewhere = outside.path().join("engr-workspace");
+    store::init(&root).expect("init");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    assert_eq!(
+        rules::load_all(&root).expect("sound to begin with").len(),
+        1
+    );
+    std::fs::rename(store::engr_dir(&root), &elsewhere).expect("move the workspace");
+    std::os::unix::fs::symlink(&elsewhere, store::engr_dir(&root)).expect("symlink");
+
+    // Everything behind the link is intact — the rule file is an ordinary
+    // regular file and `rules` is an ordinary directory.
+    assert!(rules::dir(&root).join("architecture.md").is_file());
+    assert!(std::fs::symlink_metadata(rules::dir(&root))
+        .expect("metadata")
+        .is_dir());
+
+    for (why, outcome) in [
+        ("load_all", rules::load_all(&root)),
+        ("applicable", rules::applicable(&root, Domain::Object)),
+    ] {
+        let error = outcome.expect_err(why);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{why}: {error}");
+        assert!(
+            error.message.contains("is a link to somewhere else"),
+            "{why}: {error}"
+        );
+    }
+
+    // Put it back where it belongs and it loads again, so the refusal is about
+    // the link and not about the workspace.
+    std::fs::remove_file(store::engr_dir(&root)).expect("remove link");
+    std::fs::rename(&elsewhere, store::engr_dir(&root)).expect("restore");
+    assert_eq!(rules::load_all(&root).expect("restored").len(), 1);
 }

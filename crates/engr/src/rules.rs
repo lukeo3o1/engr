@@ -356,15 +356,21 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     // would make every rule in the workspace come from somewhere the workspace
     // does not track, which is the same failure as a redirected rule file and
     // costs one check to refuse.
-    let anchored = store::engr_dir(root);
-    let anchored = std::fs::canonicalize(&anchored)
-        .map_err(|error| tool_error(anchored.display(), error))?
+    // Anchored at the **workspace root**, not at `.engr`. Canonicalizing `.engr`
+    // first made a link *there* cancel out of the comparison — both sides
+    // followed it, so `repo/.engr -> /outside/workspace` compared equal and the
+    // whole policy came from a tree git tracks as a link rather than as rule
+    // bytes. The rule is that no link may appear anywhere on the way to a rule
+    // file, so the anchor has to start above every component being checked.
+    let anchored = std::fs::canonicalize(root)
+        .map_err(|error| tool_error(root.display(), error))?
+        .join(store::DIR)
         .join(DIR);
     let resolved = std::fs::canonicalize(&dir).map_err(|error| tool_error(dir.display(), error))?;
     ensure!(
         resolved == anchored,
         EXIT_SCHEMA,
-        "{}: the rules directory is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
+        "{}: something on the way to the rules is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
         dir.display()
     );
     let mut files: Vec<PathBuf> = Vec::new();

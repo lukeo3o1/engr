@@ -1509,6 +1509,13 @@ a dangling redirection is a refusal, and following the link to decide would
 report a workspace as having no policy when what it has is policy pointing
 somewhere unreadable.
 
+The prohibition covers **every component on the way to a rule file**, not just
+the rule entry and the `rules` directory. A link at `.engr` redirects the whole
+policy while leaving everything behind it well-formed, and git would then track
+that link rather than the rule bytes — the same policy-versus-source mismatch,
+reached one level higher. The check therefore anchors above every component it
+validates.
+
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
