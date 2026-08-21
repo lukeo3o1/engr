@@ -166,7 +166,7 @@ fn a_rule_this_version_cannot_fully_read_is_refused_rather_than_ignored() {
 }
 
 #[test]
-fn a_domain_with_no_rule_needs_no_review() {
+fn a_domain_with_no_rule_has_an_empty_applicable_set() {
     let (_dir, root) = workspace();
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     write_rule(&root, "architecture", ARCHITECTURE);
@@ -187,13 +187,13 @@ fn a_domain_with_no_rule_needs_no_review() {
         rules::applicable(&root, Domain::Work)
             .expect("work")
             .is_empty(),
-        "no rule for a domain is a real answer, not a gap"
+        "the rule layer reports the set; what an empty one means is the domain's"
     );
     assert!(rules::applicable(&root, Domain::Collection)
         .expect("collection")
         .is_empty());
 
-    // And a workspace with no rules directory at all is the same answer.
+    // And a workspace with no rules directory at all reports the same set.
     let (_bare_dir, bare) = {
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path().to_path_buf();
