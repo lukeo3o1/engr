@@ -1491,11 +1491,33 @@ The policy is nonetheless *in* the identity, because it decides the outcome: the
 same wording under a ceiling of 5 and under a ceiling of 1 is not the same
 review, and one that escalates to a person is not one that refuses.
 
-Exhaustion is evaluated **per rule**. Any exhausted applicable rule stops the
-autonomous path; if at least one actually exhausted rule asks for
-`human_confirmation` the mutation escalates to the Human Gate, and otherwise it
-is refused. Collection and Work do not get exhaustion behaviour invented for
-symmetry.
+One prepared mutation carries **one scalar attempt**, compared independently
+against each applicable rule's own ceiling. There is no per-rule counter and
+engr keeps no attempt state:
+
+```text
+prepare(exact mutation, attempt=N)
+
+  rule A max_attempts=5, attempt=3  ->  reviewable
+  rule B max_attempts=2, attempt=3  ->  exhausted
+```
+
+Exhaustion is therefore evaluated **per rule** and composed conservatively. Any
+exhausted applicable rule stops the autonomous path; if at least one *actually
+exhausted* rule asks for `human_confirmation` the mutation escalates to the Human
+Gate, and otherwise it is refused. Escalation outranks refusal, because a rule
+naming a human is asking for a decision rather than for the attempt to be
+discarded — and a human can still decide to refuse. A rule that asks for a human
+but is not exhausted escalates nothing: the action describes what happens at the
+ceiling, not a standing property.
+
+Collection and Work do not get exhaustion behaviour invented for symmetry.
+
+Because the workspace version governs how a rule is read, **every path that
+reads rule semantics enforces that version** — not only the commands. A workspace
+at an older version is refused identically whether it is reached through the CLI
+or through the library, so persisted meaning never depends on which door a caller
+came through.
 
 ### What a rule rests on
 

@@ -1469,3 +1469,179 @@ fn the_review_block_refuses_what_v1_does_not_define() {
         rules::load_all(&root).unwrap_or_else(|error| panic!("{front:?}: {}", error.message));
     }
 }
+
+/// The workspace-version boundary holds on every public door, not just the CLI.
+///
+/// Rule semantics are versioned by the workspace, so a version 1 workspace must
+/// not be read under version 2 defaults — and it must not matter which public
+/// API asked. Enforcing it only in the command left `engr rules ls` refusing a
+/// workspace that `rules::load_all` accepted and silently assigned the newer
+/// effective policy, which is the exact reinterpretation the version exists to
+/// prevent, reached through a different door.
+#[test]
+fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: recording-policy\napplies:\n  domains:\n    - backlog\n---\n\n# Recording policy\n\nSay what changed.\n",
+    );
+    let (mutation, precondition) = subject();
+
+    // Exactly what a version 1 workspace is: intact, and written by a build
+    // that had never heard of `review:`.
+    std::fs::write(
+        store::engr_dir(&root).join("format.json"),
+        r#"{"format":"engr-workspace","version":1}"#,
+    )
+    .expect("format");
+
+    let refused = |error: engr::Error, what: &str| {
+        assert!(
+            error.message.contains("version 1") && error.message.contains("engr migrate"),
+            "{what} should refuse a version 1 workspace by name, said {:?}",
+            error.message
+        );
+    };
+    refused(rules::load_all(&root).expect_err("load_all"), "load_all");
+    refused(
+        rules::applicable(&root, Domain::Backlog).expect_err("applicable"),
+        "applicable",
+    );
+    match rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    ) {
+        Ok(_) => panic!("bind produced a v2 binding over a workspace declaring v1"),
+        Err(error) => refused(error, "bind"),
+    }
+    refused(
+        rules::check(
+            &root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+            "any hash",
+            &["recording-policy".to_owned()],
+        )
+        .expect_err("check"),
+        "check",
+    );
+
+    // And the explicit migration is what makes the newer semantics available,
+    // through those same doors.
+    store::migrate(&root).expect("migrate");
+    let rule = rules::load_all(&root)
+        .expect("load_all after migrating")
+        .remove(0);
+    assert_eq!(rule.review, rules::Review::default());
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(bound.rule_ids(), vec!["recording-policy".to_owned()]);
+}
+
+/// One scalar attempt, composed across rules that disagree about the ceiling.
+///
+/// v1 carries a single attempt number for the whole prepared mutation and
+/// compares it independently against each rule's own limit. There is no
+/// per-rule counter, so two rules with different ceilings reach exhaustion at
+/// different values of the same number.
+#[test]
+fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    write_rule(
+        &root,
+        "lenient",
+        "---\nid: lenient\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 5\n---\n\n# Lenient\n\nFive tries.\n",
+    );
+    write_rule(
+        &root,
+        "strict",
+        "---\nid: strict\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n---\n\n# Strict\n\nTwo tries.\n",
+    );
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+
+    assert_eq!(bound.exhaustion(1), rules::Exhaustion::NotReached);
+    assert_eq!(bound.exhaustion(2), rules::Exhaustion::NotReached);
+    // The strict rule runs out first, and one rule running out is enough.
+    assert_eq!(bound.exhaustion(3), rules::Exhaustion::Refuse);
+    assert_eq!(
+        bound
+            .exhausted(3)
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["strict"],
+        "and the caller can say which rule stopped it"
+    );
+    assert_eq!(bound.exhaustion(6), rules::Exhaustion::Refuse);
+    assert_eq!(bound.exhausted(6).len(), 2);
+
+    // The number is agent-attested process metadata, so it must not be able to
+    // move the identity of what had to be reviewed.
+    let hash = bound.sha256().expect("hash");
+    for attempt in [0, 1, 3, 99] {
+        bound.exhaustion(attempt);
+    }
+    assert_eq!(
+        hash,
+        bound.sha256().expect("hash"),
+        "attempt is an argument, never a field, so it cannot reach the hash"
+    );
+}
+
+/// A rule that asks for a human wins over one that merely refuses.
+///
+/// Composition is conservative, but "conservative" here means the strictest
+/// *request*, not the harshest outcome: a rule naming a human is asking for a
+/// decision rather than for the attempt to be discarded, and a human can still
+/// decide to refuse. The reverse would let an unrelated rule silently cancel an
+/// escalation its author asked for.
+#[test]
+fn an_exhausted_rule_asking_for_a_human_outranks_one_that_only_refuses() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    write_rule(
+        &root,
+        "refusing",
+        "---\nid: refusing\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
+    );
+    let bind = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+    };
+    assert_eq!(bind(&root).exhaustion(2), rules::Exhaustion::Refuse);
+
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(2),
+        rules::Exhaustion::HumanConfirmation
+    );
+    // Still not reached while both rules have attempts left, whatever they ask
+    // for when they run out.
+    assert_eq!(bind(&root).exhaustion(1), rules::Exhaustion::NotReached);
+
+    // An escalating rule that is *not* exhausted escalates nothing: the action
+    // describes what happens at the ceiling, not a standing property.
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(2),
+        rules::Exhaustion::Refuse,
+        "only an actually exhausted rule's action counts"
+    );
+}

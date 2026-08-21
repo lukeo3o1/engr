@@ -407,6 +407,22 @@ impl Rule {
 /// indeterminate set proves nothing. Sorted by id so the set is independent of
 /// filesystem enumeration order — the hash depends on this.
 pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
+    // The workspace version decides how these bytes are read, so it is checked
+    // before they are read — here, at the one place rules enter the process,
+    // rather than in the command that happens to have asked.
+    //
+    // Leaving it to the CLI made persisted meaning depend on which public door a
+    // caller came through: `engr rules ls` refused a version 1 workspace while
+    // `rules::load_all` accepted the same file and assigned it the version 2
+    // defaults, which is precisely the silent reinterpretation the version
+    // exists to prevent. Same shape as the raw single-file loader that was made
+    // private for the same reason: one door.
+    //
+    // `bind` and `check` reach rules only through `applicable`, which reaches
+    // them only through here, so this one check covers every semantic entry
+    // point. It deliberately does not touch the historical snapshot decoder,
+    // which answers a different question about a different workspace.
+    store::require_current(root)?;
     let dir = dir(root);
     // `exists()` follows links, so a dangling `rules` symlink answered "no" and
     // took the empty-set path — reporting that a workspace has no policy when
@@ -799,6 +815,67 @@ pub struct BoundRule {
 
 pub const BINDING: &str = "engr-rule-review";
 pub const BINDING_VERSION: u32 = 1;
+
+/// What the applicable rules, taken together, say about one attempt number.
+///
+/// Composed conservatively: the strictest outcome any single rule asks for is
+/// the outcome for the whole mutation. One rule still having attempts left says
+/// nothing about a rule that has run out.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Exhaustion {
+    /// No applicable rule is past its ceiling at this attempt.
+    NotReached,
+    /// At least one rule is past its ceiling, and none of those asks for a
+    /// human. The mutation does not happen.
+    Refuse,
+    /// At least one rule past its ceiling asks for a human to confirm.
+    ///
+    /// Escalation wins over refusal, because a rule that names a human is
+    /// asking for a decision rather than for the attempt to be discarded — and
+    /// a human can still decide to refuse.
+    HumanConfirmation,
+}
+
+impl ReviewBinding {
+    /// The applicable rules this attempt has exhausted, in the hashed order.
+    ///
+    /// Returned rather than counted because "which rule stopped this" is what a
+    /// caller has to be able to say. A composition that reports only a verdict
+    /// leaves a person told no and not told by what.
+    pub fn exhausted(&self, attempt: u32) -> Vec<&BoundRule> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.review.exhausted(attempt))
+            .collect()
+    }
+
+    /// Compose one mutation-level attempt across every applicable rule.
+    ///
+    /// v1 carries **one scalar for the whole prepared mutation**, compared
+    /// independently against each rule's own effective ceiling — there is no
+    /// per-rule attempt map, and no counter engr keeps. The number is
+    /// agent-attested process metadata, which is why it arrives as an argument
+    /// here and is not a field of the binding: it must not be able to reach
+    /// [`Self::sha256`], and the shape makes that structural rather than
+    /// remembered.
+    ///
+    /// Attempt numbers are 1-based, so a ceiling of 5 leaves 1 through 5
+    /// reviewable and exhausts at 6. A `0` is therefore before the first
+    /// attempt and exhausts nothing; there is no admission path that can supply
+    /// one yet, and refusing it here would be inventing a rule #25 has not
+    /// written.
+    pub fn exhaustion(&self, attempt: u32) -> Exhaustion {
+        let mut verdict = Exhaustion::NotReached;
+        for rule in self.exhausted(attempt) {
+            match rule.review.on_exhaustion {
+                OnExhaustion::HumanConfirmation => return Exhaustion::HumanConfirmation,
+                OnExhaustion::Reject => verdict = Exhaustion::Refuse,
+            }
+        }
+        verdict
+    }
+}
 
 impl ReviewBinding {
     /// SHA-256 over the canonical JSON form.
