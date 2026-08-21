@@ -61,6 +61,26 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+/// Commit with an identity supplied on the command line.
+///
+/// A bare `git commit` reads the committer from global config, which exists on a
+/// developer machine and on some CI images and not on others. Supplying it per
+/// invocation is what the other tests here already do; this is that, named once.
+fn commit_as_test(root: &Path, message: &str) {
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            message,
+        ],
+    );
+}
+
 fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let path = store::object_path(root, id);
     let mut value: Value =
@@ -4184,7 +4204,7 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     let format_path = store::engr_dir(root).join("format.json");
     std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
     git(root, &["add", "-A", "."]);
-    git(root, &["commit", "-q", "-m", "before the migration"]);
+    commit_as_test(root, "before the migration");
     let commit = String::from_utf8(
         Command::new("git")
             .arg("-C")
@@ -4218,7 +4238,7 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     // to what is known rather than the check being dropped.
     std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#).expect("format");
     git(root, &["add", "-A", "."]);
-    git(root, &["commit", "-q", "-m", "a version from the future"]);
+    commit_as_test(root, "a version from the future");
     let future = String::from_utf8(
         Command::new("git")
             .arg("-C")
