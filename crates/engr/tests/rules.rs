@@ -752,16 +752,29 @@ fn a_rule_entry_must_be_a_regular_file() {
     assert!(error.message.contains("must be a regular file"), "{error}");
     std::fs::remove_dir(&shaped).expect("remove");
 
-    // Unix: the case that would otherwise hang rather than fail.
+    // Unix: the case that would otherwise hang rather than fail. Bounded on a
+    // worker thread, so a reintroduced blocking read is a failing test with a
+    // message rather than a suite that never finishes — the whole point is that
+    // loading cannot block, and a test that hangs to prove it has proved
+    // nothing anyone will read.
     #[cfg(unix)]
     {
         let pipe = rules::dir(&root).join("policy.md");
-        let made = std::process::Command::new("mkfifo")
+        assert!(std::process::Command::new("mkfifo")
             .arg(&pipe)
             .status()
-            .expect("mkfifo");
-        assert!(made.success());
-        let error = rules::load_all(&root).expect_err("a pipe is not a rule");
+            .expect("mkfifo")
+            .success());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let probe = root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(rules::load_all(&probe).map(|rules| rules.len()));
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("loading rules must not block on a pipe");
+        let error = outcome.expect_err("a pipe is not a rule");
         assert_eq!(error.code, engr::EXIT_SCHEMA);
         assert!(error.message.contains("must be a regular file"), "{error}");
         std::fs::remove_file(&pipe).expect("remove");
