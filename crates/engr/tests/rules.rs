@@ -1069,9 +1069,22 @@ fn a_link_anywhere_on_the_way_to_a_rule_is_refused() {
         );
     }
 
+    // A link whose target stays inside the project is refused for the same
+    // reason. The boundary is not what the link *escapes*; it is that git would
+    // track the link rather than the rule bytes either way.
+    std::fs::remove_file(store::engr_dir(&root)).expect("remove link");
+    std::fs::rename(&elsewhere, root.join("real-engr")).expect("move inside");
+    std::os::unix::fs::symlink("real-engr", store::engr_dir(&root)).expect("symlink");
+    let error = rules::load_all(&root).expect_err("inside is not the question");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("is a link to somewhere else"),
+        "{error}"
+    );
+
     // Put it back where it belongs and it loads again, so the refusal is about
     // the link and not about the workspace.
     std::fs::remove_file(store::engr_dir(&root)).expect("remove link");
-    std::fs::rename(&elsewhere, store::engr_dir(&root)).expect("restore");
+    std::fs::rename(root.join("real-engr"), store::engr_dir(&root)).expect("restore");
     assert_eq!(rules::load_all(&root).expect("restored").len(), 1);
 }
