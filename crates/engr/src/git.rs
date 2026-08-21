@@ -85,8 +85,21 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
         EXIT_SCHEMA,
         "{path}: not an engr workspace"
     );
+    // A snapshot carries the version that was current when it was taken, so
+    // pinning this to the *newest* version would make every reference recorded
+    // before a migration unresolvable — the workspace moving forward would
+    // retroactively break provenance that was valid when it was pinned.
+    //
+    // Reading an older snapshot is safe here for a reason worth stating rather
+    // than assuming: what this function guards is decoding a historical
+    // *Object*, and every version this build recognizes represents an Object
+    // identically. The version 2 change is to how a project Rule is
+    // interpreted, and no Rule is read out of a historical snapshot. If a future
+    // version ever changes the Object representation itself, this must decode
+    // under the snapshot's own version rather than widening the check again.
     ensure!(
-        format.version == WORKSPACE_VERSION,
+        format.version == WORKSPACE_VERSION
+            || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&format.version),
         EXIT_SCHEMA,
         "{path}: workspace version {} is not supported by engr {}",
         format.version,

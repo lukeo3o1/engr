@@ -1567,14 +1567,45 @@ validates.
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
-workspace. New resource files do not repeat those fields. Phase 0 workspaces
-already carrying version 1 are still recognized as transitional while any
-Object uses `status`; workspaces without the authority may also be recognized
-from their legacy resource markers. Either form remains read-only until
-`engr migrate` is explicitly run. Migration changes only incompatible
-representation (`Object.status` to `Object.state`) and preserves compatible
-legacy markers and confirmed Event envelopes. Unknown or newer workspace
-versions are never mutated.
+workspace, and this build writes **version 2**. New resource files do not repeat
+those fields. Workspaces at version 1 are recognized and migratable; workspaces
+without the authority may also be recognized from their legacy resource markers;
+a Phase 0 workspace is transitional while any Object uses `status`. Every one of
+those forms remains read-only until `engr migrate` is explicitly run, and each
+says which of them it is rather than being reported as one thing. Migration
+changes only incompatible representation (`Object.status` to `Object.state`),
+moves the authority to the current version, and preserves compatible legacy
+markers and confirmed Event envelopes. Unknown or newer workspace versions are
+never mutated and never read.
+
+### What the workspace version is for
+
+It governs how **persisted data is interpreted**, including data whose bytes do
+not change. Version 2 exists because a project Rule gained `review.max_attempts`
+and `review.on_exhaustion` *with effective defaults*: an unchanged rule file with
+no `review:` block means one thing to a version 2 build and another to a version
+1 build, and an explicit block is an unknown field to the older one. Two builds
+accepting one workspace and disagreeing about what its policy says is the failure
+this authority exists to prevent, so a build that does not know a version refuses
+the workspace instead of reading it under its own rules.
+
+This is distinct from the review binding's own version, which identifies the
+deterministic binding contract and changes when *that* contract changes. A Rule
+does **not** carry a schema version of its own; the workspace answers for it.
+
+A prepared Rule Review attestation does not survive a migration that changes Rule
+interpretation. It named a subject computed under the old semantics, so it is
+stale by definition and must be prepared again.
+
+A **historical** snapshot carries the version that was current when it was taken,
+and is readable at any version this build recognizes. Refusing an older snapshot
+would make every reference pinned before a migration unresolvable — moving the
+workspace forward would retroactively break provenance that was correct when it
+was recorded. This is safe only while the recognized versions represent the
+resource identically, which is true of 1 and 2: version 2 changes how a Rule is
+read, and no Rule is read out of a historical snapshot. A future version that
+changes a resource representation must decode a snapshot under the snapshot's own
+version rather than widening that check again.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain

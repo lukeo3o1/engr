@@ -512,20 +512,24 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         events_before,
         "compatible retained Event history is not rewritten"
     );
-    assert_eq!(
+    assert_ne!(
         std::fs::read(&format_path).expect("format after migration"),
         format_before,
-        "a valid workspace authority is not rewritten"
+        "the workspace authority moves forward, because version 1 no longer denotes what this build writes"
     );
     assert_eq!(
         migrated_object["format"], "engr-object",
         "compatible legacy marker is preserved"
     );
-    assert_eq!(migrated_object["version"], 1);
+    assert_eq!(
+        migrated_object["version"], 1,
+        "the Object's own legacy envelope marker is compatible and is not touched"
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
-        1
+        engr::WORKSPACE_VERSION,
+        "and the workspace authority now names the version this build writes"
     );
 }
 
@@ -4091,4 +4095,143 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("both legacy status"), "{error}");
+}
+
+/// A workspace at an older version is refused, not reinterpreted.
+///
+/// This is the whole reason the Rule review policy moved the workspace version.
+/// The same `.engr/rules/*.md` bytes mean different things under version 1 and
+/// version 2 — a file with no `review:` block now carries an effective ceiling
+/// and an exhaustion action, and an explicit block is an unknown field to the
+/// older build. Two builds must not both accept the workspace and disagree about
+/// what its rules say, so a build that does not write this version refuses it
+/// and says which version it found.
+#[test]
+fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("policy.md"),
+        "---\nid: recording-policy\napplies:\n  domains:\n    - backlog\n---\n\n# Recording policy\n\nSay what changed.\n",
+    )
+    .expect("rule");
+
+    // Exactly what a version 1 workspace looks like: intact, well formed, and
+    // written by a build that had never heard of `review:`.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+
+    let listed = run_engr(root, &["rules", "ls"]);
+    assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
+    let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
+    assert!(
+        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        "the refusal names the version it found and what to do: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).is_empty(),
+        "and nothing about the rule reaches stdout, because it was never read \
+         under this build's semantics"
+    );
+    // A mutation is refused for the same reason, through the same door.
+    let prepared = run_engr(root, &["prepare", "--new", "--text", "not under version 1"]);
+    assert_eq!(prepared.status.code(), Some(engr::EXIT_SCHEMA));
+
+    // And the explicit migration is what makes the newer semantics apply.
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION
+    );
+    let shown = run_engr(root, &["rules", "show", "recording-policy"]);
+    assert!(shown.status.success());
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("5 attempts, then it is refused"),
+        "after migrating, the same bytes carry the version 2 effective policy"
+    );
+}
+
+/// Moving the workspace version forward must not break provenance recorded
+/// before it moved.
+///
+/// A reference pins a commit, and that snapshot carries whatever version was
+/// current when it was taken. If the historical decoder insisted on the newest
+/// version, every reference pinned before a migration would stop resolving —
+/// the workspace moving forward would retroactively invalidate provenance that
+/// was correct when it was recorded, which is the opposite of what pinning is
+/// for. Only versions this build actually recognizes are readable; an unknown
+/// one is still refused.
+#[test]
+fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    let created = prepare(root, &["prepare", "--new", "--text", "pinned wording"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // Commit while the workspace still says version 1, which is what every
+    // commit made before this change looks like.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    git(root, &["commit", "-q", "-m", "before the migration"]);
+    let commit = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+
+    run_engr(root, &["migrate"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION,
+        "the workspace really did move"
+    );
+
+    let historical = engr::git::object_at(root, &commit, &id)
+        .expect("a snapshot at a recognized older version is readable");
+    assert_eq!(
+        historical.expect("object present in that snapshot").id,
+        id,
+        "and it decodes to the object that was pinned"
+    );
+
+    // A version nobody here recognizes is still refused, so this is a widening
+    // to what is known rather than the check being dropped.
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    git(root, &["commit", "-q", "-m", "a version from the future"]);
+    let future = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+    let error =
+        engr::git::object_at(root, &future, &id).expect_err("an unknown version is refused");
+    assert!(error.message.contains("99"), "{}", error.message);
 }
