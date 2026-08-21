@@ -22,9 +22,11 @@
 
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
+    EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 pub const DIR: &str = "rules";
@@ -109,6 +111,43 @@ impl OnExhaustion {
     }
 }
 
+/// One attempt number inside an active review sequence.
+///
+/// A sequence runs `1 -> 2 -> 3`, and one that is abandoned, lost or restarted
+/// may legitimately begin again at `1`. **There is no attempt 0**: it is not
+/// another independent sequence, it is a number the protocol never defines.
+///
+/// Made unrepresentable rather than checked. Every evaluator refusing zero
+/// separately is the same rule written several times and forgotten once — and
+/// the forgetting is quiet, because a missing check here returns a perfectly
+/// ordinary "nothing is exhausted yet" that a caller has no reason to doubt.
+/// Validating at construction means the value cannot be wrong by the time any
+/// policy question is asked of it.
+///
+/// This carries no sequence identity and nothing is persisted. #25 is explicit
+/// that v1 has no review series, retry counter or reset record, and a type that
+/// only bounds one number cannot become one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Attempt(NonZeroU32);
+
+impl Attempt {
+    /// The first attempt of a sequence.
+    pub const FIRST: Self = Self(NonZeroU32::MIN);
+
+    pub fn new(value: u32) -> Result<Self> {
+        NonZeroU32::new(value).map(Self).ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a review attempt is counted from 1; there is no attempt 0".to_owned(),
+            )
+        })
+    }
+
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// The default ceiling, applied when a Rule does not name one.
 ///
 /// The earlier reading — that an omitted limit means unlimited — was withdrawn.
@@ -145,8 +184,8 @@ impl Review {
     /// and exhausts at 6. The attempt number is agent-attested process metadata
     /// and is deliberately not stored: engr does not count attempts, it only
     /// says what a given count means.
-    pub fn exhausted(self, attempt: u32) -> bool {
-        attempt > self.max_attempts
+    pub fn exhausted(self, attempt: Attempt) -> bool {
+        attempt.get() > self.max_attempts
     }
 }
 
@@ -879,7 +918,7 @@ impl ReviewBinding {
     /// Returned rather than counted because "which rule stopped this" is what a
     /// caller has to be able to say. A composition that reports only a verdict
     /// leaves a person told no and not told by what.
-    pub fn exhausted(&self, attempt: u32) -> Vec<&BoundRule> {
+    pub fn exhausted(&self, attempt: Attempt) -> Vec<&BoundRule> {
         self.rules
             .iter()
             .filter(|rule| rule.review.exhausted(attempt))
@@ -896,12 +935,11 @@ impl ReviewBinding {
     /// [`Self::sha256`], and the shape makes that structural rather than
     /// remembered.
     ///
-    /// Attempt numbers are 1-based, so a ceiling of 5 leaves 1 through 5
-    /// reviewable and exhausts at 6. A `0` is therefore before the first
-    /// attempt and exhausts nothing; there is no admission path that can supply
-    /// one yet, and refusing it here would be inventing a rule #25 has not
-    /// written.
-    pub fn exhaustion(&self, attempt: u32) -> Result<Exhaustion> {
+    /// Attempt numbers run from 1, so a ceiling of 5 leaves 1 through 5
+    /// reviewable and exhausts at 6. Zero is not a value this can be asked
+    /// about: [`Attempt`] refuses it at construction, so the question never
+    /// arrives here as an ordinary "nothing exhausted yet".
+    pub fn exhaustion(&self, attempt: Attempt) -> Result<Exhaustion> {
         // The smallest ceiling in the applicable set decides whether anything is
         // exhausted at all. One shared attempt passes the smallest ceiling
         // first, so "some rule is past its ceiling" and "the attempt exceeds the
@@ -910,7 +948,7 @@ impl ReviewBinding {
         let Some(limit) = self.rules.iter().map(|rule| rule.review.max_attempts).min() else {
             return Ok(Exhaustion::NotReached);
         };
-        if attempt <= limit {
+        if attempt.get() <= limit {
             return Ok(Exhaustion::NotReached);
         }
         match self.domain {
@@ -930,7 +968,7 @@ impl ReviewBinding {
             // unresolved intent over blocking admission, and the marker is what
             // tells a later reader this was not a passing review.
             Domain::Backlog => Ok(Exhaustion::Exhausted(RuleReview {
-                attempts: attempt,
+                attempts: attempt.get(),
                 limit,
             })),
             // Refused rather than answered. #25 leaves these open on purpose,

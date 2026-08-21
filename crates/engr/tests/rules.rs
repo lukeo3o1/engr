@@ -20,6 +20,10 @@ fn workspace() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+fn attempt(value: u32) -> rules::Attempt {
+    rules::Attempt::new(value).expect("a valid attempt")
+}
+
 fn write_rule(root: &Path, name: &str, text: &str) -> PathBuf {
     let path = rules::dir(root).join(format!("{name}.md"));
     std::fs::write(&path, text).expect("write rule");
@@ -1304,13 +1308,13 @@ fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
     assert_eq!(rule.review, rules::Review::default());
 
     // The boundary is "past the ceiling", not "at" it.
-    for attempt in 1..=5 {
+    for number in 1..=5 {
         assert!(
-            !rule.review.exhausted(attempt),
-            "attempt {attempt} is still reviewable under a ceiling of 5"
+            !rule.review.exhausted(attempt(number)),
+            "attempt {number} is still reviewable under a ceiling of 5"
         );
     }
-    assert!(rule.review.exhausted(6));
+    assert!(rule.review.exhausted(attempt(6)));
 }
 
 /// Writing a default out must not change what a rule means.
@@ -1426,8 +1430,8 @@ fn changing_the_effective_review_policy_changes_the_review_identity() {
     // A tighter ceiling also moves the boundary it is a ceiling for.
     write_rule(&root, "architecture", &with("review:\n  max_attempts: 1\n"));
     let rule = rules::load_all(&root).expect("load").remove(0);
-    assert!(!rule.review.exhausted(1));
-    assert!(rule.review.exhausted(2));
+    assert!(!rule.review.exhausted(attempt(1)));
+    assert!(rule.review.exhausted(attempt(2)));
 }
 
 /// The review block refuses what it does not understand, like the rest of the
@@ -1564,23 +1568,23 @@ fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
     let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
 
     // The mechanical fact is domain-neutral: which rules are past their ceiling.
-    assert!(bound.exhausted(2).is_empty());
+    assert!(bound.exhausted(attempt(2)).is_empty());
     assert_eq!(
         bound
-            .exhausted(3)
+            .exhausted(attempt(3))
             .iter()
             .map(|rule| rule.id.as_str())
             .collect::<Vec<_>>(),
         vec!["strict"],
         "the strict rule runs out first, and the caller can say which one"
     );
-    assert_eq!(bound.exhausted(6).len(), 2);
+    assert_eq!(bound.exhausted(attempt(6)).len(), 2);
 
     // The number is agent-attested process metadata, so it must not be able to
     // move the identity of what had to be reviewed.
     let hash = bound.sha256().expect("hash");
-    for attempt in [0, 1, 3, 99] {
-        let _ = bound.exhaustion(attempt);
+    for number in [1, 3, 99] {
+        let _ = bound.exhaustion(attempt(number));
     }
     assert_eq!(
         hash,
@@ -1616,11 +1620,11 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
     );
 
     assert_eq!(
-        bind(&root).exhaustion(2).expect("backlog"),
+        bind(&root).exhaustion(attempt(2)).expect("backlog"),
         rules::Exhaustion::NotReached
     );
     assert_eq!(
-        bind(&root).exhaustion(3).expect("backlog"),
+        bind(&root).exhaustion(attempt(3)).expect("backlog"),
         rules::Exhaustion::Exhausted(rules::RuleReview {
             attempts: 3,
             limit: 2
@@ -1636,14 +1640,14 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
         "---\nid: stricter\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Stricter\n\nOne try.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(3).expect("backlog"),
+        bind(&root).exhaustion(attempt(3)).expect("backlog"),
         rules::Exhaustion::Exhausted(rules::RuleReview {
             attempts: 3,
             limit: 1
         })
     );
     assert_eq!(
-        bind(&root).exhaustion(2).expect("backlog"),
+        bind(&root).exhaustion(attempt(2)).expect("backlog"),
         rules::Exhaustion::Exhausted(rules::RuleReview {
             attempts: 2,
             limit: 1
@@ -1670,11 +1674,11 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(1).expect("object"),
+        bind(&root).exhaustion(attempt(1)).expect("object"),
         rules::Exhaustion::NotReached
     );
     assert_eq!(
-        bind(&root).exhaustion(2).expect("object"),
+        bind(&root).exhaustion(attempt(2)).expect("object"),
         rules::Exhaustion::Refused
     );
 
@@ -1684,7 +1688,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(2).expect("object"),
+        bind(&root).exhaustion(attempt(2)).expect("object"),
         rules::Exhaustion::HumanConfirmation,
         "an exhausted rule naming a human outranks one that only refuses"
     );
@@ -1697,7 +1701,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(2).expect("object"),
+        bind(&root).exhaustion(attempt(2)).expect("object"),
         rules::Exhaustion::Refused,
         "only an actually exhausted rule's action counts"
     );
@@ -1726,12 +1730,61 @@ fn a_domain_whose_exhaustion_v1_has_not_settled_is_refused_rather_than_guessed()
         // Below the ceiling there is nothing to compose, and that much is
         // domain-neutral.
         assert_eq!(
-            bound.exhaustion(1).expect("not reached is answerable"),
+            bound
+                .exhaustion(attempt(1))
+                .expect("not reached is answerable"),
             rules::Exhaustion::NotReached
         );
         let error = bound
-            .exhaustion(2)
+            .exhaustion(attempt(2))
             .expect_err("an unsettled domain must not be given an answer");
         assert!(error.message.contains(domain.as_str()), "{}", error.message);
     }
+}
+
+/// There is no attempt 0, and the substrate cannot be asked about one.
+///
+/// A review sequence runs 1, 2, 3; an abandoned one begins again at 1. Zero is
+/// not another sequence — it is a number #25 never defines. The danger is not
+/// that it is wrong but that it is *quiet*: an evaluator handed zero returns a
+/// perfectly ordinary "nothing is exhausted yet", so a caller doing the natural
+/// thing would admit an undefined input as a successful policy result.
+///
+/// Refused at construction rather than in each evaluator, so there is one place
+/// to get it right instead of three places to forget it.
+#[test]
+fn a_review_attempt_is_counted_from_one_and_zero_is_not_a_value() {
+    let error = rules::Attempt::new(0).expect_err("zero is refused");
+    assert!(
+        error.message.contains("counted from 1"),
+        "{}",
+        error.message
+    );
+
+    let first = rules::Attempt::new(1).expect("one is the first attempt");
+    assert_eq!(first, rules::Attempt::FIRST);
+    assert_eq!(first.get(), 1);
+
+    // And the first attempt is genuinely reviewable rather than being refused
+    // one step further on, which is the failure this could have traded for.
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    write_rule(
+        &root,
+        "strict",
+        "---\nid: strict\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Strict\n\nOne try.\n",
+    );
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(
+        bound.exhaustion(first).expect("backlog"),
+        rules::Exhaustion::NotReached,
+        "attempt 1 against a ceiling of 1 is the last reviewable one"
+    );
+    assert_eq!(
+        bound.exhaustion(attempt(2)).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        })
+    );
 }

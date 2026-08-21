@@ -1474,6 +1474,12 @@ attempts 1 through 5 reviewable and exhausts at 6. The attempt number is
 **agent-attested process metadata**. engr does not count attempts and stores no
 review series; it says what a given count means.
 
+**Attempts are counted from 1, and 0 is not a value.** A number below the first
+attempt is not a quieter way of saying "not yet" — it is outside what the
+protocol defines, and it is refused rather than answered. The failure it prevents
+is the silent one: an evaluator handed 0 would report that nothing is exhausted,
+which reads exactly like a successful policy result.
+
 The scope of that number is **one active review sequence**, and saying so matters
 because it bounds what the ceiling guarantees:
 
