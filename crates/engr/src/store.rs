@@ -7,6 +7,9 @@
 //!   objects/<uuid>.json      the authority
 //!   events/<uuid>.jsonl      append-only confirmed history
 //!   candidates/<CODE>.json   awaiting a human
+//!   backlog/<uuid>.json      unresolved staging, confirmed by nobody
+//!   work/objects/<uuid>.json execution memory, owned by an object, confirmed by nobody
+//!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
 use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
@@ -49,6 +52,20 @@ pub fn candidate_path(root: &Path, challenge: &str) -> Result<PathBuf> {
         "candidate code {challenge:?} must be six characters from 23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     );
     Ok(candidates_dir(root).join(format!("{challenge}.json")))
+}
+
+/// Where the last size refusal is written down.
+///
+/// Inside `candidates/` deliberately, and not beside `format.json`. That
+/// directory is already ignored by every `.gitignore` `init` has ever written,
+/// so this file cannot travel out of the machine that made it — whereas a new
+/// path at the top of `.engr` would need a line existing workspaces do not have,
+/// and quietly rewriting somebody's `.gitignore` is a worse answer than picking
+/// a directory that already says "local only". [`crate::gate::pending_codes`]
+/// reads this directory by filename and keeps only valid challenge codes, so a
+/// name that is not one is invisible to it.
+pub fn refusal_path(root: &Path) -> PathBuf {
+    candidates_dir(root).join("refused-oversize.json")
 }
 
 /// Walk up from `start` looking for a workspace, so the tool works from any
@@ -121,7 +138,14 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         "{} already exists",
         dir.display()
     );
-    for path in [objects_dir(root), events_dir(root), candidates_dir(root)] {
+    for path in [
+        objects_dir(root),
+        events_dir(root),
+        candidates_dir(root),
+        crate::backlog::dir(root),
+        crate::work::dir(root),
+        crate::collection::dir(root),
+    ] {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
     write_json(
@@ -184,29 +208,37 @@ fn detect_legacy(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Does any Object here still use the legacy `status` spelling?
+///
+/// Asked of every command, in every domain, because the answer decides whether
+/// the workspace may be mutated at all. That reach is why it must not fail on a
+/// file it cannot read: one malformed Object used to make `backlog ls`, every
+/// Work command and every Collection command exit with a parse error about a
+/// file none of them were going to touch — a single bad byte disabling three
+/// domains that do not depend on it.
+///
+/// So a file that will not read is not evidence of anything here, and is not an
+/// error here either. It stays an error where it matters: `decode_object`
+/// refuses it the moment something actually loads that Object, `verify` reports
+/// it, and `preflight_migration` still validates every retained representation
+/// before moving any of them. Failing closed on Object authority and staying
+/// out of the way of the other domains are the same rule, applied where each
+/// belongs.
 fn contains_legacy_objects(root: &Path) -> Result<bool> {
     let mut legacy = false;
     for id in object_ids(root)? {
-        let path = object_path(root, &id);
-        let value: serde_json::Value = read_json(&path)?;
-        let object = value.as_object().ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}: object must be a JSON object", path.display()),
-            )
-        })?;
-        ensure!(
-            !(object.contains_key("status") && object.contains_key("state")),
-            EXIT_SCHEMA,
-            "{}: contains both legacy status and canonical state",
-            path.display()
-        );
-        ensure!(
-            object.contains_key("status") || object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: object has neither status nor state",
-            path.display()
-        );
+        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        // A file claiming both spellings cannot say which it means, so it is not
+        // counted as legacy on the strength of the one that happens to be there.
+        // `decode_object` refuses it when it is loaded.
+        if object.contains_key("state") {
+            continue;
+        }
         legacy |= object.contains_key("status");
     }
     Ok(legacy)
@@ -229,6 +261,24 @@ struct MigrationEntry {
 }
 
 fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
+    // The two spellings of one lifecycle field are checked here rather than in
+    // the workspace scan, because this is where the answer matters: a file
+    // claiming both cannot say which it means, and `status` is read as an alias
+    // for `state`, so serde would silently take one and call it authority.
+    if let Some(object) = value.as_object() {
+        ensure!(
+            !(object.contains_key("status") && object.contains_key("state")),
+            EXIT_SCHEMA,
+            "{}: contains both legacy status and canonical state",
+            path.display()
+        );
+        ensure!(
+            object.contains_key("status") || object.contains_key("state"),
+            EXIT_SCHEMA,
+            "{}: object has neither status nor state",
+            path.display()
+        );
+    }
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     object.validate()?;

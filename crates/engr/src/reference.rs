@@ -1,6 +1,7 @@
 //! Canonical syntax for engr resource references.
 
 use crate::{ensure, Error, Result, EXIT_SCHEMA};
+use serde::{Deserialize, Serialize};
 
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -122,11 +123,24 @@ impl EngrRef {
             }
         };
         validate_id(kind, id)?;
+        // A **positive** integer. Section ids are allocated from a counter that
+        // starts at 1, so `:0` names nothing that can ever exist — accepting it
+        // would let a reference parse, canonicalize and round-trip while being
+        // unresolvable by construction, which is worse than refusing it here.
+        //
+        // Whether a resource kind supports a section selector at all stays a
+        // domain rule: shared syntax is not shared semantics.
         let section = section
             .map(|value| {
-                value
+                let parsed = value
                     .parse::<u64>()
-                    .map_err(|_| Error::new(EXIT_SCHEMA, "section selector must be an integer"))
+                    .map_err(|_| Error::new(EXIT_SCHEMA, "section selector must be an integer"))?;
+                ensure!(
+                    parsed > 0,
+                    EXIT_SCHEMA,
+                    "section selector must be a positive integer, and {parsed} is not"
+                );
+                Ok(parsed)
             })
             .transpose()?;
         Ok(Self {
@@ -273,6 +287,18 @@ pub fn encode_uuid(uuid: uuid::Uuid) -> String {
         .collect()
 }
 
+/// The compact reference spelling of a stored UUID identity.
+///
+/// Records keep standard UUID text so a file can be identified without a
+/// resolver; references use the 26-character codec. Both spellings are the same
+/// 128 bits, and this is the one place that says so for callers holding the
+/// stored form.
+pub fn encode_uuid_str(value: &str) -> Result<String> {
+    let uuid = uuid::Uuid::parse_str(value)
+        .map_err(|_| Error::new(EXIT_SCHEMA, format!("{value:?} is not a UUID")))?;
+    Ok(encode_uuid(uuid))
+}
+
 pub fn decode_uuid(compact: &str) -> Result<uuid::Uuid> {
     ensure!(
         compact.len() == 26,
@@ -298,6 +324,43 @@ pub fn decode_uuid(compact: &str) -> Result<uuid::Uuid> {
         value = (value << 5) | digit;
     }
     Ok(uuid::Uuid::from_bytes(value.to_be_bytes()))
+}
+
+/// Parse an embedded engr target and hold it to the one canonical spelling.
+///
+/// Shared because every domain that embeds `{ "kind": "engr", "ref": ... }` has
+/// the same three questions — is it parseable, is that resource kind legal
+/// *here*, and is it written the one way — while each keeps its own answer to
+/// the second. Sharing the parser is not sharing the semantics: `subjects[]`,
+/// `produced[]` and `relations[]` all pass through this and mean different
+/// things on the other side.
+///
+/// `what` names the field in the refusal, because a caller who typed the wrong
+/// reference needs to know which of several it was.
+pub fn canonical_embedded(
+    reference: &str,
+    allowed: &[ResourceKind],
+    what: &str,
+) -> Result<CanonicalEngrRef> {
+    let parsed = EngrRef::parse_embedded(reference)?;
+    ensure!(
+        parsed.snapshot_selector().is_none(),
+        EXIT_SCHEMA,
+        "{what} names a current resource, so it cannot carry a Git snapshot selector"
+    );
+    ensure!(
+        allowed.contains(&parsed.kind()),
+        EXIT_SCHEMA,
+        "{what} cannot target {reference:?}"
+    );
+    let canonical = parsed.canonicalize(|_| None)?;
+    ensure!(
+        canonical.embedded() == reference,
+        EXIT_SCHEMA,
+        "{what} {reference:?} is not canonical; write it as {:?}",
+        canonical.embedded()
+    );
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -408,4 +471,49 @@ mod tests {
             "obj:01h47kwz2mfk0v47mffcnstqva:3@0123456789abcdef0123456789abcdef01234567"
         );
     }
+}
+
+/// The structural discriminator from the shared embedded reference form. `kind`
+/// is structural; `type` stays reserved for semantic classification.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EngrKind {
+    #[serde(rename = "engr")]
+    Engr,
+}
+
+/// `{ "kind": "engr", "ref": "obj:<id>" }` — the shared embedded engr target.
+///
+/// Lives here rather than in the first domain that needed it, because more than
+/// one now does. What is shared is the *syntax*: every domain still decides for
+/// itself which resource kinds it will accept and what pointing at one means.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct EngrTarget {
+    pub kind: EngrKind,
+    #[serde(rename = "ref")]
+    pub reference: String,
+}
+
+impl EngrTarget {
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self {
+            kind: EngrKind::Engr,
+            reference: reference.into(),
+        }
+    }
+}
+
+/// A fresh workspace-scoped collection id: fifty random bits as ten Crockford
+/// Base32 characters.
+///
+/// Deliberately opaque and deliberately not a uuid. A collection id is short
+/// enough to say out loud and carries nothing — no date, no milestone number,
+/// no type — because every one of those would be a fact that can stop being
+/// true while the id cannot change.
+pub fn random_collection_id() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..10)
+        .map(|_| CROCKFORD[rng.gen_range(0..32)] as char)
+        .collect()
 }

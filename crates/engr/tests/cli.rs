@@ -152,10 +152,12 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "target".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -170,10 +172,12 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "projection wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -197,10 +201,12 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionRevised { section: 1 },
             object: target.clone(),
+            becomes: None,
             content: Content {
                 text: "effective crash-tail wording".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -227,10 +233,12 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::ObjectCreated,
             object: source.clone(),
+            becomes: None,
             content: Content {
                 text: "source".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -244,6 +252,7 @@ fn reference_admission_uses_the_effective_target_projection() {
     let stale_projection_ref = Payload {
         action: Action::SectionAdded,
         object: source.clone(),
+        becomes: None,
         content: Content {
             text: "cannot pin stale projection".to_owned(),
             based_on: None,
@@ -253,6 +262,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                 sha256: raw.sha256,
                 commit: old_commit.clone(),
             }],
+            ..Content::default()
         },
     };
     let error = gate::prepare(root, stale_projection_ref)
@@ -294,6 +304,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         Payload {
             action: Action::SectionAdded,
             object: source,
+            becomes: None,
             content: Content {
                 text: "historically verified effective wording".to_owned(),
                 based_on: None,
@@ -303,6 +314,7 @@ fn reference_admission_uses_the_effective_target_projection() {
                     sha256: effective.sha256,
                     commit: committed_effective,
                 }],
+                ..Content::default()
             },
         },
     )
@@ -320,10 +332,12 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::ObjectCreated,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "candidate state".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -336,10 +350,12 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "apply once".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -383,10 +399,12 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id.clone(),
+            becomes: None,
             content: Content {
                 text: "stale candidate".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -397,10 +415,12 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         Payload {
             action: Action::SectionAdded,
             object: id,
+            becomes: None,
             content: Content {
                 text: "overtaking mutation".to_owned(),
                 based_on: None,
                 refs: Vec::new(),
+                ..Content::default()
             },
         },
     )
@@ -605,6 +625,7 @@ fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewri
             text: String::new(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         };
         event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
         std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
@@ -1199,10 +1220,12 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload = Payload {
         action: Action::SectionAdded,
         object: id,
+        becomes: None,
         content: Content {
             text: "event wording".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1413,10 +1436,12 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
     let payload = Payload {
         action: Action::SectionAdded,
         object: object.clone(),
+        becomes: None,
         content: Content {
             text: "reconcile under lock".to_owned(),
             based_on: None,
             refs: Vec::new(),
+            ..Content::default()
         },
     };
     let payload_sha256 = payload.sha256().expect("payload hash");
@@ -1594,6 +1619,474 @@ fn an_empty_commit_is_not_the_basis_moving() {
     );
 }
 
+/// The two domains share a workspace and nothing else. A reader who runs the
+/// record commands must not be shown a word of unconfirmed staging, and a
+/// reader who runs the staging commands must not be able to mistake what they
+/// are looking at.
+#[test]
+fn record_surfaces_never_mix_in_unconfirmed_staging() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "confirmed record"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &object,
+            "--add",
+            "--text",
+            "confirmed wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    let staged = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "reconsider the confirmed wording",
+            "--text",
+            "unconfirmed exploratory wording",
+        ],
+    );
+    assert!(
+        staged.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let staged = String::from_utf8(staged.stdout).expect("utf8");
+    assert!(staged.contains("UNCONFIRMED STAGING"), "got {staged:?}");
+
+    for args in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &object],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).expect("utf8");
+        assert!(
+            !text.contains("unconfirmed exploratory wording")
+                && !text.contains("reconsider the confirmed wording"),
+            "{args:?} must not mix staging into the record: {text:?}"
+        );
+    }
+
+    // `verify` stays record-oriented: staging existing is not a record verdict.
+    let verify = run_engr(root, &["verify"]);
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("PASS"));
+
+    // And structured staging output carries the boundary as a field, because
+    // that is what travels furthest from the banner.
+    let shown = run_engr(root, &["backlog", "ls"]);
+    let listing = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(listing.contains("UNCONFIRMED STAGING"));
+    let id = listing
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().next())
+        .expect("a listed item")
+        .to_owned();
+    let json = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).expect("backlog json");
+    assert_eq!(json["authority"], "unconfirmed_staging");
+    assert_eq!(
+        json["sections"][0]["text"],
+        "unconfirmed exploratory wording"
+    );
+}
+
+/// What a candidate derived from staging shows, and what confirming it says it
+/// did. The flags that declare a source are still an open protocol question, so
+/// the candidate is prepared through the library — but the screens a human
+/// reads are the command line's, and they are what this pins.
+#[test]
+fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    let staging = engr::backlog::create(root, "two points", "settled here", Vec::new())
+        .expect("stage")
+        .id;
+    engr::backlog::add_section(root, &staging, "still open", Vec::new()).expect("second point");
+
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&object).expect("object id is a uuid"));
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            becomes: None,
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+                ..Content::default()
+            },
+        },
+        vec![
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: true,
+            },
+            gate::SourceRequest {
+                item: staging.clone(),
+                section: 2,
+                produced: vec![engr::backlog::Produced::object(format!("obj:{compact}"))],
+                resolves: false,
+            },
+        ],
+    )
+    .expect("prepare from staging");
+    let code = prepared.candidate.challenge.clone();
+
+    // Re-rendered hours later, the screen still says what typing the code does.
+    let shown = run_engr(root, &["candidate", &code]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(
+        shown.contains("§1  resolved by this — will be consumed"),
+        "got {shown:?}"
+    );
+    assert!(
+        shown.contains("§2  still unresolved after this"),
+        "got {shown:?}"
+    );
+    assert!(shown.contains(&format!("produced engr:obj:{compact}")));
+
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        confirmed.status.success(),
+        "confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    let confirmed = String::from_utf8(confirmed.stdout).expect("utf8");
+    assert!(confirmed.contains("CONFIRMED"));
+    assert!(
+        confirmed.contains("resolved and consumed"),
+        "confirming must say what it did to staging: {confirmed:?}"
+    );
+    assert!(
+        confirmed.contains("recorded 1 produced outcome(s); still unresolved"),
+        "including the point it did not settle: {confirmed:?}"
+    );
+
+    let stored = engr::backlog::load(root, &staging).expect("the second point survives");
+    assert_eq!(stored.sections.len(), 1);
+    assert_eq!(stored.sections[0].id, 2);
+    assert_eq!(stored.sections[0].produced.len(), 1);
+}
+
+/// Three different failures, three different exit codes. Phase 1 fixed that
+/// boundary for the record; staging has to keep it, or a script cannot tell a
+/// typo from a corrupted workspace.
+#[test]
+fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let item = engr::backlog::create(root, "topic", "unresolved", Vec::new())
+        .expect("stage")
+        .id;
+    let compact =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&item).expect("uuid is a uuid"));
+    let absent =
+        engr::reference::encode_uuid(uuid::Uuid::parse_str(&engr::model::new_id()).expect("uuid"));
+
+    let code = |args: &[&str]| run_engr(root, args).status.code();
+
+    // Legal syntax, wrong shape for the command: usage.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{compact}:1")]),
+        Some(engr::EXIT_USAGE),
+        "every backlog command addresses a whole item"
+    );
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:obj:{compact}")]),
+        Some(engr::EXIT_USAGE),
+        "and a backlog command does not address an Object"
+    );
+    // Malformed canonical reference the person typed: usage, not schema.
+    for malformed in ["engr:backlog:not-a-compact-uuid", "engr:nonsense:abc"] {
+        assert_eq!(
+            code(&["backlog", "show", malformed]),
+            Some(engr::EXIT_USAGE),
+            "{malformed}"
+        );
+    }
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            "engr:obj:not-a-compact-uuid",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "a malformed --subject is a mistyped argument"
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject",
+            &format!("engr:collection:{compact}"),
+        ]),
+        Some(engr::EXIT_USAGE)
+    );
+    assert_eq!(
+        code(&[
+            "backlog",
+            "add",
+            &item,
+            "--text",
+            "concerns",
+            "--subject-file",
+            "../outside.rs",
+        ]),
+        Some(engr::EXIT_USAGE),
+        "and so is a path that is not repository-relative"
+    );
+
+    // Well-formed, but there is no such item: not found.
+    assert_eq!(
+        code(&["backlog", "show", &format!("engr:backlog:{absent}")]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+    assert_eq!(
+        code(&["backlog", "show", "0198ffff"]),
+        Some(engr::EXIT_NOT_FOUND)
+    );
+
+    // The stored file itself is wrong: schema, reached through a valid argument.
+    let path = engr::backlog::item_path(root, &item);
+    let mut stored: Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["updated_at"] = Value::String("last tuesday".to_owned());
+    store::write_json(&path, &stored).expect("corrupt the stored item");
+    assert_eq!(
+        code(&["backlog", "show", &item]),
+        Some(engr::EXIT_SCHEMA),
+        "a malformed workspace is not the caller's argument being wrong"
+    );
+    assert_eq!(code(&["backlog", "ls"]), Some(engr::EXIT_SCHEMA));
+}
+
+/// The confirmation screen names which unresolved point gets consumed, so two
+/// different points may never print the same identifier on it. Backlog ids
+/// abbreviate against Backlog ids: borrowing the Object width is how two
+/// distinct sources become indistinguishable exactly where it matters.
+#[test]
+fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+
+    // Two backlog items differing only in their last character. One object, so
+    // the Object width is 8 — which would render both of these identically.
+    let ids = [
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6a",
+        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6b",
+    ];
+    for id in ids {
+        let item = serde_json::json!({
+            "id": id,
+            "topic": format!("unresolved point in {id}"),
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": "still open",
+                "updated_at": "2026-08-17T00:00:00Z",
+                "subjects": [],
+            }],
+        });
+        store::write_json(&engr::backlog::item_path(root, id), &item).expect("stage");
+    }
+    assert_eq!(engr::view::width(root), 8, "the object namespace is narrow");
+
+    let prepared = gate::prepare_from_backlog(
+        root,
+        Payload {
+            action: Action::SectionAdded,
+            object: object.clone(),
+            becomes: None,
+            content: Content {
+                text: "what the work produced".to_owned(),
+                based_on: None,
+                refs: Vec::new(),
+                ..Content::default()
+            },
+        },
+        ids.iter()
+            .map(|id| gate::SourceRequest {
+                item: (*id).to_owned(),
+                section: 1,
+                produced: Vec::new(),
+                resolves: false,
+            })
+            .collect(),
+    )
+    .expect("prepare from two staged points");
+
+    let shown = run_engr(root, &["candidate", &prepared.candidate.challenge]);
+    let shown = String::from_utf8(shown.stdout).expect("utf8");
+    let rendered: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| line.strip_prefix("Backlog    "))
+        .map(|line| line.split_whitespace().next().expect("an id"))
+        .collect();
+    assert_eq!(rendered.len(), 2, "both sources are shown: {shown:?}");
+    assert_ne!(
+        rendered[0], rendered[1],
+        "two unresolved points must not render identically: {shown:?}"
+    );
+    for (id, printed) in ids.iter().zip(&rendered) {
+        assert!(
+            id.starts_with(printed),
+            "{printed} does not abbreviate {id}"
+        );
+    }
+}
+
+/// Backlog CRUD through the command line, including the one refusal that keeps
+/// a subject from claiming provenance it does not have.
+#[test]
+fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    assert!(run_engr(root, &["init"]).status.success(), "init");
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.name", "test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    std::fs::write(root.join("session.rs"), "fn refresh() {}\n").expect("source");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "source"]);
+
+    let created = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "refresh strategy",
+            "--text",
+            "offline mode may invalidate it",
+            "--subject-file",
+            "session.rs",
+            "--subject-symbol",
+            "session.rs",
+            "refresh",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let id = engr::backlog::ids(root).expect("ids").remove(0);
+
+    assert!(
+        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
+            .status
+            .success()
+    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "2",
+            "--text",
+            "reworded"
+        ]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "merge",
+            &id,
+            "--sections",
+            "1,2",
+            "--text",
+            "one point"
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
+            .status
+            .success()
+    );
+
+    let item = engr::backlog::load(root, &id).expect("item");
+    assert_eq!(item.topic, "refresh");
+    assert_eq!(item.sections.len(), 1);
+    assert_eq!(item.sections[0].id, 3);
+    assert!(
+        engr::gate::pending(root).expect("candidates").is_empty(),
+        "staging edits never mint a challenge code"
+    );
+
+    // A dirty path cannot be pinned, and the refusal says what to do about it.
+    std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "concerns dirty source",
+            "--subject-file",
+            "session.rs",
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("commit it first"), "got {message:?}");
+
+    assert!(run_engr(root, &["backlog", "rm", &id, "--section", "3"])
+        .status
+        .success());
+    assert!(
+        engr::backlog::ids(root).expect("ids").is_empty(),
+        "removing the last unresolved point removes the topic"
+    );
+    let empty = run_engr(root, &["backlog", "ls"]);
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("nothing unresolved"));
+}
+
 /// Installed from a release archive there is no checkout, so the document that
 /// says what the tool guarantees would otherwise not be on the machine the tool
 /// is on. It also has to work before `init`: the protocol is what someone reads
@@ -1617,4 +2110,1931 @@ fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
     let printed = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(printed, engr::PROTOCOL);
     assert!(printed.starts_with("# engr protocol v0"));
+}
+
+/// A workspace with one committed source file, for the surfaces that pin one.
+fn repository_with_source(root: &Path) {
+    git(root, &["init", "-q"]);
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/verifier.rs"), "fn verify() {}\n").expect("source");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "source",
+        ],
+    );
+}
+
+/// The code a candidate screen ends with.
+fn code_from(screen: &str) -> String {
+    screen
+        .rsplit("CONFIRM ")
+        .next()
+        .expect("a candidate screen ends with its code")
+        .trim()
+        .to_owned()
+}
+
+/// The screen a human reads before typing a code has to carry the whole
+/// destination. A state without its type is a word that means different things
+/// on different objects, and attention is what they are actually deciding.
+#[test]
+fn classifying_shows_the_whole_destination_and_what_it_does_to_the_listing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "verification design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "draft",
+        ],
+    );
+    assert!(screen.status.success());
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for line in ["Type       design", "State      draft", "Attention  yes"] {
+        assert!(shown.contains(line), "{line:?} missing from {shown}");
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let listed = run_engr(root, &["ls"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("design/draft"));
+
+    // Accepting it takes it out of the default listing without closing it, and
+    // says so before the human commits to that.
+    let leaving = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "design",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &leaving);
+    let listed = run_engr(root, &["ls"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("no objects"),
+        "an accepted design is out of the default attention set"
+    );
+    let all = run_engr(root, &["ls", "--all"]);
+    assert!(String::from_utf8_lossy(&all.stdout).contains("design/accepted"));
+
+    // `--close` is the untyped vocabulary, and a design has no such state.
+    let refused = run_engr(root, &["prepare", "--object", &id, "--close"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a design cannot be closed"));
+}
+
+/// The role, the excerpt and the artifact are all part of the assertion, so all
+/// of them appear on the candidate screen and in the record afterwards.
+#[test]
+fn a_section_carries_role_supplementary_content_and_implementation_provenance() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "issuer validation"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--role",
+            "acceptance_criterion",
+            "--text",
+            "The verifier must reject an unknown issuer before checking audience.",
+            "--content",
+            "data.json",
+            "{\"error\":\"invalid_issuer\"}",
+            "--implemented-by-symbol",
+            "src/verifier.rs",
+            "verify",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for fragment in [
+        "Role       acceptance_criterion",
+        "Content    [0] data.json",
+        "implemented_by -> symbol src/verifier.rs :: verify",
+        // The body itself, not only its type: a human shown the label has not
+        // read what they are admitting.
+        "{\"error\":\"invalid_issuer\"}",
+    ] {
+        assert!(
+            shown.contains(fragment),
+            "{fragment:?} missing from {shown}"
+        );
+    }
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).to_string();
+    assert!(shown.contains("§1 [acceptance_criterion]"), "{shown}");
+    assert!(shown.contains("content  [0] data.json"), "{shown}");
+    assert!(shown.contains("relation implemented_by"), "{shown}");
+
+    let structured = run_engr(root, &["show", &id, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&structured.stdout).expect("json");
+    assert_eq!(value["state"], "open");
+    assert_eq!(value["attention"], Value::Bool(true));
+    assert!(
+        value.get("type").is_none(),
+        "an untyped object says nothing"
+    );
+    let section = &value["sections"][0];
+    assert_eq!(section["role"], "acceptance_criterion");
+    assert_eq!(section["content"][0]["type"], "data.json");
+    assert_eq!(section["relations"][0]["type"], "implemented_by");
+    assert!(
+        section["relations"][0]["target"]["commit"]
+            .as_str()
+            .expect("commit")
+            .len()
+            >= 40,
+        "a relation pins a full resolved object id"
+    );
+
+    // The vocabularies are closed, and closed at the command line too.
+    for bad in [
+        vec!["--role", "rationale"],
+        vec!["--content", "text.md", "prose"],
+    ] {
+        let mut args = vec![
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "x",
+        ];
+        args.extend(bad.iter().copied());
+        assert!(
+            !run_engr(root, &args).status.success(),
+            "{bad:?} is outside the vocabulary"
+        );
+    }
+}
+
+/// The first refusal has to send the agent somewhere, and the retry has to be
+/// visible to the human who is being asked to admit it anyway.
+#[test]
+fn an_oversize_section_is_refused_once_and_the_retry_says_so_on_the_screen() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "size policy"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(message.contains("engr backlog"), "{message}");
+    assert!(message.contains("--oversize"), "{message}");
+
+    let retried = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            &long,
+            "--oversize",
+        ],
+    );
+    assert!(retried.status.success());
+    let shown = String::from_utf8_lossy(&retried.stdout).to_string();
+    assert!(
+        shown.contains("OVERSIZE   admitted by exception"),
+        "the exception is on the screen, above the wording: {shown}"
+    );
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    assert!(!std::fs::read_to_string(store::object_path(root, &id))
+        .expect("object")
+        .contains("oversize"));
+}
+
+/// One command, one confirmation, three facts: the state, the replacement and
+/// the reason.
+#[test]
+fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let original = prepare(root, &["prepare", "--new", "--text", "redis locks"]);
+    confirm(root, &original);
+    let original_id = original["object"].as_str().expect("object id").to_owned();
+    let replacement = prepare(root, &["prepare", "--new", "--text", "advisory locks"]);
+    confirm(root, &replacement);
+    let replacement_id = replacement["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let classified = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &classified);
+    // Straight from `accepted`, with nothing in between. That is the object
+    // supersession exists for — one that was current until something replaced
+    // it — and it is out of the attention set by definition. Sending it back
+    // through `proposed` first would confirm a state it was never in.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &original_id,
+            "--supersede",
+            &replacement_id,
+            "--no-based-on",
+            "--text",
+            "Replaced: advisory locks remove the extra availability dependency.",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(shown.contains("Role       supersession"), "{shown}");
+    assert!(shown.contains("superseded_by -> engr:obj:"), "{shown}");
+    assert!(shown.contains("State      superseded"), "{shown}");
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &original_id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "superseded");
+    assert_eq!(value["attention"], Value::Bool(false));
+    assert_eq!(value["sections"][0]["role"], "supersession");
+    assert_eq!(
+        value["sections"][0]["relations"][0]["type"],
+        "superseded_by"
+    );
+    assert_eq!(
+        store::load_events(root, &original_id)
+            .expect("events")
+            .len(),
+        3,
+        "created, classified, superseded — one semantic action appends one event, \
+         and retiring an accepted decision invents no intermediate state"
+    );
+}
+
+/// A destination belongs to `--classify`, or to an action that needs the object
+/// back in the attention set — and to nothing else.
+///
+/// "Needs the object back" is the operative half. On an object that already
+/// needs attention there is nothing to bring back, so a destination on a section
+/// action is refused there too: it would be an unrelated change riding along
+/// inside a confirmation about something else.
+#[test]
+fn type_and_state_flags_belong_to_classify_and_nothing_else() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "flag discipline"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    for (args, expected) in [
+        (
+            vec!["prepare", "--object", &id, "--close", "--state", "closed"],
+            "already names the state it produces",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--classify", "--state", "open"],
+            "--classify needs the destination type",
+        ),
+        (
+            vec![
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "x",
+                "--type",
+                "design",
+            ],
+            "a destination needs a --state",
+        ),
+        (
+            vec![
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "x",
+                "--type",
+                "design",
+                "--state",
+                "proposed",
+            ],
+            "already needs attention",
+        ),
+        (
+            vec!["prepare", "--object", &id, "--close", "--role", "decision"],
+            "carries no wording",
+        ),
+    ] {
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{args:?} must be refused");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{args:?}: got {message:?}");
+    }
+
+    // `--untyped` is a word rather than the absence of `--type`, so "no type"
+    // and "I forgot to say" cannot look the same.
+    let untyped = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--untyped",
+            "--state",
+            "closed",
+        ],
+    );
+    confirm(root, &untyped);
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(value["state"], "closed");
+    assert!(value.get("type").is_none());
+}
+
+/// Removing supplementary content shows the human what is being removed.
+///
+/// `content[]` is ordered and repeated types are valid, so with two `code.rs`
+/// entries the heading names a position, not a thing. A body is hashed with the
+/// section and is as authoritative as the wording above it — removed wording
+/// already appears in the text diff, and a removed body has to appear the same
+/// way, or the screen is asking for a confirmation of something it did not show.
+#[test]
+fn a_removed_supplementary_body_is_shown_and_a_changed_one_is_shown_as_a_diff() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "two excerpts"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // A body long enough that showing all of it would be the wrong answer for a
+    // modification, so the two presentations are actually distinguishable.
+    let long = (0..40)
+        .map(|line| format!("let step_{line} = {line};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let changed = long.replace("let step_7 = 7;", "let step_7 = 700;");
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &long,
+            "--content",
+            "code.rs",
+            "fn discarded() { todo!() }",
+        ],
+    );
+    confirm(root, &added);
+
+    // Keep the first entry, change it, and drop the second.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Both excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            &changed,
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+
+    assert!(
+        shown.contains("── content [1] code.rs ── removed"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("fn discarded() { todo!() }"),
+        "the removed body is shown, not only which position it sat in: {shown}"
+    );
+
+    // The modified body is a diff against the previous one, which is the same
+    // presentation the wording gets — and the reason the protocol says a body
+    // is shown in full when it is added or removed rather than in every case.
+    assert!(shown.contains("-let step_7 = 7;"), "{shown}");
+    assert!(shown.contains("+let step_7 = 700;"), "{shown}");
+    assert!(
+        !shown.contains("let step_39 = 39;"),
+        "an unchanged tail forty lines away is not context: {shown}"
+    );
+
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let entries = value["sections"][0]["content"].as_array().expect("content");
+    assert_eq!(entries.len(), 1, "the second entry really is gone");
+    assert_eq!(entries[0]["body"], changed);
+}
+
+/// The exception is the retry of a refusal, and the command line cannot skip
+/// the refusal by reaching for the flag first.
+#[test]
+fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "admission order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
+
+    let straight_to_it = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            &long,
+        ],
+    );
+    assert!(
+        !straight_to_it.status.success(),
+        "the first prepare must refuse, whatever flags it carried"
+    );
+    let message = String::from_utf8_lossy(&straight_to_it.stderr).to_string();
+    assert!(message.contains("retry of a refusal"), "{message}");
+
+    // And an exception over content that breaks nothing is refused too, so the
+    // flag never becomes something an agent can just always pass.
+    let nothing_to_except = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--oversize",
+            "--text",
+            "brief",
+        ],
+    );
+    assert!(!nothing_to_except.status.success());
+    assert!(
+        String::from_utf8_lossy(&nothing_to_except.stderr).contains("no exception to make"),
+        "{}",
+        String::from_utf8_lossy(&nothing_to_except.stderr)
+    );
+    // Nor on an action that has no section content to measure at all, where the
+    // exception could only ever be a claim the screen makes on engr's behalf.
+    for action in [
+        vec!["--rename", "--text", "a better title"],
+        vec!["--classify", "--untyped", "--state", "closed"],
+    ] {
+        let mut args = vec!["prepare", "--object", &id, "--oversize"];
+        args.extend(action.iter().copied());
+        let refused = run_engr(root, &args);
+        assert!(!refused.status.success(), "{action:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("no size exception to make"),
+            "{action:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["candidate"]).stdout).contains("nothing"),
+        "and no attempt left a code awaiting a human"
+    );
+}
+
+/// Give a stored Section bodies a text editor could have put there.
+///
+/// The hash is recomputed, so this is valid persisted authority rather than
+/// corruption — exactly what a workspace written by any build may hold, since
+/// nothing on the read path normalizes a body.
+fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
+    let mut object = store::load_object(root, id).expect("load");
+    let section = &mut object.sections[0];
+    section.content = bodies
+        .iter()
+        .map(|body| engr::semantics::Supplement::new("code.rs", *body))
+        .collect();
+    section.sha256 = section.recomputed_sha256().expect("hash");
+    store::save_object(root, &object).expect("save");
+    assert!(
+        run_engr(root, &["verify", id]).status.success(),
+        "the seeded section must be valid stored authority"
+    );
+}
+
+/// The screen cannot draw two different authoritative bodies the same way.
+///
+/// A terminal shows `"x"`, `"x\n"` and `"x   "` identically, and a body of
+/// nothing but spaces as nothing at all — yet each is a different literal
+/// inside a different Section hash. Nothing normalizes a body, on the way in or
+/// on the read path, so any build's workspace may hold all of these; the gate's
+/// obligation is to say what it is showing, not to change it.
+#[test]
+fn a_body_whose_ending_is_invisible_is_described_where_the_human_reads_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "invisible endings"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "placeholder one",
+            "--content",
+            "code.rs",
+            "placeholder two",
+            "--content",
+            "code.rs",
+            "placeholder three",
+        ],
+    );
+    confirm(root, &added);
+
+    // Now they hold what a previous build, a hand edit, or a body that simply
+    // ended that way would leave behind.
+    seed_bodies(root, &id, &["let x = 1;\n", "let y = 2;   ", "   "]);
+
+    // Removing all three: the screen has to convey what is being removed.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    for expected in [
+        "── content [0] code.rs ── removed, ends with 1 newline",
+        "── content [1] code.rs ── removed, ends with 3 spaces",
+        "── content [2] code.rs ── removed, 3 spaces, and nothing else",
+    ] {
+        assert!(
+            expected_line(&shown, expected),
+            "{expected:?} not in {shown}"
+        );
+    }
+    // The bodies themselves are still printed exactly, untrimmed.
+    assert!(shown.contains("let x = 1;\n"), "{shown}");
+    assert!(shown.contains("let y = 2;   \n"), "{shown}");
+
+    // And a revision that only moves trailing whitespace — which the line diff
+    // below cannot show — is named on both sides.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Three excerpts stand behind this assertion.",
+            "--content",
+            "code.rs",
+            "let x = 1;\n\n",
+            "--content",
+            "code.rs",
+            "let y = 2;   ",
+            "--content",
+            "code.rs",
+            "   ",
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(
+        expected_line(
+            &shown,
+            "── content [0] code.rs ── previous ends with 1 newline; candidate ends with 2 newlines"
+        ),
+        "{shown}"
+    );
+    // The other two are unchanged, so they are not shown at all.
+    assert!(!shown.contains("content [1]"), "{shown}");
+    assert!(!shown.contains("content [2]"), "{shown}");
+}
+
+/// Whether a line is present exactly, trailing spaces and all.
+fn expected_line(screen: &str, line: &str) -> bool {
+    screen.lines().any(|candidate| candidate == line)
+}
+
+/// Content order is the order the caller wrote, whichever flag spelled it.
+///
+/// `content[]` is ordered and moving an entry is a revision, so grouping the
+/// inline entries ahead of the file-backed ones would be authoritative input
+/// being silently rearranged. Both spellings stay available and mixing them
+/// stays legal; what changed is that the sequence survives.
+#[test]
+fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "content order"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let second = root.join("second.json");
+    std::fs::write(&second, "{\"second\":true}").expect("write");
+    let fourth = root.join("fourth.json");
+    std::fs::write(&fourth, "{\"fourth\":true}").expect("write");
+
+    // Inline, file, inline, file — the interleaving the two lists cannot hold.
+    let screen = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "four excerpts, in this order",
+            "--content",
+            "code.rs",
+            "let first = 1;",
+            "--content-file",
+            "data.json",
+            second.to_str().expect("path"),
+            "--content",
+            "code.rs",
+            "let third = 3;",
+            "--content-file",
+            "data.json",
+            fourth.to_str().expect("path"),
+        ],
+    );
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let shown = String::from_utf8_lossy(&screen.stdout).to_string();
+    let headings: Vec<&str> = shown
+        .lines()
+        .filter(|line| line.starts_with("Content    ["))
+        .collect();
+    assert_eq!(
+        headings,
+        vec![
+            "Content    [0] code.rs",
+            "Content    [1] data.json",
+            "Content    [2] code.rs",
+            "Content    [3] data.json",
+        ],
+        "the candidate screen shows the caller's order: {shown}"
+    );
+
+    let code = code_from(&shown);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+    let value: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let bodies: Vec<&str> = value["sections"][0]["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .map(|entry| entry["body"].as_str().expect("body"))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            "let first = 1;",
+            "{\"second\":true}",
+            "let third = 3;",
+            "{\"fourth\":true}",
+        ],
+        "and the record stores it"
+    );
+}
+
+/// Execution memory is reachable, and reads as what it is.
+///
+/// Every screen that prints it says so, because the failure this domain can
+/// cause is not corruption — it is a reader taking a finished checklist for a
+/// settled decision.
+#[test]
+fn work_is_its_own_namespace_and_every_screen_says_it_is_not_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    repository_with_source(root);
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let empty = run_engr(root, &["work", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("EXECUTION MEMORY"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no execution memory"), "{shown}");
+
+    let started = run_engr(
+        root,
+        &[
+            "work",
+            "start",
+            &id,
+            "--summary",
+            "Parser done. show still uses the old resolver.",
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(run_engr(
+        root,
+        &["work", "item", "add", &id, "--text", "migrate the parser"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["work", "item", "state", &id, "--item", "1", "--state", "done"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &[
+            "work",
+            "block",
+            &id,
+            "--reason",
+            "waiting on the compat result"
+        ]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["work", "ls"]).stdout).to_string();
+    assert!(listed.contains("blocked"), "derived, not stored: {listed}");
+    assert!(listed.contains("the auth design"), "{listed}");
+
+    // And the record's own commands are untouched by any of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["EXECUTION MEMORY", "migrate the parser", "compat result"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?} from the sidecar: {shown}"
+            );
+        }
+    }
+    let structured: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert!(structured.get("work").is_none(), "{structured}");
+    assert_eq!(structured["state"], "open", "the Object is where it was");
+
+    // Structured Work output travels furthest from any banner — into another
+    // tool, with no screen in between — so the boundary has to be a field.
+    // `{"state": "active"}` alone is indistinguishable from an Object's state.
+    let sidecar: Value =
+        serde_json::from_slice(&run_engr(root, &["work", "show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(
+        sidecar["authority"], "execution_memory",
+        "the JSON surface must say what it is: {sidecar}"
+    );
+    assert_eq!(sidecar["standing"], "blocked");
+    assert_eq!(sidecar["state"], "active");
+}
+
+/// A human said stop, and every screen that touches it says so.
+///
+/// The rule itself is the agent's to follow — engr cannot tell who asked, so it
+/// does not refuse. What it can do is never let the signal pass unremarked: the
+/// state screen states the rule, and deleting says what went with the sidecar.
+#[test]
+fn pausing_work_survives_an_agent_trying_to_delete_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "paused work"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+
+    let shown = String::from_utf8_lossy(&run_engr(root, &["work", "show", &id]).stdout).to_string();
+    assert!(shown.contains("State      paused"), "{shown}");
+    assert!(
+        shown.contains("do not resume it on your own"),
+        "the screen states the rule the tool cannot enforce: {shown}"
+    );
+
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(
+        removed.status.success(),
+        "the deletion is carried out: the rule is normative, not mechanical"
+    );
+    assert!(
+        String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"),
+        "but it does not pass unremarked: {}",
+        String::from_utf8_lossy(&removed.stdout)
+    );
+    assert!(!run_engr(root, &["work", "show", &id]).status.success());
+
+    // Deleting an active one says only that there is nothing left to hand off.
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(removed.status.success());
+    assert!(!String::from_utf8_lossy(&removed.stdout).contains("stop signal"));
+}
+
+/// A work target names a whole Object or Backlog item, and must exist.
+#[test]
+fn work_targets_are_checked_at_the_command_line() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "depends"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let other = prepare(root, &["prepare", "--new", "--text", "the prerequisite"]);
+    confirm(root, &other);
+    let other = other["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&other).expect("compact");
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    let ok = run_engr(
+        root,
+        &[
+            "work",
+            "depend",
+            &id,
+            "--on",
+            &format!("engr:obj:{compact}"),
+            "--reason",
+            "the token format is confirmed there",
+        ],
+    );
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let shown = String::from_utf8_lossy(&ok.stdout).to_string();
+    assert!(shown.contains("Depends on"), "{shown}");
+    assert!(
+        shown.contains("the token format is confirmed there"),
+        "{shown}"
+    );
+
+    let absent = engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact");
+    for (spec, expected) in [
+        (format!("engr:obj:{compact}:1"), "whole Object"),
+        // A well-formed Collection id, so what refuses it is the kind and not the
+        // spelling: Work does not point at planning metadata.
+        ("engr:collection:0123456789".to_owned(), "cannot target"),
+        (format!("engr:obj:{absent}"), "does not exist"),
+        (format!("obj:{compact}"), "must be an engr: reference"),
+    ] {
+        let refused = run_engr(root, &["work", "depend", &id, "--on", &spec]);
+        assert!(!refused.status.success(), "{spec}");
+        let message = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(message.contains(expected), "{spec}: {message}");
+    }
+}
+
+/// Every surface an agent can reach describes the same rule.
+///
+/// `paused` has one behaviour and four places that state it: the protocol
+/// compiled into the binary, `--help`, the screens, and the source. When an
+/// accepted design moves, they have to move together — an agent that reads
+/// `--help` and concludes the opposite of `engr protocol` has been handed two
+/// rules and will follow the convenient one. Pinned here because the drift is
+/// invisible: nothing else fails when only the wording is stale.
+#[test]
+fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    // `--help` is the surface an agent reaches for first and the one most
+    // likely to disagree, because nothing breaks when it does.
+    let help = String::from_utf8_lossy(&run_engr(root, &["work", "rm", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["work", "--help"]).stdout);
+    for stale in ["Refused while paused", "refused", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help still claims the reverted rule ({stale:?}): {help}"
+        );
+    }
+
+    // The compiled-in protocol is canonical, and says the rule is the agent's.
+    // Whitespace-normalized, so a reflowed paragraph does not fail a test about
+    // meaning — the thing being pinned is what the sentence says.
+    let protocol = String::from_utf8_lossy(&run_engr(root, &["protocol"]).stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        protocol.contains("MUST NOT delete a paused work object"),
+        "the protocol states the normative rule"
+    );
+    assert!(
+        protocol.contains("MUST NOT turn it into a lifecycle rule by refusing the deletion"),
+        "and states that an implementation must not enforce it"
+    );
+
+    // And the behaviour itself, one more time, against the same binary the two
+    // documents above came out of.
+    let created = prepare(root, &["prepare", "--new", "--text", "surfaces agree"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+    assert!(run_engr(root, &["work", "pause", &id]).status.success());
+    let removed = run_engr(root, &["work", "rm", &id]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("stop signal went with it"));
+}
+
+/// Planning is reachable, reads as planning, and stays out of the record.
+#[test]
+fn collections_are_their_own_namespace_and_never_reach_the_record() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    let empty = run_engr(root, &["collection", "ls"]);
+    assert!(empty.status.success());
+    let shown = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(shown.contains("PLANNING"), "{shown}");
+    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("no collections"), "{shown}");
+
+    let made = run_engr(
+        root,
+        &[
+            "collection",
+            "new",
+            "--name",
+            "Q3 authentication",
+            "--start",
+            "2026-07-01",
+            "--end",
+            "2026-09-30",
+        ],
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let plan = String::from_utf8_lossy(&made.stdout).to_string();
+    let plan_id = plan
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("the id is on the screen")
+        .trim()
+        .to_owned();
+
+    let added = run_engr(
+        root,
+        &[
+            "collection",
+            "add",
+            &plan_id,
+            "--target",
+            &format!("engr:obj:{compact}"),
+            "--order",
+            "10",
+            "--priority",
+            "high",
+            "--reason",
+            "Blocks the rest of the milestone.",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let shown = String::from_utf8_lossy(&added.stdout).to_string();
+    assert!(shown.contains("[high]"), "{shown}");
+    assert!(
+        shown.contains("Blocks the rest of the milestone."),
+        "{shown}"
+    );
+    // Derived attention, not `open`: half the vocabulary does not have that.
+    assert!(shown.contains("attention"), "{shown}");
+    assert!(shown.contains("the auth design"), "{shown}");
+
+    // The record's own commands see none of it.
+    for command in [
+        vec!["ls"],
+        vec!["ls", "--all", "--sections"],
+        vec!["show", &id],
+        vec!["verify"],
+    ] {
+        let output = run_engr(root, &command);
+        assert!(output.status.success(), "{command:?}");
+        let shown = String::from_utf8_lossy(&output.stdout).to_string();
+        for leak in ["PLANNING", "Q3 authentication", "Blocks the rest"] {
+            assert!(
+                !shown.contains(leak),
+                "{command:?} leaked {leak:?}: {shown}"
+            );
+        }
+    }
+
+    // Structured planning output says what it is, like the other two domains.
+    let structured: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan_id, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(structured["authority"], "planning", "{structured}");
+    assert_eq!(structured["state"], "open");
+    assert_eq!(structured["schedule"]["start"], "2026-07-01");
+    assert_eq!(structured["members"][0]["priority"]["level"], "high");
+}
+
+/// Deleting a plan is the agent's rule to follow, and the screen says what went.
+#[test]
+fn deleting_a_collection_reports_the_planning_context_it_discarded() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan_id = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    let deleted = run_engr(root, &["collection", "delete", &plan_id]);
+    assert!(
+        deleted.status.success(),
+        "the rule is normative, not mechanical: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    let said = String::from_utf8_lossy(&deleted.stdout).to_string();
+    assert!(said.contains("planning context"), "{said}");
+    assert!(!run_engr(root, &["collection", "show", &plan_id])
+        .status
+        .success());
+
+    // And the help does not claim a refusal the tool does not perform.
+    let help = String::from_utf8_lossy(&run_engr(root, &["collection", "--help"]).stdout)
+        .to_string()
+        + &String::from_utf8_lossy(&run_engr(root, &["collection", "delete", "--help"]).stdout);
+    for stale in ["Refused", "refuses", "cannot be deleted"] {
+        assert!(
+            !help.contains(stale),
+            "help claims a guard that is not there: {help}"
+        );
+    }
+}
+
+/// The listing puts what is still being pursued first.
+///
+/// Pinned with all three states because the bug it replaces was invisible with
+/// one: sorting by the *name* of the state puts `cancelled` and `completed`
+/// above `open` alphabetically, which is the exact reverse of what a planning
+/// listing is for, and nothing about a single open plan would have shown it.
+#[test]
+fn collection_ls_lists_open_plans_before_closed_ones() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let make = |name: &str| -> String {
+        let made = run_engr(root, &["collection", "new", "--name", name]);
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        String::from_utf8_lossy(&made.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("Collection "))
+            .expect("id")
+            .trim()
+            .to_owned()
+    };
+    // Named so that alphabetical order by name would also get this wrong.
+    let cancelled = make("aaa dropped");
+    let completed = make("bbb finished");
+    let open = make("zzz current");
+    assert!(run_engr(
+        root,
+        &["collection", "state", &cancelled, "--state", "cancelled"]
+    )
+    .status
+    .success());
+    assert!(run_engr(
+        root,
+        &["collection", "state", &completed, "--state", "completed"]
+    )
+    .status
+    .success());
+
+    let listed = String::from_utf8_lossy(&run_engr(root, &["collection", "ls"]).stdout).to_string();
+    // Rows only: the banner says "what its members mean", which a looser filter
+    // would count as a row and quietly shift every position by one.
+    let order: Vec<&str> = listed
+        .lines()
+        .filter(|line| line.contains("need attention"))
+        .map(|line| {
+            if line.contains("zzz current") {
+                "open"
+            } else if line.contains("bbb finished") {
+                "completed"
+            } else {
+                "cancelled"
+            }
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["open", "completed", "cancelled"],
+        "open plans come first: {listed}"
+    );
+    assert!(listed.contains(&open[..4]), "{listed}");
+}
+
+/// engr can name its own resources to itself.
+///
+/// Every reference-taking flag across three domains wants
+/// `engr:obj:<26-char>` or `engr:backlog:<26-char>`, and until this landed no
+/// command printed one — an agent had to implement Crockford Base32 outside the
+/// tool to use `--subject`, `--on` or `--target` at all. The test is the round
+/// trip rather than the field, because the field is only worth having if what
+/// it prints is exactly what the flags accept.
+#[test]
+fn a_read_surface_prints_the_reference_every_flag_asks_for() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "refresh", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+
+    // Text and structured both carry it, for both domains.
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    let reference = object["reference"].as_str().expect("reference").to_owned();
+    assert!(reference.starts_with("engr:obj:"), "{reference}");
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{reference}:1"),
+        "a section names itself too, for --ref and --subject"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).contains(&reference),
+        "the text surface prints it as well"
+    );
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    let staged_reference = staged["reference"].as_str().expect("reference").to_owned();
+    assert!(
+        staged_reference.starts_with("engr:backlog:"),
+        "{staged_reference}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["backlog", "show", &item]).stdout)
+            .contains(&staged_reference)
+    );
+
+    // And every flag that demanded this shape accepts exactly what was printed.
+    let plan = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    let plan_id = String::from_utf8_lossy(&plan.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+    assert!(run_engr(root, &["work", "start", &id]).status.success());
+
+    for (what, args) in [
+        (
+            "collection add --target, an object",
+            vec!["collection", "add", &plan_id, "--target", &reference],
+        ),
+        (
+            "collection add --target, a backlog item",
+            vec!["collection", "add", &plan_id, "--target", &staged_reference],
+        ),
+        (
+            "work depend --on",
+            vec!["work", "depend", &id, "--on", &staged_reference],
+        ),
+        (
+            "backlog new --subject",
+            vec![
+                "backlog",
+                "new",
+                "--topic",
+                "t",
+                "--text",
+                "x",
+                "--subject",
+                &reference,
+            ],
+        ),
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{what} refused what engr itself printed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Every addressable entity says its own canonical reference, exactly.
+///
+/// The contract is the machine-readable path — an agent must be able to obtain
+/// a reference without reimplementing the codec — so this asserts the exact
+/// values rather than only that one of them round-trips. Sections included:
+/// they are addressable too, and `--ref` and `--subject` take them.
+#[test]
+fn every_addressable_entity_exposes_its_canonical_reference() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "a section",
+        ],
+    );
+    confirm(root, &added);
+    assert!(run_engr(
+        root,
+        &["backlog", "new", "--topic", "t", "--text", "a point"]
+    )
+    .status
+    .success());
+    let item = engr::backlog::all(root).expect("backlog")[0].id.clone();
+    let made = run_engr(root, &["collection", "new", "--name", "a plan"]);
+    assert!(made.status.success());
+    let plan = String::from_utf8_lossy(&made.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Collection "))
+        .expect("id")
+        .trim()
+        .to_owned();
+
+    // The exact values, derived independently of the surfaces under test.
+    let object_ref = format!(
+        "engr:obj:{}",
+        engr::reference::encode_uuid_str(&id).expect("compact")
+    );
+    let item_ref = format!(
+        "engr:backlog:{}",
+        engr::reference::encode_uuid_str(&item).expect("compact")
+    );
+    let plan_ref = format!("engr:collection:{plan}");
+
+    let object: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(object["reference"], object_ref);
+    assert_eq!(
+        object["sections"][0]["reference"],
+        format!("{object_ref}:1")
+    );
+    assert_eq!(object["id"], id, "identity is not replaced by addressing");
+
+    let staged: Value = serde_json::from_slice(
+        &run_engr(root, &["backlog", "show", &item, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(staged["reference"], item_ref);
+    assert_eq!(staged["sections"][0]["reference"], format!("{item_ref}:1"));
+    assert_eq!(
+        staged["sections"][0]["id"], 1,
+        "the section keeps its own id"
+    );
+    assert_eq!(staged["id"], item);
+
+    let planned: Value = serde_json::from_slice(
+        &run_engr(root, &["collection", "show", &plan, "--format", "json"]).stdout,
+    )
+    .expect("json");
+    assert_eq!(planned["reference"], plan_ref);
+    assert_eq!(planned["id"], plan);
+
+    // Each one is accepted where it is meant to be used.
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "u",
+            "--text",
+            "x",
+            "--subject",
+            &format!("{object_ref}:1")
+        ]
+    )
+    .status
+    .success());
+    assert!(
+        run_engr(root, &["collection", "add", &plan, "--target", &item_ref])
+            .status
+            .success()
+    );
+}
+
+/// `:0` names a section that cannot exist, so the shared parser refuses it.
+#[test]
+fn a_zero_section_selector_is_refused_everywhere() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact");
+
+    for spelling in [
+        format!("engr:obj:{compact}:0"),
+        format!("obj:{compact}:0"),
+        format!("engr:backlog:{compact}:0"),
+    ] {
+        let error = engr::reference::EngrRef::parse_embedded(
+            spelling.strip_prefix("engr:").unwrap_or(&spelling),
+        )
+        .expect_err("section ids start at 1");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{spelling}");
+        assert!(error.message.contains("positive integer"), "{error}");
+    }
+    // One is still fine, and so is the parser's own error for a non-integer.
+    assert!(engr::reference::EngrRef::parse_embedded(&format!("obj:{compact}:1")).is_ok());
+
+    // And it is refused at the command line, through the same parser.
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "t",
+            "--text",
+            "x",
+            "--subject",
+            &format!("engr:obj:{compact}:0"),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("positive integer"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+/// The screen a human is required to read names what the action applies to.
+///
+/// `Payload`'s rustdoc promises that "delete §3 cannot become delete §5 after it
+/// was displayed". The hash kept that promise; the screen did not print the
+/// section at all, so with two sections carrying identical wording, deleting the
+/// first and deleting the second rendered byte-for-byte the same thing. Section
+/// ids are never reused, so confirming the wrong one breaks every reference
+/// pinning it with no way to put it back.
+#[test]
+fn a_candidate_screen_distinguishes_two_sections_that_say_the_same_thing() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "retry policy"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    for _ in 0..2 {
+        let added = prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "Retry with backoff.",
+            ],
+        );
+        confirm(root, &added);
+    }
+
+    let screen = |section: &str| {
+        let candidate = prepare(root, &["prepare", "--object", &id, "--delete", section]);
+        let code = candidate["challenge"]
+            .as_str()
+            .expect("challenge")
+            .to_owned();
+        let shown =
+            String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+        run_engr(root, &["confirm", &format!("CONFIRM {code} no")]);
+        shown
+    };
+    let first = screen("1");
+    let second = screen("2");
+
+    assert!(first.contains("section.deleted §1"), "{first}");
+    assert!(second.contains("section.deleted §2"), "{second}");
+    assert_ne!(
+        first.lines().next(),
+        second.lines().next(),
+        "two different mutations must not render the same first line"
+    );
+
+    // And the object is named by something a human recognises, not only by an
+    // abbreviated uuid they have no way to check.
+    assert!(first.contains("retry policy"), "{first}");
+}
+
+/// The hard ceiling is not a threshold with an override, and must not read as
+/// one. Both refusals used to end with the same sentence, so an agent that
+/// learned to add `--oversize` for the first would add it for the second — and
+/// burn a cycle discovering the flag it was just told to use does nothing.
+#[test]
+fn the_two_size_refusals_do_not_end_the_same_way() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "bounds"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    let refusal = |text: &str, oversize: bool| {
+        let mut args = vec![
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            text,
+        ];
+        if oversize {
+            args.push("--oversize");
+        }
+        let output = run_engr(root, &args);
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let normal = refusal(&"x".repeat(2000), false);
+    assert!(
+        normal.contains("prepare it again with --oversize"),
+        "the first refusal offers the retry: {normal}"
+    );
+
+    let hard = refusal(&"x".repeat(6000), false);
+    assert!(
+        !hard.contains("prepare it again with --oversize"),
+        "the hard ceiling must not read as a threshold with an override: {hard}"
+    );
+    assert!(hard.contains("no flag for this one"), "{hard}");
+
+    // And it means it: the flag an agent might reach for anyway is refused the
+    // same way rather than quietly letting the oversize record through.
+    let retried = refusal(&"x".repeat(6000), true);
+    assert!(retried.contains("no flag for this one"), "{retried}");
+}
+
+/// A machine-readable surface has to be readable by a strict machine.
+///
+/// The section wrapper added an explicit `id` beside a flattened section that
+/// already had one, so every section object carried the key twice. Permissive
+/// parsers take the last and happen to be right; a typed deserializer — including
+/// the one this crate uses — refuses the document outright.
+#[test]
+fn backlog_json_sections_do_not_repeat_a_key() {
+    // Deserialized from the raw text, not from a `Value`. Parsing into a
+    // `Value` first collapses a repeated key silently, which is exactly the
+    // reading that made this defect invisible.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StrictSection {
+        id: u64,
+        reference: String,
+        text: String,
+        updated_at: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StrictItem {
+        id: String,
+        reference: String,
+        sections: Vec<StrictSection>,
+    }
+
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let item = engr::backlog::create(root, "strictness", "a point", Vec::new()).expect("backlog");
+    engr::backlog::add_section(root, &item.id, "a second point", Vec::new()).expect("second");
+
+    let shown = run_engr(root, &["backlog", "show", &item.id, "--format", "json"]);
+    assert!(shown.status.success());
+    let raw = String::from_utf8_lossy(&shown.stdout).into_owned();
+    let parsed: StrictItem = serde_json::from_str(&raw)
+        .unwrap_or_else(|error| panic!("a strict reader must accept this: {error}\n{raw}"));
+    assert_eq!(parsed.sections.len(), 2);
+}
+
+/// A pending candidate presents the identity it was prepared with.
+///
+/// The screen names the Object by title, which makes the title part of the
+/// confirmation context — and a live lookup at render time would have left that
+/// part outside the candidate and outside `integrity_sha256`. A title rewritten
+/// in the projection afterwards would then change what the candidate presents
+/// while its payload hash, its integrity hash and `expected_rev` all still
+/// checked out, which is exactly what #20 says must be impossible.
+#[test]
+fn a_pending_candidate_shows_the_title_it_was_prepared_with() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the auth design"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Use short-lived tokens.",
+        ],
+    );
+    confirm(root, &added);
+
+    let candidate = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--revise",
+            "1",
+            "--no-based-on",
+            "--text",
+            "Use short-lived tokens, capped at 15 minutes.",
+        ],
+    );
+    let code = candidate["challenge"]
+        .as_str()
+        .expect("challenge")
+        .to_owned();
+    let before =
+        String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(before.contains("the auth design"), "{before}");
+
+    // Rewrite the title in the projection the way a text editor would, leaving
+    // `rev` alone so the candidate stays fresh by its own binding.
+    let path = store::object_path(root, &id);
+    let mut stored: Value = store::read_json(&path).expect("object");
+    stored["title"] = Value::String("a record this candidate is not about".into());
+    store::write_json(&path, &stored).expect("rewrite title");
+
+    let after = String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        !after.contains("a record this candidate is not about"),
+        "a pending candidate must not present an identity nobody prepared: {after}"
+    );
+    assert!(after.contains("the auth design"), "{after}");
+    assert_eq!(before, after, "the same candidate renders the same screen");
+
+    // And it is still admissible: the projection changed, the prepared context
+    // did not, so nothing about the candidate's own integrity moved.
+    let admitted = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+}
+
+/// `--ref` refuses a target whose file was rewritten outside the gate.
+///
+/// The pin is derived by recomputing the target's content, not by copying its
+/// stored seal, so the disagreement between the two is caught where the
+/// reference is built rather than several layers later. Copying the seal would
+/// have produced a reference that records agreement to wording nobody confirmed.
+#[test]
+fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+
+    let target = prepare(root, &["prepare", "--new", "--text", "upstream decision"]);
+    confirm(root, &target);
+    let target = target["object"].as_str().expect("object id").to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &target,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "Reason codes are numeric.",
+        ],
+    );
+    confirm(root, &added);
+
+    let source = prepare(root, &["prepare", "--new", "--text", "downstream decision"]);
+    confirm(root, &source);
+    let source = source["object"].as_str().expect("object id").to_owned();
+
+    // The wording changes; the seal beside it does not.
+    let path = store::object_path(root, &target);
+    let mut stored: Value = store::read_json(&path).expect("object");
+    stored["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
+    store::write_json(&path, &stored).expect("rewrite");
+
+    let reference = format!("{target}:1");
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &source,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "So the UI renders integers.",
+            "--ref",
+            &reference,
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(
+        message.contains("changed outside the gate"),
+        "the refusal must name what is actually wrong: {message}"
+    );
+}
+
+/// One malformed Object does not disable the domains that do not depend on it.
+///
+/// Every command asks whether the workspace still uses the legacy spelling, and
+/// that question used to read every Object file — so a single unreadable one
+/// made `backlog ls`, every Work command and every Collection command exit with
+/// a parse error about a file none of them were going to touch.
+///
+/// Isolation is not leniency. Object authority still fails closed: loading the
+/// malformed Object is refused, and `verify` says so. What changed is that
+/// three independent domains stopped being taken down with it.
+#[test]
+fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let healthy = prepare(root, &["prepare", "--new", "--text", "a sound record"]);
+    confirm(root, &healthy);
+    let healthy = healthy["object"].as_str().expect("object id").to_owned();
+    let broken = prepare(root, &["prepare", "--new", "--text", "about to be broken"]);
+    confirm(root, &broken);
+    let broken = broken["object"].as_str().expect("object id").to_owned();
+    engr::backlog::create(root, "staging", "an unresolved point", Vec::new()).expect("backlog");
+    engr::work::start(root, &healthy, Some("underway")).expect("work");
+    engr::collection::create(root, "a plan", None, None).expect("collection");
+
+    std::fs::write(store::object_path(root, &broken), "not json at all").expect("break it");
+
+    for args in [
+        vec!["backlog", "ls"],
+        vec!["work", "show", &healthy],
+        vec!["collection", "ls"],
+        vec!["show", &healthy],
+        vec!["verify", &healthy],
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{args:?} does not depend on the broken object: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // And the broken object itself is still refused, on every path that would
+    // have to trust it.
+    for args in [vec!["show", &broken], vec!["verify", &broken]] {
+        let output = run_engr(root, &args);
+        assert!(!output.status.success(), "{args:?} must fail closed");
+    }
+    assert!(
+        engr::ops::effective(root, &broken).is_err(),
+        "the library path fails closed too"
+    );
+
+    // A file claiming both spellings of the lifecycle field cannot say which it
+    // means, so loading it is refused rather than serde quietly taking one.
+    let mut confused: Value = store::read_json(&store::object_path(root, &healthy)).expect("read");
+    confused["status"] = confused["state"].clone();
+    store::write_json(&store::object_path(root, &healthy), &confused).expect("write");
+    let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("both legacy status"), "{error}");
 }

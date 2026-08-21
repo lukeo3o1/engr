@@ -8,6 +8,11 @@ revising, merging, deleting, closing — all of it goes through one gate: an age
 proposes, a human reads the change, and types a challenge code. There is no other
 way in.
 
+Work that is still unresolved goes in the **backlog** instead, which is
+git-tracked, freely agent-editable, and confirmed by nobody. That is what lets
+the record stay strict: exploratory material has somewhere to live that does not
+cost a confirmation or dilute what a recorded section means.
+
 Current workspaces use `.engr/format.json` as their sole schema authority.
 Legacy v0 workspaces without it remain readable; run `engr migrate` explicitly
 before changing them. engr refuses to mutate unknown or newer versions.
@@ -55,8 +60,9 @@ to be reading:
   on, so the target being rewritten is a computation too — and it pins the commit
   as well, so `git show` recovers what it used to say.
 
-The case worth interrupting for is a **closed** object whose basis moved. Closed
-means nobody is looking, which is exactly when drift goes unnoticed.
+The case worth interrupting for is an object **nobody is looking at** whose basis
+moved — a closed one, an accepted design, a mitigated risk. Out of the default
+listing is exactly where drift goes unnoticed.
 
 Reading is also checking. `show` recomputes every section's hash before printing
 it, and the hash of every section it stands on, because the default way in is the
@@ -69,7 +75,13 @@ word must not print `ok` over words nobody agreed to.
 compiled into the binary — `engr protocol` prints the copy that matches the
 build you are running, which is what makes "where this document and the
 implementation disagree" a question you can settle without a checkout.
-Forty-three tests cover the gate, the record and the command line.
+The tests cover the gate, the record, object semantics, unresolved staging,
+execution memory, planning and the command line.
+
+An object may carry a `type` — `design`, `decision` or `risk` — and one `state`
+valid for it; untyped is a first-class answer, not a gap. What `engr ls` shows by
+default is derived from that pair rather than stored, so an accepted design and a
+mitigated risk leave the listing without anything having to be called closed.
 
 There are no version numbers. One release tag, `latest`, published by hand and
 moved each time — so the commit compiled into the binary is what identifies a
@@ -104,10 +116,12 @@ engr prepare --object <id> --revise 3 --text-file f.txt
 engr prepare --object <id> --merge 1,2 --text-file f.txt
 engr prepare --object <id> --delete 3
 engr prepare --object <id> --close
+engr prepare --object <id> --classify --type decision --state accepted
+engr prepare --object <id> --supersede <other> --text "why it was replaced"
 engr candidate                               # what is awaiting a human
 engr candidate <code>                        # show it again, hours later
-engr ls                                      # open objects
-engr ls --all --stale                        # what needs attention
+engr ls                                      # what needs attention
+engr ls --stale                              # sections whose basis or refs moved
 engr ls --all --sections | grep <term>       # one line per section, greppable
 engr show <id>                               # sections, and how far each can be trusted
 engr show <id> --format json                 # the same, for an agent
@@ -117,7 +131,55 @@ engr protocol                                # the spec this binary implements
 
 Objects are addressed by unique id prefix, like a git commit.
 
-**Commit `.engr/objects` and `.engr/events`.** Confirmed events are append-only
+Work that is not settled yet goes somewhere else entirely:
+
+```bash
+engr backlog new --topic "reconsider the refresh strategy" \
+                 --text "offline mode may invalidate it" \
+                 --subject-file src/auth/session.rs
+engr backlog ls                              # unresolved topics
+engr backlog show <id>                       # points, subjects, outcomes so far
+engr backlog add <id> --text "another point"
+engr backlog revise <id> --section 2 --text "reworded"
+engr backlog rm <id> --section 2             # removing it is what says "settled"
+```
+
+Where execution currently stands goes somewhere else again — a sidecar on one
+object, holding the shortest useful handoff to whoever picks it up next:
+
+```bash
+engr work ls                                 # objects with execution memory
+engr work show <id>                          # where this one stands
+engr work start <id> --summary "parser done; show still on the old resolver"
+engr work item add <id> --text "migrate engr show"
+engr work block <id> --reason "waiting for the compatibility result"
+```
+
+No confirmation, no challenge code, no event log — an agent edits both directly
+and git is their history. Nothing in either is authority, every screen says so,
+and `ls`, `show` and `verify` never mix a word of them into the record.
+
+Which work belongs together goes in a **collection** — a plan, with an order and
+an optional schedule:
+
+```bash
+engr collection new --name "Q3 authentication" --end 2026-09-30
+engr collection add <plan> --target engr:obj:<id> --order 10 --priority high
+engr collection ls                           # plans, and what still needs attention
+```
+
+Grouping something changes nothing about it. An object in a plan means exactly
+what its confirmed sections say, and calling a plan complete is a declaration
+about the plan rather than a claim about its members.
+
+Work is deliberately weak. Finishing every item settles nothing: the object is
+exactly where it was, because only a confirmation moves it. `paused` is the one
+signal that belongs to the human rather than the agent — and engr cannot tell
+them apart, so it enforces none of it. What it does instead is say what happened:
+deleting paused work reports that a human's stop signal went with it.
+
+**Commit `.engr/objects`, `.engr/events`, `.engr/backlog`, `.engr/work` and
+`.engr/collections`.** Confirmed events are append-only
 history and audit evidence; sections remain the authority for current wording.
 This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —
