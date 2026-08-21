@@ -4173,9 +4173,18 @@ fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics()
     );
     let shown = run_engr(root, &["rules", "show", "recording-policy"]);
     assert!(shown.status.success());
+    let stdout = String::from_utf8_lossy(&shown.stdout).to_string();
     assert!(
-        String::from_utf8_lossy(&shown.stdout).contains("5 attempts, then it is refused"),
-        "after migrating, the same bytes carry the version 2 effective policy"
+        stdout.contains("5 attempts; on_exhaustion = reject"),
+        "after migrating, the same bytes carry the version 2 effective policy: {stdout}"
+    );
+    // This rule governs `backlog` only, where exhaustion neither refuses nor
+    // summons anyone. The line therefore states the policy and not an outcome —
+    // the earlier wording asserted the Object consequence for a rule that can
+    // never have it.
+    assert!(
+        !stdout.contains("refused") && !stdout.contains("human confirms"),
+        "no read surface claims a universal consequence: {stdout}"
     );
 }
 
@@ -4254,4 +4263,50 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     let error =
         engr::git::object_at(root, &future, &id).expect_err("an unknown version is refused");
     assert!(error.message.contains("99"), "{}", error.message);
+}
+
+/// No read surface promises a consequence the rule's domain does not have.
+///
+/// The sharpest case: a Backlog-only rule asking for `human_confirmation`.
+/// Backlog exhaustion never routes through the Human Gate, so a line reading
+/// "then a human confirms" would be telling a reader the opposite of what will
+/// happen — and it would be the surface, not the code, that they act on.
+///
+/// A rule does not have one consequence. It depends on the domain, and inside
+/// Backlog on whether the mutation destroys unresolved work. So the surfaces
+/// state the effective policy, and the protocol states the consequence per
+/// domain, exactly once.
+#[test]
+fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("staging.md"),
+        "---\nid: staging-policy\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 3\n  on_exhaustion: human_confirmation\n---\n\n# Staging policy\n\nSay what is unresolved.\n",
+    )
+    .expect("rule");
+
+    for args in [vec!["rules", "show", "staging-policy"], vec!["rules", "ls"]] {
+        let output = run_engr(root, &args);
+        assert!(output.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(
+            stdout.contains("3 attempts; on_exhaustion = human_confirmation"),
+            "{args:?} states the effective policy: {stdout}"
+        );
+        assert!(
+            !stdout.contains("human confirms") && !stdout.contains("refused"),
+            "{args:?} must not promise an outcome this domain does not have: {stdout}"
+        );
+    }
+
+    // The machine surface already carried effective values and no prose
+    // consequence; it stays that way.
+    let json = run_engr(root, &["rules", "show", "staging-policy", "--json"]);
+    let document: Value =
+        serde_json::from_slice(&json.stdout).expect("rules show --json is a document");
+    assert_eq!(document["review"]["max_attempts"], 3);
+    assert_eq!(document["review"]["on_exhaustion"], "human_confirmation");
 }

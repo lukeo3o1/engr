@@ -120,20 +120,25 @@ out. `rules show` states it; `rules ls` mentions it only where it is not the
 default:
 
 ```text
-Review     5 attempts, then it is refused
-Review     3 attempts, then a human confirms
+Review     5 attempts; on_exhaustion = reject
+Review     3 attempts; on_exhaustion = human_confirmation
 ```
 
-Both halves have defaults — five attempts, then refusal — so a rule that says
+Both halves have defaults — five attempts, and `reject` — so a rule that says
 nothing about review still has a limit. There is no unlimited rule. The attempt
 count is **yours to report honestly**: engr does not track it, stores no history
 of your tries, and can only tell you what a number means.
 
+The line states the rule's policy, not what will happen to you. **A rule does not
+have one consequence** — that is decided by the domain you are mutating, below.
+
 What running out costs you depends on the domain, and the difference is
 deliberate:
 
-- On an **Object**, it stops you. The mutation does not happen, and if an
-  exhausted rule asks for one, a human is brought in to decide.
+- On an **Object**, it stops *you*. Your autonomous path ends there, and if an
+  exhausted rule asks for one, a human is brought in to decide. `reject` means
+  engr will not escalate on your behalf — not that the mutation is forbidden. A
+  human can still raise the same change and decide, having seen the review.
 - In the **Backlog**, it does not stop you. Unresolved work is worth keeping, so
   the entry goes in marked `rule_review { attempts, limit }` — which is a
   standing note that this went in without a passing review, not a free pass.

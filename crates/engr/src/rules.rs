@@ -71,10 +71,16 @@ impl Domain {
 
 /// What a Rule asks for once its review attempts are spent.
 ///
-/// Two values in v1, and the narrow one is the default: running out of attempts
-/// means the mutation does not happen, not that a human is summoned. Escalation
-/// is something a Rule opts into, because a policy that pulls a person in is a
-/// claim about that policy's importance and only its author can make it.
+/// Two values in v1, and the narrow one is the default: escalation is something
+/// a Rule opts into, because a policy that pulls a person in is a claim about
+/// that policy's importance and only its author can make it.
+///
+/// **This is a request, not an outcome.** What it costs is decided by the domain
+/// and by [`Exhaustion`]: an Object stops and may escalate, a Backlog mutation
+/// is kept and marked and never escalates on this field, and Collection and Work
+/// have no v1 answer at all. Even `Reject` on an Object stops the *autonomous*
+/// path rather than forbidding the mutation — a human may initiate the same one
+/// and override the result through the gate.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExhaustion {

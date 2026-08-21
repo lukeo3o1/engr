@@ -2676,21 +2676,29 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
     }
 }
 
-/// The effective review policy in one line, in the terms a reader acts on.
+/// The effective review policy in one line.
 ///
-/// Says what happens rather than naming the field: "then a human confirms" is
-/// the consequence, `human_confirmation` is the spelling. The number is the
-/// effective ceiling, so a rule that wrote nothing and one that wrote `5` read
-/// identically here — which is what they mean.
+/// States the policy rather than a consequence, because **a rule does not have
+/// one consequence**. What running out of attempts costs depends on the domain
+/// — Object stops, Backlog records and keeps the unresolved state, Collection
+/// and Work are undefined in v1 — and inside Backlog it depends further on the
+/// mutation, since a consume needs a review that passed while an ordinary edit
+/// does not. Even `reject` on an Object is the autonomous-agent outcome and not
+/// a repository prohibition: a human may still initiate the same mutation and
+/// override the result.
+///
+/// So a line here saying "then it is refused" would be false for most rules that
+/// carry the default. It names the effective field instead, and the consequence
+/// is stated once, per domain, in the protocol.
+///
+/// The number is the effective ceiling, so a rule that wrote nothing and one
+/// that wrote `5` read identically — which is what they mean.
 fn review_line(review: &rules::Review) -> String {
-    let outcome = match review.on_exhaustion {
-        rules::OnExhaustion::Reject => "then it is refused",
-        rules::OnExhaustion::HumanConfirmation => "then a human confirms",
-    };
     format!(
-        "{} attempt{}, {outcome}",
+        "{} attempt{}; on_exhaustion = {}",
         review.max_attempts,
-        if review.max_attempts == 1 { "" } else { "s" }
+        if review.max_attempts == 1 { "" } else { "s" },
+        review.on_exhaustion.as_str()
     )
 }
 
