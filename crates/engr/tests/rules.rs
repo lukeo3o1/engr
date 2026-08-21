@@ -1970,3 +1970,79 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
         bound.sha256().expect("hash")
     );
 }
+
+/// A subject JCS cannot carry exactly is refused, not silently flattened.
+///
+/// `serde_jcs` canonicalizes numbers through `f64`, correctly and per RFC 8785.
+/// The consequence is that an integer past the safe range does not fail — it
+/// becomes a *different* integer, and two distinct subjects end up with one set
+/// of canonical bytes:
+///
+/// ```text
+/// 9007199254740993 -> {"n":9007199254740992}
+/// 9007199254740992 -> {"n":9007199254740992}
+/// ```
+///
+/// For a value whose whole job is naming an exact subject, that is the worst
+/// failure available: an attestation over one subject would verify against the
+/// other, and nothing would report it. The bytes are never computed for such a
+/// value now; the refusal happens first.
+#[test]
+fn a_subject_outside_the_canonical_number_range_is_refused() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: policy\napplies:\n  domains:\n    - backlog\n---\n\n# Policy\n\nSay what changed.\n",
+    );
+    let ok = serde_json::json!({"item": "01a0", "sections": 2});
+
+    // The collision this prevents is real, not theoretical.
+    let past = serde_json::json!({"n": 9007199254740993u64});
+    let at = serde_json::json!({"n": 9007199254740992u64});
+    assert_ne!(past, at, "distinct JSON values");
+    assert_eq!(
+        serde_jcs::to_string(&past).expect("jcs"),
+        serde_jcs::to_string(&at).expect("jcs"),
+        "which canonicalize to the same bytes, which is why they must not get here"
+    );
+
+    for (subject, side) in [(past.clone(), "mutation"), (ok.clone(), "precondition")] {
+        let (mutation, precondition) = if side == "mutation" {
+            (subject, ok.clone())
+        } else {
+            (ok.clone(), past.clone())
+        };
+        let error = match rules::bind(&root, Domain::Backlog, mutation, precondition) {
+            Ok(_) => panic!("a subject outside the safe range was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("hash alike") && error.message.contains("as a string"),
+            "the refusal says why and what to do instead: {}",
+            error.message
+        );
+    }
+
+    // Nested and negative values are reached too — a walk, not a top-level peek.
+    for buried in [
+        serde_json::json!({"a": [1, {"b": 9007199254740993u64}]}),
+        serde_json::json!({"a": -9007199254740993i64}),
+        serde_json::json!([[[u64::MAX]]]),
+    ] {
+        rules::bind(&root, Domain::Backlog, buried, ok.clone())
+            .err()
+            .expect("refused wherever it is buried");
+    }
+
+    // And the boundary itself is usable: the largest safe integer, its negative,
+    // and ordinary floats all pass.
+    for fine in [
+        serde_json::json!({"n": 9007199254740991u64}),
+        serde_json::json!({"n": -9007199254740991i64}),
+        serde_json::json!({"n": 1.5}),
+        serde_json::json!({"n": 0}),
+    ] {
+        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("inside the range");
+    }
+}

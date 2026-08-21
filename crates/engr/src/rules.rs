@@ -1031,6 +1031,68 @@ impl ReviewBinding {
     }
 }
 
+/// The largest integer JCS can carry without losing which integer it was.
+///
+/// RFC 8785 §3.1 requires numbers to be expressible as IEEE-754 binary64, and
+/// I-JSON gives the interoperable range as ±(2^53 − 1). Beyond it, distinct
+/// integers stop being distinguishable.
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// Refuse a subject JCS cannot carry without changing it.
+///
+/// Not a formality. `serde_jcs` canonicalizes numbers through `f64`, correctly
+/// and per the standard — which means an integer past the safe range does not
+/// fail, it **quietly becomes a different one**:
+///
+/// ```text
+/// 9007199254740993  ->  {"n":9007199254740992}
+/// 9007199254740992  ->  {"n":9007199254740992}
+/// ```
+///
+/// Two different review subjects, one set of canonical bytes, one hash. For a
+/// value whose entire job is naming an exact subject, that is the worst
+/// available failure: an attestation over one would verify against the other,
+/// and nothing anywhere would report it.
+///
+/// So the input domain is checked before the bytes are computed, and a number
+/// outside it is refused with what to do instead — RFC 8785 says such values
+/// belong in strings. Applied where arbitrary JSON enters, which is `bind`'s two
+/// subject arguments; every other value reaching [`canonical_bytes`] is an
+/// engr-owned struct whose numbers are `u32`.
+fn within_safe_numbers(value: &serde_json::Value, what: &str) -> Result<()> {
+    match value {
+        serde_json::Value::Number(number) => {
+            // Deliberately not `(n as f64) as u64 == n`: Rust saturates that
+            // cast, so `u64::MAX` compares equal to itself and passes while JCS
+            // renders it as 18446744073709552000.
+            let safe = match (number.as_u64(), number.as_i64()) {
+                (Some(unsigned), _) => unsigned <= MAX_SAFE_INTEGER,
+                (_, Some(signed)) => signed.unsigned_abs() <= MAX_SAFE_INTEGER,
+                _ => true,
+            };
+            ensure!(
+                safe,
+                EXIT_USAGE,
+                "{what}: {number} is outside the range canonical JSON can carry exactly (±{MAX_SAFE_INTEGER}), so two different subjects would hash alike; carry it as a string"
+            );
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                within_safe_numbers(item, what)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(entries) => {
+            for entry in entries.values() {
+                within_safe_numbers(entry, what)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The canonical bytes of one value, as **RFC 8785 (JCS)**.
 ///
 /// Not `serde_json::to_string`, and the difference is not academic. JCS orders
@@ -1093,6 +1155,10 @@ pub fn bind(
     mutation: serde_json::Value,
     precondition: serde_json::Value,
 ) -> Result<ReviewBinding> {
+    // Before anything is resolved or hashed: the two arguments that are
+    // arbitrary caller JSON must be inside what canonical bytes can carry.
+    within_safe_numbers(&mutation, "mutation")?;
+    within_safe_numbers(&precondition, "precondition")?;
     let mut bound = Vec::new();
     for rule in applicable(root, domain)? {
         let mut based_on = Vec::new();

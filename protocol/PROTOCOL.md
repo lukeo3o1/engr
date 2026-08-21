@@ -1511,6 +1511,15 @@ is hashed:
 4. JCS the resulting structure and hash it
 ```
 
+A review subject must be inside what those bytes can carry. RFC 8785 requires
+numbers expressible as IEEE-754 binary64, so an integer outside ±(2^53 − 1) is
+**refused** rather than hashed. This is not pedantry about a standard:
+canonicalization takes numbers through a `double`, so an integer past that range
+does not fail — it becomes a different integer, and `9007199254740993` and
+`9007199254740992` produce the *same* canonical bytes. Two distinct subjects,
+one hash, and an attestation over either verifying against the other. Values
+needing more precision are carried as strings.
+
 Naming a standard is the point: JCS orders object members by **UTF-16** code
 units and fixes number formatting, so a second implementation in another
 language computes the same bytes. A stable serializer gives determinism for one
