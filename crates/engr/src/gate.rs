@@ -841,6 +841,22 @@ fn prepare_locked(
             }
             Some(parts.join("\n"))
         }
+        // The same rule the revision above applies to wording, applied to the
+        // Object's own classification. Confirming a move to the state it is
+        // already in appends a permanent Event that records no change, spends a
+        // `rev`, and invalidates every other live candidate for this Object —
+        // three lasting consequences for an operation that does nothing. A
+        // human asked to confirm it is being asked to assent to nothing.
+        (Action::ObjectClassified { object_type, state }, Some(object)) => {
+            ensure!(
+                (*object_type, *state) != (object.object_type, object.state),
+                EXIT_INVARIANT,
+                "{} is already {}, so there is nothing to confirm",
+                object.id,
+                crate::view::classification(object)
+            );
+            None
+        }
         _ => None,
     };
 
@@ -1031,8 +1047,25 @@ fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
             continue;
         }
         seen.push(next.clone());
-        if let Ok(target) = ops::effective(root, &next) {
-            frontier.extend(target.replacements()?);
+        // A branch that stops because the authority would not load is a branch
+        // nobody walked, and an unwalked branch can hide the cycle this
+        // function exists to find. Swallowing the error collapsed "no further
+        // replacements" and "this file is unreadable" into one answer, which is
+        // the downgrade the shared resolution rule forbids on an authoritative
+        // path. Genuine absence still terminates the branch — there is nothing
+        // further to walk — and is governed where references are admitted.
+        match ops::effective(root, &next) {
+            Ok(target) => frontier.extend(target.replacements()?),
+            Err(error) if error.code == EXIT_NOT_FOUND => continue,
+            Err(error) => {
+                return Err(Error::new(
+                    error.code,
+                    format!(
+                        "the supersession chain passes through {next}, which will not load, so whether this replacement closes a cycle cannot be established: {}",
+                        error.message
+                    ),
+                ))
+            }
         }
     }
     Ok(())

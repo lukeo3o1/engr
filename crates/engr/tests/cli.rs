@@ -3974,3 +3974,121 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
         "the refusal must name what is actually wrong: {message}"
     );
 }
+
+/// A machine surface does not emit a successful document and then fail.
+///
+/// `rules show --json` resolved every basis and printed the Rule *before*
+/// returning the failure, so a Rule whose required material cannot be resolved
+/// looked exactly like a usable one on stdout. A caller that drops the exit
+/// status — a pipe, a wrapper, anything that reads output and not status —
+/// would consume normative wording as reviewable when engr had already
+/// established that it is not.
+///
+/// The human surface may print `UNUSABLE` and then fail, because a person reads
+/// the line. A parser reads the document.
+#[test]
+fn rules_show_json_emits_nothing_when_the_rule_cannot_be_used() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::write(
+        engr::rules::dir(root).join("architecture.md"),
+        "---\nid: architecture\napplies:\n  domains: [object]\nbased_on:\n  - path: AGENTS.md\n---\n\n# Architecture\n\nThe rule.\n",
+    )
+    .expect("rule");
+
+    // Usable: the document is emitted and the command succeeds.
+    let shown = run_engr(root, &["rules", "show", "architecture", "--json"]);
+    assert!(shown.status.success());
+    let document: Value =
+        serde_json::from_slice(&shown.stdout).expect("a usable rule is a json document");
+    assert_eq!(document["id"], "architecture");
+
+    // The material the rule rests on goes away.
+    std::fs::remove_file(root.join("AGENTS.md")).expect("remove basis");
+
+    let shown = run_engr(root, &["rules", "show", "architecture", "--json"]);
+    assert!(!shown.status.success(), "an unusable rule is a failure");
+    assert!(
+        shown.stdout.is_empty(),
+        "and nothing that looks like a usable rule reaches stdout: {}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&shown.stderr).contains("does not exist"),
+        "the reason goes where a failure goes"
+    );
+
+    // `ls --json` already carried `usable`, and still does — the two surfaces
+    // agree rather than one of them being silently weaker.
+    let listed = run_engr(root, &["rules", "ls", "--json"]);
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("json");
+    assert_eq!(listed[0]["usable"], false);
+}
+
+/// One malformed Object does not disable the domains that do not depend on it.
+///
+/// Every command asks whether the workspace still uses the legacy spelling, and
+/// that question used to read every Object file — so a single unreadable one
+/// made `backlog ls`, every Work command and every Collection command exit with
+/// a parse error about a file none of them were going to touch.
+///
+/// Isolation is not leniency. Object authority still fails closed: loading the
+/// malformed Object is refused, and `verify` says so. What changed is that
+/// three independent domains stopped being taken down with it.
+#[test]
+fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let healthy = prepare(root, &["prepare", "--new", "--text", "a sound record"]);
+    confirm(root, &healthy);
+    let healthy = healthy["object"].as_str().expect("object id").to_owned();
+    let broken = prepare(root, &["prepare", "--new", "--text", "about to be broken"]);
+    confirm(root, &broken);
+    let broken = broken["object"].as_str().expect("object id").to_owned();
+    engr::backlog::create(root, "staging", "an unresolved point", Vec::new()).expect("backlog");
+    engr::work::start(root, &healthy, Some("underway")).expect("work");
+    engr::collection::create(root, "a plan", None, None).expect("collection");
+
+    std::fs::write(store::object_path(root, &broken), "not json at all").expect("break it");
+
+    for args in [
+        vec!["backlog", "ls"],
+        vec!["work", "show", &healthy],
+        vec!["collection", "ls"],
+        vec!["show", &healthy],
+        vec!["verify", &healthy],
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{args:?} does not depend on the broken object: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // And the broken object itself is still refused, on every path that would
+    // have to trust it.
+    for args in [vec!["show", &broken], vec!["verify", &broken]] {
+        let output = run_engr(root, &args);
+        assert!(!output.status.success(), "{args:?} must fail closed");
+    }
+    assert!(
+        engr::ops::effective(root, &broken).is_err(),
+        "the library path fails closed too"
+    );
+
+    // A file claiming both spellings of the lifecycle field cannot say which it
+    // means, so loading it is refused rather than serde quietly taking one.
+    let mut confused: Value = store::read_json(&store::object_path(root, &healthy)).expect("read");
+    confused["status"] = confused["state"].clone();
+    store::write_json(&store::object_path(root, &healthy), &confused).expect("write");
+    let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("both legacy status"), "{error}");
+}

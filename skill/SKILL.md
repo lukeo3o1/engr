@@ -93,6 +93,31 @@ engr candidate ABC123     # render it again, in full
 **Do not re-run `engr prepare` to show it again.** That mints a new code and voids
 the one they are holding.
 
+## Project rules
+
+Some projects write down rules engr cannot check for itself — what belongs in a
+record, what belongs in backlog, what a plan may contain. They live in
+`.engr/rules/*.md` and they are project policy, not engr's:
+
+```bash
+engr rules ls                    # what exists, and what it governs
+engr rules ls --domain backlog   # what governs a backlog mutation
+engr rules show <id>             # one rule in full, with what it rests on
+```
+
+**Read the ones that govern what you are about to do, and read what they rest
+on.** A rule names project files in `based_on`; those files are part of the rule,
+not background reading. `rules show` prints them so you know exactly which
+material you were meant to have read.
+
+A rule marked **UNUSABLE** cannot be reviewed against — its material is missing,
+or a pinned basis no longer matches the project. Say so rather than proceeding
+as though the rule were absent: an unusable rule is not a rule that does not
+apply.
+
+engr does not author or edit rules, and there is no gate for them. Git is their
+history.
+
 ## Reading the record
 
 At the start of engineering work, run `engr ls --stale`. It lists **sections that

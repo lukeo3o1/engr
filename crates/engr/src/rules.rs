@@ -20,9 +20,7 @@
 //! file. Changing one changes what the *next* mutation must be reviewed
 //! against, and nothing already admitted.
 
-use crate::{
-    ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
-};
+use crate::{ensure, git, store, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -126,6 +124,38 @@ impl Basis {
             "rule {rule}: based_on {} pins commit {commit}, which this repository does not have",
             self.path
         );
+        // The id must *be* a commit, not merely reach one. An annotated tag
+        // peels, so its own object id would pass a reachability check while the
+        // value stored is a tag id — and a field specified as a commit id that
+        // silently holds something else is a persisted representation nobody
+        // can rely on reading back.
+        ensure!(
+            git::object_type(root, commit).as_deref() == Some("commit"),
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} pins {commit}, which is not a commit; a based_on commit names the commit itself, not a tag that points at one",
+            self.path
+        );
+        // And the entry at that commit must be an ordinary file. The mode is the
+        // only place this survives: `git show <commit>:<path>` prints a
+        // symlink's target *name* as though it were content, so a historical
+        // link whose target name equals a later regular file's contents would
+        // compare equal and the pin would look current across a change from a
+        // link to a file.
+        let mode = git::tree_entry_mode(root, commit, &self.path).ok_or_else(|| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "rule {rule}: based_on {} is not present at commit {commit}",
+                    self.path
+                ),
+            )
+        })?;
+        ensure!(
+            mode == "100644" || mode == "100755",
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} was not a regular file at {commit} (git mode {mode}); a basis names a real file, and git records a link as its target's name rather than the file's contents",
+            self.path
+        );
         let pinned = git::blob_at(root, commit, &self.path).ok_or_else(|| {
             Error::new(
                 EXIT_NOT_FOUND,
@@ -161,7 +191,16 @@ impl Basis {
     /// attestations that rested on the old text, which is the fail-closed
     /// direction.
     fn current(&self, root: &Path, rule: &str) -> Result<String> {
-        let path = safe_join(root, &self.path).ok_or_else(|| {
+        // Resolved against the **repository** top level, which is what
+        // "repository-relative" means and what `git show <commit>:<path>` uses
+        // no matter where the workspace sits. `.engr` may live in a
+        // subdirectory, and reading current material from there while reading
+        // pinned material through git compared two different files: a rule
+        // naming `AGENTS.md` in `repo/sub/.engr` bound `repo/sub/AGENTS.md`
+        // now and `repo/AGENTS.md` at the pin, so it could be called stale or
+        // current on the strength of a file it never named.
+        let project = project_root(root);
+        let path = safe_join(&project, &self.path).ok_or_else(|| {
             Error::new(
                 EXIT_SCHEMA,
                 format!(
@@ -187,16 +226,61 @@ impl Basis {
                 tool_error(path.display(), error)
             }
         })?;
-        let inside =
-            std::fs::canonicalize(root).map_err(|error| tool_error(root.display(), error))?;
+        let inside = std::fs::canonicalize(&project)
+            .map_err(|error| tool_error(project.display(), error))?;
         ensure!(
             resolved.starts_with(&inside),
             EXIT_SCHEMA,
             "rule {rule}: based_on {} resolves outside the project, so it is not project material anyone here can review",
             self.path
         );
+        // One path, one material. A link is a path that denotes another path, and
+        // the two halves of a basis cannot follow it the same way: reading from
+        // disk yields the target file's contents, while `git show <commit>:<path>`
+        // yields the link *blob* — the target's name as text. So a pinned basis
+        // over an unchanged in-repository link compares `real contents` against
+        // `real.md` and is stale forever, with nothing anyone can do to the
+        // project to make it current again.
+        //
+        // Following it on both sides would mean re-implementing link resolution
+        // over historical git trees — cycles, depth, escapes, missing targets —
+        // for a case no project has asked for. Refusing keeps the invariant by
+        // construction: what a basis names is what a basis is.
+        let direct = self
+            .path
+            .split('/')
+            .fold(inside.clone(), |path, part| path.join(part));
+        ensure!(
+            resolved == direct,
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} is a link rather than the file itself, and a link cannot be pinned: git records its target's name where the working tree gives the target's contents. Name the file directly",
+            self.path
+        );
+        // A basis names a real regular file, the same rule rule *files* follow.
+        // `.md` is a name, not a kind: a FIFO passes every path check above and
+        // then blocks in the read until someone opens the other end, so a
+        // project file nobody can commit becomes a rule that can never be
+        // resolved — a hang rather than an answer.
+        let kind = std::fs::metadata(&resolved)
+            .map_err(|error| tool_error(resolved.display(), error))?
+            .file_type();
+        ensure!(
+            kind.is_file(),
+            EXIT_SCHEMA,
+            "rule {rule}: based_on {} is not a regular file, so it is not project material git can track as this rule's basis",
+            self.path
+        );
         std::fs::read_to_string(&resolved).map_err(|error| tool_error(resolved.display(), error))
     }
+}
+
+/// The root a repository-relative path is relative to.
+///
+/// The repository top level when there is a repository, and the workspace root
+/// otherwise — without git, "repository-relative" has no other meaning, and the
+/// workspace is the only project boundary there is.
+fn project_root(root: &Path) -> PathBuf {
+    git::repo_root(root).unwrap_or_else(|| root.to_path_buf())
 }
 
 /// Repository-relative, and staying there. A basis is project material, so a
@@ -246,16 +330,91 @@ impl Rule {
 /// filesystem enumeration order — the hash depends on this.
 pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     let dir = dir(root);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+    // `exists()` follows links, so a dangling `rules` symlink answered "no" and
+    // took the empty-set path — reporting that a workspace has no policy when
+    // what it actually has is policy pointing somewhere unreadable. Absence and
+    // a broken redirection are different facts, and only the first is an empty
+    // set. Asked without following, so the answer is about `rules` itself.
+    let listed = match std::fs::symlink_metadata(&dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(tool_error(dir.display(), error)),
+    };
+    ensure!(
+        !listed.file_type().is_symlink(),
+        EXIT_SCHEMA,
+        "{}: the rules directory is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
+        dir.display()
+    );
+    ensure!(
+        listed.is_dir(),
+        EXIT_SCHEMA,
+        "{}: the rules directory is not a directory",
+        dir.display()
+    );
+    // The directory itself must be where it says it is. A redirected `rules`
+    // would make every rule in the workspace come from somewhere the workspace
+    // does not track, which is the same failure as a redirected rule file and
+    // costs one check to refuse.
+    // Anchored at the **workspace root**, not at `.engr`. Canonicalizing `.engr`
+    // first made a link *there* cancel out of the comparison — both sides
+    // followed it, so `repo/.engr -> /outside/workspace` compared equal and the
+    // whole policy came from a tree git tracks as a link rather than as rule
+    // bytes. The rule is that no link may appear anywhere on the way to a rule
+    // file, so the anchor has to start above every component being checked.
+    let anchored = std::fs::canonicalize(root)
+        .map_err(|error| tool_error(root.display(), error))?
+        .join(store::DIR)
+        .join(DIR);
+    let resolved = std::fs::canonicalize(&dir).map_err(|error| tool_error(dir.display(), error))?;
+    ensure!(
+        resolved == anchored,
+        EXIT_SCHEMA,
+        "{}: something on the way to the rules is a link to somewhere else, so the policy engr would enforce is not the policy this workspace tracks",
+        dir.display()
+    );
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
         let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("md") {
-            files.push(path);
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
         }
+        // A rule file is read for its bytes, and `read_to_string` follows links
+        // — so a locator pointing outside would let engr enforce policy the
+        // repository does not track, and one pointing inside would still differ from
+        // git, which records a link as its target's *name* rather than the
+        // target's contents. Rules are git-tracked project data and git is
+        // their history; a rule whose bytes git does not hold is not one.
+        //
+        // Refused rather than followed, and refused before reading: the
+        // enumeration decided this path is a rule, so this path is what has to
+        // be a rule.
+        let kind = entry
+            .file_type()
+            .map_err(|error| tool_error(path.display(), error))?;
+        ensure!(
+            !kind.is_symlink(),
+            EXIT_SCHEMA,
+            "{}: a rule file is a link rather than the rule itself; git records a link's target name where the loader would read the target's contents, so the two would not agree on what the rule says",
+            path.display()
+        );
+        // And a regular file, not merely something that is not a link. `.md` is a
+        // name, not a kind: a FIFO called `policy.md` makes `read_to_string`
+        // block until someone opens the other end, so an entry nobody can
+        // commit becomes a workspace that will not load rules at all. Devices
+        // and sockets have no place in a model where a rule's bytes are what
+        // git tracks for that path.
+        //
+        // Checked before reading, for the same reason as the link check: the
+        // refusal has to happen while it can still be a refusal.
+        ensure!(
+            kind.is_file(),
+            EXIT_SCHEMA,
+            "{}: a rule file must be a regular file; this is not one, so it is not something git can track as project policy",
+            path.display()
+        );
+        files.push(path);
     }
     files.sort();
     let mut rules: Vec<Rule> = Vec::new();
@@ -289,7 +448,20 @@ pub fn applicable(root: &Path, domain: Domain) -> Result<Vec<Rule>> {
         .collect())
 }
 
-pub fn load(path: &Path) -> Result<Rule> {
+/// Read one rule file that has **already** been established as a real regular
+/// file in the rules directory.
+///
+/// Private, and that is the whole point. Public, it was a second answer to
+/// "is this a valid rule?" — `load_all` refuses a symlink or a FIFO before
+/// reading, while a caller handed the same path to this one followed the link
+/// or blocked on the pipe. A persisted resource must not become legal because
+/// of which door a caller came through, and the cheapest way to guarantee that
+/// is to leave only one door.
+///
+/// If a single-rule loader is ever wanted publicly it takes the workspace root,
+/// not a path, so it can enforce the same boundary rather than trusting the
+/// caller to have done it.
+fn load(path: &Path) -> Result<Rule> {
     let raw = std::fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(EXIT_NOT_FOUND, format!("{}: not found", path.display()))
@@ -428,159 +600,4 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
         offset += line.len();
     }
     None
-}
-
-/// The exact subject of a review, fingerprinted.
-///
-/// This is the whole mechanism. An attestation is not a claim that an agent
-/// understood anything — it is a claim that it reviewed *this* mutation against
-/// *these* rules resting on *this* material. So the binding names all three
-/// exactly, and the hash over it is the identity of that subject. Change any of
-/// them and the hash changes, and the previous attestation stops naming
-/// anything that exists.
-///
-/// Deterministic and stateless by construction. There is no pending review
-/// object, no nonce, no session: a process that restarts recomputes the same
-/// value from the same inputs, and admission recomputes it from current state
-/// rather than trusting anything it was handed.
-#[derive(Serialize)]
-pub struct ReviewBinding {
-    /// A discriminator, so a hash from this version can never be mistaken for
-    /// one produced under different binding rules.
-    binding: &'static str,
-    version: u32,
-    domain: Domain,
-    /// The exact semantic mutation, as the domain canonicalizes it.
-    mutation: serde_json::Value,
-    /// The exact state the mutation is being applied to.
-    ///
-    /// Without this the binding would cover only the proposed output, and
-    /// another agent could change the target underneath a review while leaving
-    /// the proposal untouched — the attestation would still verify, against a
-    /// subject that no longer exists.
-    precondition: serde_json::Value,
-    rules: Vec<BoundRule>,
-}
-
-/// One rule as it stood, with everything it rests on resolved.
-#[derive(Serialize)]
-pub struct BoundRule {
-    pub id: String,
-    /// Sorted, because the set is semantically order-insensitive.
-    pub domains: Vec<Domain>,
-    /// Sorted by path, for the same reason.
-    pub based_on: Vec<ResolvedBasis>,
-    /// The normative text, exactly as written and never normalized.
-    ///
-    /// Built from parsed semantics plus this exact body rather than from the
-    /// file's raw bytes. Raw bytes would make review identity depend on
-    /// incidental YAML spelling: reordering `applies.domains` changes nothing
-    /// about what the rule means or what a reviewer had to read, and it must
-    /// not invalidate an attestation. The body is the one part where every
-    /// byte is meaning, so it is carried untouched.
-    pub body: String,
-}
-
-pub const BINDING: &str = "engr-rule-review";
-pub const BINDING_VERSION: u32 = 1;
-
-impl ReviewBinding {
-    /// SHA-256 over the canonical JSON form.
-    ///
-    /// The same primitive the confirmation gate uses, so key order comes from a
-    /// `BTreeMap` rather than from declaration order, and the rule and basis
-    /// lists were sorted before they got here.
-    pub fn sha256(&self) -> Result<String> {
-        crate::confirmation::fingerprint(self)
-    }
-
-    pub fn rules(&self) -> &[BoundRule] {
-        &self.rules
-    }
-
-    /// Every rule id this review must cover, in the order the hash saw them.
-    pub fn rule_ids(&self) -> Vec<String> {
-        self.rules.iter().map(|rule| rule.id.clone()).collect()
-    }
-}
-
-/// Freeze what a review of this mutation has to cover.
-///
-/// Fails closed if any applicable rule cannot be fully resolved. An unusable
-/// rule is not a rule that does not apply: admitting under an incomplete set is
-/// the one outcome this mechanism exists to prevent, so the mutation it governs
-/// is blocked until the rule is repaired.
-pub fn bind(
-    root: &Path,
-    domain: Domain,
-    mutation: serde_json::Value,
-    precondition: serde_json::Value,
-) -> Result<ReviewBinding> {
-    let mut bound = Vec::new();
-    for rule in applicable(root, domain)? {
-        let mut based_on = Vec::new();
-        for basis in &rule.based_on {
-            based_on.push(basis.resolve(root, &rule.id)?);
-        }
-        bound.push(BoundRule {
-            id: rule.id,
-            domains: rule.domains,
-            based_on,
-            body: rule.body,
-        });
-    }
-    Ok(ReviewBinding {
-        binding: BINDING,
-        version: BINDING_VERSION,
-        domain,
-        mutation,
-        precondition,
-        rules: bound,
-    })
-}
-
-/// Check an attestation against the subject as it stands right now.
-///
-/// Recomputed, never looked up. The hash an agent submits is only meaningful if
-/// the thing it names is recomputed from current state at the moment of
-/// admission — otherwise the interval between review and admission is exactly
-/// where the subject can change.
-///
-/// The rule ids are checked as well as the hash. They are redundant against a
-/// correct implementation, and they are not redundant against a confused one: an
-/// agent that names the wrong set has told us its review covered something else,
-/// and it is better to say so than to accept a hash it may have obtained without
-/// reading what the hash was over.
-pub fn check(
-    root: &Path,
-    domain: Domain,
-    mutation: serde_json::Value,
-    precondition: serde_json::Value,
-    attested: &str,
-    reviewed: &[String],
-) -> Result<()> {
-    let binding = bind(root, domain, mutation, precondition)?;
-    let expected = binding.sha256()?;
-    let ids = binding.rule_ids();
-    let mut named: Vec<String> = reviewed.to_vec();
-    named.sort();
-    named.dedup();
-    ensure!(
-        named == ids,
-        EXIT_INVARIANT,
-        "the review names {}, and what governs this {} mutation is {}",
-        if named.is_empty() {
-            "no rules".to_owned()
-        } else {
-            named.join(", ")
-        },
-        domain.as_str(),
-        ids.join(", ")
-    );
-    ensure!(
-        attested == expected,
-        EXIT_INVARIANT,
-        "this review was of something else: the mutation, its target, a rule, or a rule's material has changed since it was reviewed. Review the current subject and attest to {expected}"
-    );
-    Ok(())
 }

@@ -1410,6 +1410,112 @@ history with a tool meant for it; then accept that references into the deleted
 section no longer resolve. engr adds nothing to those three steps, and pretending
 otherwise would only obscure the second.
 
+## Project rules
+
+Everything above is a mechanical invariant: id grammar, reference existence,
+valid states, size ceilings, hash integrity. Those are decidable, so engr
+decides them. A **rule** carries what is left — whether wording follows *this
+project's* recording policy, whether an entry is really unresolved engineering
+uncertainty, whether a plan follows the milestone policy. No schema answers
+those.
+
+So a rule is not a check engr runs. It is material an agent is required to have
+read, named precisely enough that the requirement can be verified afterwards. It
+proves nothing about comprehension and does not claim to; it makes silently
+skipping the review impossible through the supported path.
+
+Rules are **project policy data, not an authority domain**. There is no event
+store, no candidate and no confirmation for a rule file: git is their history.
+Changing one changes what the *next* mutation must be reviewed against, and
+nothing already admitted.
+
+```text
+.engr/rules/*.md    YAML front matter + a normative Markdown body
+```
+
+`id` is the stable identity and the filename is only a locator, so renaming a
+file does not create a different rule. **Duplicate ids fail closed**: two files
+claiming one identity means the applicable set is not determinable, and a review
+over an indeterminate set attests to nothing. Ids are `[a-z0-9-]+`.
+
+Front matter is **standard YAML**, then a strict rule schema. The layers are
+distinct — YAML decides syntax, engr decides whether the parsed document is a
+rule — and a field this version does not understand is **refused rather than
+ignored**, because reading past it would review against a rule only partly
+understood. The normative body is stored exactly as written; emptiness is
+decided by refusing, never by rewriting.
+
+Applicability is domain-only: `object`, `backlog`, `collection`, `work`. What an
+**empty** applicable set means belongs to the domain that owns the mutation, not
+to this layer.
+
+### What a rule rests on
+
+```yaml
+based_on:
+  - path: AGENTS.md                    # the current material
+  - path: docs/architecture.md         # the exact material it was written against
+    commit: <full git object id>
+```
+
+Paths are **repository-relative** — relative to the repository top level, which
+is what `git show <commit>:<path>` uses and need not be where `.engr` sits. Both
+the current and the pinned side MUST resolve the same path the same way; two
+roots for one stored path means a rule can be judged against a file it never
+named.
+
+A pinned basis stops being usable once the current file says something else. The
+comparison is on **content, not commit ids**: a commit that did not touch the
+path changed nothing the rule depends on, and staling for it would train
+everyone to bump the pin without reading anything.
+
+Missing paths, unresolvable commits, and a path absent at its pin all fail
+closed. engr does not guess a rename.
+
+### Rules and bases name real files
+
+v1 **prohibits symlinks** for both `.engr/rules/*.md` and `based_on.path`, and
+for the rules directory itself. A link is refused even when its target stays
+inside the repository.
+
+The reason is that a link does not denote one material. Git records a symlink as
+a blob containing its target's *name*; a working-tree read returns the target's
+*contents*. So a pinned basis over an unchanged in-repository link compares a
+file's text against a filename and is stale forever, with nothing anyone can do
+to the project to make it current. Rules are git-tracked policy, and a rule whose
+bytes git does not hold is not a rule.
+
+A rule entry and a basis must both be **regular files**. `.md` is a name, not a
+kind: a FIFO so named makes a read block until someone opens the other end,
+turning an entry nobody can commit into a workspace that cannot load rules at
+all — a hang rather than an answer. Every one of these checks happens **before**
+reading, which is while it can still be a refusal.
+
+A **pinned** basis is checked against what git *recorded*, not only what git
+prints. `git show <commit>:<path>` prints a symlink's target name as though it
+were content, so a historical link whose target name equals a later regular
+file's contents would compare equal and the pin would read as current across
+exactly the change this prohibition exists to make visible. The tree entry mode
+MUST be a regular blob.
+
+A declared `commit` MUST name a commit object, not merely reach one. An
+annotated tag peels to a commit, so a reachability check accepts its id while
+the stored value is a tag id — a field specified as a commit id that quietly
+holds something else is a persisted representation nobody can rely on reading
+back.
+
+A **broken** rules directory is not an absent one. Absence is an empty rule set;
+a dangling redirection is a refusal, and following the link to decide would
+report a workspace as having no policy when what it has is policy pointing
+somewhere unreadable.
+
+The prohibition covers **every component on the way to a rule file**, not just
+the rule entry and the `rules` directory. A link at `.engr` redirects the whole
+policy while leaving everything behind it well-formed, and git would then track
+that link rather than the rule bytes — the same policy-versus-source mismatch,
+reached one level higher. The check therefore anchors above every component it
+validates.
+
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
