@@ -816,25 +816,54 @@ pub struct BoundRule {
 pub const BINDING: &str = "engr-rule-review";
 pub const BINDING_VERSION: u32 = 1;
 
-/// What the applicable rules, taken together, say about one attempt number.
+/// The compact diagnostic Backlog records when it admits an exhausted mutation.
 ///
-/// Composed conservatively: the strictest outcome any single rule asks for is
-/// the outcome for the whole mutation. One rule still having attempts left says
-/// nothing about a rule that has run out.
+/// Deliberately two numbers. It exists to say "this went in without a passing
+/// review, and here is roughly why", not to reconstruct the review: the complete
+/// applicable set and its effective semantics live in the binding, and
+/// duplicating per-rule ids or limits here would be a persisted review history
+/// that #25 refuses.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RuleReview {
+    /// The mutation-level attempt value supplied for the review.
+    pub attempts: u32,
+    /// The earliest ceiling in the applicable set — the one that made this
+    /// exhausted, since a shared attempt passes the smallest ceiling first.
+    pub limit: u32,
+}
+
+/// What the applicable rules say about one attempt, **in the terms its domain
+/// defines**.
+///
+/// There is deliberately no domain-neutral answer. #25 gives Object and Backlog
+/// opposite ones: Object stops and may call a human, while Backlog admits the
+/// unresolved state anyway and marks it, because preserving unresolved
+/// engineering intent is the whole point of that domain. A single enum meaning
+/// the same thing everywhere would hand the next caller Object's behaviour for a
+/// Backlog mutation, which is exactly what #25 forbids.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Exhaustion {
-    /// No applicable rule is past its ceiling at this attempt.
+    /// No applicable rule is past its ceiling at this attempt. Every domain.
     NotReached,
-    /// At least one rule is past its ceiling, and none of those asks for a
-    /// human. The mutation does not happen.
-    Refuse,
-    /// At least one rule past its ceiling asks for a human to confirm.
+    /// **Object.** At least one rule is past its ceiling and none asks for a
+    /// human, so autonomous admission stops and the mutation does not happen.
+    Refused,
+    /// **Object.** At least one exhausted rule asks a human to confirm.
     ///
-    /// Escalation wins over refusal, because a rule that names a human is
-    /// asking for a decision rather than for the attempt to be discarded — and
-    /// a human can still decide to refuse.
+    /// Escalation wins over refusal among exhausted Object rules, because a rule
+    /// naming a human is asking for a decision rather than for the attempt to be
+    /// discarded — and a human can still decide to refuse.
     HumanConfirmation,
+    /// **Backlog.** Exhausted, with the diagnostic to record — and no
+    /// escalation, whatever any exhausted rule's `on_exhaustion` says.
+    ///
+    /// Whether the mutation may then proceed is the *mutation's* question, not
+    /// this one's: a non-destructive Backlog edit soft-admits and stores this
+    /// marker, while a consume does not, because destroying unresolved work
+    /// needs a review that actually passed. This variant reports that the
+    /// ceiling was passed and what to record; it does not authorize anything.
+    Exhausted(RuleReview),
 }
 
 impl ReviewBinding {
@@ -865,15 +894,49 @@ impl ReviewBinding {
     /// attempt and exhausts nothing; there is no admission path that can supply
     /// one yet, and refusing it here would be inventing a rule #25 has not
     /// written.
-    pub fn exhaustion(&self, attempt: u32) -> Exhaustion {
-        let mut verdict = Exhaustion::NotReached;
-        for rule in self.exhausted(attempt) {
-            match rule.review.on_exhaustion {
-                OnExhaustion::HumanConfirmation => return Exhaustion::HumanConfirmation,
-                OnExhaustion::Reject => verdict = Exhaustion::Refuse,
-            }
+    pub fn exhaustion(&self, attempt: u32) -> Result<Exhaustion> {
+        // The smallest ceiling in the applicable set decides whether anything is
+        // exhausted at all. One shared attempt passes the smallest ceiling
+        // first, so "some rule is past its ceiling" and "the attempt exceeds the
+        // smallest ceiling" are the same statement — which is also why this
+        // number is the one Backlog records as `limit`.
+        let Some(limit) = self.rules.iter().map(|rule| rule.review.max_attempts).min() else {
+            return Ok(Exhaustion::NotReached);
+        };
+        if attempt <= limit {
+            return Ok(Exhaustion::NotReached);
         }
-        verdict
+        match self.domain {
+            Domain::Object => {
+                if self
+                    .exhausted(attempt)
+                    .iter()
+                    .any(|rule| rule.review.on_exhaustion == OnExhaustion::HumanConfirmation)
+                {
+                    Ok(Exhaustion::HumanConfirmation)
+                } else {
+                    Ok(Exhaustion::Refused)
+                }
+            }
+            // `on_exhaustion` is deliberately not consulted. For Backlog it
+            // never routes to the Human Gate: the domain prioritizes keeping
+            // unresolved intent over blocking admission, and the marker is what
+            // tells a later reader this was not a passing review.
+            Domain::Backlog => Ok(Exhaustion::Exhausted(RuleReview {
+                attempts: attempt,
+                limit,
+            })),
+            // Refused rather than answered. #25 leaves these open on purpose,
+            // and the one thing this must not do is invent behaviour for them
+            // by letting another domain's composition stand in.
+            Domain::Collection | Domain::Work => Err(Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "v1 does not define what an exhausted rule means for a {} mutation",
+                    self.domain.as_str()
+                ),
+            )),
+        }
     }
 }
 

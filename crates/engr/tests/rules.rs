@@ -1541,7 +1541,7 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
     assert_eq!(bound.rule_ids(), vec!["recording-policy".to_owned()]);
 }
 
-/// One scalar attempt, composed across rules that disagree about the ceiling.
+/// One scalar attempt, judged against each rule's own ceiling.
 ///
 /// v1 carries a single attempt number for the whole prepared mutation and
 /// compares it independently against each rule's own limit. There is no
@@ -1563,10 +1563,8 @@ fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
     );
     let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
 
-    assert_eq!(bound.exhaustion(1), rules::Exhaustion::NotReached);
-    assert_eq!(bound.exhaustion(2), rules::Exhaustion::NotReached);
-    // The strict rule runs out first, and one rule running out is enough.
-    assert_eq!(bound.exhaustion(3), rules::Exhaustion::Refuse);
+    // The mechanical fact is domain-neutral: which rules are past their ceiling.
+    assert!(bound.exhausted(2).is_empty());
     assert_eq!(
         bound
             .exhausted(3)
@@ -1574,16 +1572,15 @@ fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
             .map(|rule| rule.id.as_str())
             .collect::<Vec<_>>(),
         vec!["strict"],
-        "and the caller can say which rule stopped it"
+        "the strict rule runs out first, and the caller can say which one"
     );
-    assert_eq!(bound.exhaustion(6), rules::Exhaustion::Refuse);
     assert_eq!(bound.exhausted(6).len(), 2);
 
     // The number is agent-attested process metadata, so it must not be able to
     // move the identity of what had to be reviewed.
     let hash = bound.sha256().expect("hash");
     for attempt in [0, 1, 3, 99] {
-        bound.exhaustion(attempt);
+        let _ = bound.exhaustion(attempt);
     }
     assert_eq!(
         hash,
@@ -1592,22 +1589,17 @@ fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
     );
 }
 
-/// A rule that asks for a human wins over one that merely refuses.
+/// Backlog keeps unresolved work whatever the exhausted rule asked for.
 ///
-/// Composition is conservative, but "conservative" here means the strictest
-/// *request*, not the harshest outcome: a rule naming a human is asking for a
-/// decision rather than for the attempt to be discarded, and a human can still
-/// decide to refuse. The reverse would let an unrelated rule silently cancel an
-/// escalation its author asked for.
+/// This is the one place the composition must NOT be shared. #25 gives Backlog
+/// the opposite outcome from Object on purpose: the domain exists to hold
+/// unresolved engineering intent, so exhaustion marks the mutation instead of
+/// blocking it, and `on_exhaustion: human_confirmation` summons nobody. One
+/// verdict shared with Object would hand the next caller what #25 forbids.
 #[test]
-fn an_exhausted_rule_asking_for_a_human_outranks_one_that_only_refuses() {
+fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
     let (_dir, root) = workspace();
     let (mutation, precondition) = subject();
-    write_rule(
-        &root,
-        "refusing",
-        "---\nid: refusing\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
-    );
     let bind = |root: &Path| {
         rules::bind(
             root,
@@ -1617,31 +1609,129 @@ fn an_exhausted_rule_asking_for_a_human_outranks_one_that_only_refuses() {
         )
         .expect("bind")
     };
-    assert_eq!(bind(&root).exhaustion(2), rules::Exhaustion::Refuse);
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nTwo tries, then ask.\n",
+    );
+
+    assert_eq!(
+        bind(&root).exhaustion(2).expect("backlog"),
+        rules::Exhaustion::NotReached
+    );
+    assert_eq!(
+        bind(&root).exhaustion(3).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 3,
+            limit: 2
+        }),
+        "even a rule asking for a human does not route Backlog through the gate"
+    );
+
+    // `limit` is the earliest ceiling in the applicable set, so a stricter rule
+    // arriving changes the diagnostic even though the attempt has not moved.
+    write_rule(
+        &root,
+        "stricter",
+        "---\nid: stricter\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Stricter\n\nOne try.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(3).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 3,
+            limit: 1
+        })
+    );
+    assert_eq!(
+        bind(&root).exhaustion(2).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        }),
+        "and it stays the earliest ceiling even when only that rule is exhausted"
+    );
+}
+
+/// Object stops, and escalates only when an actually exhausted rule asks.
+///
+/// The behaviour Backlog deliberately does not share. Kept in its own test so
+/// the two cannot drift into one another: if these ever agree, something has
+/// been made universal that #25 made domain-specific.
+#[test]
+fn an_exhausted_object_review_stops_and_may_call_a_human() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    let bind = |root: &Path| {
+        rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
+    };
+    write_rule(
+        &root,
+        "refusing",
+        "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(1).expect("object"),
+        rules::Exhaustion::NotReached
+    );
+    assert_eq!(
+        bind(&root).exhaustion(2).expect("object"),
+        rules::Exhaustion::Refused
+    );
 
     write_rule(
         &root,
         "escalating",
-        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
+        "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(2),
-        rules::Exhaustion::HumanConfirmation
+        bind(&root).exhaustion(2).expect("object"),
+        rules::Exhaustion::HumanConfirmation,
+        "an exhausted rule naming a human outranks one that only refuses"
     );
-    // Still not reached while both rules have attempts left, whatever they ask
-    // for when they run out.
-    assert_eq!(bind(&root).exhaustion(1), rules::Exhaustion::NotReached);
 
-    // An escalating rule that is *not* exhausted escalates nothing: the action
+    // An escalating rule that is not exhausted escalates nothing: the action
     // describes what happens at the ceiling, not a standing property.
     write_rule(
         &root,
         "escalating",
-        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
+        "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(2),
-        rules::Exhaustion::Refuse,
+        bind(&root).exhaustion(2).expect("object"),
+        rules::Exhaustion::Refused,
         "only an actually exhausted rule's action counts"
     );
+}
+
+/// Collection and Work are refused, not answered.
+///
+/// #25 leaves their exhaustion behaviour open, and the failure mode this guards
+/// against is the quiet one: letting another domain's composition stand in would
+/// give them invented semantics that look settled at the call site.
+#[test]
+fn a_domain_whose_exhaustion_v1_has_not_settled_is_refused_rather_than_guessed() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    for domain in [Domain::Collection, Domain::Work] {
+        write_rule(
+            &root,
+            "policy",
+            &format!(
+                "---\nid: policy\napplies:\n  domains:\n    - {}\nreview:\n  max_attempts: 1\n---\n\n# Policy\n\nOne try.\n",
+                domain.as_str()
+            ),
+        );
+        let bound =
+            rules::bind(&root, domain, mutation.clone(), precondition.clone()).expect("bind");
+        // Below the ceiling there is nothing to compose, and that much is
+        // domain-neutral.
+        assert_eq!(
+            bound.exhaustion(1).expect("not reached is answerable"),
+            rules::Exhaustion::NotReached
+        );
+        let error = bound
+            .exhaustion(2)
+            .expect_err("an unsettled domain must not be given an answer");
+        assert!(error.message.contains(domain.as_str()), "{}", error.message);
+    }
 }

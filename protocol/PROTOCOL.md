@@ -1502,16 +1502,41 @@ prepare(exact mutation, attempt=N)
   rule B max_attempts=2, attempt=3  ->  exhausted
 ```
 
-Exhaustion is therefore evaluated **per rule** and composed conservatively. Any
-exhausted applicable rule stops the autonomous path; if at least one *actually
-exhausted* rule asks for `human_confirmation` the mutation escalates to the Human
-Gate, and otherwise it is refused. Escalation outranks refusal, because a rule
-naming a human is asking for a decision rather than for the attempt to be
-discarded — and a human can still decide to refuse. A rule that asks for a human
-but is not exhausted escalates nothing: the action describes what happens at the
-ceiling, not a standing property.
+Which rules are past their ceiling is a mechanical fact and the same everywhere.
+**What that means is the domain's, and the domains deliberately disagree.**
 
-Collection and Work do not get exhaustion behaviour invented for symmetry.
+For an **Object**, an exhausted applicable rule stops the autonomous path. If at
+least one *actually exhausted* rule asks for `human_confirmation` the mutation
+escalates to the Human Gate, and otherwise it is refused. Escalation outranks
+refusal among exhausted rules, because a rule naming a human is asking for a
+decision rather than for the attempt to be discarded — and a human can still
+decide to refuse. A rule that asks for a human but is not exhausted escalates
+nothing: the action describes what happens at the ceiling, not a standing
+property.
+
+For the **Backlog**, exhaustion does **not** escalate and does not block, whatever
+any exhausted rule's `on_exhaustion` says. The domain exists to hold unresolved
+engineering intent, so the mutation is admitted and marked:
+
+```json
+"rule_review": { "attempts": 6, "limit": 2 }
+```
+
+`attempts` is the mutation-level attempt supplied; `limit` is the smallest
+effective ceiling in the applicable set — the one that made this exhausted, since
+a shared attempt passes the smallest ceiling first. It is a compact diagnostic,
+not a review history: per-rule ids and limits are not recorded, because the
+complete applicable set already lives in the review binding. A later successful
+revision clears the marker; a later exhausted admission replaces it.
+
+That soft-admission covers mutations that **preserve** unresolved information.
+Consuming a Backlog Section is destructive, so it requires a review that actually
+passed: an exhausted consume does not happen and the Section stays as it was.
+
+**Collection and Work have no exhaustion behaviour in v1.** It is refused rather
+than borrowed from another domain, because a composition that answers for a
+domain nobody has decided is an invented rule that looks settled at the call
+site.
 
 Because the workspace version governs how a rule is read, **every path that
 reads rule semantics enforces that version** — not only the commands. A workspace

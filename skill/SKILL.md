@@ -127,9 +127,22 @@ Review     3 attempts, then a human confirms
 Both halves have defaults — five attempts, then refusal — so a rule that says
 nothing about review still has a limit. There is no unlimited rule. The attempt
 count is **yours to report honestly**: engr does not track it, stores no history
-of your tries, and can only tell you what a number means. Going past the ceiling
-does not fail quietly — it stops the autonomous path, and depending on the rule
-either refuses the mutation or hands it to a human.
+of your tries, and can only tell you what a number means.
+
+What running out costs you depends on the domain, and the difference is
+deliberate:
+
+- On an **Object**, it stops you. The mutation does not happen, and if an
+  exhausted rule asks for one, a human is brought in to decide.
+- In the **Backlog**, it does not stop you. Unresolved work is worth keeping, so
+  the entry goes in marked `rule_review { attempts, limit }` — which is a
+  standing note that this went in without a passing review, not a free pass.
+  **Consuming** a Backlog point is the exception: that destroys unresolved work,
+  so it needs a review that actually passed.
+
+Do not treat the Backlog marker as somewhere to put work you could not get past
+a rule. It is visible, it says what happened, and the point that produced it is
+still unresolved.
 
 engr does not author or edit rules, and there is no gate for them. Git is their
 history.
