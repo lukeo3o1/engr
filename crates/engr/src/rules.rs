@@ -442,7 +442,20 @@ pub fn applicable(root: &Path, domain: Domain) -> Result<Vec<Rule>> {
         .collect())
 }
 
-pub fn load(path: &Path) -> Result<Rule> {
+/// Read one rule file that has **already** been established as a real regular
+/// file in the rules directory.
+///
+/// Private, and that is the whole point. Public, it was a second answer to
+/// "is this a valid rule?" — `load_all` refuses a symlink or a FIFO before
+/// reading, while a caller handed the same path to this one followed the link
+/// or blocked on the pipe. A persisted resource must not become legal because
+/// of which door a caller came through, and the cheapest way to guarantee that
+/// is to leave only one door.
+///
+/// If a single-rule loader is ever wanted publicly it takes the workspace root,
+/// not a path, so it can enforce the same boundary rather than trusting the
+/// caller to have done it.
+fn load(path: &Path) -> Result<Rule> {
     let raw = std::fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(EXIT_NOT_FOUND, format!("{}: not found", path.display()))

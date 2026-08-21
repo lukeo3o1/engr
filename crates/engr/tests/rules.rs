@@ -952,3 +952,62 @@ fn a_dangling_rules_directory_is_not_an_absent_one() {
     std::fs::remove_file(rules::dir(&root)).expect("remove link");
     assert!(rules::load_all(&root).expect("absent").is_empty());
 }
+
+/// Every public way in enforces the same file-identity boundary.
+///
+/// The boundary is now guaranteed by visibility: the raw single-file reader is
+/// private, so there is no public entry point that takes a path and trusts it.
+/// What a test can still pin is that the doors which *do* exist agree — a rule
+/// must not become legal because a caller reached it through `applicable`
+/// rather than `load_all`.
+#[test]
+#[cfg(unix)]
+fn no_public_loader_accepts_what_another_refuses() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::write(root.join("real-rule.md"), ARCHITECTURE).expect("real rule");
+
+    let locator = rules::dir(&root).join("architecture.md");
+    std::os::unix::fs::symlink(root.join("real-rule.md"), &locator).expect("symlink");
+    for (why, outcome) in [
+        ("load_all", rules::load_all(&root)),
+        ("applicable", rules::applicable(&root, Domain::Object)),
+    ] {
+        let error = outcome.expect_err(why);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{why}: {error}");
+        assert!(
+            error.message.contains("a link rather than the rule itself"),
+            "{why}: {error}"
+        );
+    }
+    std::fs::remove_file(&locator).expect("remove");
+
+    // And the same for an entry that would block rather than refuse, bounded so
+    // a regression fails instead of stalling.
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&locator)
+        .status()
+        .expect("mkfifo")
+        .success());
+    for why in ["load_all", "applicable"] {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let probe = root.clone();
+        let via = why;
+        std::thread::spawn(move || {
+            let outcome = if via == "load_all" {
+                rules::load_all(&probe).map(|rules| rules.len())
+            } else {
+                rules::applicable(&probe, Domain::Object).map(|rules| rules.len())
+            };
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{why} must not block on a pipe"));
+        let error = outcome.expect_err(why);
+        assert!(
+            error.message.contains("must be a regular file"),
+            "{why}: {error}"
+        );
+    }
+}
