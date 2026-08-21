@@ -125,9 +125,16 @@ Review     3 attempts; on_exhaustion = human_confirmation
 ```
 
 Both halves have defaults — five attempts, and `reject` — so a rule that says
-nothing about review still has a limit. There is no unlimited rule. The attempt
-count is **yours to report honestly**: engr does not track it, stores no history
-of your tries, and can only tell you what a number means.
+nothing about review still has a limit. There is no unlimited rule.
+
+The attempt count is **yours to report honestly**. engr does not track it, stores
+no history of your tries, and can only tell you what a number means. It counts
+one run of self-review: if you lose the thread or start over, a later independent
+attempt at the same work legitimately begins at 1 again.
+
+That is not a way around the ceiling. It is there because you are the only one
+who knows how many times you have tried, and reporting a low number to get past a
+rule is lying about the one input the rule depends on.
 
 The line states the rule's policy, not what will happen to you. **A rule does not
 have one consequence** — that is decided by the domain you are mutating, below.

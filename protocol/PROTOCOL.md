@@ -1474,6 +1474,23 @@ attempts 1 through 5 reviewable and exhausts at 6. The attempt number is
 **agent-attested process metadata**. engr does not count attempts and stores no
 review series; it says what a given count means.
 
+The scope of that number is **one active review sequence**, and saying so matters
+because it bounds what the ceiling guarantees:
+
+```text
+same sequence          attempt = 1 -> 2 -> 3 -> ...
+sequence abandoned,
+lost, or restarted     a later independent sequence may begin again at 1
+```
+
+So `max_attempts` bounds repeated self-review within one continuous sequence. It
+is **not a rate limit and not a security control**: nothing persists across a
+restart, so cumulative exhaustion is not guaranteed and must not be relied on as
+though it were. v1 adds no persisted review series, retry counter, reset or
+abandonment record, and no pending-review resource — which is the same decision
+seen from the other side, since any of those would be the durable counter this
+is not.
+
 The **effective** values are what participate in review identity — not whether
 the YAML happened to spell a default out. These two are one rule, and a binding
 over either produces the same hash:
