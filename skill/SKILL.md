@@ -115,6 +115,22 @@ or a pinned basis no longer matches the project. Say so rather than proceeding
 as though the rule were absent: an unusable rule is not a rule that does not
 apply.
 
+Every rule also says how many attempts you get and what happens when they run
+out. `rules show` states it; `rules ls` mentions it only where it is not the
+default:
+
+```text
+Review     5 attempts, then it is refused
+Review     3 attempts, then a human confirms
+```
+
+Both halves have defaults — five attempts, then refusal — so a rule that says
+nothing about review still has a limit. There is no unlimited rule. The attempt
+count is **yours to report honestly**: engr does not track it, stores no history
+of your tries, and can only tell you what a number means. Going past the ceiling
+does not fail quietly — it stops the autonomous path, and depending on the rule
+either refuses the mutation or hands it to a human.
+
 engr does not author or edit rules, and there is no gate for them. Git is their
 history.
 

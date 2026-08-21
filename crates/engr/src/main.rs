@@ -2557,6 +2557,10 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                             "id": rule.id,
                             "domains": rule.domains.iter().map(|domain| domain.as_str()).collect::<Vec<_>>(),
                             "based_on": rule.based_on,
+                            // Effective values, never "unspecified": a machine
+                            // reading this must not have to know the defaults
+                            // to know what the rule does.
+                            "review": rule.review,
                             "usable": basis_trouble(root, rule).is_none(),
                             "authority": "project_policy",
                         })
@@ -2593,6 +2597,13 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                         None => println!("    based on {} (current)", basis.path),
                     }
                 }
+                // Listed only when it is not the default. A line on every rule
+                // repeating the same ceiling is noise a reader learns to skip,
+                // and the one rule that escalates to a person would be skipped
+                // with it. `rules show` states it unconditionally.
+                if rule.review != rules::Review::default() {
+                    println!("    review {}", review_line(&rule.review));
+                }
                 if let Some(trouble) = basis_trouble(root, rule) {
                     println!("    UNUSABLE  {trouble}");
                 }
@@ -2623,6 +2634,7 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
                     "id": rule.id,
                     "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
                     "based_on": rule.based_on,
+                    "review": rule.review,
                     "body": rule.body,
                     "authority": "project_policy",
                 });
@@ -2636,6 +2648,7 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
             let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
             println!("Rule       {}", rule.id);
             println!("Governs    {}", domains.join(", "));
+            println!("Review     {}", review_line(&rule.review));
             match &resolved {
                 Ok(bases) if bases.is_empty() => {
                     println!("Based on   nothing outside the rule itself")
@@ -2661,6 +2674,24 @@ fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
             resolved.map(|_| ())
         }
     }
+}
+
+/// The effective review policy in one line, in the terms a reader acts on.
+///
+/// Says what happens rather than naming the field: "then a human confirms" is
+/// the consequence, `human_confirmation` is the spelling. The number is the
+/// effective ceiling, so a rule that wrote nothing and one that wrote `5` read
+/// identically here — which is what they mean.
+fn review_line(review: &rules::Review) -> String {
+    let outcome = match review.on_exhaustion {
+        rules::OnExhaustion::Reject => "then it is refused",
+        rules::OnExhaustion::HumanConfirmation => "then a human confirms",
+    };
+    format!(
+        "{} attempt{}, {outcome}",
+        review.max_attempts,
+        if review.max_attempts == 1 { "" } else { "s" }
+    )
 }
 
 /// The first reason this rule cannot be reviewed against, if there is one.

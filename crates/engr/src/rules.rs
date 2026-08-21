@@ -69,6 +69,80 @@ impl Domain {
     }
 }
 
+/// What a Rule asks for once its review attempts are spent.
+///
+/// Two values in v1, and the narrow one is the default: running out of attempts
+/// means the mutation does not happen, not that a human is summoned. Escalation
+/// is something a Rule opts into, because a policy that pulls a person in is a
+/// claim about that policy's importance and only its author can make it.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OnExhaustion {
+    Reject,
+    HumanConfirmation,
+}
+
+impl OnExhaustion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::HumanConfirmation => "human_confirmation",
+        }
+    }
+
+    /// Read as a string and mapped here, for the reason `applies.domains` is:
+    /// an unsupported value is refused by name with the supported set spelled
+    /// out, rather than by a deserializer talking about variants.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reject" => Some(Self::Reject),
+            "human_confirmation" => Some(Self::HumanConfirmation),
+            _ => None,
+        }
+    }
+}
+
+/// The default ceiling, applied when a Rule does not name one.
+///
+/// The earlier reading — that an omitted limit means unlimited — was withdrawn.
+/// Every v1 Rule has a finite effective ceiling, so "how many attempts does this
+/// get" always has an answer without consulting anything outside the Rule.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// One Rule's review policy, **with the defaults already applied**.
+///
+/// This type never holds "unspecified". A Rule that omits `max_attempts` and one
+/// that writes `max_attempts: 5` produce the identical value here, which is the
+/// point: the effective semantics participate in review identity, and YAML
+/// spelling does not. Two rules that mean the same thing must not hash
+/// differently because one author was explicit.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Review {
+    pub max_attempts: u32,
+    pub on_exhaustion: OnExhaustion,
+}
+
+impl Default for Review {
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            on_exhaustion: OnExhaustion::Reject,
+        }
+    }
+}
+
+impl Review {
+    /// Whether this attempt is past the ceiling.
+    ///
+    /// Strictly greater, so a limit of 5 leaves attempts 1 through 5 reviewable
+    /// and exhausts at 6. The attempt number is agent-attested process metadata
+    /// and is deliberately not stored: engr does not count attempts, it only
+    /// says what a given count means.
+    pub fn exhausted(self, attempt: u32) -> bool {
+        attempt > self.max_attempts
+    }
+}
+
 /// One project file a Rule rests on, and which version of it.
 ///
 /// `commit` absent means the current content, whatever it is now: the Rule
@@ -311,6 +385,8 @@ pub struct Rule {
     pub domains: Vec<Domain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub based_on: Vec<Basis>,
+    /// The review policy in force, defaults resolved. See [`Review`].
+    pub review: Review,
     /// The normative text, exactly as written.
     pub body: String,
     /// Where it was found. Not part of identity and not hashed.
@@ -554,6 +630,45 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
     }
     based_on.sort_by(|left, right| left.path.cmp(&right.path));
 
+    // Resolved to effective values here, at the one place a Rule is read, so
+    // nothing downstream ever has to know whether a default was written out.
+    let review = match front.review {
+        None => Review::default(),
+        Some(written) => {
+            let max_attempts = match written.max_attempts {
+                None => DEFAULT_MAX_ATTEMPTS,
+                Some(limit) => {
+                    // Zero would exhaust before the first attempt, which is not
+                    // a ceiling but a way of spelling "never reviewable" that
+                    // the schema does not offer. Refused rather than read as an
+                    // unreachable rule.
+                    ensure!(
+                        limit > 0,
+                        EXIT_SCHEMA,
+                        "{where_}: rule {} sets max_attempts to 0, and a positive limit is what makes a rule reviewable",
+                        front.id
+                    );
+                    limit
+                }
+            };
+            let on_exhaustion = match written.on_exhaustion.as_deref() {
+                None => OnExhaustion::Reject,
+                Some(name) => OnExhaustion::parse(name).ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!(
+                            "{where_}: {name:?} is not an exhaustion action; v1 has reject and human_confirmation"
+                        ),
+                    )
+                })?,
+            };
+            Review {
+                max_attempts,
+                on_exhaustion,
+            }
+        }
+    };
+
     // The body is stored exactly as written. Trimming it would rewrite the
     // normative material — leading and trailing whitespace can carry meaning in
     // Markdown, and more to the point, the text a review surface shows has to be
@@ -569,6 +684,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         id: front.id,
         domains,
         based_on,
+        review,
         body: body.to_owned(),
         source: path.to_path_buf(),
     })
@@ -582,6 +698,24 @@ struct FrontMatter {
     applies: Applies,
     #[serde(default)]
     based_on: Vec<Basis>,
+    /// Absent is a first-class answer: it means the defaults, not "no policy".
+    #[serde(default)]
+    review: Option<ReviewFrontMatter>,
+}
+
+/// The review block as it may be written, where every field may be left out.
+///
+/// Kept separate from [`Review`] on purpose. This type is what the file is
+/// allowed to say; `Review` is what the Rule means. Collapsing them would put an
+/// `Option` into the value that gets hashed, and then an omitted default and a
+/// written one would be two different review identities.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewFrontMatter {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    on_exhaustion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -644,6 +778,14 @@ pub struct BoundRule {
     pub domains: Vec<Domain>,
     /// Sorted by path, for the same reason.
     pub based_on: Vec<ResolvedBasis>,
+    /// The effective review policy, defaults resolved before it got here.
+    ///
+    /// It belongs in the identity because it decides the outcome: the same
+    /// wording reviewed under a ceiling of 5 and under a ceiling of 1 are not
+    /// the same review, and one that escalates to a human on exhaustion is not
+    /// the same as one that simply refuses. A binding that omitted this would
+    /// verify unchanged while the thing it governs had changed meaning.
+    pub review: Review,
     /// The normative text, exactly as written and never normalized.
     ///
     /// Built from parsed semantics plus this exact body rather than from the
@@ -700,6 +842,7 @@ pub fn bind(
             id: rule.id,
             domains: rule.domains,
             based_on,
+            review: rule.review,
             body: rule.body,
         });
     }

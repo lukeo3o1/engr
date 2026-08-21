@@ -1449,6 +1449,54 @@ Applicability is domain-only: `object`, `backlog`, `collection`, `work`. What an
 **empty** applicable set means belongs to the domain that owns the mutation, not
 to this layer.
 
+### How many attempts, and what happens after
+
+```yaml
+review:
+  max_attempts: 5                      # optional, positive
+  on_exhaustion: human_confirmation     # optional: reject | human_confirmation
+```
+
+Both fields are optional and both have **effective values**, so every rule
+answers "how many attempts does this get" from the rule alone:
+
+```text
+max_attempts omitted    -> 5
+on_exhaustion omitted   -> reject
+```
+
+There is no unlimited rule in v1. A rule may raise or lower the ceiling, and a
+ceiling of `0` is refused: it is not a tighter limit but a way of spelling "never
+reviewable", which the schema does not offer.
+
+Exhaustion is `attempt > effective max_attempts`, so a ceiling of 5 leaves
+attempts 1 through 5 reviewable and exhausts at 6. The attempt number is
+**agent-attested process metadata**. engr does not count attempts and stores no
+review series; it says what a given count means.
+
+The **effective** values are what participate in review identity — not whether
+the YAML happened to spell a default out. These two are one rule, and a binding
+over either produces the same hash:
+
+```yaml
+review:                          review:
+  on_exhaustion: human_confirmation      max_attempts: 5
+                                         on_exhaustion: human_confirmation
+```
+
+That equality is the point. An author tidying their front matter must not
+silently invalidate every attestation made against the rule, and two rules that
+mean the same thing must not hash differently because one author was explicit.
+The policy is nonetheless *in* the identity, because it decides the outcome: the
+same wording under a ceiling of 5 and under a ceiling of 1 is not the same
+review, and one that escalates to a person is not one that refuses.
+
+Exhaustion is evaluated **per rule**. Any exhausted applicable rule stops the
+autonomous path; if at least one actually exhausted rule asks for
+`human_confirmation` the mutation escalates to the Human Gate, and otherwise it
+is refused. Collection and Work do not get exhaustion behaviour invented for
+symmetry.
+
 ### What a rule rests on
 
 ```yaml

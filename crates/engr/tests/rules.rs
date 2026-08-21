@@ -1285,3 +1285,187 @@ fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
     )
     .expect_err("and it is still checked");
 }
+
+/// A rule that says nothing about review still has a review policy.
+///
+/// The withdrawn reading was that an omitted `max_attempts` means unlimited.
+/// Every v1 rule has a finite effective ceiling, so "how many attempts does this
+/// get" is answerable from the rule alone, without consulting a default nobody
+/// wrote down.
+#[test]
+fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let rule = rules::load_all(&root).expect("load").remove(0);
+
+    assert_eq!(rule.review.max_attempts, 5);
+    assert_eq!(rule.review.on_exhaustion, rules::OnExhaustion::Reject);
+    assert_eq!(rule.review, rules::Review::default());
+
+    // The boundary is "past the ceiling", not "at" it.
+    for attempt in 1..=5 {
+        assert!(
+            !rule.review.exhausted(attempt),
+            "attempt {attempt} is still reviewable under a ceiling of 5"
+        );
+    }
+    assert!(rule.review.exhausted(6));
+}
+
+/// Writing a default out must not change what a rule means.
+///
+/// This is the whole reason [`rules::Review`] holds effective values rather than
+/// options. A review identity is over what the rule *says*, and two rules that
+/// say the same thing in different YAML are one rule as far as a reviewer is
+/// concerned. If the binding hashed the spelling, an author tidying their front
+/// matter would silently invalidate every attestation against it.
+#[test]
+fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let hash = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let silent = hash(&root);
+
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  max_attempts: 5\n  on_exhaustion: reject\nbased_on:",
+        ),
+    );
+    assert_eq!(
+        silent,
+        hash(&root),
+        "an explicit default is the same review subject as an omitted one"
+    );
+
+    // The issue's own example: naming only the action still means the default
+    // ceiling, so these two spellings are also one rule.
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  on_exhaustion: human_confirmation\nbased_on:",
+        ),
+    );
+    let escalating = hash(&root);
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  max_attempts: 5\n  on_exhaustion: human_confirmation\nbased_on:",
+        ),
+    );
+    assert_eq!(escalating, hash(&root));
+
+    // And it is genuinely a different rule from the default one, or the
+    // equality above would be proving nothing.
+    assert_ne!(silent, escalating);
+}
+
+/// The effective policy is part of the review subject, because it decides the
+/// outcome.
+///
+/// The same wording under a ceiling of 5 and under a ceiling of 1 is not the
+/// same review, and one that pulls in a person on exhaustion is not the same as
+/// one that refuses. A binding that left this out would keep verifying while the
+/// thing it governs had changed meaning.
+#[test]
+fn changing_the_effective_review_policy_changes_the_review_identity() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let hash = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+    let with = |front: &str| ARCHITECTURE.replace("based_on:", &format!("{front}based_on:"));
+
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let original = hash(&root);
+
+    write_rule(&root, "architecture", &with("review:\n  max_attempts: 1\n"));
+    let tighter = hash(&root);
+    assert_ne!(original, tighter, "the ceiling is part of the subject");
+
+    write_rule(
+        &root,
+        "architecture",
+        &with("review:\n  on_exhaustion: human_confirmation\n"),
+    );
+    assert_ne!(
+        original,
+        hash(&root),
+        "what happens on exhaustion is part of the subject"
+    );
+
+    // A tighter ceiling also moves the boundary it is a ceiling for.
+    write_rule(&root, "architecture", &with("review:\n  max_attempts: 1\n"));
+    let rule = rules::load_all(&root).expect("load").remove(0);
+    assert!(!rule.review.exhausted(1));
+    assert!(rule.review.exhausted(2));
+}
+
+/// The review block refuses what it does not understand, like the rest of the
+/// schema.
+///
+/// A ceiling of zero is the interesting one: it is not a tighter limit but a way
+/// of spelling "never reviewable", which v1 does not offer. Read as a number it
+/// would exhaust before the first attempt and quietly make the rule unusable in
+/// a way nothing reports.
+#[test]
+fn the_review_block_refuses_what_v1_does_not_define() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let with = |front: &str| ARCHITECTURE.replace("based_on:", &format!("{front}based_on:"));
+
+    for (front, expected) in [
+        ("review:\n  max_attempts: 0\n", "positive limit"),
+        ("review:\n  on_exhaustion: escalate\n", "not an exhaustion"),
+        ("review:\n  on_exhaustion: Reject\n", "not an exhaustion"),
+        ("review:\n  attempts: 3\n", "unknown field"),
+    ] {
+        write_rule(&root, "architecture", &with(front));
+        let error = rules::load_all(&root).expect_err(&format!("{front:?} is refused"));
+        assert!(
+            error.message.contains(expected),
+            "{front:?} should say {expected:?}, said {:?}",
+            error.message
+        );
+    }
+
+    // And the two it does define are accepted.
+    for front in [
+        "review:\n  max_attempts: 1\n",
+        "review:\n  on_exhaustion: reject\n",
+        "review:\n  on_exhaustion: human_confirmation\n",
+        "review:\n  max_attempts: 12\n  on_exhaustion: human_confirmation\n",
+    ] {
+        write_rule(&root, "architecture", &with(front));
+        rules::load_all(&root).unwrap_or_else(|error| panic!("{front:?}: {}", error.message));
+    }
+}
