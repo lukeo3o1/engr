@@ -76,11 +76,12 @@ impl Domain {
 /// that policy's importance and only its author can make it.
 ///
 /// **This is a request, not an outcome.** What it costs is decided by the domain
-/// and by [`Exhaustion`]: an Object stops and may escalate, a Backlog mutation
-/// is kept and marked and never escalates on this field, and Collection and Work
-/// have no v1 answer at all. Even `Reject` on an Object stops the *autonomous*
-/// path rather than forbidding the mutation — a human may initiate the same one
-/// and override the result through the gate.
+/// and by [`Exhaustion`]: an Object stops and may escalate; a *non-destructive*
+/// Backlog mutation is kept and marked, and never escalates on this field, while
+/// consuming a Backlog Section needs a review that passed and simply does not
+/// happen; and Collection and Work have no v1 answer at all. Even `Reject` on an
+/// Object stops the *autonomous* path rather than forbidding the mutation — a
+/// human may initiate the same one and override the result through the gate.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExhaustion {
