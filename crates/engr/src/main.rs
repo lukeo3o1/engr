@@ -1792,9 +1792,15 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
         // stdout stays byte for byte what it was — this is the surface people
         // pipe into grep — so the alarm goes to stderr, which survives the pipe.
         print!("{}", view::render_ls_sections(root, &objects));
-        let forged = view::tampered_count(&objects);
-        if forged > 0 {
-            eprintln!("!! {forged} sections do not match their hashes; run: engr verify");
+        let untrusted = view::untrusted_sections(root, &objects);
+        if !untrusted.is_empty() {
+            eprintln!(
+                "!! {} of these sections cannot be trusted; run: engr verify",
+                untrusted.len()
+            );
+            for row in &untrusted {
+                eprintln!("!!   {row}");
+            }
         }
     } else if stale {
         let out = view::render_stale(root, &objects);

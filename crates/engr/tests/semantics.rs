@@ -88,6 +88,22 @@ fn classify(object_type: Option<ObjectType>, state: State) -> Action {
 }
 
 fn classified(root: &Path, id: &str, object_type: Option<ObjectType>, state: State) -> Object {
+    // Classifying to the state an Object already stands in is refused as a
+    // no-op, so step through a different valid classification first when the
+    // destination is where it already is. What these tests prove is that the
+    // destination is admissible, not that confirming nothing is.
+    let current = ops::effective(root, id).expect("object");
+    if (current.object_type, current.state) == (object_type, state) {
+        let away = if object_type.is_none() && state == State::Open {
+            (None, State::Closed)
+        } else {
+            (None, State::Open)
+        };
+        admit(
+            root,
+            payload(classify(away.0, away.1), id, Content::default()),
+        );
+    }
     admit(
         root,
         payload(classify(object_type, state), id, Content::default()),
@@ -169,6 +185,12 @@ fn every_state_is_valid_for_exactly_the_types_the_protocol_gives_it() {
     for (object_type, valid) in table {
         for state in every_state {
             let id = new_object(&root, "state table");
+            // A fresh object is already untyped and open, so proving that
+            // combination is admissible means arriving at it rather than
+            // confirming nothing — the no-op refusal is a different rule.
+            if (object_type, state) == (None, State::Open) {
+                classified(&root, &id, None, State::Closed);
+            }
             let proposal = payload(classify(object_type, state), &id, Content::default());
             if valid.contains(&state) {
                 let object = admit(&root, proposal);
@@ -1622,5 +1644,141 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
             && carrying[0].contains("\"state\":\"proposed\""),
         "{}",
         carrying[0]
+    );
+}
+
+/// The supersession cycle walk fails closed on authority it cannot read.
+///
+/// The walk existed to prove a replacement does not close a loop. It followed
+/// each edge with `if let Ok(target)`, so an intermediate Object that would not
+/// load simply ended that branch — and a branch nobody walked can hide the
+/// cycle the walk was there to find. Unreadable authoritative state must fail
+/// closed rather than be collapsed into "nothing further this way".
+#[test]
+fn a_supersession_chain_through_unreadable_authority_is_refused() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+
+    let far = new_object(&root, "the far end of the chain");
+    let middle = new_object(&root, "the middle of the chain");
+    let near = new_object(&root, "the near end of the chain");
+    let source = new_object(&root, "the object being replaced");
+
+    for id in [&middle, &near, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+
+    // middle is superseded by far, so walking from middle continues to far.
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &middle,
+            Content {
+                text: "replaced by the far end".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&far))],
+                ..Content::default()
+            },
+        ),
+    );
+    // near is superseded by middle, so walking from near reaches far through it.
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &near,
+            Content {
+                text: "replaced by the middle".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&middle))],
+                ..Content::default()
+            },
+        ),
+    );
+
+    let replaces_source = || {
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced by the near end".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&near))],
+                ..Content::default()
+            },
+        )
+    };
+    // Intact, the whole chain walks and the supersession is admissible.
+    gate::prepare(&root, replaces_source()).expect("an intact chain");
+    gate::discard(
+        &root,
+        &gate::pending_codes(&root).expect("pending")[0].clone(),
+    )
+    .expect("clear");
+
+    // Now the middle of the chain will not load. Everything beyond it is
+    // unreachable, so whether this replacement closes a cycle is no longer
+    // establishable — and saying nothing is the one answer that is wrong.
+    rewrite(&root, &middle, |value| {
+        value["state"] = Value::String("not-a-state".into());
+    });
+    assert!(
+        ops::effective(&root, &middle).is_err(),
+        "the middle is unreadable"
+    );
+
+    let error = gate::prepare(&root, replaces_source())
+        .expect_err("a chain that cannot be walked is not a chain that is clear");
+    assert!(
+        error.message.contains("will not load"),
+        "the refusal must say why it could not be established: {error}"
+    );
+}
+
+/// A classification that changes nothing is not a change to confirm.
+///
+/// Confirming it would append a permanent Event recording no change, spend a
+/// `rev`, and invalidate every other live candidate for the Object — three
+/// lasting consequences for an operation that does nothing, and a human asked
+/// to assent to nothing.
+#[test]
+fn classifying_an_object_into_the_state_it_already_holds_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "already there");
+
+    // A fresh object is untyped and open, so that is already a no-op.
+    let error = gate::prepare(
+        &root,
+        payload(classify(None, State::Open), &id, Content::default()),
+    )
+    .expect_err("nothing to confirm");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("nothing to confirm"), "{error}");
+
+    let before = ops::effective(&root, &id).expect("object").rev;
+    let object = classified(&root, &id, Some(ObjectType::Design), State::Draft);
+    assert_eq!(object.rev, before + 1, "a real change is one revision");
+
+    // And it holds for a typed classification too, not just the untyped default.
+    let error = gate::prepare(
+        &root,
+        payload(
+            classify(Some(ObjectType::Design), State::Draft),
+            &id,
+            Content::default(),
+        ),
+    )
+    .expect_err("still nothing to confirm");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(
+        ops::effective(&root, &id).expect("object").rev,
+        before + 1,
+        "and the refusal spent nothing"
     );
 }
