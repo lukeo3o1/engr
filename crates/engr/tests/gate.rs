@@ -2,7 +2,7 @@
 
 use engr::model::{Action, Content, Payload, Ref};
 use engr::semantics::{Relation, Role, State, Supplement};
-use engr::{backlog, gate, ops, store};
+use engr::{gate, ops, store};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -862,19 +862,6 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
                 value["object_title"] = serde_json::json!("a record this is not")
             }),
         ),
-        (
-            "backlog",
-            Box::new(|value: &mut serde_json::Value| {
-                value["backlog"] = serde_json::to_value(vec![backlog::Source {
-                    item: engr::model::new_id(),
-                    section: 1,
-                    basis_sha256: "0".repeat(64),
-                    produced: Vec::new(),
-                    resolves: true,
-                }])
-                .expect("backlog")
-            }),
-        ),
     ];
 
     // Every field of `PreparedContext` is exercised above. The comparison is
@@ -895,13 +882,6 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
         previous_relations: vec![Relation::superseded_by(format!("obj:{}", "0".repeat(26)))],
         previous_semantics_recorded: true,
         oversize: true,
-        backlog: vec![backlog::Source {
-            item: engr::model::new_id(),
-            section: 1,
-            basis_sha256: "0".repeat(64),
-            produced: Vec::new(),
-            resolves: true,
-        }],
         object_title: Some("the record being changed".to_owned()),
     };
     let declared: BTreeSet<String> = serde_json::to_value(&populated)

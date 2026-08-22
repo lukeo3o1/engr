@@ -181,12 +181,12 @@ enum Backlog {
         #[command(flatten)]
         subjects: SubjectArgs,
     },
-    /// Remove an unresolved point, or the whole topic
-    Rm {
+    /// Consume a resolved point. The topic goes when its last one does
+    Consume {
         item: String,
-        /// Remove one point. The topic goes when its last one does
+        /// The point being judged resolved
         #[arg(long)]
-        section: Option<u64>,
+        section: u64,
     },
 }
 
@@ -686,7 +686,6 @@ fn run(cli: Cli) -> Result<()> {
                 // later revision would say the wrong thing happened.
                 admitted.event.rev
             );
-            report_backlog(&root, &admitted.backlog);
             warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
@@ -727,33 +726,6 @@ fn run(cli: Cli) -> Result<()> {
         Command::Rules(command) => rules_command(&root, command),
         Command::Work(command) => work_command(&root, command),
         Command::Collection(command) => collection_command(&root, command),
-    }
-}
-
-/// Say what confirmation did to unresolved staging, in the same breath as the
-/// admission. A source that moved needs a decision, and the moment the human is
-/// still here is the moment to say so.
-fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
-    let width = view::backlog_width(root);
-    for outcome in outcomes {
-        let item = shorten(&outcome.item, width);
-        let line = match &outcome.result {
-            backlog::Reconciliation::Recorded { added: 0 } => {
-                "already recorded — nothing to add".to_owned()
-            }
-            backlog::Reconciliation::Recorded { added } => {
-                format!("recorded {added} produced outcome(s); still unresolved")
-            }
-            backlog::Reconciliation::Consumed { item_removed: true } => {
-                "resolved and consumed; the topic had nothing else unresolved".to_owned()
-            }
-            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
-            backlog::Reconciliation::SourceChanged => {
-                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
-            }
-            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
-        };
-        println!("backlog    {item} §{}  {line}", outcome.section);
     }
 }
 
@@ -844,22 +816,14 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             println!("merged into §{section}");
             Ok(())
         }
-        Backlog::Rm { item, section } => {
+        Backlog::Consume { item, section } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            match section {
-                Some(section) => {
-                    if backlog::delete_section(root, &id, section)? {
-                        println!(
-                            "removed §{section}, and the topic with it — nothing else was unresolved"
-                        );
-                    } else {
-                        println!("removed §{section}");
-                    }
-                }
-                None => {
-                    backlog::delete_item(root, &id)?;
-                    println!("removed {}", shorten(&id, view::backlog_width(root)));
-                }
+            if backlog::consume_section(root, &id, section)? {
+                println!(
+                    "consumed §{section}, and the topic with it — nothing else was unresolved"
+                );
+            } else {
+                println!("consumed §{section}");
             }
             Ok(())
         }
@@ -1474,7 +1438,6 @@ fn render_basis(basis: Option<&str>) -> String {
 /// consumes.
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
-    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
@@ -1642,26 +1605,6 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .map(|item| item.to_string())
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
-        }
-    }
-    // Confirming this will also edit unresolved staging, so the human reading
-    // the change is shown that before they type, not told about it afterwards.
-    for source in &candidate.context.backlog {
-        out.push_str(&format!(
-            "Backlog    {} §{}  {}\n",
-            shorten(&source.item, backlog_width),
-            source.section,
-            if source.resolves {
-                "resolved by this — will be consumed"
-            } else {
-                "still unresolved after this"
-            }
-        ));
-        for produced in &source.produced {
-            out.push_str(&format!(
-                "           produced engr:{}\n",
-                produced.target.reference
             ));
         }
     }

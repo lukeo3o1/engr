@@ -182,9 +182,9 @@ pub struct Section {
     pub id: u64,
     pub text: String,
     /// When the unresolved statement itself last changed. Operational triage
-    /// metadata: it is not in the resolution basis, and appending a produced
-    /// outcome does not refresh it, because an outcome deliberately does not
-    /// change what remains unresolved.
+    /// metadata: last meaningful activity on the unresolved work, which includes
+    /// a change to `produced[]` as much as to the wording. Not a concurrency
+    /// token -- staleness is decided by the mutation precondition, not by this.
     pub updated_at: String,
     #[serde(default)]
     pub subjects: Vec<Subject>,
@@ -193,16 +193,6 @@ pub struct Section {
 }
 
 impl Section {
-    /// The transient compare-and-consume token: `canonical(text, subjects[])`.
-    ///
-    /// Excludes `produced[]`, `updated_at`, the Section id and the parent topic.
-    /// A candidate pins this at prepare so confirming a proposal written against
-    /// v1 of an unresolved point cannot quietly consume v2 — but accumulating an
-    /// outcome, or renaming the topic, must not invalidate a candidate either.
-    pub fn resolution_basis(&self) -> Result<String> {
-        resolution_basis(&self.text, &self.subjects)
-    }
-
     fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
         // What the write path refuses, a stored file may not contain. Two
@@ -230,7 +220,7 @@ impl Section {
             subject.validate()?;
             // subjects[] is a set: two identical entries carry no more meaning
             // than one, and permitting them would make "equivalent subjects"
-            // ambiguous for the resolution basis.
+            // ambiguous when the set is compared.
             ensure!(
                 seen.insert(canonical_json(subject)?),
                 EXIT_SCHEMA,
@@ -363,31 +353,6 @@ impl Item {
     }
 }
 
-/// `canonical(text, subjects[])`, with subjects compared as an unordered set.
-///
-/// Two Sections whose subjects differ only in array order state the same
-/// unresolved thing, so they must fingerprint the same — otherwise reordering a
-/// list nobody reads as ordered would silently kill a prepared candidate.
-pub fn resolution_basis(text: &str, subjects: &[Subject]) -> Result<String> {
-    let mut canonical: Vec<String> = subjects.iter().map(canonical_json).collect::<Result<_>>()?;
-    canonical.sort();
-    let mut basis = serde_json::Map::new();
-    basis.insert(
-        "text".to_owned(),
-        serde_json::Value::String(text.to_owned()),
-    );
-    basis.insert(
-        "subjects".to_owned(),
-        serde_json::Value::Array(
-            canonical
-                .into_iter()
-                .map(serde_json::Value::String)
-                .collect(),
-        ),
-    );
-    crate::confirmation::fingerprint(&serde_json::Value::Object(basis))
-}
-
 /// `serde_json::Map` is a `BTreeMap`, so this is key-sorted and stable.
 fn canonical_json<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value)
@@ -406,7 +371,7 @@ pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
 /// Whether two subject lists say the same thing.
 ///
 /// `subjects[]` is a set, so order is not content. Reordering one leaves the
-/// resolution basis identical by design; activity has to agree, or triage
+/// same unresolved thing by design; activity has to agree, or triage
 /// reports work on a point nobody touched.
 fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
     let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
@@ -503,8 +468,8 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
 }
 
 /// Write one item. Callers must already hold the workspace lock: every mutation
-/// here is read-modify-write, and the compare-and-consume path additionally
-/// needs its fingerprint check and its write to be one step.
+/// here is read-modify-write, and a destructive path additionally needs its
+/// precondition check and its write to be one step.
 fn save(root: &Path, item: &Item) -> Result<()> {
     store::require_current(root)?;
     item.validate()?;
@@ -726,7 +691,7 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
             .expect("section presence checked above");
         // The caller's order is persisted, because no canonical order is
         // required — but reordering a set is not a change to what is
-        // unresolved, and the resolution basis already says so.
+        // unresolved, and the set comparison already says so.
         let changed = !same_subjects(&slot.subjects, &subjects)?;
         slot.subjects = subjects;
         if changed {
@@ -785,9 +750,21 @@ pub fn merge_sections(
     })
 }
 
-/// Remove one unresolved point. If it was the last, the item goes with it:
-/// an item is a topic that still has unresolved work in it.
-pub fn delete_section(root: &Path, id: &str, section: u64) -> Result<bool> {
+/// Consume one unresolved point: judge it resolved and take it out.
+///
+/// **The only way a Section leaves.** There is no separate delete or discard,
+/// and that is deliberate rather than a naming preference: two removal verbs
+/// would mean a reader of the history cannot tell whether a point was resolved,
+/// abandoned, or swept away by mistake. Consume covers all of those, including
+/// the cases with nothing to show for them — a duplicate, an obsolete concern, a
+/// decision not to pursue — because what authorizes removal is the judgement
+/// that it no longer needs to be pending, not evidence of an outcome.
+///
+/// If it was the last point, the item goes with it: an item is a topic that
+/// still has unresolved work in it, and an empty one is not a canonical state.
+/// That removal is mechanical structural cleanup inside this same mutation, not
+/// a second deletion anyone has to ask for.
+pub fn consume_section(root: &Path, id: &str, section: u64) -> Result<bool> {
     locked(root, || {
         let mut item = load(root, id)?;
         item.section(section)?;
@@ -799,229 +776,4 @@ pub fn delete_section(root: &Path, id: &str, section: u64) -> Result<bool> {
         save(root, &item)?;
         Ok(false)
     })
-}
-
-pub fn delete_item(root: &Path, id: &str) -> Result<()> {
-    locked(root, || {
-        load(root, id)?;
-        remove(root, id)
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Candidate-driven reconciliation
-// ---------------------------------------------------------------------------
-
-/// A Backlog Section a candidate declares it was derived from, with what the
-/// candidate says confirming it means for that source.
-///
-/// Nothing here is inferred. An Object changing is not evidence that any
-/// unresolved point was worked on, so the relationship has to be stated.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Source {
-    pub item: String,
-    pub section: u64,
-    /// The source's resolution basis as it stood when the candidate was
-    /// prepared.
-    pub basis_sha256: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub produced: Vec<Produced>,
-    /// Whether successful confirmation declares this source resolved.
-    pub resolves: bool,
-}
-
-impl Source {
-    pub fn validate(&self) -> Result<()> {
-        crate::model::validate_object_id(&self.item).map_err(|_| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "backlog source id {:?} must be a canonical UUIDv7",
-                    self.item
-                ),
-            )
-        })?;
-        ensure!(
-            self.section > 0,
-            EXIT_SCHEMA,
-            "backlog source section ids start at 1"
-        );
-        ensure!(
-            self.basis_sha256.len() == 64
-                && self
-                    .basis_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            EXIT_SCHEMA,
-            "backlog source must pin a resolution basis"
-        );
-        for produced in &self.produced {
-            produced.validate()?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reconciliation {
-    /// The declared outcomes were appended. `added` counts the ones that were
-    /// not already listed, so a retry reports zero rather than duplicating.
-    Recorded {
-        added: usize,
-    },
-    Consumed {
-        item_removed: bool,
-    },
-    /// The source moved after the candidate was prepared. The Object mutation
-    /// still stands; this unresolved point needs a human or agent decision.
-    SourceChanged,
-    /// Already consumed, or edited away. Nothing left to reconcile.
-    SourceGone,
-}
-
-#[derive(Debug, Clone)]
-pub struct Outcome {
-    pub item: String,
-    pub section: u64,
-    pub result: Reconciliation,
-}
-
-impl Outcome {
-    pub fn needs_attention(&self) -> bool {
-        matches!(
-            self.result,
-            Reconciliation::SourceChanged | Reconciliation::SourceGone
-        )
-    }
-}
-
-/// Apply what a successful confirmation said about its Backlog sources.
-///
-/// Must run while the caller holds the workspace lock, and only after the
-/// authoritative mutation is durable. Two rules do the work:
-///
-/// - a source whose basis moved since prepare is left entirely alone, because a
-///   candidate written against v1 must never touch v2 — and is reported, because
-///   the reconciliation still has to happen somewhere;
-/// - appending an outcome already listed is a no-op, which is what makes the
-///   retry after a crash between the projection and the candidate's deletion
-///   apply nothing twice.
-///
-/// A source that changed is not a failure of the Object mutation. That was
-/// confirmed by a human and is already in the record.
-///
-/// Crate-visible deliberately. Its precondition — the caller already holds the
-/// workspace lock — cannot be expressed in the signature, and a lock a caller
-/// has to remember is one a caller will forget. Inside the crate there is
-/// exactly one caller and it is the confirmation path.
-pub(crate) fn reconcile(root: &Path, sources: &[Source]) -> Result<Vec<Outcome>> {
-    let mut outcomes = Vec::new();
-    for source in sources {
-        let mut item = match load(root, &source.item) {
-            Ok(item) => item,
-            Err(error) if error.code == EXIT_NOT_FOUND => {
-                outcomes.push(Outcome {
-                    item: source.item.clone(),
-                    section: source.section,
-                    result: Reconciliation::SourceGone,
-                });
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(current) = item
-            .sections
-            .iter()
-            .find(|section| section.id == source.section)
-        else {
-            outcomes.push(Outcome {
-                item: source.item.clone(),
-                section: source.section,
-                result: Reconciliation::SourceGone,
-            });
-            continue;
-        };
-        if current.resolution_basis()? != source.basis_sha256 {
-            outcomes.push(Outcome {
-                item: source.item.clone(),
-                section: source.section,
-                result: Reconciliation::SourceChanged,
-            });
-            continue;
-        }
-
-        let result = if source.resolves {
-            item.sections.retain(|section| section.id != source.section);
-            if item.sections.is_empty() {
-                remove(root, &source.item)?;
-                Reconciliation::Consumed { item_removed: true }
-            } else {
-                save(root, &item)?;
-                Reconciliation::Consumed {
-                    item_removed: false,
-                }
-            }
-        } else {
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|section| section.id == source.section)
-                .expect("section presence checked above");
-            let mut added = 0;
-            for outcome in &source.produced {
-                if !slot.produced.contains(outcome) {
-                    slot.produced.push(outcome.clone());
-                    added += 1;
-                }
-            }
-            if added > 0 {
-                save(root, &item)?;
-            }
-            Reconciliation::Recorded { added }
-        };
-        outcomes.push(Outcome {
-            item: source.item.clone(),
-            section: source.section,
-            result,
-        });
-    }
-    Ok(outcomes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn subject_pair() -> (Subject, Subject) {
-        (
-            Subject::engr("obj:01h47kwz2mfk0v47mffcnstqva:3"),
-            Subject::File {
-                path: "src/auth/session.rs".to_owned(),
-                commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            },
-        )
-    }
-
-    #[test]
-    fn the_resolution_basis_reads_subjects_as_a_set() {
-        let (first, second) = subject_pair();
-        assert_eq!(
-            resolution_basis("unresolved", &[first.clone(), second.clone()]).expect("basis"),
-            resolution_basis("unresolved", &[second, first]).expect("basis"),
-            "equivalent subject sets in a different order state the same thing"
-        );
-    }
-
-    #[test]
-    fn the_resolution_basis_follows_text_and_subjects_only() {
-        let (first, second) = subject_pair();
-        let one = std::slice::from_ref(&first);
-        let base = resolution_basis("unresolved", one).expect("basis");
-        assert_ne!(base, resolution_basis("reworded", one).expect("basis"));
-        assert_ne!(
-            base,
-            resolution_basis("unresolved", &[first.clone(), second]).expect("basis")
-        );
-    }
 }

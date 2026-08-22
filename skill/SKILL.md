@@ -244,7 +244,7 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
-engr backlog rm <id> --section 2          # removing it is what says "settled"
+engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
 
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
@@ -252,6 +252,12 @@ backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can
 assert, propose it through the gate like anything else — the wording a human
 confirms is usually not the wording you staged.
+
+**Admitting the Object does not touch the point it came from.** They are two
+separate operations, and the second one is yours to remember: after the record
+gains the outcome, either record it on the point with `produced` or consume the
+point if it is settled. engr will not infer the link, because an inferred one
+would eventually consume something nobody meant to resolve.
 
 Two rules keep it honest:
 

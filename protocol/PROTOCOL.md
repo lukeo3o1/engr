@@ -904,8 +904,8 @@ cannot disagree.
 
 Neither does a write that changes nothing. Rewriting a Section with the wording
 it already had, or with the same `subjects[]` set in a different order, MUST
-leave `updated_at` alone. Order is not content — the resolution basis already
-treats `subjects[]` as unordered — and an idempotent write that manufactures
+leave `updated_at` alone. Order is not content — `subjects[]` is a set — and an idempotent write that
+manufactures
 activity puts an untouched point at the top of the list somebody reads to find
 what was touched.
 
@@ -917,7 +917,8 @@ fractional seconds and appending `Z` reports a different moment entirely. Read
 surfaces may normalize the offset for display; they may not change the instant,
 and the stored value keeps its own precision and offset.
 
-It is operational metadata and is **not** part of the resolution basis.
+It is operational metadata, not a concurrency token: whether a prepared mutation
+is still applicable is decided by its precondition, never by this timestamp.
 
 ### produced[]
 
@@ -936,68 +937,20 @@ confirmation so the point can be consumed. An agent resuming work should read
 the text, the subjects and the produced outcomes together before deciding what
 is left — that is what stops it re-solving what an earlier session settled.
 
-A declared outcome asserts that authority exists, so `prepare` MUST refuse one
-that names an Object or Section which will not exist once the candidate is
-admitted. The check is against the **projected** state, not the stored one: the
-usual outcome of working on an unresolved point is the very Object or Section
-the candidate creates, and refusing that would make the field useless for its
-own case. The candidate pins `expected_rev`, so that projection is exact.
+Object admission and this bookkeeping are **two independent operations**.
+Confirming an Object appends nothing here and consumes nothing here; an agent
+that worked from a point updates it afterwards, as an ordinary Backlog mutation.
+engr never infers the link, because an inferred one would eventually consume a
+point nobody meant to resolve.
 
-Existence is checked when the claim is made and never again. Loading backlog
-MUST NOT depend on a recorded outcome still existing: an Object deleted through
-the gate afterwards is history, and history cannot be allowed to make the
-staging around it unreadable.
-
-### Resolution basis
-
-The transient compare-and-consume token is
-
-```text
-canonical(text, subjects[])
-```
-
-excluding `produced[]`, `updated_at`, the Section id and the parent topic, with
-`subjects[]` canonicalized as an unordered set. It is **not** stored on the
-backlog Section: it is comparison state a candidate pins, not a trust hash.
-
-If a produced outcome materially changes what remains unresolved, the agent
-revises `text` or `subjects[]` — which moves the basis, as it should.
-
-### Candidate-derived outcomes
-
-A normal record action remains the thing that enters the record. There is no
-`backlog_promoted` event and no second confirmation flow.
-
-A candidate derived from backlog MUST explicitly declare its source Section(s),
-the outcomes produced from each, and whether confirming settles each one. It
-MUST NOT be inferred from the fact that an Object changed. `prepare` pins each
-source's resolution basis and refuses up front if the source does not exist.
-
-Those declarations are covered by candidate integrity and stay out of the event:
-backlog is not part of the authoritative record.
-
-After successful confirmation, per source:
-
-| Basis since prepare | Candidate says | Result |
-| --- | --- | --- |
-| unchanged | still unresolved | declared outcomes appended to `produced[]` |
-| unchanged | resolved | Section consumed; item removed if it was the last |
-| **changed** | either | left untouched, and reported |
-
-The third row is the one that matters. A stale source MUST NOT invalidate
-wording a human already confirmed — the record mutation still admits — and an
-old candidate MUST NOT mutate newer unresolved staging. Failing to reconcile
-because the source moved is an expected outcome, not a failed admission.
-
-A source declared resolved is consumed, so outcomes declared alongside it have
-nowhere to be written and are not: the point is settled, and the outcome is in
-the record, which is where it belongs.
-
-Reconciliation MUST happen inside the same successful confirmation, holding the
-same lock that made the mutation durable, so nothing can edit the source between
-the basis check and the write. It MUST also be idempotent: appending an outcome
-already listed does nothing, and a consumed Section is simply gone, so the retry
-that closes the crash window applies none of it twice.
+A declared outcome asserts that authority exists, so appending one MUST refuse a
+target that does not exist. **Existence is checked when the claim is made and
+never again**, in that direction only: `produced[]` is a record of what happened,
+not a referential-integrity constraint, so it never constrains the Object
+domain. A target may later be superseded, deleted, or absorbed by a merge while
+an entry still names it; the entry becomes an unavailable historical pointer,
+which is not corruption, and it MUST NOT be retargeted to a replacement —
+rewriting it would rewrite what was actually produced.
 
 ### Read surfaces
 
