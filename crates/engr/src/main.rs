@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{collection, gate, git, ops, store, view, work};
+use engr::{collection, gate, git, ops, rules, store, view, work};
 use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,53 @@ enum Command {
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
+    /// Project rules an agent must read before a semantic mutation
+    #[command(subcommand)]
+    Rules(RulesCommand),
+}
+
+/// Rules are project policy data, so this surface is read-only.
+///
+/// engr does not author or edit a rule. There is no `rules new`, no gate, no
+/// event: a rule is a file in the repository, and git is its history. What engr
+/// owes an agent is the ability to see exactly which rules govern a mutation
+/// and exactly what they rest on — everything a review has to have covered.
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// What rules exist, and what they govern
+    Ls {
+        /// Only rules governing this domain
+        #[arg(long, value_enum, value_name = "DOMAIN")]
+        domain: Option<DomainArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One rule in full, with its bases resolved to what must be read
+    Show {
+        /// The rule's stable id, not its filename
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DomainArg {
+    Object,
+    Backlog,
+    Collection,
+    Work,
+}
+
+impl DomainArg {
+    fn model(self) -> rules::Domain {
+        match self {
+            Self::Object => rules::Domain::Object,
+            Self::Backlog => rules::Domain::Backlog,
+            Self::Collection => rules::Domain::Collection,
+            Self::Work => rules::Domain::Work,
+        }
+    }
 }
 
 /// Backlog edits do not go through the gate, and must not look as though they
@@ -127,19 +174,35 @@ enum Backlog {
     /// Consolidate unresolved points into one
     Merge {
         item: String,
-        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-        sections: Vec<u64>,
+        /// Section that keeps its identity
+        #[arg(long)]
+        destination: u64,
+        /// Section absorbed and removed
+        #[arg(long)]
+        source: u64,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
     },
-    /// Remove an unresolved point, or the whole topic
-    Rm {
+    /// Record durable knowledge this point produced. Does not resolve it
+    Produced {
         item: String,
-        /// Remove one point. The topic goes when its last one does
         #[arg(long)]
-        section: Option<u64>,
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        /// Take the outcome back off: the bookkeeping was wrong, not the record
+        #[arg(long)]
+        forget: bool,
+    },
+    /// Consume a resolved point. The topic goes when its last one does
+    Consume {
+        item: String,
+        /// The point being judged resolved
+        #[arg(long)]
+        section: u64,
     },
 }
 
@@ -207,9 +270,11 @@ impl SubjectArgs {
             subjects.push(subject);
         }
         for path in &self.subject_file {
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-file", path, error))?;
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
             });
         }
@@ -220,9 +285,11 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-symbol", path, error))?;
             let subject = Subject::Symbol {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
                 symbol: symbol.clone(),
             };
@@ -486,12 +553,11 @@ impl Prepare {
         let revision = self.implemented_at.as_deref();
         let mut relations = Vec::new();
         for path in &self.implemented_by_file {
+            let commit = pin_exact(root, path, revision, "--implemented-by-file")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::File {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-file", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                 },
             });
@@ -503,12 +569,11 @@ impl Prepare {
                     "--implemented-by-symbol takes a path and a symbol name",
                 ));
             };
+            let commit = pin_exact(root, path, revision, "--implemented-by-symbol")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::Symbol {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-symbol", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                     symbol: symbol.clone(),
                 },
@@ -639,7 +704,6 @@ fn run(cli: Cli) -> Result<()> {
                 // later revision would say the wrong thing happened.
                 admitted.event.rev
             );
-            report_backlog(&root, &admitted.backlog);
             warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
@@ -677,35 +741,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
+        Command::Rules(command) => rules_command(&root, command),
         Command::Work(command) => work_command(&root, command),
         Command::Collection(command) => collection_command(&root, command),
-    }
-}
-
-/// Say what confirmation did to unresolved staging, in the same breath as the
-/// admission. A source that moved needs a decision, and the moment the human is
-/// still here is the moment to say so.
-fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
-    let width = view::backlog_width(root);
-    for outcome in outcomes {
-        let item = shorten(&outcome.item, width);
-        let line = match &outcome.result {
-            backlog::Reconciliation::Recorded { added: 0 } => {
-                "already recorded — nothing to add".to_owned()
-            }
-            backlog::Reconciliation::Recorded { added } => {
-                format!("recorded {added} produced outcome(s); still unresolved")
-            }
-            backlog::Reconciliation::Consumed { item_removed: true } => {
-                "resolved and consumed; the topic had nothing else unresolved".to_owned()
-            }
-            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
-            backlog::Reconciliation::SourceChanged => {
-                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
-            }
-            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
-        };
-        println!("backlog    {item} §{}  {line}", outcome.section);
     }
 }
 
@@ -781,7 +819,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
         }
         Backlog::Merge {
             item,
-            sections,
+            destination,
+            source,
             text,
             subjects,
         } => {
@@ -789,29 +828,45 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             let section = backlog::merge_sections(
                 root,
                 &id,
-                &sections,
+                destination,
+                source,
                 &text.read()?,
                 subjects.build(root)?,
             )?;
             println!("merged into §{section}");
             Ok(())
         }
-        Backlog::Rm { item, section } => {
+        Backlog::Produced {
+            item,
+            section,
+            target,
+            forget,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            match section {
-                Some(section) => {
-                    if backlog::delete_section(root, &id, section)? {
-                        println!(
-                            "removed §{section}, and the topic with it — nothing else was unresolved"
-                        );
-                    } else {
-                        println!("removed §{section}");
-                    }
+            let outcome = backlog::Produced::object(
+                backlog::EngrTarget::new(target.clone()).reference.clone(),
+            );
+            if forget {
+                if backlog::forget_produced(root, &id, section, &outcome)? {
+                    println!("§{section} no longer records that outcome");
+                } else {
+                    println!("§{section} was not recording that outcome");
                 }
-                None => {
-                    backlog::delete_item(root, &id)?;
-                    println!("removed {}", shorten(&id, view::backlog_width(root)));
-                }
+            } else if backlog::record_produced(root, &id, section, outcome)? {
+                println!("§{section} produced {target}; still unresolved");
+            } else {
+                println!("§{section} already recorded that outcome");
+            }
+            Ok(())
+        }
+        Backlog::Consume { item, section } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            if backlog::consume_section(root, &id, section)? {
+                println!(
+                    "consumed §{section}, and the topic with it — nothing else was unresolved"
+                );
+            } else {
+                println!("consumed §{section}");
             }
             Ok(())
         }
@@ -1055,6 +1110,31 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pin a commit for an **authoritative** relation target, refusing a dirty path.
+///
+/// Backlog subjects may now pin a baseline and record `dirty: true`, because
+/// losing the context entirely is worse than recording an inexact one. A record
+/// relation is not that: `implemented_by` is admitted wording claiming this
+/// assertion is implemented *there*, and a snapshot that does not describe what
+/// was read is a claim nobody can check later.
+///
+/// Whether the record should relax the same way is #9's and #35's question, not
+/// this slice's, so the refusal stays exactly where it was and only Backlog
+/// moved.
+fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
+    let (commit, dirty) = backlog::pin(root, path, revision)
+        .map_err(|error| malformed_argument(flag, path, error))?;
+    if dirty {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{flag} {path} has uncommitted changes, so the pinned commit would not describe what was read; commit it first, or choose another committed revision"
+            ),
+        ));
+    }
+    Ok(commit)
 }
 
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
@@ -1426,7 +1506,6 @@ fn render_basis(basis: Option<&str>) -> String {
 /// consumes.
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
-    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
@@ -1594,26 +1673,6 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .map(|item| item.to_string())
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
-        }
-    }
-    // Confirming this will also edit unresolved staging, so the human reading
-    // the change is shown that before they type, not told about it afterwards.
-    for source in &candidate.context.backlog {
-        out.push_str(&format!(
-            "Backlog    {} §{}  {}\n",
-            shorten(&source.item, backlog_width),
-            source.section,
-            if source.resolves {
-                "resolved by this — will be consumed"
-            } else {
-                "still unresolved after this"
-            }
-        ));
-        for produced in &source.produced {
-            out.push_str(&format!(
-                "           produced engr:{}\n",
-                produced.target.reference
             ));
         }
     }
@@ -2483,4 +2542,181 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read-only, because a rule is project data rather than an engr resource.
+///
+/// The listing says whether each rule is *usable*, which is the question an
+/// agent actually has: a rule whose basis cannot be resolved, or whose pinned
+/// basis no longer matches the project, cannot be reviewed against — and under
+/// #25 that blocks the mutations it covers rather than being quietly skipped.
+/// Saying so here means the agent finds out while reading, not at admission.
+fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
+    store::require_current(root)?;
+    match command {
+        RulesCommand::Ls { domain, json } => {
+            let domain = domain.map(DomainArg::model);
+            let all = match domain {
+                Some(domain) => rules::applicable(root, domain)?,
+                None => rules::load_all(root)?,
+            };
+            if json {
+                let listed: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|rule| {
+                        serde_json::json!({
+                            "id": rule.id,
+                            "domains": rule.domains.iter().map(|domain| domain.as_str()).collect::<Vec<_>>(),
+                            "based_on": rule.based_on,
+                            // Effective values, never "unspecified": a machine
+                            // reading this must not have to know the defaults
+                            // to know what the rule does.
+                            "review": rule.review,
+                            "usable": basis_trouble(root, rule).is_none(),
+                            "authority": "project_policy",
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&listed)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rules: {error}")) })?
+                );
+                return Ok(());
+            }
+            if all.is_empty() {
+                // What an empty set means belongs to the domain, not here: for
+                // most it means no review is required, and for autonomous
+                // agent Object admission it is what blocks the path.
+                match domain {
+                    Some(domain) => {
+                        println!("No rule governs {}.", domain.as_str())
+                    }
+                    None => println!("No project rules."),
+                }
+                return Ok(());
+            }
+            println!("PROJECT POLICY — read these before the mutation they govern\n");
+            for rule in &all {
+                let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+                println!("{}  {}", rule.id, domains.join(", "));
+                for basis in &rule.based_on {
+                    match &basis.commit {
+                        Some(commit) => {
+                            println!("    based on {} at {}", basis.path, shorten(commit, 8))
+                        }
+                        None => println!("    based on {} (current)", basis.path),
+                    }
+                }
+                // Listed only when it is not the default. A line on every rule
+                // repeating the same ceiling is noise a reader learns to skip,
+                // and the one rule that escalates to a person would be skipped
+                // with it. `rules show` states it unconditionally.
+                if rule.review != rules::Review::default() {
+                    println!("    review {}", review_line(&rule.review));
+                }
+                if let Some(trouble) = basis_trouble(root, rule) {
+                    println!("    UNUSABLE  {trouble}");
+                }
+            }
+            Ok(())
+        }
+        RulesCommand::Show { id, json } => {
+            let rule = rules::load_all(root)?
+                .into_iter()
+                .find(|rule| rule.id == id)
+                .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("no rule with id {id:?}")))?;
+            let resolved: Result<Vec<_>> = rule
+                .based_on
+                .iter()
+                .map(|basis| basis.resolve(root, &rule.id))
+                .collect();
+            if json {
+                // Nothing reaches stdout until the rule is known to be usable.
+                // Printing first and failing after left a machine surface whose
+                // successful-looking document was indistinguishable from a real
+                // one — a caller that drops the exit status would consume
+                // normative wording as reviewable when engr had already
+                // established that it is not. The human surface may say
+                // "UNUSABLE" and then fail, because a person reads the line; a
+                // parser reads the document.
+                resolved?;
+                let value = serde_json::json!({
+                    "id": rule.id,
+                    "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+                    "based_on": rule.based_on,
+                    "review": rule.review,
+                    "body": rule.body,
+                    "authority": "project_policy",
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rule: {error}")) })?
+                );
+                return Ok(());
+            }
+            let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+            println!("Rule       {}", rule.id);
+            println!("Governs    {}", domains.join(", "));
+            println!("Review     {}", review_line(&rule.review));
+            match &resolved {
+                Ok(bases) if bases.is_empty() => {
+                    println!("Based on   nothing outside the rule itself")
+                }
+                Ok(bases) => {
+                    for basis in bases {
+                        match &basis.commit {
+                            Some(commit) => println!(
+                                "Based on   {} at {} — read it, it is part of this rule",
+                                basis.path,
+                                shorten(commit, 8)
+                            ),
+                            None => println!(
+                                "Based on   {} (current) — read it, it is part of this rule",
+                                basis.path
+                            ),
+                        }
+                    }
+                }
+                Err(error) => println!("Based on   UNUSABLE — {}", error.message),
+            }
+            println!("\n{}", rule.body);
+            resolved.map(|_| ())
+        }
+    }
+}
+
+/// The effective review policy in one line.
+///
+/// States the policy rather than a consequence, because **a rule does not have
+/// one consequence**. What running out of attempts costs depends on the domain
+/// — Object stops, Backlog records and keeps the unresolved state, Collection
+/// and Work are undefined in v1 — and inside Backlog it depends further on the
+/// mutation, since a consume needs a review that passed while an ordinary edit
+/// does not. Even `reject` on an Object is the autonomous-agent outcome and not
+/// a repository prohibition: a human may still initiate the same mutation and
+/// override the result.
+///
+/// So a line here saying "then it is refused" would be false for most rules that
+/// carry the default. It names the effective field instead, and the consequence
+/// is stated once, per domain, in the protocol.
+///
+/// The number is the effective ceiling, so a rule that wrote nothing and one
+/// that wrote `5` read identically — which is what they mean.
+fn review_line(review: &rules::Review) -> String {
+    format!(
+        "{} attempt{}; on_exhaustion = {}",
+        review.max_attempts,
+        if review.max_attempts == 1 { "" } else { "s" },
+        review.on_exhaustion.as_str()
+    )
+}
+
+/// The first reason this rule cannot be reviewed against, if there is one.
+fn basis_trouble(root: &Path, rule: &rules::Rule) -> Option<String> {
+    rule.based_on
+        .iter()
+        .find_map(|basis| basis.resolve(root, &rule.id).err())
+        .map(|error| error.message)
 }

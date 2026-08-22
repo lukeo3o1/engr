@@ -766,7 +766,8 @@ fn subject_note(root: &Path, subject: &backlog::Subject) -> Option<&'static str>
                 Err(_) => Some("unreadable"),
             }
         }
-        backlog::Subject::File { path, commit } | backlog::Subject::Symbol { path, commit, .. } => {
+        backlog::Subject::File { path, commit, .. }
+        | backlog::Subject::Symbol { path, commit, .. } => {
             (!git::path_at(root, commit, path)).then_some("snapshot unavailable")
         }
     }

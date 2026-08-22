@@ -7,18 +7,37 @@
 pub mod backlog;
 pub mod collection;
 pub mod confirmation;
+pub mod digest;
 pub mod gate;
 pub mod git;
 pub mod model;
 pub mod ops;
 pub mod reference;
+pub mod rules;
 pub mod semantics;
 pub mod store;
 pub mod view;
 pub mod work;
 
 /// Schema version of `.engr/format.json`, the workspace-level authority.
-pub const WORKSPACE_VERSION: u32 = 1;
+///
+/// Version 2 is the first to define `review.max_attempts` and
+/// `review.on_exhaustion` on a project Rule, including their effective
+/// defaults. That is a *semantic* change over unchanged bytes: a rule file with
+/// no `review:` block means one thing here and another to a version 1 build, and
+/// an explicit block is an unknown field there. The workspace version is what
+/// stops the two from silently disagreeing — a build that does not know a
+/// version refuses the workspace rather than reading it under its own rules.
+pub const WORKSPACE_VERSION: u32 = 2;
+/// Older workspace versions this build recognizes and can migrate forward.
+///
+/// Recognized is not the same as current: a workspace at one of these is read
+/// only until `engr migrate` is run explicitly. It is also what makes a
+/// *historical* snapshot readable — see [`git::object_at`] — because a commit
+/// predating the migration carries the version that was current when it was
+/// made, and refusing it would make every reference pinned before the migration
+/// unresolvable.
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
 /// Version carried by confirmed Event envelopes that remain readable unchanged.

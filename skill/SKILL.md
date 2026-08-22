@@ -93,6 +93,72 @@ engr candidate ABC123     # render it again, in full
 **Do not re-run `engr prepare` to show it again.** That mints a new code and voids
 the one they are holding.
 
+## Project rules
+
+Some projects write down rules engr cannot check for itself — what belongs in a
+record, what belongs in backlog, what a plan may contain. They live in
+`.engr/rules/*.md` and they are project policy, not engr's:
+
+```bash
+engr rules ls                    # what exists, and what it governs
+engr rules ls --domain backlog   # what governs a backlog mutation
+engr rules show <id>             # one rule in full, with what it rests on
+```
+
+**Read the ones that govern what you are about to do, and read what they rest
+on.** A rule names project files in `based_on`; those files are part of the rule,
+not background reading. `rules show` prints them so you know exactly which
+material you were meant to have read.
+
+A rule marked **UNUSABLE** cannot be reviewed against — its material is missing,
+or a pinned basis no longer matches the project. Say so rather than proceeding
+as though the rule were absent: an unusable rule is not a rule that does not
+apply.
+
+Every rule also says how many attempts you get and what happens when they run
+out. `rules show` states it; `rules ls` mentions it only where it is not the
+default:
+
+```text
+Review     5 attempts; on_exhaustion = reject
+Review     3 attempts; on_exhaustion = human_confirmation
+```
+
+Both halves have defaults — five attempts, and `reject` — so a rule that says
+nothing about review still has a limit. There is no unlimited rule.
+
+The attempt count is **yours to report honestly**. engr does not track it, stores
+no history of your tries, and can only tell you what a number means. It counts
+one run of self-review: if you lose the thread or start over, a later independent
+attempt at the same work legitimately begins at 1 again.
+
+That is not a way around the ceiling. It is there because you are the only one
+who knows how many times you have tried, and reporting a low number to get past a
+rule is lying about the one input the rule depends on.
+
+The line states the rule's policy, not what will happen to you. **A rule does not
+have one consequence** — that is decided by the domain you are mutating, below.
+
+What running out costs you depends on the domain, and the difference is
+deliberate:
+
+- On an **Object**, it stops *you*. Your autonomous path ends there, and if an
+  exhausted rule asks for one, a human is brought in to decide. `reject` means
+  engr will not escalate on your behalf — not that the mutation is forbidden. A
+  human can still raise the same change and decide, having seen the review.
+- In the **Backlog**, it does not stop you. Unresolved work is worth keeping, so
+  the entry goes in marked `rule_review { attempts, limit }` — which is a
+  standing note that this went in without a passing review, not a free pass.
+  **Consuming** a Backlog point is the exception: that destroys unresolved work,
+  so it needs a review that actually passed.
+
+Do not treat the Backlog marker as somewhere to put work you could not get past
+a rule. It is visible, it says what happened, and the point that produced it is
+still unresolved.
+
+engr does not author or edit rules, and there is no gate for them. Git is their
+history.
+
 ## Reading the record
 
 At the start of engineering work, run `engr ls --stale`. It lists **sections that
@@ -178,7 +244,8 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
-engr backlog rm <id> --section 2          # removing it is what says "settled"
+engr backlog produced <id> --section 2 --target engr:obj:<id>:3
+engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
 
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
@@ -186,6 +253,15 @@ backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can
 assert, propose it through the gate like anything else — the wording a human
 confirms is usually not the wording you staged.
+
+**Admitting the Object does not touch the point it came from.** They are two
+separate operations, and the second is yours to remember: once the record has
+the outcome, either record it against the point with `backlog produced`, or
+consume the point if it is settled. engr will not infer the link, because an
+inferred one would eventually consume something nobody meant to resolve.
+
+Recording an outcome does **not** resolve anything — a point can produce several
+outcomes across sessions and still have work left. Only consuming says settled.
 
 Two rules keep it honest:
 

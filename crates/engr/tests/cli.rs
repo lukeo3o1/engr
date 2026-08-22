@@ -61,6 +61,26 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+/// Commit with an identity supplied on the command line.
+///
+/// A bare `git commit` reads the committer from global config, which exists on a
+/// developer machine and on some CI images and not on others. Supplying it per
+/// invocation is what the other tests here already do; this is that, named once.
+fn commit_as_test(root: &Path, message: &str) {
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            message,
+        ],
+    );
+}
+
 fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let path = store::object_path(root, id);
     let mut value: Value =
@@ -512,20 +532,24 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         events_before,
         "compatible retained Event history is not rewritten"
     );
-    assert_eq!(
+    assert_ne!(
         std::fs::read(&format_path).expect("format after migration"),
         format_before,
-        "a valid workspace authority is not rewritten"
+        "the workspace authority moves forward, because version 1 no longer denotes what this build writes"
     );
     assert_eq!(
         migrated_object["format"], "engr-object",
         "compatible legacy marker is preserved"
     );
-    assert_eq!(migrated_object["version"], 1);
+    assert_eq!(
+        migrated_object["version"], 1,
+        "the Object's own legacy envelope marker is compatible and is not touched"
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
-        1
+        engr::WORKSPACE_VERSION,
+        "and the workspace authority now names the version this build writes"
     );
 }
 
@@ -1708,93 +1732,6 @@ fn record_surfaces_never_mix_in_unconfirmed_staging() {
     );
 }
 
-/// What a candidate derived from staging shows, and what confirming it says it
-/// did. The flags that declare a source are still an open protocol question, so
-/// the candidate is prepared through the library — but the screens a human
-/// reads are the command line's, and they are what this pins.
-#[test]
-fn a_candidate_from_staging_shows_what_confirming_will_do_to_it() {
-    let workspace = TempDir::new().expect("temp dir");
-    let root = workspace.path();
-    assert!(run_engr(root, &["init"]).status.success(), "init");
-    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
-    confirm(root, &created);
-    let object = created["object"].as_str().expect("object id").to_owned();
-
-    let staging = engr::backlog::create(root, "two points", "settled here", Vec::new())
-        .expect("stage")
-        .id;
-    engr::backlog::add_section(root, &staging, "still open", Vec::new()).expect("second point");
-
-    let compact =
-        engr::reference::encode_uuid(uuid::Uuid::parse_str(&object).expect("object id is a uuid"));
-    let prepared = gate::prepare_from_backlog(
-        root,
-        Payload {
-            action: Action::SectionAdded,
-            object: object.clone(),
-            becomes: None,
-            content: Content {
-                text: "what the work produced".to_owned(),
-                based_on: None,
-                refs: Vec::new(),
-                ..Content::default()
-            },
-        },
-        vec![
-            gate::SourceRequest {
-                item: staging.clone(),
-                section: 1,
-                produced: Vec::new(),
-                resolves: true,
-            },
-            gate::SourceRequest {
-                item: staging.clone(),
-                section: 2,
-                produced: vec![engr::backlog::Produced::object(format!("obj:{compact}"))],
-                resolves: false,
-            },
-        ],
-    )
-    .expect("prepare from staging");
-    let code = prepared.candidate.challenge.clone();
-
-    // Re-rendered hours later, the screen still says what typing the code does.
-    let shown = run_engr(root, &["candidate", &code]);
-    let shown = String::from_utf8(shown.stdout).expect("utf8");
-    assert!(
-        shown.contains("§1  resolved by this — will be consumed"),
-        "got {shown:?}"
-    );
-    assert!(
-        shown.contains("§2  still unresolved after this"),
-        "got {shown:?}"
-    );
-    assert!(shown.contains(&format!("produced engr:obj:{compact}")));
-
-    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
-    assert!(
-        confirmed.status.success(),
-        "confirm: {}",
-        String::from_utf8_lossy(&confirmed.stderr)
-    );
-    let confirmed = String::from_utf8(confirmed.stdout).expect("utf8");
-    assert!(confirmed.contains("CONFIRMED"));
-    assert!(
-        confirmed.contains("resolved and consumed"),
-        "confirming must say what it did to staging: {confirmed:?}"
-    );
-    assert!(
-        confirmed.contains("recorded 1 produced outcome(s); still unresolved"),
-        "including the point it did not settle: {confirmed:?}"
-    );
-
-    let stored = engr::backlog::load(root, &staging).expect("the second point survives");
-    assert_eq!(stored.sections.len(), 1);
-    assert_eq!(stored.sections[0].id, 2);
-    assert_eq!(stored.sections[0].produced.len(), 1);
-}
-
 /// Three different failures, three different exit codes. Phase 1 fixed that
 /// boundary for the record; staging has to keep it, or a script cannot tell a
 /// typo from a corrupted workspace.
@@ -1894,85 +1831,6 @@ fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
     assert_eq!(code(&["backlog", "ls"]), Some(engr::EXIT_SCHEMA));
 }
 
-/// The confirmation screen names which unresolved point gets consumed, so two
-/// different points may never print the same identifier on it. Backlog ids
-/// abbreviate against Backlog ids: borrowing the Object width is how two
-/// distinct sources become indistinguishable exactly where it matters.
-#[test]
-fn candidate_rendering_abbreviates_backlog_sources_in_their_own_namespace() {
-    let workspace = TempDir::new().expect("temp dir");
-    let root = workspace.path();
-    assert!(run_engr(root, &["init"]).status.success(), "init");
-    let created = prepare(root, &["prepare", "--new", "--text", "the outcome"]);
-    confirm(root, &created);
-    let object = created["object"].as_str().expect("object id").to_owned();
-
-    // Two backlog items differing only in their last character. One object, so
-    // the Object width is 8 — which would render both of these identically.
-    let ids = [
-        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6a",
-        "01890f3e-7c54-7cc1-b21e-8f7b2b9d5f6b",
-    ];
-    for id in ids {
-        let item = serde_json::json!({
-            "id": id,
-            "topic": format!("unresolved point in {id}"),
-            "next_section_id": 2,
-            "sections": [{
-                "id": 1,
-                "text": "still open",
-                "updated_at": "2026-08-17T00:00:00Z",
-                "subjects": [],
-            }],
-        });
-        store::write_json(&engr::backlog::item_path(root, id), &item).expect("stage");
-    }
-    assert_eq!(engr::view::width(root), 8, "the object namespace is narrow");
-
-    let prepared = gate::prepare_from_backlog(
-        root,
-        Payload {
-            action: Action::SectionAdded,
-            object: object.clone(),
-            becomes: None,
-            content: Content {
-                text: "what the work produced".to_owned(),
-                based_on: None,
-                refs: Vec::new(),
-                ..Content::default()
-            },
-        },
-        ids.iter()
-            .map(|id| gate::SourceRequest {
-                item: (*id).to_owned(),
-                section: 1,
-                produced: Vec::new(),
-                resolves: false,
-            })
-            .collect(),
-    )
-    .expect("prepare from two staged points");
-
-    let shown = run_engr(root, &["candidate", &prepared.candidate.challenge]);
-    let shown = String::from_utf8(shown.stdout).expect("utf8");
-    let rendered: Vec<&str> = shown
-        .lines()
-        .filter_map(|line| line.strip_prefix("Backlog    "))
-        .map(|line| line.split_whitespace().next().expect("an id"))
-        .collect();
-    assert_eq!(rendered.len(), 2, "both sources are shown: {shown:?}");
-    assert_ne!(
-        rendered[0], rendered[1],
-        "two unresolved points must not render identically: {shown:?}"
-    );
-    for (id, printed) in ids.iter().zip(&rendered) {
-        assert!(
-            id.starts_with(printed),
-            "{printed} does not abbreviate {id}"
-        );
-    }
-}
-
 /// Backlog CRUD through the command line, including the one refusal that keeps
 /// a subject from claiming provenance it does not have.
 #[test]
@@ -2035,8 +1893,10 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "backlog",
             "merge",
             &id,
-            "--sections",
-            "1,2",
+            "--destination",
+            "1",
+            "--source",
+            "2",
             "--text",
             "one point"
         ]
@@ -2052,15 +1912,16 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     let item = engr::backlog::load(root, &id).expect("item");
     assert_eq!(item.topic, "refresh");
     assert_eq!(item.sections.len(), 1);
-    assert_eq!(item.sections[0].id, 3);
+    assert_eq!(item.sections[0].id, 1);
     assert!(
         engr::gate::pending(root).expect("candidates").is_empty(),
         "staging edits never mint a challenge code"
     );
 
-    // A dirty path cannot be pinned, and the refusal says what to do about it.
+    // A dirty path is pinned and marked rather than refused: losing the context
+    // is worse than recording that the baseline is inexact.
     std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
-    let refused = run_engr(
+    let staged = run_engr(
         root,
         &[
             "backlog",
@@ -2072,16 +1933,51 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "session.rs",
         ],
     );
-    assert!(!refused.status.success());
-    let message = String::from_utf8_lossy(&refused.stderr).to_string();
-    assert!(message.contains("commit it first"), "got {message:?}");
+    assert!(
+        staged.status.success(),
+        "got {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let item = engr::backlog::load(root, &id).expect("item");
+    let stored = serde_json::to_value(item.sections.last().expect("section")).expect("json");
+    assert_eq!(
+        stored["subjects"][0]["dirty"],
+        serde_json::json!(true),
+        "the subject records that what was read is not what it pins: {stored}"
+    );
+    let shown = run_engr(root, &["backlog", "show", &id]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("uncommitted changes"),
+        "and the surface says so to whoever reads it"
+    );
 
-    assert!(run_engr(root, &["backlog", "rm", &id, "--section", "3"])
-        .status
-        .success());
+    // Consuming one point leaves the others: the topic goes only when the last
+    // one does, and that is the same mutation rather than a second command.
+    let remaining = engr::backlog::load(root, &id).expect("item").sections.len();
+    assert_eq!(
+        remaining, 2,
+        "the dirty subject was staged as its own point"
+    );
+    assert!(
+        run_engr(root, &["backlog", "consume", &id, "--section", "3"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        engr::backlog::load(root, &id).expect("item").sections.len(),
+        1,
+        "one point consumed, the topic still has unresolved work"
+    );
+    let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
+    assert!(run_engr(
+        root,
+        &["backlog", "consume", &id, "--section", &last.to_string()]
+    )
+    .status
+    .success());
     assert!(
         engr::backlog::ids(root).expect("ids").is_empty(),
-        "removing the last unresolved point removes the topic"
+        "consuming the last unresolved point removes the topic with it"
     );
     let empty = run_engr(root, &["backlog", "ls"]);
     assert!(String::from_utf8_lossy(&empty.stdout).contains("nothing unresolved"));
@@ -3975,6 +3871,60 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
     );
 }
 
+/// A machine surface does not emit a successful document and then fail.
+///
+/// `rules show --json` resolved every basis and printed the Rule *before*
+/// returning the failure, so a Rule whose required material cannot be resolved
+/// looked exactly like a usable one on stdout. A caller that drops the exit
+/// status — a pipe, a wrapper, anything that reads output and not status —
+/// would consume normative wording as reviewable when engr had already
+/// established that it is not.
+///
+/// The human surface may print `UNUSABLE` and then fail, because a person reads
+/// the line. A parser reads the document.
+#[test]
+fn rules_show_json_emits_nothing_when_the_rule_cannot_be_used() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::write(
+        engr::rules::dir(root).join("architecture.md"),
+        "---\nid: architecture\napplies:\n  domains: [object]\nbased_on:\n  - path: AGENTS.md\n---\n\n# Architecture\n\nThe rule.\n",
+    )
+    .expect("rule");
+
+    // Usable: the document is emitted and the command succeeds.
+    let shown = run_engr(root, &["rules", "show", "architecture", "--json"]);
+    assert!(shown.status.success());
+    let document: Value =
+        serde_json::from_slice(&shown.stdout).expect("a usable rule is a json document");
+    assert_eq!(document["id"], "architecture");
+
+    // The material the rule rests on goes away.
+    std::fs::remove_file(root.join("AGENTS.md")).expect("remove basis");
+
+    let shown = run_engr(root, &["rules", "show", "architecture", "--json"]);
+    assert!(!shown.status.success(), "an unusable rule is a failure");
+    assert!(
+        shown.stdout.is_empty(),
+        "and nothing that looks like a usable rule reaches stdout: {}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&shown.stderr).contains("does not exist"),
+        "the reason goes where a failure goes"
+    );
+
+    // `ls --json` already carried `usable`, and still does — the two surfaces
+    // agree rather than one of them being silently weaker.
+    let listed = run_engr(root, &["rules", "ls", "--json"]);
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("json");
+    assert_eq!(listed[0]["usable"], false);
+}
+
 /// One malformed Object does not disable the domains that do not depend on it.
 ///
 /// Every command asks whether the workspace still uses the legacy spelling, and
@@ -4037,4 +3987,198 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("both legacy status"), "{error}");
+}
+
+/// A workspace at an older version is refused, not reinterpreted.
+///
+/// This is the whole reason the Rule review policy moved the workspace version.
+/// The same `.engr/rules/*.md` bytes mean different things under version 1 and
+/// version 2 — a file with no `review:` block now carries an effective ceiling
+/// and an exhaustion action, and an explicit block is an unknown field to the
+/// older build. Two builds must not both accept the workspace and disagree about
+/// what its rules say, so a build that does not write this version refuses it
+/// and says which version it found.
+#[test]
+fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("policy.md"),
+        "---\nid: recording-policy\napplies:\n  domains:\n    - backlog\n---\n\n# Recording policy\n\nSay what changed.\n",
+    )
+    .expect("rule");
+
+    // Exactly what a version 1 workspace looks like: intact, well formed, and
+    // written by a build that had never heard of `review:`.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+
+    let listed = run_engr(root, &["rules", "ls"]);
+    assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
+    let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
+    assert!(
+        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        "the refusal names the version it found and what to do: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).is_empty(),
+        "and nothing about the rule reaches stdout, because it was never read \
+         under this build's semantics"
+    );
+    // A mutation is refused for the same reason, through the same door.
+    let prepared = run_engr(root, &["prepare", "--new", "--text", "not under version 1"]);
+    assert_eq!(prepared.status.code(), Some(engr::EXIT_SCHEMA));
+
+    // And the explicit migration is what makes the newer semantics apply.
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION
+    );
+    let shown = run_engr(root, &["rules", "show", "recording-policy"]);
+    assert!(shown.status.success());
+    let stdout = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(
+        stdout.contains("5 attempts; on_exhaustion = reject"),
+        "after migrating, the same bytes carry the version 2 effective policy: {stdout}"
+    );
+    // This rule governs `backlog` only, where exhaustion neither refuses nor
+    // summons anyone. The line therefore states the policy and not an outcome —
+    // the earlier wording asserted the Object consequence for a rule that can
+    // never have it.
+    assert!(
+        !stdout.contains("refused") && !stdout.contains("human confirms"),
+        "no read surface claims a universal consequence: {stdout}"
+    );
+}
+
+/// Moving the workspace version forward must not break provenance recorded
+/// before it moved.
+///
+/// A reference pins a commit, and that snapshot carries whatever version was
+/// current when it was taken. If the historical decoder insisted on the newest
+/// version, every reference pinned before a migration would stop resolving —
+/// the workspace moving forward would retroactively invalidate provenance that
+/// was correct when it was recorded, which is the opposite of what pinning is
+/// for. Only versions this build actually recognizes are readable; an unknown
+/// one is still refused.
+#[test]
+fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    let created = prepare(root, &["prepare", "--new", "--text", "pinned wording"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // Commit while the workspace still says version 1, which is what every
+    // commit made before this change looks like.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    commit_as_test(root, "before the migration");
+    let commit = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+
+    run_engr(root, &["migrate"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION,
+        "the workspace really did move"
+    );
+
+    let historical = engr::git::object_at(root, &commit, &id)
+        .expect("a snapshot at a recognized older version is readable");
+    assert_eq!(
+        historical.expect("object present in that snapshot").id,
+        id,
+        "and it decodes to the object that was pinned"
+    );
+
+    // A version nobody here recognizes is still refused, so this is a widening
+    // to what is known rather than the check being dropped.
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    commit_as_test(root, "a version from the future");
+    let future = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+    let error =
+        engr::git::object_at(root, &future, &id).expect_err("an unknown version is refused");
+    assert!(error.message.contains("99"), "{}", error.message);
+}
+
+/// No read surface promises a consequence the rule's domain does not have.
+///
+/// The sharpest case: a Backlog-only rule asking for `human_confirmation`.
+/// Backlog exhaustion never routes through the Human Gate, so a line reading
+/// "then a human confirms" would be telling a reader the opposite of what will
+/// happen — and it would be the surface, not the code, that they act on.
+///
+/// A rule does not have one consequence. It depends on the domain, and inside
+/// Backlog on whether the mutation destroys unresolved work. So the surfaces
+/// state the effective policy, and the protocol states the consequence per
+/// domain, exactly once.
+#[test]
+fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("staging.md"),
+        "---\nid: staging-policy\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 3\n  on_exhaustion: human_confirmation\n---\n\n# Staging policy\n\nSay what is unresolved.\n",
+    )
+    .expect("rule");
+
+    for args in [vec!["rules", "show", "staging-policy"], vec!["rules", "ls"]] {
+        let output = run_engr(root, &args);
+        assert!(output.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(
+            stdout.contains("3 attempts; on_exhaustion = human_confirmation"),
+            "{args:?} states the effective policy: {stdout}"
+        );
+        assert!(
+            !stdout.contains("human confirms") && !stdout.contains("refused"),
+            "{args:?} must not promise an outcome this domain does not have: {stdout}"
+        );
+    }
+
+    // The machine surface already carried effective values and no prose
+    // consequence; it stays that way.
+    let json = run_engr(root, &["rules", "show", "staging-policy", "--json"]);
+    let document: Value =
+        serde_json::from_slice(&json.stdout).expect("rules show --json is a document");
+    assert_eq!(document["review"]["max_attempts"], 3);
+    assert_eq!(document["review"]["on_exhaustion"], "human_confirmation");
 }

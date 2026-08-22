@@ -28,7 +28,7 @@ use crate::model::new_id;
 use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
-    EXIT_USAGE,
+    EXIT_STALE, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -70,11 +70,33 @@ pub enum Subject {
     File {
         path: String,
         commit: String,
+        /// The observed target carried changes the pinned commit does not hold.
+        ///
+        /// **Target-local, and only that.** It does not say the repository is
+        /// dirty, and it has nothing to do with `git worktree`. It says: when
+        /// this subject was written, what the agent actually read is not what
+        /// `commit` reconstructs. The commit remains a recoverable baseline; the
+        /// extra context may be gone for good, and a later reader deserves to
+        /// know that rather than trust a snapshot that was never exact.
+        ///
+        /// Absent when clean, so a clean subject is byte-for-byte what it was.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
     },
     Symbol {
         path: String,
         symbol: String,
         commit: String,
+        /// The **containing file** had uncommitted changes. See
+        /// [`Subject::File::dirty`].
+        ///
+        /// Deliberately not a claim about the symbol itself. Proving that a diff
+        /// touches one symbol's own range needs language parsing, AST mapping
+        /// and symbol-aware diffing, and the protocol refuses to require any of
+        /// that for a piece of context metadata. So this is the conservative
+        /// answer, and readers must not sharpen it into one about the symbol.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
     },
 }
 
@@ -94,7 +116,7 @@ impl Subject {
                     "a subject",
                 )?;
             }
-            Subject::File { path, commit } => {
+            Subject::File { path, commit, .. } => {
                 validate_repo_path(path)?;
                 validate_pinned_commit(commit)?;
             }
@@ -102,6 +124,7 @@ impl Subject {
                 path,
                 symbol,
                 commit,
+                ..
             } => {
                 validate_repo_path(path)?;
                 validate_pinned_commit(commit)?;
@@ -115,16 +138,58 @@ impl Subject {
         Ok(())
     }
 
-    /// How the subject reads on a screen. Not persisted state.
-    pub fn render(&self) -> String {
+    /// What this subject *concerns*, with observation detail stripped.
+    ///
+    /// `dirty` is deliberately absent. It is a note about the moment of writing,
+    /// not part of which target is meant, so two subjects naming the same file
+    /// at the same commit are the same subject whether or not one of them was
+    /// observed against a modified worktree.
+    ///
+    /// Kept as its own method rather than a hand-written `PartialEq`: structural
+    /// equality still has to mean structural equality, and a comparison that
+    /// silently ignored a field would be a trap for the next person who
+    /// compares two subjects for a different reason.
+    fn identity(&self) -> Subject {
         match self {
-            Subject::Engr { reference } => format!("engr:{reference}"),
-            Subject::File { path, commit } => format!("file   {path} @{}", short(commit)),
+            Subject::Engr { .. } => self.clone(),
+            Subject::File { path, commit, .. } => Subject::File {
+                path: path.clone(),
+                commit: commit.clone(),
+                dirty: false,
+            },
             Subject::Symbol {
                 path,
                 symbol,
                 commit,
-            } => format!("symbol {path} :: {symbol} @{}", short(commit)),
+                ..
+            } => Subject::Symbol {
+                path: path.clone(),
+                symbol: symbol.clone(),
+                commit: commit.clone(),
+                dirty: false,
+            },
+        }
+    }
+
+    /// How the subject reads on a screen. Not persisted state.
+    pub fn render(&self) -> String {
+        match self {
+            Subject::Engr { reference } => format!("engr:{reference}"),
+            Subject::File {
+                path,
+                commit,
+                dirty,
+            } => format!("file   {path} @{}{}", short(commit), inexact(*dirty)),
+            Subject::Symbol {
+                path,
+                symbol,
+                commit,
+                dirty,
+            } => format!(
+                "symbol {path} :: {symbol} @{}{}",
+                short(commit),
+                inexact(*dirty)
+            ),
         }
     }
 }
@@ -182,9 +247,9 @@ pub struct Section {
     pub id: u64,
     pub text: String,
     /// When the unresolved statement itself last changed. Operational triage
-    /// metadata: it is not in the resolution basis, and appending a produced
-    /// outcome does not refresh it, because an outcome deliberately does not
-    /// change what remains unresolved.
+    /// metadata: last meaningful activity on the unresolved work, which includes
+    /// a change to `produced[]` as much as to the wording. Not a concurrency
+    /// token -- staleness is decided by the mutation precondition, not by this.
     pub updated_at: String,
     #[serde(default)]
     pub subjects: Vec<Subject>,
@@ -193,16 +258,6 @@ pub struct Section {
 }
 
 impl Section {
-    /// The transient compare-and-consume token: `canonical(text, subjects[])`.
-    ///
-    /// Excludes `produced[]`, `updated_at`, the Section id and the parent topic.
-    /// A candidate pins this at prepare so confirming a proposal written against
-    /// v1 of an unresolved point cannot quietly consume v2 — but accumulating an
-    /// outcome, or renaming the topic, must not invalidate a candidate either.
-    pub fn resolution_basis(&self) -> Result<String> {
-        resolution_basis(&self.text, &self.subjects)
-    }
-
     fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
         // What the write path refuses, a stored file may not contain. Two
@@ -230,7 +285,7 @@ impl Section {
             subject.validate()?;
             // subjects[] is a set: two identical entries carry no more meaning
             // than one, and permitting them would make "equivalent subjects"
-            // ambiguous for the resolution basis.
+            // ambiguous when the set is compared.
             ensure!(
                 seen.insert(canonical_json(subject)?),
                 EXIT_SCHEMA,
@@ -363,31 +418,6 @@ impl Item {
     }
 }
 
-/// `canonical(text, subjects[])`, with subjects compared as an unordered set.
-///
-/// Two Sections whose subjects differ only in array order state the same
-/// unresolved thing, so they must fingerprint the same — otherwise reordering a
-/// list nobody reads as ordered would silently kill a prepared candidate.
-pub fn resolution_basis(text: &str, subjects: &[Subject]) -> Result<String> {
-    let mut canonical: Vec<String> = subjects.iter().map(canonical_json).collect::<Result<_>>()?;
-    canonical.sort();
-    let mut basis = serde_json::Map::new();
-    basis.insert(
-        "text".to_owned(),
-        serde_json::Value::String(text.to_owned()),
-    );
-    basis.insert(
-        "subjects".to_owned(),
-        serde_json::Value::Array(
-            canonical
-                .into_iter()
-                .map(serde_json::Value::String)
-                .collect(),
-        ),
-    );
-    crate::confirmation::fingerprint(&serde_json::Value::Object(basis))
-}
-
 /// `serde_json::Map` is a `BTreeMap`, so this is key-sorted and stable.
 fn canonical_json<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value)
@@ -406,14 +436,35 @@ pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
 /// Whether two subject lists say the same thing.
 ///
 /// `subjects[]` is a set, so order is not content. Reordering one leaves the
-/// resolution basis identical by design; activity has to agree, or triage
+/// same unresolved thing by design; activity has to agree, or triage
 /// reports work on a point nobody touched.
+/// Compared on identity, which **excludes `dirty`**. That flag records how the
+/// target looked when it was observed, not which target is meant, so a subject
+/// re-observed against a dirty worktree still concerns the same thing and must
+/// not read as fresh work.
 fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
-    let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
-    let mut right: Vec<String> = right.iter().map(canonical_json).collect::<Result<_>>()?;
+    let mut left: Vec<String> = left
+        .iter()
+        .map(|subject| canonical_json(&subject.identity()))
+        .collect::<Result<_>>()?;
+    let mut right: Vec<String> = right
+        .iter()
+        .map(|subject| canonical_json(&subject.identity()))
+        .collect::<Result<_>>()?;
     left.sort();
     right.sort();
     Ok(left == right)
+}
+
+/// How a dirty subject reads. Said on the surface, not left in the JSON, because
+/// the person deciding whether to trust the pinned baseline is the one reading
+/// this line.
+fn inexact(dirty: bool) -> &'static str {
+    if dirty {
+        "  (observed with uncommitted changes)"
+    } else {
+        ""
+    }
 }
 
 fn short(value: &str) -> &str {
@@ -503,8 +554,8 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
 }
 
 /// Write one item. Callers must already hold the workspace lock: every mutation
-/// here is read-modify-write, and the compare-and-consume path additionally
-/// needs its fingerprint check and its write to be one step.
+/// here is read-modify-write, and a destructive path additionally needs its
+/// precondition check and its write to be one step.
 fn save(root: &Path, item: &Item) -> Result<()> {
     store::require_current(root)?;
     item.validate()?;
@@ -564,14 +615,37 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 // Git provenance for file and symbol subjects
 // ---------------------------------------------------------------------------
 
-/// Resolve the commit a file or symbol subject pins.
+/// Resolve the commit a subject pins, and whether what was read matched it.
 ///
-/// Backlog is non-authoritative, but it must not knowingly persist a false
-/// snapshot: with the path dirty, HEAD does not describe what the agent
-/// actually read. So an omitted revision defaults to HEAD only while the path
-/// is clean, and the path has to exist in whatever commit is pinned.
-pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
+/// A dirty path used to be refused outright: HEAD would not describe what the
+/// agent actually read, so the subject was rejected as a false snapshot. That
+/// was the wrong trade. Refusing loses the context entirely — the agent had
+/// genuinely read something and now cannot say so — while the honest answer is
+/// available for nothing: pin the baseline **and record that it is inexact**.
+///
+/// So this returns both, and `dirty` is asked in every branch. Naming an
+/// explicit revision does not make the working file match it either; an agent
+/// reading a modified file and pinning an older commit has exactly the same gap.
+/// What is refused is not knowing — if git cannot say whether the path is clean,
+/// there is no honest answer to record.
+///
+/// The path must exist in whatever commit is pinned, dirty or not: a baseline
+/// that never held the file reconstructs nothing.
+pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, bool)> {
     validate_repo_path(path)?;
+    // Asked in every branch, because pinning an explicit revision does not make
+    // the working file match it either — an agent reading a modified file and
+    // naming an older commit has the same gap, and the marker is about what was
+    // read rather than about which commit was chosen.
+    let dirty = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "could not determine whether {path} is clean; \
+                 a subject records whether what was read matches what it pins"
+            ),
+        )
+    })?;
     let commit = match revision {
         Some(revision) => git::resolve(root, revision).ok_or_else(|| {
             Error::new(
@@ -579,34 +653,14 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
                 format!("{revision} is not a commit in this repository"),
             )
         })?,
-        None => match git::path_dirty(root, path) {
-            Some(false) => git::head(root).ok_or_else(|| {
-                Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "there is no repository HEAD to pin {path} at; choose a committed revision"
-                    ),
-                )
-            })?,
-            Some(true) => {
-                return Err(Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "{path} has uncommitted changes, so HEAD would not describe what was read; \
-                         commit it first, or choose another committed revision"
-                    ),
-                ))
-            }
-            None => {
-                return Err(Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "could not determine whether {path} is clean; \
-                         commit it first, or choose another committed revision"
-                    ),
-                ))
-            }
-        },
+        None => git::head(root).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "there is no repository HEAD to pin {path} at; choose a committed revision"
+                ),
+            )
+        })?,
     };
     ensure!(
         git::path_at(root, &commit, path),
@@ -614,7 +668,224 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
         "{path} does not exist at commit {}; a subject cannot pin a snapshot that never held it",
         short(&commit)
     );
-    Ok(commit)
+    Ok((commit, dirty))
+}
+
+// ---------------------------------------------------------------------------
+// Mutation preconditions
+// ---------------------------------------------------------------------------
+
+/// Exactly what a prepared Backlog mutation was written against.
+///
+/// There is a gap between reading a point, reviewing a change to it, and
+/// applying that change. Whatever happens in that gap must not be applied over:
+/// a review of v1 wording must not silently land on v2, and a consume prepared
+/// against a point somebody has since sharpened must not destroy the sharpening.
+///
+/// This replaces the old Backlog-specific `canonical(text, subjects[])`
+/// fingerprint, which is gone as a protocol concept. The difference is not the
+/// hashing — an implementation may still hash internally — it is the **scope**.
+/// The fingerprint covered a hand-picked subset and was therefore blind to any
+/// field outside it; these bind the whole predecessor the mutation actually
+/// depends on, so a field added later is covered without anyone remembering.
+///
+/// Each variant binds what that mutation genuinely rests on and deliberately no
+/// more. Binding the whole item everywhere would be simpler and wrong: an
+/// unrelated sibling Section moving would stale a mutation that never read it,
+/// and a model that cries stale for unrelated work teaches people to re-prepare
+/// without looking.
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(tag = "precondition", rename_all = "snake_case")]
+pub enum Precondition {
+    /// Creating an item: only that the id is still free.
+    ///
+    /// Nothing else can affect it. Other Backlog activity is irrelevant to
+    /// whether this new item can exist.
+    ItemAbsent { item: String },
+    /// Changing the topic: the complete parent item.
+    ///
+    /// The topic is shared context for every Section under it, so a change to
+    /// any of them can change what renaming it means.
+    Item { item: Item },
+    /// Adding a Section: the parent topic, and that the id is still free.
+    ///
+    /// Sibling Sections are excluded on purpose — adding a point does not read
+    /// them, so their moving says nothing about this add.
+    SectionAbsent {
+        item: String,
+        topic: String,
+        section: u64,
+    },
+    /// Changing or consuming a Section: that whole Section, and the topic.
+    ///
+    /// The whole Section rather than its wording: `subjects[]`, `produced[]` and
+    /// `updated_at` are all things a reviewer may have taken into account, and a
+    /// subset would be blind to exactly the field somebody else touched. The
+    /// topic comes too, because it is the context the Section is read in.
+    Section {
+        item: String,
+        topic: String,
+        section: Section,
+    },
+    /// Merging: the topic, and every Section the merge consumes or keeps.
+    ///
+    /// All of them, because a merge is one judgement about several points at
+    /// once: if any of them moved, the judgement was about something else.
+    Merge {
+        item: String,
+        topic: String,
+        sections: Vec<Section>,
+    },
+}
+
+impl Precondition {
+    /// What a new item's creation rests on.
+    pub fn item_absent(item: impl Into<String>) -> Self {
+        Self::ItemAbsent { item: item.into() }
+    }
+
+    /// Read the current predecessor for a topic change.
+    pub fn topic(root: &Path, item: &str) -> Result<Self> {
+        Ok(Self::Item {
+            item: load(root, item)?,
+        })
+    }
+
+    /// Read the current predecessor for adding a Section.
+    ///
+    /// The id bound is the one the item will hand out next, so a concurrent add
+    /// that takes it stales this one — two adds must not each believe they are
+    /// creating the same point.
+    pub fn section_absent(root: &Path, item: &str) -> Result<Self> {
+        let loaded = load(root, item)?;
+        Ok(Self::SectionAbsent {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            section: loaded.next_section_id,
+        })
+    }
+
+    /// Read the current predecessor for changing or consuming one Section.
+    pub fn section(root: &Path, item: &str, section: u64) -> Result<Self> {
+        let loaded = load(root, item)?;
+        Ok(Self::Section {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            section: loaded.section(section)?.clone(),
+        })
+    }
+
+    /// Read the current predecessor for a destination/source merge.
+    pub fn merge(root: &Path, item: &str, destination: u64, source: u64) -> Result<Self> {
+        ensure!(
+            destination != source,
+            EXIT_INVARIANT,
+            "a merge needs distinct destination and source sections"
+        );
+        let loaded = load(root, item)?;
+        let mut bound = vec![
+            loaded.section(destination)?.clone(),
+            loaded.section(source)?.clone(),
+        ];
+        bound.sort_by_key(|section| section.id);
+        Ok(Self::Merge {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            sections: bound,
+        })
+    }
+
+    /// The item this precondition is about.
+    pub fn item(&self) -> &str {
+        match self {
+            Self::ItemAbsent { item }
+            | Self::SectionAbsent { item, .. }
+            | Self::Section { item, .. }
+            | Self::Merge { item, .. } => item,
+            Self::Item { item } => &item.id,
+        }
+    }
+
+    /// Whether the world still looks the way this mutation was written against.
+    ///
+    /// Called inside the same lock that performs the write; checking outside it
+    /// would leave open the very gap it exists to close.
+    pub fn still_holds(&self, root: &Path) -> Result<()> {
+        match self {
+            Self::ItemAbsent { item } => match load(root, item) {
+                Err(error) if error.code == EXIT_NOT_FOUND => Ok(()),
+                Ok(_) => stale("that backlog id"),
+                Err(error) => Err(error),
+            },
+            Self::Item { item } => {
+                let current = load(root, &item.id)?;
+                if &current == item {
+                    Ok(())
+                } else {
+                    stale("the backlog item")
+                }
+            }
+            Self::SectionAbsent {
+                item,
+                topic,
+                section,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                if current.section(*section).is_ok() {
+                    return stale("that section id");
+                }
+                Ok(())
+            }
+            Self::Section {
+                item,
+                topic,
+                section,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                match current.section(section.id) {
+                    Ok(now) if now == section => Ok(()),
+                    _ => stale("that unresolved point"),
+                }
+            }
+            Self::Merge {
+                item,
+                topic,
+                sections,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                for section in sections {
+                    match current.section(section.id) {
+                        Ok(now) if now == section => {}
+                        _ => return stale("one of the points being merged"),
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Stale is its own outcome, not a failure of the mutation.
+///
+/// The caller did nothing wrong and the data is not corrupt: the world moved
+/// between reading and writing. Saying which part moved is what makes the retry
+/// intelligent rather than a reflex.
+fn stale(what: &str) -> Result<()> {
+    Err(Error::new(
+        EXIT_STALE,
+        format!(
+            "{what} changed since this was prepared, so the change was prepared against something else; read it again and re-prepare"
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -726,7 +997,7 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
             .expect("section presence checked above");
         // The caller's order is persisted, because no canonical order is
         // required — but reordering a set is not a change to what is
-        // unresolved, and the resolution basis already says so.
+        // unresolved, and the set comparison already says so.
         let changed = !same_subjects(&slot.subjects, &subjects)?;
         slot.subjects = subjects;
         if changed {
@@ -736,58 +1007,146 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
     })
 }
 
-/// Consolidate unresolved points into one, taking a new id.
+/// Record that working on this point produced durable knowledge.
 ///
-/// The absorbed Sections' `produced[]` carry forward, deduplicated. Dropping
+/// **The second of two independent operations.** Admitting the Object does not
+/// reach in here, so an agent that produced something records it afterwards, as
+/// an ordinary staging edit. Forgetting leaves the bookkeeping stale and the
+/// admitted record perfectly valid — which is the trade #8 chose over an
+/// inferred link that would eventually consume a point nobody meant to resolve.
+///
+/// Existence is checked **here and only here**, and only in this direction. A
+/// target must exist to be claimed; afterwards it may be superseded, deleted or
+/// absorbed by a merge, and the entry becomes an unavailable historical pointer
+/// rather than corruption. It is never a reverse constraint: no Object operation
+/// consults `produced[]`, and nothing retargets an entry to a replacement,
+/// because that would rewrite what was actually produced.
+pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -> Result<bool> {
+    outcome.validate()?;
+    let (object, target_section) = outcome.target()?;
+    let projected = crate::ops::effective(root, &object).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "produced outcome names object {}, which does not exist: {}",
+                short(&object),
+                error.message
+            ),
+        )
+    })?;
+    if let Some(target_section) = target_section {
+        projected.section(target_section).map_err(|_| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "produced outcome names {} §{target_section}, which does not exist",
+                    short(&object)
+                ),
+            )
+        })?;
+    }
+    edit(root, id, |item| {
+        item.section(section)?;
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|candidate| candidate.id == section)
+            .expect("section presence checked above");
+        // A set: claiming the same outcome twice carries no more than claiming
+        // it once, so a repeated call is not an error and not a duplicate.
+        if slot.produced.contains(&outcome) {
+            return Ok(false);
+        }
+        slot.produced.push(outcome.clone());
+        // Bookkeeping *is* activity on the unresolved work, even though the
+        // wording did not move: `updated_at` means last meaningful activity, and
+        // learning what a point produced is meaningful to whoever picks it up.
+        slot.updated_at = now();
+        Ok(true)
+    })
+}
+
+/// Take an outcome back off a point.
+///
+/// Mutable bookkeeping, not append-only history: an entry recorded in error is
+/// corrected here. What it corrects is the *relationship* — that this point
+/// produced that outcome — and never the target, which is why removal asks
+/// nothing about whether the target still resolves. Requiring it to would make
+/// a mistaken entry uncorrectable exactly when the target has gone.
+pub fn forget_produced(root: &Path, id: &str, section: u64, outcome: &Produced) -> Result<bool> {
+    edit(root, id, |item| {
+        item.section(section)?;
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|candidate| candidate.id == section)
+            .expect("section presence checked above");
+        let before = slot.produced.len();
+        slot.produced.retain(|entry| entry != outcome);
+        let removed = slot.produced.len() != before;
+        if removed {
+            slot.updated_at = now();
+        }
+        Ok(removed)
+    })
+}
+
+/// Absorb one unresolved point into another, keeping the destination id.
+///
+/// The source Section's `produced[]` carries forward, deduplicated. Dropping
 /// them would lose the one thing that stops a later session re-solving work an
 /// earlier one already got confirmed — and merging says these were the same
 /// unresolved point, not that the outcomes never happened.
 pub fn merge_sections(
     root: &Path,
     id: &str,
-    absorbs: &[u64],
+    destination: u64,
+    source: u64,
     text: &str,
     subjects: Vec<Subject>,
 ) -> Result<u64> {
     check_text(text)?;
-    let mut unique = absorbs.to_vec();
-    unique.sort_unstable();
-    unique.dedup();
     ensure!(
-        absorbs.len() >= 2,
+        destination != source,
         EXIT_INVARIANT,
-        "a merge must absorb at least two sections"
-    );
-    ensure!(
-        unique.len() == absorbs.len(),
-        EXIT_INVARIANT,
-        "a merge cannot absorb the same section twice"
+        "a merge needs distinct destination and source sections"
     );
     edit(root, id, |item| {
-        let mut produced: Vec<Produced> = Vec::new();
-        for absorbed in absorbs {
-            for outcome in &item.section(*absorbed)?.produced {
-                if !produced.contains(outcome) {
-                    produced.push(outcome.clone());
-                }
+        let mut produced = item.section(destination)?.produced.clone();
+        for outcome in &item.section(source)?.produced {
+            if !produced.contains(outcome) {
+                produced.push(outcome.clone());
             }
         }
-        let section = take_id(item)?;
-        item.sections.retain(|item| !absorbs.contains(&item.id));
-        item.sections.push(Section {
-            id: section,
-            text: text.to_owned(),
-            updated_at: now(),
-            subjects,
-            produced,
-        });
-        Ok(section)
+        item.sections.retain(|section| section.id != source);
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|section| section.id == destination)
+            .expect("destination presence checked above");
+        slot.text = text.to_owned();
+        slot.updated_at = now();
+        slot.subjects = subjects;
+        slot.produced = produced;
+        Ok(destination)
     })
 }
 
-/// Remove one unresolved point. If it was the last, the item goes with it:
-/// an item is a topic that still has unresolved work in it.
-pub fn delete_section(root: &Path, id: &str, section: u64) -> Result<bool> {
+/// Consume one unresolved point: judge it resolved and take it out.
+///
+/// **The only way a Section leaves.** There is no separate delete or discard,
+/// and that is deliberate rather than a naming preference: two removal verbs
+/// would mean a reader of the history cannot tell whether a point was resolved,
+/// abandoned, or swept away by mistake. Consume covers all of those, including
+/// the cases with nothing to show for them — a duplicate, an obsolete concern, a
+/// decision not to pursue — because what authorizes removal is the judgement
+/// that it no longer needs to be pending, not evidence of an outcome.
+///
+/// If it was the last point, the item goes with it: an item is a topic that
+/// still has unresolved work in it, and an empty one is not a canonical state.
+/// That removal is mechanical structural cleanup inside this same mutation, not
+/// a second deletion anyone has to ask for.
+pub fn consume_section(root: &Path, id: &str, section: u64) -> Result<bool> {
     locked(root, || {
         let mut item = load(root, id)?;
         item.section(section)?;
@@ -799,229 +1158,4 @@ pub fn delete_section(root: &Path, id: &str, section: u64) -> Result<bool> {
         save(root, &item)?;
         Ok(false)
     })
-}
-
-pub fn delete_item(root: &Path, id: &str) -> Result<()> {
-    locked(root, || {
-        load(root, id)?;
-        remove(root, id)
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Candidate-driven reconciliation
-// ---------------------------------------------------------------------------
-
-/// A Backlog Section a candidate declares it was derived from, with what the
-/// candidate says confirming it means for that source.
-///
-/// Nothing here is inferred. An Object changing is not evidence that any
-/// unresolved point was worked on, so the relationship has to be stated.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Source {
-    pub item: String,
-    pub section: u64,
-    /// The source's resolution basis as it stood when the candidate was
-    /// prepared.
-    pub basis_sha256: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub produced: Vec<Produced>,
-    /// Whether successful confirmation declares this source resolved.
-    pub resolves: bool,
-}
-
-impl Source {
-    pub fn validate(&self) -> Result<()> {
-        crate::model::validate_object_id(&self.item).map_err(|_| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "backlog source id {:?} must be a canonical UUIDv7",
-                    self.item
-                ),
-            )
-        })?;
-        ensure!(
-            self.section > 0,
-            EXIT_SCHEMA,
-            "backlog source section ids start at 1"
-        );
-        ensure!(
-            self.basis_sha256.len() == 64
-                && self
-                    .basis_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            EXIT_SCHEMA,
-            "backlog source must pin a resolution basis"
-        );
-        for produced in &self.produced {
-            produced.validate()?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reconciliation {
-    /// The declared outcomes were appended. `added` counts the ones that were
-    /// not already listed, so a retry reports zero rather than duplicating.
-    Recorded {
-        added: usize,
-    },
-    Consumed {
-        item_removed: bool,
-    },
-    /// The source moved after the candidate was prepared. The Object mutation
-    /// still stands; this unresolved point needs a human or agent decision.
-    SourceChanged,
-    /// Already consumed, or edited away. Nothing left to reconcile.
-    SourceGone,
-}
-
-#[derive(Debug, Clone)]
-pub struct Outcome {
-    pub item: String,
-    pub section: u64,
-    pub result: Reconciliation,
-}
-
-impl Outcome {
-    pub fn needs_attention(&self) -> bool {
-        matches!(
-            self.result,
-            Reconciliation::SourceChanged | Reconciliation::SourceGone
-        )
-    }
-}
-
-/// Apply what a successful confirmation said about its Backlog sources.
-///
-/// Must run while the caller holds the workspace lock, and only after the
-/// authoritative mutation is durable. Two rules do the work:
-///
-/// - a source whose basis moved since prepare is left entirely alone, because a
-///   candidate written against v1 must never touch v2 — and is reported, because
-///   the reconciliation still has to happen somewhere;
-/// - appending an outcome already listed is a no-op, which is what makes the
-///   retry after a crash between the projection and the candidate's deletion
-///   apply nothing twice.
-///
-/// A source that changed is not a failure of the Object mutation. That was
-/// confirmed by a human and is already in the record.
-///
-/// Crate-visible deliberately. Its precondition — the caller already holds the
-/// workspace lock — cannot be expressed in the signature, and a lock a caller
-/// has to remember is one a caller will forget. Inside the crate there is
-/// exactly one caller and it is the confirmation path.
-pub(crate) fn reconcile(root: &Path, sources: &[Source]) -> Result<Vec<Outcome>> {
-    let mut outcomes = Vec::new();
-    for source in sources {
-        let mut item = match load(root, &source.item) {
-            Ok(item) => item,
-            Err(error) if error.code == EXIT_NOT_FOUND => {
-                outcomes.push(Outcome {
-                    item: source.item.clone(),
-                    section: source.section,
-                    result: Reconciliation::SourceGone,
-                });
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(current) = item
-            .sections
-            .iter()
-            .find(|section| section.id == source.section)
-        else {
-            outcomes.push(Outcome {
-                item: source.item.clone(),
-                section: source.section,
-                result: Reconciliation::SourceGone,
-            });
-            continue;
-        };
-        if current.resolution_basis()? != source.basis_sha256 {
-            outcomes.push(Outcome {
-                item: source.item.clone(),
-                section: source.section,
-                result: Reconciliation::SourceChanged,
-            });
-            continue;
-        }
-
-        let result = if source.resolves {
-            item.sections.retain(|section| section.id != source.section);
-            if item.sections.is_empty() {
-                remove(root, &source.item)?;
-                Reconciliation::Consumed { item_removed: true }
-            } else {
-                save(root, &item)?;
-                Reconciliation::Consumed {
-                    item_removed: false,
-                }
-            }
-        } else {
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|section| section.id == source.section)
-                .expect("section presence checked above");
-            let mut added = 0;
-            for outcome in &source.produced {
-                if !slot.produced.contains(outcome) {
-                    slot.produced.push(outcome.clone());
-                    added += 1;
-                }
-            }
-            if added > 0 {
-                save(root, &item)?;
-            }
-            Reconciliation::Recorded { added }
-        };
-        outcomes.push(Outcome {
-            item: source.item.clone(),
-            section: source.section,
-            result,
-        });
-    }
-    Ok(outcomes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn subject_pair() -> (Subject, Subject) {
-        (
-            Subject::engr("obj:01h47kwz2mfk0v47mffcnstqva:3"),
-            Subject::File {
-                path: "src/auth/session.rs".to_owned(),
-                commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            },
-        )
-    }
-
-    #[test]
-    fn the_resolution_basis_reads_subjects_as_a_set() {
-        let (first, second) = subject_pair();
-        assert_eq!(
-            resolution_basis("unresolved", &[first.clone(), second.clone()]).expect("basis"),
-            resolution_basis("unresolved", &[second, first]).expect("basis"),
-            "equivalent subject sets in a different order state the same thing"
-        );
-    }
-
-    #[test]
-    fn the_resolution_basis_follows_text_and_subjects_only() {
-        let (first, second) = subject_pair();
-        let one = std::slice::from_ref(&first);
-        let base = resolution_basis("unresolved", one).expect("basis");
-        assert_ne!(base, resolution_basis("reworded", one).expect("basis"));
-        assert_ne!(
-            base,
-            resolution_basis("unresolved", &[first.clone(), second]).expect("basis")
-        );
-    }
 }

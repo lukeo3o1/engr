@@ -3,7 +3,6 @@
 //! `prepare` puts a candidate up and mints a challenge; `confirm` admits it only
 //! against the exact response. There is no unconfirmed write path.
 
-use crate::backlog;
 use crate::model::{
     canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
     CANDIDATE_FORMAT, EVENT_FORMAT,
@@ -70,10 +69,6 @@ pub struct PreparedContext {
     /// edited on disk into an exception nobody granted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub oversize: bool,
-    /// The unresolved points this candidate says it came from, each pinned to
-    /// the resolution basis it was prepared against.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub backlog: Vec<backlog::Source>,
     /// The Object's title as it stood at prepare, for the screen to name the
     /// record by something a human recognises.
     ///
@@ -107,25 +102,17 @@ impl std::ops::Deref for Candidate {
     }
 }
 
-/// What a confirmation produced: the Event that entered the record, the object
-/// it produced, and what that did to the Backlog sources the candidate named.
+/// What a confirmation produced: the Event that entered the record and the
+/// Object it produced.
+///
+/// It no longer reports anything about Backlog. Admission and Backlog
+/// bookkeeping are two independent operations: confirming an Object says
+/// nothing about which unresolved point it came from, and an inferred link
+/// would eventually consume a point nobody meant to resolve.
 #[derive(Debug)]
 pub struct Admitted {
     pub event: Event,
     pub object: Object,
-    pub backlog: Vec<backlog::Outcome>,
-}
-
-/// A Backlog source a caller declares a candidate was derived from. The
-/// resolution basis is pinned by `prepare`, not supplied, so the pin is always
-/// what the source actually said at that moment.
-#[derive(Clone, Debug)]
-pub struct SourceRequest {
-    /// Any unique Backlog id prefix, or an `engr:backlog:<id>` reference.
-    pub item: String,
-    pub section: u64,
-    pub produced: Vec<backlog::Produced>,
-    pub resolves: bool,
 }
 
 fn now() -> String {
@@ -241,14 +228,6 @@ fn validate_candidate(candidate: &Candidate) -> Result<()> {
     candidate.verify_payload_with(Payload::sha256)?;
     candidate.verify_integrity(&candidate.context)?;
     candidate.payload.validate()?;
-    for source in &candidate.context.backlog {
-        source.validate().map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("candidate {}: {}", candidate.challenge, error.message),
-            )
-        })?;
-    }
     validate_title_context(&candidate.payload).map_err(|error| {
         Error::new(
             EXIT_SCHEMA,
@@ -485,28 +464,13 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Vec::new(), Admission::Normal)
+    prepare_admitting(root, payload, Admission::Normal)
 }
 
 /// Prepare a proposal that broke a normal size threshold, after a first attempt
 /// was already refused.
 pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Vec::new(), Admission::Oversize)
-}
-
-/// Prepare a record mutation that the caller declares came from unresolved
-/// staging.
-///
-/// The sources are the candidate's own statement about where the work came
-/// from and what confirming it settles. engr never derives that from the fact
-/// that an Object changed: an inferred link would eventually consume an
-/// unresolved point nobody meant to resolve.
-pub fn prepare_from_backlog(
-    root: &Path,
-    payload: Payload,
-    sources: Vec<SourceRequest>,
-) -> Result<Prepared> {
-    prepare_admitting(root, payload, sources, Admission::Normal)
+    prepare_admitting(root, payload, Admission::Oversize)
 }
 
 /// How much this proposal is allowed to be.
@@ -519,26 +483,17 @@ pub enum Admission {
     Oversize,
 }
 
-/// The one entry point both other axes go through, so they compose.
+/// The one entry point, so the size axis composes with everything else.
 ///
-/// Where the work came from and how big it is are independent questions, and
-/// the convenience wrappers above only cover the two common corners. A proposal
-/// derived from unresolved staging that legitimately exceeds a normal threshold
-/// has to be able to retry with the exception *and* keep saying where it came
-/// from — dropping the Backlog sources to get through the size door would make
-/// confirming it settle nothing.
-pub fn prepare_admitting(
-    root: &Path,
-    payload: Payload,
-    sources: Vec<SourceRequest>,
-    admission: Admission,
-) -> Result<Prepared> {
+/// Where a proposal came from is no longer part of preparing it. Object
+/// admission and Backlog bookkeeping are two independent operations, so a
+/// candidate carries no declared source and confirming one settles nothing in
+/// staging by itself.
+pub fn prepare_admitting(root: &Path, payload: Payload, admission: Admission) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
-    store::with_lock(root, move || {
-        prepare_locked(root, payload, sources, admission)
-    })
+    store::with_lock(root, move || prepare_locked(root, payload, admission))
 }
 
 /// Which proposals engr has refused for size, so an explicit retry can prove it
@@ -643,98 +598,7 @@ fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
 /// Resolve each declared source and pin what it currently says.
 ///
 /// Refused up front, like every other precondition at this gate: a candidate
-/// naming an unresolved point that does not exist cannot reconcile later, and
-/// the moment to say so is before a human is holding a code.
-/// Whether a declared outcome names authority that will exist once this
-/// candidate is admitted.
-///
-/// Checked against the projected object rather than the stored one, because the
-/// usual outcome of working on an unresolved point is the very Object or Section
-/// this candidate creates — refusing that would make the field useless for the
-/// case it was designed for. The projection is exact: the candidate pins
-/// `expected_rev`, so the state confirmation applies to is the state this saw.
-fn produced_outcome_exists(
-    root: &Path,
-    projected: &Object,
-    outcome: &backlog::Produced,
-) -> Result<()> {
-    let (target, section) = outcome.target()?;
-    let authority = if target == projected.id {
-        projected.clone()
-    } else {
-        ops::effective(root, &target).map_err(|error| {
-            if error.code == EXIT_NOT_FOUND {
-                Error::new(
-                    EXIT_NOT_FOUND,
-                    format!("produced outcome names object {target}, which does not exist"),
-                )
-            } else {
-                error
-            }
-        })?
-    };
-    if let Some(section) = section {
-        authority.section(section).map_err(|_| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!("produced outcome names {target} §{section}, which does not exist"),
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn pin_sources(
-    root: &Path,
-    requests: Vec<SourceRequest>,
-    projected: &Object,
-) -> Result<Vec<backlog::Source>> {
-    let mut sources: Vec<backlog::Source> = Vec::new();
-    for request in requests {
-        let item = backlog::resolve_id(root, &request.item)?;
-        let loaded = backlog::load(root, &item)?;
-        let section = loaded.section(request.section)?;
-        ensure!(
-            !sources
-                .iter()
-                .any(|other| other.item == item && other.section == request.section),
-            EXIT_USAGE,
-            "backlog source {} §{} is declared twice",
-            item,
-            request.section
-        );
-        let mut produced: Vec<backlog::Produced> = Vec::new();
-        for outcome in request.produced {
-            outcome.validate()?;
-            produced_outcome_exists(root, projected, &outcome)?;
-            ensure!(
-                !produced.contains(&outcome),
-                EXIT_USAGE,
-                "backlog source {} §{} declares the same outcome twice",
-                item,
-                request.section
-            );
-            produced.push(outcome);
-        }
-        let source = backlog::Source {
-            item,
-            section: request.section,
-            basis_sha256: section.resolution_basis()?,
-            produced,
-            resolves: request.resolves,
-        };
-        source.validate()?;
-        sources.push(source);
-    }
-    Ok(sources)
-}
-
-fn prepare_locked(
-    root: &Path,
-    mut payload: Payload,
-    sources: Vec<SourceRequest>,
-    admission: Admission,
-) -> Result<Prepared> {
+fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Result<Prepared> {
     store::require_current(root)?;
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
@@ -900,7 +764,6 @@ fn prepare_locked(
         previous_relations: previous.relations,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
         oversize: admission == Admission::Oversize,
-        backlog: pin_sources(root, sources, &projected)?,
         object_title: object
             .as_ref()
             .map(|object| object.title.clone())
@@ -1168,31 +1031,6 @@ pub fn confirm(root: &Path, response: &str) -> Result<Admitted> {
     store::with_lock(root, || confirm_locked(root, response))
 }
 
-/// Reconcile the candidate's Backlog sources, inside the same lock that made
-/// the Object mutation durable and before the candidate is disposed of.
-///
-/// Both halves of that matter. The lock is what stops a Backlog edit landing
-/// between the basis check and the write, so compare-and-consume cannot delete
-/// wording it never compared against. Running before disposal is what makes the
-/// crash retry finish the job: the already-applied path comes back through here
-/// with the same declarations, and appending an outcome already listed does
-/// nothing.
-fn reconcile_backlog(root: &Path, candidate: &Candidate) -> Result<Vec<backlog::Outcome>> {
-    if candidate.context.backlog.is_empty() {
-        return Ok(Vec::new());
-    }
-    backlog::reconcile(root, &candidate.context.backlog).map_err(|error| {
-        Error::new(
-            error.code,
-            format!(
-                "the object change was confirmed and saved; reconciling backlog failed: {}. \
-                 Repeat the same confirmation to finish it",
-                error.message
-            ),
-        )
-    })
-}
-
 fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     store::require_current(root)?;
     let code = crate::confirmation::authorize(
@@ -1217,14 +1055,10 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     let mut object = match candidate_state(root, &candidate)? {
         CandidateState::AlreadyApplied(applied) => {
             let object = ops::reconcile(root, &candidate.payload.object)?;
-            // The retry's whole job is to finish what a crash interrupted, and
-            // Backlog reconciliation is part of that job.
-            let backlog = reconcile_backlog(root, &candidate)?;
             discard_locked(root, code)?;
             return Ok(Admitted {
                 event: *applied,
                 object,
-                backlog,
             });
         }
         CandidateState::Stale { current_rev } => {
@@ -1284,16 +1118,8 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     }
     store::append_event(root, &event)?;
     store::save_object(root, &object)?;
-    // Backlog last, and never able to undo any of the above. What a human
-    // confirmed is in the record; a source that moved since prepare is a
-    // reconciliation outcome to report, not a failed admission.
-    let backlog = reconcile_backlog(root, &candidate)?;
     discard_locked(root, code)?;
-    Ok(Admitted {
-        event,
-        object,
-        backlog,
-    })
+    Ok(Admitted { event, object })
 }
 
 /// Build the content half of a payload, defaulting `based_on` to HEAD so a
