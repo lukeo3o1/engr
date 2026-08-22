@@ -834,8 +834,12 @@ impl Precondition {
                 if &current.topic != topic {
                     return stale("the topic");
                 }
-                if current.section(*section).is_ok() {
-                    return stale("that section id");
+                // Absence alone has an ABA hole: another mutation can allocate
+                // this id and then consume it, making it absent again while the
+                // monotonic counter has moved on. The reviewed add was for this
+                // exact allocation slot, not merely for any currently empty id.
+                if current.next_section_id != *section {
+                    return stale("the next section id");
                 }
                 Ok(())
             }

@@ -1203,6 +1203,23 @@ fn adding_a_point_binds_the_id_it_will_take_and_not_the_siblings() {
     assert_eq!(error.code, engr::EXIT_STALE);
 }
 
+#[test]
+fn an_add_precondition_does_not_revive_after_its_section_id_is_consumed() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    let prepared = backlog::Precondition::section_absent(&root, &id).expect("prepare add");
+
+    let allocated = backlog::add_section(&root, &id, "temporary", Vec::new()).expect("add");
+    assert_eq!(allocated, 2);
+    assert!(!backlog::consume_section(&root, &id, allocated).expect("consume"));
+
+    let error = prepared
+        .still_holds(&root)
+        .expect_err("the monotonic allocation state moved even though §2 is absent again");
+    assert_eq!(error.code, engr::EXIT_STALE);
+    assert!(error.message.contains("next section id"));
+}
+
 /// A topic change binds the complete item, because it scopes every point.
 #[test]
 fn a_topic_mutation_binds_the_whole_item() {
