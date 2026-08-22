@@ -880,12 +880,26 @@ navigation relation, not a dependency graph. Authoritative `refs[]` MUST NOT
 gain the ability to target backlog: a confirmed section cannot stand on wording
 nobody read. The asymmetry is the point.
 
-A `file` or `symbol` subject pins a path and a full resolved commit. Where the
-caller does not choose a committed revision and the path is dirty, engr MUST
-refuse rather than pin HEAD — HEAD would not describe what was actually read.
-The path MUST exist in the commit pinned. Backlog is allowed to be unresolved;
-it is not allowed to claim provenance it does not have. Symbol identity is a
-path and a human-readable name; no language-specific resolution is attempted.
+A `file` or `symbol` subject pins a path and a full resolved commit. The path
+MUST exist in that commit: a baseline that never held the file reconstructs
+nothing. Symbol identity is a path and a human-readable name; no
+language-specific resolution is attempted.
+
+Where the observed target carried changes the pinned commit does not hold, the
+subject is still written and MUST record `dirty: true`. Refusing it was the
+earlier rule and the wrong trade: the agent genuinely read something, and losing
+that context is worse than recording a baseline that is honestly labelled
+inexact. The commit stays recoverable; the extra context may be gone.
+
+`dirty` is **target-local**. It says nothing about the repository as a whole and
+nothing about `git worktree`. For a `symbol` it means the **containing file**
+was modified — proving a diff intersects one symbol's own source range would
+require language parsing and AST mapping, which this protocol MUST NOT require
+for context metadata, so readers MUST NOT read it as a claim about the symbol.
+
+`dirty` is **not part of subject identity**: the same target re-observed against
+a modified worktree is the same subject, and MUST NOT read as fresh activity. It
+is absent when clean, so a clean subject is byte-for-byte what it always was.
 
 A subject that later stops resolving is a stale signpost, and MUST NOT make the
 item unreadable. Backlog is staging, not a referential-integrity database.

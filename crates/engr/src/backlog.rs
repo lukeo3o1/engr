@@ -70,11 +70,33 @@ pub enum Subject {
     File {
         path: String,
         commit: String,
+        /// The observed target carried changes the pinned commit does not hold.
+        ///
+        /// **Target-local, and only that.** It does not say the repository is
+        /// dirty, and it has nothing to do with `git worktree`. It says: when
+        /// this subject was written, what the agent actually read is not what
+        /// `commit` reconstructs. The commit remains a recoverable baseline; the
+        /// extra context may be gone for good, and a later reader deserves to
+        /// know that rather than trust a snapshot that was never exact.
+        ///
+        /// Absent when clean, so a clean subject is byte-for-byte what it was.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
     },
     Symbol {
         path: String,
         symbol: String,
         commit: String,
+        /// The **containing file** had uncommitted changes. See
+        /// [`Subject::File::dirty`].
+        ///
+        /// Deliberately not a claim about the symbol itself. Proving that a diff
+        /// touches one symbol's own range needs language parsing, AST mapping
+        /// and symbol-aware diffing, and the protocol refuses to require any of
+        /// that for a piece of context metadata. So this is the conservative
+        /// answer, and readers must not sharpen it into one about the symbol.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
     },
 }
 
@@ -94,7 +116,7 @@ impl Subject {
                     "a subject",
                 )?;
             }
-            Subject::File { path, commit } => {
+            Subject::File { path, commit, .. } => {
                 validate_repo_path(path)?;
                 validate_pinned_commit(commit)?;
             }
@@ -102,6 +124,7 @@ impl Subject {
                 path,
                 symbol,
                 commit,
+                ..
             } => {
                 validate_repo_path(path)?;
                 validate_pinned_commit(commit)?;
@@ -115,16 +138,58 @@ impl Subject {
         Ok(())
     }
 
-    /// How the subject reads on a screen. Not persisted state.
-    pub fn render(&self) -> String {
+    /// What this subject *concerns*, with observation detail stripped.
+    ///
+    /// `dirty` is deliberately absent. It is a note about the moment of writing,
+    /// not part of which target is meant, so two subjects naming the same file
+    /// at the same commit are the same subject whether or not one of them was
+    /// observed against a modified worktree.
+    ///
+    /// Kept as its own method rather than a hand-written `PartialEq`: structural
+    /// equality still has to mean structural equality, and a comparison that
+    /// silently ignored a field would be a trap for the next person who
+    /// compares two subjects for a different reason.
+    fn identity(&self) -> Subject {
         match self {
-            Subject::Engr { reference } => format!("engr:{reference}"),
-            Subject::File { path, commit } => format!("file   {path} @{}", short(commit)),
+            Subject::Engr { .. } => self.clone(),
+            Subject::File { path, commit, .. } => Subject::File {
+                path: path.clone(),
+                commit: commit.clone(),
+                dirty: false,
+            },
             Subject::Symbol {
                 path,
                 symbol,
                 commit,
-            } => format!("symbol {path} :: {symbol} @{}", short(commit)),
+                ..
+            } => Subject::Symbol {
+                path: path.clone(),
+                symbol: symbol.clone(),
+                commit: commit.clone(),
+                dirty: false,
+            },
+        }
+    }
+
+    /// How the subject reads on a screen. Not persisted state.
+    pub fn render(&self) -> String {
+        match self {
+            Subject::Engr { reference } => format!("engr:{reference}"),
+            Subject::File {
+                path,
+                commit,
+                dirty,
+            } => format!("file   {path} @{}{}", short(commit), inexact(*dirty)),
+            Subject::Symbol {
+                path,
+                symbol,
+                commit,
+                dirty,
+            } => format!(
+                "symbol {path} :: {symbol} @{}{}",
+                short(commit),
+                inexact(*dirty)
+            ),
         }
     }
 }
@@ -373,12 +438,33 @@ pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
 /// `subjects[]` is a set, so order is not content. Reordering one leaves the
 /// same unresolved thing by design; activity has to agree, or triage
 /// reports work on a point nobody touched.
+/// Compared on identity, which **excludes `dirty`**. That flag records how the
+/// target looked when it was observed, not which target is meant, so a subject
+/// re-observed against a dirty worktree still concerns the same thing and must
+/// not read as fresh work.
 fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
-    let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
-    let mut right: Vec<String> = right.iter().map(canonical_json).collect::<Result<_>>()?;
+    let mut left: Vec<String> = left
+        .iter()
+        .map(|subject| canonical_json(&subject.identity()))
+        .collect::<Result<_>>()?;
+    let mut right: Vec<String> = right
+        .iter()
+        .map(|subject| canonical_json(&subject.identity()))
+        .collect::<Result<_>>()?;
     left.sort();
     right.sort();
     Ok(left == right)
+}
+
+/// How a dirty subject reads. Said on the surface, not left in the JSON, because
+/// the person deciding whether to trust the pinned baseline is the one reading
+/// this line.
+fn inexact(dirty: bool) -> &'static str {
+    if dirty {
+        "  (observed with uncommitted changes)"
+    } else {
+        ""
+    }
 }
 
 fn short(value: &str) -> &str {
@@ -529,14 +615,37 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 // Git provenance for file and symbol subjects
 // ---------------------------------------------------------------------------
 
-/// Resolve the commit a file or symbol subject pins.
+/// Resolve the commit a subject pins, and whether what was read matched it.
 ///
-/// Backlog is non-authoritative, but it must not knowingly persist a false
-/// snapshot: with the path dirty, HEAD does not describe what the agent
-/// actually read. So an omitted revision defaults to HEAD only while the path
-/// is clean, and the path has to exist in whatever commit is pinned.
-pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
+/// A dirty path used to be refused outright: HEAD would not describe what the
+/// agent actually read, so the subject was rejected as a false snapshot. That
+/// was the wrong trade. Refusing loses the context entirely — the agent had
+/// genuinely read something and now cannot say so — while the honest answer is
+/// available for nothing: pin the baseline **and record that it is inexact**.
+///
+/// So this returns both, and `dirty` is asked in every branch. Naming an
+/// explicit revision does not make the working file match it either; an agent
+/// reading a modified file and pinning an older commit has exactly the same gap.
+/// What is refused is not knowing — if git cannot say whether the path is clean,
+/// there is no honest answer to record.
+///
+/// The path must exist in whatever commit is pinned, dirty or not: a baseline
+/// that never held the file reconstructs nothing.
+pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, bool)> {
     validate_repo_path(path)?;
+    // Asked in every branch, because pinning an explicit revision does not make
+    // the working file match it either — an agent reading a modified file and
+    // naming an older commit has the same gap, and the marker is about what was
+    // read rather than about which commit was chosen.
+    let dirty = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "could not determine whether {path} is clean; \
+                 a subject records whether what was read matches what it pins"
+            ),
+        )
+    })?;
     let commit = match revision {
         Some(revision) => git::resolve(root, revision).ok_or_else(|| {
             Error::new(
@@ -544,34 +653,14 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
                 format!("{revision} is not a commit in this repository"),
             )
         })?,
-        None => match git::path_dirty(root, path) {
-            Some(false) => git::head(root).ok_or_else(|| {
-                Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "there is no repository HEAD to pin {path} at; choose a committed revision"
-                    ),
-                )
-            })?,
-            Some(true) => {
-                return Err(Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "{path} has uncommitted changes, so HEAD would not describe what was read; \
-                         commit it first, or choose another committed revision"
-                    ),
-                ))
-            }
-            None => {
-                return Err(Error::new(
-                    EXIT_INVARIANT,
-                    format!(
-                        "could not determine whether {path} is clean; \
-                         commit it first, or choose another committed revision"
-                    ),
-                ))
-            }
-        },
+        None => git::head(root).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "there is no repository HEAD to pin {path} at; choose a committed revision"
+                ),
+            )
+        })?,
     };
     ensure!(
         git::path_at(root, &commit, path),
@@ -579,7 +668,7 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<String> {
         "{path} does not exist at commit {}; a subject cannot pin a snapshot that never held it",
         short(&commit)
     );
-    Ok(commit)
+    Ok((commit, dirty))
 }
 
 // ---------------------------------------------------------------------------

@@ -570,12 +570,14 @@ fn file_and_symbol_subjects_pin_a_full_committed_object_id() {
         vec![
             Subject::File {
                 path: "src/session.rs".to_owned(),
-                commit: backlog::pin(&root, "src/session.rs", None).expect("pin"),
+                commit: backlog::pin(&root, "src/session.rs", None).expect("pin").0,
+                dirty: false,
             },
             Subject::Symbol {
                 path: "src/session.rs".to_owned(),
                 symbol: "refresh".to_owned(),
-                commit: backlog::pin(&root, "src/session.rs", None).expect("pin"),
+                commit: backlog::pin(&root, "src/session.rs", None).expect("pin").0,
+                dirty: false,
             },
         ],
     )
@@ -590,37 +592,6 @@ fn file_and_symbol_subjects_pin_a_full_committed_object_id() {
         assert_eq!(commit, &head, "the resolved id is persisted, never `HEAD`");
         assert!(engr::model::is_canonical_git_oid(commit));
     }
-}
-
-#[test]
-fn a_dirty_path_cannot_silently_pin_head() {
-    let (_dir, root) = workspace();
-    repository(&root);
-    std::fs::create_dir_all(root.join("src")).expect("src");
-    std::fs::write(root.join("src/session.rs"), "fn refresh() {}\n").expect("source");
-    let committed = commit_all(&root, "session");
-    std::fs::write(root.join("src/session.rs"), "fn refresh() { todo!() }\n").expect("edit");
-
-    let error = backlog::pin(&root, "src/session.rs", None)
-        .expect_err("HEAD would not describe what was actually read");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(error.message.contains("commit it first"));
-
-    assert_eq!(
-        backlog::pin(&root, "src/session.rs", Some(&committed))
-            .expect("an explicit committed choice"),
-        committed,
-        "choosing a committed revision explicitly remains available"
-    );
-
-    // A file git has never seen is dirty in the sense that matters here.
-    std::fs::write(root.join("src/new.rs"), "fn added() {}\n").expect("untracked");
-    assert!(backlog::pin(&root, "src/new.rs", None).is_err());
-
-    // And a path absent from the chosen commit cannot be pinned at all.
-    let error = backlog::pin(&root, "src/new.rs", Some(&committed))
-        .expect_err("a snapshot that never held the path is false provenance");
-    assert!(error.message.contains("does not exist at commit"));
 }
 
 #[test]
@@ -922,4 +893,103 @@ fn effective_authority_is_unchanged_by_anything_in_staging() {
     );
     let report = ops::verify(&root, &object).expect("verify");
     assert!(report.passed(), "record verification stays record-oriented");
+}
+
+/// A dirty target pins its baseline and says so, instead of being refused.
+///
+/// The earlier rule rejected it: with the path modified, the pinned commit does
+/// not describe what the agent read, so the subject was called a false snapshot.
+/// That trade was wrong. Refusing loses the context altogether — the agent did
+/// read something and now cannot say so — while the honest answer costs nothing:
+/// keep the recoverable baseline and record that it is inexact.
+///
+/// `dirty` is target-local. It says nothing about the repository as a whole, and
+/// for a symbol it means the **containing file** was modified — proving a diff
+/// touches one symbol's own range would need parsing and AST mapping, which the
+/// protocol refuses to require for context metadata.
+#[test]
+fn a_dirty_target_pins_its_baseline_and_records_that_it_is_inexact() {
+    let (_dir, root) = workspace();
+    repository(&root);
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/session.rs"), "fn refresh() {}\n").expect("source");
+    let committed = commit_all(&root, "session");
+
+    let (commit, dirty) = backlog::pin(&root, "src/session.rs", None).expect("clean");
+    assert_eq!(commit, committed);
+    assert!(!dirty, "a clean target carries no marker");
+
+    std::fs::write(root.join("src/session.rs"), "fn refresh() { todo!() }\n").expect("edit");
+    let (commit, dirty) =
+        backlog::pin(&root, "src/session.rs", None).expect("dirty is not refused");
+    assert_eq!(commit, committed, "the baseline is still recoverable");
+    assert!(dirty, "and the subject says the observed target was not it");
+
+    // Naming a revision explicitly does not make the working file match it, so
+    // the marker is about what was read rather than which commit was chosen.
+    let (_, dirty) = backlog::pin(&root, "src/session.rs", Some(&committed)).expect("explicit");
+    assert!(dirty);
+
+    // A clean subject stays byte-for-byte what it was: the field is absent, not
+    // `false`, so nothing that already exists gains a key.
+    let clean = Subject::File {
+        path: "src/session.rs".to_owned(),
+        commit: committed.clone(),
+        dirty: false,
+    };
+    let json = serde_json::to_value(&clean).expect("json");
+    assert!(json.get("dirty").is_none(), "absent when clean: {json}");
+
+    // An untracked file is still refused, and for a different reason worth
+    // keeping straight: `dirty` says the baseline is inexact, and an untracked
+    // file has no baseline at all. Marking it dirty would claim a commit
+    // reconstructs something it has never held.
+    std::fs::write(root.join("src/new.rs"), "fn added() {}\n").expect("untracked");
+    for revision in [None, Some(committed.as_str())] {
+        let error = backlog::pin(&root, "src/new.rs", revision)
+            .expect_err("no commit holds it, so there is nothing to pin");
+        assert!(
+            error.message.contains("does not exist at commit"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+/// `dirty` is observation detail, not part of which target is meant.
+///
+/// Re-observing the same file at the same commit against a modified worktree
+/// concerns the same thing, so it must not read as fresh work in the field
+/// triage sorts by.
+#[test]
+fn the_dirty_marker_is_not_part_of_subject_identity() {
+    let (_dir, root) = workspace();
+    repository(&root);
+    std::fs::write(root.join("file.rs"), "fn a() {}\n").expect("source");
+    let committed = commit_all(&root, "file");
+    let clean = Subject::File {
+        path: "file.rs".to_owned(),
+        commit: committed.clone(),
+        dirty: false,
+    };
+    let observed_dirty = Subject::File {
+        path: "file.rs".to_owned(),
+        commit: committed,
+        dirty: true,
+    };
+    assert_ne!(clean, observed_dirty, "structurally they still differ");
+
+    let id = backlog::create(&root, "topic", "unresolved", vec![clean])
+        .expect("create")
+        .id;
+    let before = backlog::load(&root, &id).expect("load").sections[0]
+        .updated_at
+        .clone();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    backlog::set_subjects(&root, &id, 1, vec![observed_dirty]).expect("re-observe");
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").sections[0].updated_at,
+        before,
+        "the same target re-observed is not activity"
+    );
 }

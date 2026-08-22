@@ -254,9 +254,11 @@ impl SubjectArgs {
             subjects.push(subject);
         }
         for path in &self.subject_file {
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-file", path, error))?;
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
             });
         }
@@ -267,9 +269,11 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-symbol", path, error))?;
             let subject = Subject::Symbol {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
                 symbol: symbol.clone(),
             };
@@ -533,12 +537,11 @@ impl Prepare {
         let revision = self.implemented_at.as_deref();
         let mut relations = Vec::new();
         for path in &self.implemented_by_file {
+            let commit = pin_exact(root, path, revision, "--implemented-by-file")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::File {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-file", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                 },
             });
@@ -550,12 +553,11 @@ impl Prepare {
                     "--implemented-by-symbol takes a path and a symbol name",
                 ));
             };
+            let commit = pin_exact(root, path, revision, "--implemented-by-symbol")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::Symbol {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-symbol", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                     symbol: symbol.clone(),
                 },
@@ -1067,6 +1069,31 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pin a commit for an **authoritative** relation target, refusing a dirty path.
+///
+/// Backlog subjects may now pin a baseline and record `dirty: true`, because
+/// losing the context entirely is worse than recording an inexact one. A record
+/// relation is not that: `implemented_by` is admitted wording claiming this
+/// assertion is implemented *there*, and a snapshot that does not describe what
+/// was read is a claim nobody can check later.
+///
+/// Whether the record should relax the same way is #9's and #35's question, not
+/// this slice's, so the refusal stays exactly where it was and only Backlog
+/// moved.
+fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
+    let (commit, dirty) = backlog::pin(root, path, revision)
+        .map_err(|error| malformed_argument(flag, path, error))?;
+    if dirty {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{flag} {path} has uncommitted changes, so the pinned commit would not describe what was read; commit it first, or choose another committed revision"
+            ),
+        ));
+    }
+    Ok(commit)
 }
 
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {

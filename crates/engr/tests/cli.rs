@@ -1916,9 +1916,10 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         "staging edits never mint a challenge code"
     );
 
-    // A dirty path cannot be pinned, and the refusal says what to do about it.
+    // A dirty path is pinned and marked rather than refused: losing the context
+    // is worse than recording that the baseline is inexact.
     std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
-    let refused = run_engr(
+    let staged = run_engr(
         root,
         &[
             "backlog",
@@ -1930,18 +1931,51 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "session.rs",
         ],
     );
-    assert!(!refused.status.success());
-    let message = String::from_utf8_lossy(&refused.stderr).to_string();
-    assert!(message.contains("commit it first"), "got {message:?}");
+    assert!(
+        staged.status.success(),
+        "got {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let item = engr::backlog::load(root, &id).expect("item");
+    let stored = serde_json::to_value(item.sections.last().expect("section")).expect("json");
+    assert_eq!(
+        stored["subjects"][0]["dirty"],
+        serde_json::json!(true),
+        "the subject records that what was read is not what it pins: {stored}"
+    );
+    let shown = run_engr(root, &["backlog", "show", &id]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("uncommitted changes"),
+        "and the surface says so to whoever reads it"
+    );
 
+    // Consuming one point leaves the others: the topic goes only when the last
+    // one does, and that is the same mutation rather than a second command.
+    let remaining = engr::backlog::load(root, &id).expect("item").sections.len();
+    assert_eq!(
+        remaining, 2,
+        "the dirty subject was staged as its own point"
+    );
     assert!(
         run_engr(root, &["backlog", "consume", &id, "--section", "3"])
             .status
             .success()
     );
+    assert_eq!(
+        engr::backlog::load(root, &id).expect("item").sections.len(),
+        1,
+        "one point consumed, the topic still has unresolved work"
+    );
+    let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
+    assert!(run_engr(
+        root,
+        &["backlog", "consume", &id, "--section", &last.to_string()]
+    )
+    .status
+    .success());
     assert!(
         engr::backlog::ids(root).expect("ids").is_empty(),
-        "removing the last unresolved point removes the topic"
+        "consuming the last unresolved point removes the topic with it"
     );
     let empty = run_engr(root, &["backlog", "ls"]);
     assert!(String::from_utf8_lossy(&empty.stdout).contains("nothing unresolved"));
