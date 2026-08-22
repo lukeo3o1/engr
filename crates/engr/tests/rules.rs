@@ -20,6 +20,10 @@ fn workspace() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+fn attempt(value: u32) -> rules::Attempt {
+    rules::Attempt::new(value).expect("a valid attempt")
+}
+
 fn write_rule(root: &Path, name: &str, text: &str) -> PathBuf {
     let path = rules::dir(root).join(format!("{name}.md"));
     std::fs::write(&path, text).expect("write rule");
@@ -1087,4 +1091,978 @@ fn a_link_anywhere_on_the_way_to_a_rule_is_refused() {
     std::fs::remove_file(store::engr_dir(&root)).expect("remove link");
     std::fs::rename(root.join("real-engr"), store::engr_dir(&root)).expect("restore");
     assert_eq!(rules::load_all(&root).expect("restored").len(), 1);
+}
+
+fn subject() -> (serde_json::Value, serde_json::Value) {
+    (
+        serde_json::json!({"action": "backlog.section_added", "text": "still unresolved"}),
+        serde_json::json!({"item": "01a0", "sections": 2}),
+    )
+}
+
+/// The hash is the identity of an exact review subject.
+///
+/// Same subject, same value — across processes, because nothing about it is
+/// remembered. Different subject in *any* of its parts, different value, so an
+/// attestation stops naming anything the moment what it covered moves.
+#[test]
+fn the_review_hash_is_the_identity_of_what_had_to_be_reviewed() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let (mutation, precondition) = subject();
+
+    let hash = |mutation: &serde_json::Value, precondition: &serde_json::Value| {
+        rules::bind(
+            &root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+    let original = hash(&mutation, &precondition);
+    assert_eq!(
+        original,
+        hash(&mutation, &precondition),
+        "nothing is remembered, so recomputation is the same value"
+    );
+
+    // The mutation.
+    assert_ne!(
+        original,
+        hash(
+            &serde_json::json!({"action": "backlog.section_added", "text": "something else"}),
+            &precondition
+        )
+    );
+    // The target it is being applied to, with the proposal untouched. Without
+    // this in the binding, another agent could move the target under a review
+    // and the attestation would still verify.
+    assert_ne!(
+        original,
+        hash(
+            &mutation,
+            &serde_json::json!({"item": "01a0", "sections": 3})
+        )
+    );
+    // The rule's own text.
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace("silently contradicts", "contradicts"),
+    );
+    let after_rule_edit = hash(&mutation, &precondition);
+    assert_ne!(original, after_rule_edit);
+    write_rule(&root, "architecture", ARCHITECTURE);
+
+    // The material the rule rests on.
+    std::fs::write(root.join("AGENTS.md"), "a different contract\n").expect("edit");
+    assert_ne!(original, hash(&mutation, &precondition));
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("restore");
+    assert_eq!(original, hash(&mutation, &precondition));
+
+    // The applicable set. Another rule for this domain is another thing that
+    // had to be read, so the review that did not read it no longer stands.
+    write_rule(
+        &root,
+        "second",
+        "---\nid: backlog-quality\napplies:\n  domains:\n    - backlog\n---\n\n# Backlog quality\n\nUnresolved matters only.\n",
+    );
+    assert_ne!(original, hash(&mutation, &precondition));
+
+    // And a rule for a different domain changes nothing here.
+    write_rule(
+        &root,
+        "third",
+        "---\nid: work-handoff\napplies:\n  domains:\n    - work\n---\n\n# Work handoff\n\nSay what is left.\n",
+    );
+    let with_other_domain = hash(&mutation, &precondition);
+    std::fs::remove_file(rules::dir(&root).join("third.md")).expect("remove");
+    assert_eq!(
+        with_other_domain,
+        hash(&mutation, &precondition),
+        "a rule that does not govern this domain is not part of this review"
+    );
+}
+
+#[test]
+fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let (mutation, precondition) = subject();
+    let reviewed = vec!["architecture-consistency".to_owned()];
+
+    let binding = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let attested = binding.sha256().expect("hash");
+    assert_eq!(binding.rule_ids(), reviewed);
+
+    rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect("an unchanged subject");
+
+    // Naming the wrong set is refused even when the hash is right — an agent
+    // that names something else has told us its review covered something else.
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &["something-else".to_owned()],
+    )
+    .expect_err("the wrong rules");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // The material moves; the attestation stops naming anything that exists.
+    std::fs::write(root.join("AGENTS.md"), "a different contract\n").expect("edit");
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect_err("the subject moved");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("was of something else"), "{error}");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("restore");
+
+    // A rule that cannot be resolved blocks what it governs rather than being
+    // skipped. An unusable rule is not a rule that does not apply.
+    std::fs::remove_file(root.join("AGENTS.md")).expect("remove basis");
+    let error = rules::check(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+        &attested,
+        &reviewed,
+    )
+    .expect_err("an unusable rule blocks");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+
+    // A domain with no rules still has a binding, and this layer still checks
+    // it. What an empty set *means* is the domain's call — no review required
+    // for most, and the thing that blocks autonomous Object admission for one —
+    // so the rule layer must not decide it by short-circuiting.
+    let empty = rules::bind(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    assert!(empty.rule_ids().is_empty());
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation.clone(),
+        precondition.clone(),
+        &empty.sha256().expect("hash"),
+        &[],
+    )
+    .expect("an empty set is still a subject");
+    rules::check(
+        &root,
+        Domain::Collection,
+        mutation,
+        precondition,
+        "not the hash",
+        &[],
+    )
+    .expect_err("and it is still checked");
+}
+
+/// A rule that says nothing about review still has a review policy.
+///
+/// The withdrawn reading was that an omitted `max_attempts` means unlimited.
+/// Every v1 rule has a finite effective ceiling, so "how many attempts does this
+/// get" is answerable from the rule alone, without consulting a default nobody
+/// wrote down.
+#[test]
+fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let rule = rules::load_all(&root).expect("load").remove(0);
+
+    assert_eq!(rule.review.max_attempts, 5);
+    assert_eq!(rule.review.on_exhaustion, rules::OnExhaustion::Reject);
+    assert_eq!(rule.review, rules::Review::default());
+
+    // The boundary is "past the ceiling", not "at" it.
+    for number in 1..=5 {
+        assert!(
+            !rule.review.exhausted(attempt(number)),
+            "attempt {number} is still reviewable under a ceiling of 5"
+        );
+    }
+    assert!(rule.review.exhausted(attempt(6)));
+}
+
+/// Writing a default out must not change what a rule means.
+///
+/// This is the whole reason [`rules::Review`] holds effective values rather than
+/// options. A review identity is over what the rule *says*, and two rules that
+/// say the same thing in different YAML are one rule as far as a reviewer is
+/// concerned. If the binding hashed the spelling, an author tidying their front
+/// matter would silently invalidate every attestation against it.
+#[test]
+fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let hash = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let silent = hash(&root);
+
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  max_attempts: 5\n  on_exhaustion: reject\nbased_on:",
+        ),
+    );
+    assert_eq!(
+        silent,
+        hash(&root),
+        "an explicit default is the same review subject as an omitted one"
+    );
+
+    // The issue's own example: naming only the action still means the default
+    // ceiling, so these two spellings are also one rule.
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  on_exhaustion: human_confirmation\nbased_on:",
+        ),
+    );
+    let escalating = hash(&root);
+    write_rule(
+        &root,
+        "architecture",
+        &ARCHITECTURE.replace(
+            "based_on:",
+            "review:\n  max_attempts: 5\n  on_exhaustion: human_confirmation\nbased_on:",
+        ),
+    );
+    assert_eq!(escalating, hash(&root));
+
+    // And it is genuinely a different rule from the default one, or the
+    // equality above would be proving nothing.
+    assert_ne!(silent, escalating);
+}
+
+/// The effective policy is part of the review subject, because it decides the
+/// outcome.
+///
+/// The same wording under a ceiling of 5 and under a ceiling of 1 is not the
+/// same review, and one that pulls in a person on exhaustion is not the same as
+/// one that refuses. A binding that left this out would keep verifying while the
+/// thing it governs had changed meaning.
+#[test]
+fn changing_the_effective_review_policy_changes_the_review_identity() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let hash = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+        .sha256()
+        .expect("hash")
+    };
+    let with = |front: &str| ARCHITECTURE.replace("based_on:", &format!("{front}based_on:"));
+
+    write_rule(&root, "architecture", ARCHITECTURE);
+    let original = hash(&root);
+
+    write_rule(&root, "architecture", &with("review:\n  max_attempts: 1\n"));
+    let tighter = hash(&root);
+    assert_ne!(original, tighter, "the ceiling is part of the subject");
+
+    write_rule(
+        &root,
+        "architecture",
+        &with("review:\n  on_exhaustion: human_confirmation\n"),
+    );
+    assert_ne!(
+        original,
+        hash(&root),
+        "what happens on exhaustion is part of the subject"
+    );
+
+    // A tighter ceiling also moves the boundary it is a ceiling for.
+    write_rule(&root, "architecture", &with("review:\n  max_attempts: 1\n"));
+    let rule = rules::load_all(&root).expect("load").remove(0);
+    assert!(!rule.review.exhausted(attempt(1)));
+    assert!(rule.review.exhausted(attempt(2)));
+}
+
+/// The review block refuses what it does not understand, like the rest of the
+/// schema.
+///
+/// A ceiling of zero is the interesting one: it is not a tighter limit but a way
+/// of spelling "never reviewable", which v1 does not offer. Read as a number it
+/// would exhaust before the first attempt and quietly make the rule unusable in
+/// a way nothing reports.
+#[test]
+fn the_review_block_refuses_what_v1_does_not_define() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let with = |front: &str| ARCHITECTURE.replace("based_on:", &format!("{front}based_on:"));
+
+    for (front, expected) in [
+        ("review:\n  max_attempts: 0\n", "positive limit"),
+        ("review:\n  on_exhaustion: escalate\n", "not an exhaustion"),
+        ("review:\n  on_exhaustion: Reject\n", "not an exhaustion"),
+        ("review:\n  attempts: 3\n", "unknown field"),
+    ] {
+        write_rule(&root, "architecture", &with(front));
+        let error = rules::load_all(&root).expect_err(&format!("{front:?} is refused"));
+        assert!(
+            error.message.contains(expected),
+            "{front:?} should say {expected:?}, said {:?}",
+            error.message
+        );
+    }
+
+    // And the two it does define are accepted.
+    for front in [
+        "review:\n  max_attempts: 1\n",
+        "review:\n  on_exhaustion: reject\n",
+        "review:\n  on_exhaustion: human_confirmation\n",
+        "review:\n  max_attempts: 12\n  on_exhaustion: human_confirmation\n",
+    ] {
+        write_rule(&root, "architecture", &with(front));
+        rules::load_all(&root).unwrap_or_else(|error| panic!("{front:?}: {}", error.message));
+    }
+}
+
+/// The workspace-version boundary holds on every public door, not just the CLI.
+///
+/// Rule semantics are versioned by the workspace, so a version 1 workspace must
+/// not be read under version 2 defaults — and it must not matter which public
+/// API asked. Enforcing it only in the command left `engr rules ls` refusing a
+/// workspace that `rules::load_all` accepted and silently assigned the newer
+/// effective policy, which is the exact reinterpretation the version exists to
+/// prevent, reached through a different door.
+#[test]
+fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: recording-policy\napplies:\n  domains:\n    - backlog\n---\n\n# Recording policy\n\nSay what changed.\n",
+    );
+    let (mutation, precondition) = subject();
+
+    // Exactly what a version 1 workspace is: intact, and written by a build
+    // that had never heard of `review:`.
+    std::fs::write(
+        store::engr_dir(&root).join("format.json"),
+        r#"{"format":"engr-workspace","version":1}"#,
+    )
+    .expect("format");
+
+    let refused = |error: engr::Error, what: &str| {
+        assert!(
+            error.message.contains("version 1") && error.message.contains("engr migrate"),
+            "{what} should refuse a version 1 workspace by name, said {:?}",
+            error.message
+        );
+    };
+    refused(rules::load_all(&root).expect_err("load_all"), "load_all");
+    refused(
+        rules::applicable(&root, Domain::Backlog).expect_err("applicable"),
+        "applicable",
+    );
+    match rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    ) {
+        Ok(_) => panic!("bind produced a v2 binding over a workspace declaring v1"),
+        Err(error) => refused(error, "bind"),
+    }
+    refused(
+        rules::check(
+            &root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+            "any hash",
+            &["recording-policy".to_owned()],
+        )
+        .expect_err("check"),
+        "check",
+    );
+
+    // And the explicit migration is what makes the newer semantics available,
+    // through those same doors.
+    store::migrate(&root).expect("migrate");
+    let rule = rules::load_all(&root)
+        .expect("load_all after migrating")
+        .remove(0);
+    assert_eq!(rule.review, rules::Review::default());
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(bound.rule_ids(), vec!["recording-policy".to_owned()]);
+}
+
+/// One scalar attempt, judged against each rule's own ceiling.
+///
+/// v1 carries a single attempt number for the whole prepared mutation and
+/// compares it independently against each rule's own limit. There is no
+/// per-rule counter, so two rules with different ceilings reach exhaustion at
+/// different values of the same number.
+#[test]
+fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    write_rule(
+        &root,
+        "lenient",
+        "---\nid: lenient\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 5\n---\n\n# Lenient\n\nFive tries.\n",
+    );
+    write_rule(
+        &root,
+        "strict",
+        "---\nid: strict\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n---\n\n# Strict\n\nTwo tries.\n",
+    );
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+
+    // The mechanical fact is domain-neutral: which rules are past their ceiling.
+    assert!(bound.exhausted(attempt(2)).is_empty());
+    assert_eq!(
+        bound
+            .exhausted(attempt(3))
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["strict"],
+        "the strict rule runs out first, and the caller can say which one"
+    );
+    assert_eq!(bound.exhausted(attempt(6)).len(), 2);
+
+    // The number is agent-attested process metadata, so it must not be able to
+    // move the identity of what had to be reviewed.
+    let hash = bound.sha256().expect("hash");
+    for number in [1, 3, 99] {
+        let _ = bound.exhaustion(attempt(number));
+    }
+    assert_eq!(
+        hash,
+        bound.sha256().expect("hash"),
+        "attempt is an argument, never a field, so it cannot reach the hash"
+    );
+}
+
+/// Backlog keeps unresolved work whatever the exhausted rule asked for.
+///
+/// This is the one place the composition must NOT be shared. #25 gives Backlog
+/// the opposite outcome from Object on purpose: the domain exists to hold
+/// unresolved engineering intent, so exhaustion marks the mutation instead of
+/// blocking it, and `on_exhaustion: human_confirmation` summons nobody. One
+/// verdict shared with Object would hand the next caller what #25 forbids.
+#[test]
+fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    let bind = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+    };
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nTwo tries, then ask.\n",
+    );
+
+    assert_eq!(
+        bind(&root).exhaustion(attempt(2)).expect("backlog"),
+        rules::Exhaustion::NotReached
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(3)).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 3,
+            limit: 2
+        }),
+        "even a rule asking for a human does not route Backlog through the gate"
+    );
+
+    // `limit` is the earliest ceiling in the applicable set, so a stricter rule
+    // arriving changes the diagnostic even though the attempt has not moved.
+    write_rule(
+        &root,
+        "stricter",
+        "---\nid: stricter\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Stricter\n\nOne try.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(3)).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 3,
+            limit: 1
+        })
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(2)).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        }),
+        "and it stays the earliest ceiling even when only that rule is exhausted"
+    );
+}
+
+/// Object stops, and escalates only when an actually exhausted rule asks.
+///
+/// The behaviour Backlog deliberately does not share. Kept in its own test so
+/// the two cannot drift into one another: if these ever agree, something has
+/// been made universal that #25 made domain-specific.
+#[test]
+fn an_exhausted_object_review_stops_and_may_call_a_human() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    let bind = |root: &Path| {
+        rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
+    };
+    write_rule(
+        &root,
+        "refusing",
+        "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(1)).expect("object"),
+        rules::Exhaustion::NotReached
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(2)).expect("object"),
+        rules::Exhaustion::Refused
+    );
+
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(2)).expect("object"),
+        rules::Exhaustion::HumanConfirmation,
+        "an exhausted rule naming a human outranks one that only refuses"
+    );
+
+    // An escalating rule that is not exhausted escalates nothing: the action
+    // describes what happens at the ceiling, not a standing property.
+    write_rule(
+        &root,
+        "escalating",
+        "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
+    );
+    assert_eq!(
+        bind(&root).exhaustion(attempt(2)).expect("object"),
+        rules::Exhaustion::Refused,
+        "only an actually exhausted rule's action counts"
+    );
+}
+
+/// Collection and Work are refused, not answered.
+///
+/// #25 leaves their exhaustion behaviour open, and the failure mode this guards
+/// against is the quiet one: letting another domain's composition stand in would
+/// give them invented semantics that look settled at the call site.
+#[test]
+fn a_domain_whose_exhaustion_v1_has_not_settled_is_refused_rather_than_guessed() {
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    for domain in [Domain::Collection, Domain::Work] {
+        write_rule(
+            &root,
+            "policy",
+            &format!(
+                "---\nid: policy\napplies:\n  domains:\n    - {}\nreview:\n  max_attempts: 1\n---\n\n# Policy\n\nOne try.\n",
+                domain.as_str()
+            ),
+        );
+        let bound =
+            rules::bind(&root, domain, mutation.clone(), precondition.clone()).expect("bind");
+        // Below the ceiling there is nothing to compose, and that much is
+        // domain-neutral.
+        assert_eq!(
+            bound
+                .exhaustion(attempt(1))
+                .expect("not reached is answerable"),
+            rules::Exhaustion::NotReached
+        );
+        let error = bound
+            .exhaustion(attempt(2))
+            .expect_err("an unsettled domain must not be given an answer");
+        assert!(error.message.contains(domain.as_str()), "{}", error.message);
+    }
+}
+
+/// There is no attempt 0, and the substrate cannot be asked about one.
+///
+/// A review sequence runs 1, 2, 3; an abandoned one begins again at 1. Zero is
+/// not another sequence — it is a number #25 never defines. The danger is not
+/// that it is wrong but that it is *quiet*: an evaluator handed zero returns a
+/// perfectly ordinary "nothing is exhausted yet", so a caller doing the natural
+/// thing would admit an undefined input as a successful policy result.
+///
+/// Refused at construction rather than in each evaluator, so there is one place
+/// to get it right instead of three places to forget it.
+#[test]
+fn a_review_attempt_is_counted_from_one_and_zero_is_not_a_value() {
+    let error = rules::Attempt::new(0).expect_err("zero is refused");
+    assert!(
+        error.message.contains("counted from 1"),
+        "{}",
+        error.message
+    );
+
+    let first = rules::Attempt::new(1).expect("one is the first attempt");
+    assert_eq!(first, rules::Attempt::FIRST);
+    assert_eq!(first.get(), 1);
+
+    // And the first attempt is genuinely reviewable rather than being refused
+    // one step further on, which is the failure this could have traded for.
+    let (_dir, root) = workspace();
+    let (mutation, precondition) = subject();
+    write_rule(
+        &root,
+        "strict",
+        "---\nid: strict\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\n# Strict\n\nOne try.\n",
+    );
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(
+        bound.exhaustion(first).expect("backlog"),
+        rules::Exhaustion::NotReached,
+        "attempt 1 against a ceiling of 1 is the last reviewable one"
+    );
+    assert_eq!(
+        bound.exhaustion(attempt(2)).expect("backlog"),
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        })
+    );
+}
+
+/// The hashed order of an unordered set is the protocol's, not whichever field
+/// looked natural to sort by.
+///
+/// `based_on` was sorted by `path`, which is deterministic, stable, and still
+/// wrong: canonical JSON sorts keys, so a basis's canonical bytes begin with
+/// `commit`, and a pinned basis therefore precedes a floating one whatever the
+/// paths say. Two conforming implementations — one sorting by path, one by
+/// canonical bytes — would hash the same rule differently, which is exactly what
+/// a shared hash contract cannot allow.
+///
+/// The case is built so the two orders disagree by construction rather than by
+/// luck: `"commit"` sorts before `"content"`, so the pinned basis wins the
+/// comparison before either path is ever examined.
+#[test]
+fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("a-floating.md"), "current material\n").expect("floating");
+    std::fs::write(root.join("z-pinned.md"), "pinned material\n").expect("pinned");
+    let commit = commit_all(&root, "bases");
+
+    write_rule(
+        &root,
+        "ordering",
+        &format!(
+            "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-floating.md\n  - path: z-pinned.md\n    commit: {commit}\n---\n\n# Ordering\n\nBoth bases matter.\n"
+        ),
+    );
+
+    // Read order stays human-friendly: by path.
+    let rule = rules::load_all(&root).expect("rules").remove(0);
+    assert_eq!(
+        rule.based_on
+            .iter()
+            .map(|basis| basis.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-floating.md", "z-pinned.md"],
+    );
+
+    // Hashed order is canonical: the pinned basis carries a `commit` key, and
+    // `"commit"` precedes `"content"`, so it sorts first despite its path.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    assert_eq!(
+        bound.rules()[0]
+            .based_on
+            .iter()
+            .map(|basis| basis.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-pinned.md", "a-floating.md"],
+        "the hashed set is in canonical-bytes order, not path order"
+    );
+}
+
+/// The applicable rule set is hashed canonically, and reported by id.
+///
+/// Those are different orders on purpose. Canonical bytes begin with a rule's
+/// bases, which is right for a hash and useless to a person — and useless for
+/// comparing what an agent claims it reviewed, since the agent would have to
+/// reproduce the hash to reproduce the order. So the set question is answered in
+/// the one order both sides can produce independently.
+#[test]
+fn the_reported_rule_set_is_by_id_even_though_the_hash_is_not() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    // `zebra` has no bases; `alpha` does. Canonical bytes put the one with
+    // bases first, so hash order and id order disagree.
+    write_rule(
+        &root,
+        "alpha",
+        ARCHITECTURE
+            .replace("architecture-consistency", "alpha")
+            .as_str(),
+    );
+    write_rule(
+        &root,
+        "zebra",
+        "---\nid: zebra\napplies:\n  domains:\n    - backlog\n---\n\n# Zebra\n\nNo bases.\n",
+    );
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+
+    assert_eq!(
+        bound.rule_ids(),
+        vec!["alpha".to_owned(), "zebra".to_owned()],
+        "reported by id, so an agent can name the set without computing a hash"
+    );
+    assert_eq!(
+        bound
+            .rules()
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zebra", "alpha"],
+        "hashed in canonical-bytes order, which begins with `based_on`: an empty \
+         list sorts before a populated one, so the two orders genuinely disagree"
+    );
+
+    // And `check` accepts that same id set, which is the property the ordering
+    // split exists to preserve.
+    rules::check(
+        &root,
+        Domain::Backlog,
+        mutation,
+        precondition,
+        &bound.sha256().expect("hash"),
+        &["zebra".to_owned(), "alpha".to_owned()],
+    )
+    .expect("the named set is a set, whatever order it arrives in");
+}
+
+/// The canonical bytes are RFC 8785, not "whatever serde produces stably".
+///
+/// The two are easy to confuse, because serde's output *is* deterministic for
+/// one implementation — that is the weaker claim wearing the same word. An
+/// attestation is meant to be checkable by whoever recomputes it, possibly in
+/// another language, which is the entire reason a standard is named.
+///
+/// The divergence is concrete. JCS orders object members by **UTF-16** code
+/// units; `serde_json`'s map is ordered by Rust string comparison, which is
+/// UTF-8 order. `U+1F600` begins with the UTF-16 unit `D83D`, which precedes
+/// `E000`, while in UTF-8 `U+E000` sorts first. The subject below carries both
+/// keys, so the two canonicalizations disagree about it.
+///
+/// Pinned as an exact digest rather than a property. A property test would have
+/// to reproduce the binding's shape to compare against, and a reconstruction
+/// that drifts from the real one silently stops testing anything — which is how
+/// the first version of this test passed while the implementation used serde
+/// bytes. **This value is the contract**: it should change only when the binding
+/// deliberately changes, and never because a serializer did.
+#[test]
+fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "fixed",
+        "---\nid: fixed\napplies:\n  domains:\n    - backlog\n---\n\n# Fixed\n\nExact bytes.\n",
+    );
+    let mutation = serde_json::json!({
+        "action": "backlog.section_added",
+        "keys": { "\u{1F600}": "emoji", "\u{E000}": "private use" }
+    });
+    let precondition = serde_json::json!({"item": "01a0", "sections": 2});
+
+    // The case genuinely separates the two orderings; if this ever stops being
+    // true, the digest below is no longer proving what it claims and the case
+    // needs sharpening rather than the assertion relaxing.
+    assert_ne!(
+        serde_json::to_string(&mutation).expect("serde"),
+        serde_jcs::to_string(&mutation).expect("jcs"),
+        "the subject must separate UTF-8 order from UTF-16 order"
+    );
+
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    assert_eq!(
+        bound.sha256().expect("hash"),
+        "47eb5a407a4d4769325129310bd877e50a30e0584377c761cab3ed3c88eebd5d",
+        "the review binding digest is SHA-256 over its RFC 8785 bytes"
+    );
+
+    // Nothing is remembered, so recomputation is the same value.
+    assert_eq!(
+        rules::bind(&root, Domain::Backlog, mutation, precondition)
+            .expect("bind")
+            .sha256()
+            .expect("hash"),
+        bound.sha256().expect("hash")
+    );
+}
+
+/// A subject JCS cannot carry exactly is refused, not silently flattened.
+///
+/// `serde_jcs` canonicalizes numbers through `f64`, correctly and per RFC 8785.
+/// The consequence is that an integer past the safe range does not fail — it
+/// becomes a *different* integer, and two distinct subjects end up with one set
+/// of canonical bytes:
+///
+/// ```text
+/// 9007199254740993 -> {"n":9007199254740992}
+/// 9007199254740992 -> {"n":9007199254740992}
+/// ```
+///
+/// For a value whose whole job is naming an exact subject, that is the worst
+/// failure available: an attestation over one subject would verify against the
+/// other, and nothing would report it. The bytes are never computed for such a
+/// value now; the refusal happens first.
+#[test]
+fn a_subject_outside_the_canonical_number_range_is_refused() {
+    let (_dir, root) = workspace();
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: policy\napplies:\n  domains:\n    - backlog\n---\n\n# Policy\n\nSay what changed.\n",
+    );
+    let ok = serde_json::json!({"item": "01a0", "sections": 2});
+
+    // The collision this prevents is real, not theoretical.
+    let past = serde_json::json!({"n": 9007199254740993u64});
+    let at = serde_json::json!({"n": 9007199254740992u64});
+    assert_ne!(past, at, "distinct JSON values");
+    assert_eq!(
+        serde_jcs::to_string(&past).expect("jcs"),
+        serde_jcs::to_string(&at).expect("jcs"),
+        "which canonicalize to the same bytes, which is why they must not get here"
+    );
+
+    for (subject, side) in [(past.clone(), "mutation"), (ok.clone(), "precondition")] {
+        let (mutation, precondition) = if side == "mutation" {
+            (subject, ok.clone())
+        } else {
+            (ok.clone(), past.clone())
+        };
+        let error = match rules::bind(&root, Domain::Backlog, mutation, precondition) {
+            Ok(_) => panic!("a subject outside the safe range was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("hash alike") && error.message.contains("as a string"),
+            "the refusal says why and what to do instead: {}",
+            error.message
+        );
+    }
+
+    // Nested and negative values are reached too — a walk, not a top-level peek.
+    for buried in [
+        serde_json::json!({"a": [1, {"b": 9007199254740993u64}]}),
+        serde_json::json!({"a": -9007199254740993i64}),
+        serde_json::json!([[[u64::MAX]]]),
+        // 2^60 + 1: one past an exact value, and it collides with it.
+        serde_json::json!({"a": (1u64 << 60) + 1}),
+    ] {
+        rules::bind(&root, Domain::Backlog, buried, ok.clone())
+            .err()
+            .expect("refused wherever it is buried");
+    }
+
+    // The domain is RFC 8785's -- exactly a binary64 value -- not the
+    // +-(2^53-1) safe-integer recommendation. The RFC's own Appendix B lists
+    // 9007199254740992 as a valid canonical number, and 2^60 is exact too:
+    // using the recommendation as the domain would refuse both.
+    for fine in [
+        serde_json::json!({"n": 9007199254740991u64}),
+        serde_json::json!({"n": 9007199254740992u64}), // 2^53, exact
+        serde_json::json!({"n": 1u64 << 60}),
+        serde_json::json!({"n": -(1i64 << 60)}),
+        serde_json::json!({"n": 1.5}),
+        serde_json::json!({"n": 0}),
+    ] {
+        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("exactly a binary64 value");
+    }
+
+    // One accepted value whose canonical *spelling* is not its literal, to pin
+    // that this is deliberate: 2^60 renders as ECMAScript's shortest
+    // round-tripping form, which parses back to exactly 2^60. The value
+    // survives; only the decimal is the standard's rather than the author's.
+    let big = serde_json::json!({"n": 1u64 << 60});
+    let canonical = serde_jcs::to_string(&big).expect("jcs");
+    assert_eq!(canonical, "{\"n\":1152921504606847000}");
+    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("parse");
+    assert_eq!(
+        parsed["n"].as_f64().expect("number"),
+        (1u64 << 60) as f64,
+        "the spelling moved, the value did not"
+    );
 }

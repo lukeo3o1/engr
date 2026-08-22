@@ -20,9 +20,13 @@
 //! file. Changing one changes what the *next* mutation must be reviewed
 //! against, and nothing already admitted.
 
-use crate::{ensure, git, store, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA};
+use crate::{
+    ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
+    EXIT_USAGE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 pub const DIR: &str = "rules";
@@ -64,6 +68,124 @@ impl Domain {
             "work" => Some(Self::Work),
             _ => None,
         }
+    }
+}
+
+/// What a Rule asks for once its review attempts are spent.
+///
+/// Two values in v1, and the narrow one is the default: escalation is something
+/// a Rule opts into, because a policy that pulls a person in is a claim about
+/// that policy's importance and only its author can make it.
+///
+/// **This is a request, not an outcome.** What it costs is decided by the domain
+/// and by [`Exhaustion`]: an Object stops and may escalate; a *non-destructive*
+/// Backlog mutation is kept and marked, and never escalates on this field, while
+/// consuming a Backlog Section needs a review that passed and simply does not
+/// happen; and Collection and Work have no v1 answer at all. Even `Reject` on an
+/// Object stops the *autonomous* path rather than forbidding the mutation — a
+/// human may initiate the same one and override the result through the gate.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OnExhaustion {
+    Reject,
+    HumanConfirmation,
+}
+
+impl OnExhaustion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::HumanConfirmation => "human_confirmation",
+        }
+    }
+
+    /// Read as a string and mapped here, for the reason `applies.domains` is:
+    /// an unsupported value is refused by name with the supported set spelled
+    /// out, rather than by a deserializer talking about variants.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reject" => Some(Self::Reject),
+            "human_confirmation" => Some(Self::HumanConfirmation),
+            _ => None,
+        }
+    }
+}
+
+/// One attempt number inside an active review sequence.
+///
+/// A sequence runs `1 -> 2 -> 3`, and one that is abandoned, lost or restarted
+/// may legitimately begin again at `1`. **There is no attempt 0**: it is not
+/// another independent sequence, it is a number the protocol never defines.
+///
+/// Made unrepresentable rather than checked. Every evaluator refusing zero
+/// separately is the same rule written several times and forgotten once — and
+/// the forgetting is quiet, because a missing check here returns a perfectly
+/// ordinary "nothing is exhausted yet" that a caller has no reason to doubt.
+/// Validating at construction means the value cannot be wrong by the time any
+/// policy question is asked of it.
+///
+/// This carries no sequence identity and nothing is persisted. #25 is explicit
+/// that v1 has no review series, retry counter or reset record, and a type that
+/// only bounds one number cannot become one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Attempt(NonZeroU32);
+
+impl Attempt {
+    /// The first attempt of a sequence.
+    pub const FIRST: Self = Self(NonZeroU32::MIN);
+
+    pub fn new(value: u32) -> Result<Self> {
+        NonZeroU32::new(value).map(Self).ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a review attempt is counted from 1; there is no attempt 0".to_owned(),
+            )
+        })
+    }
+
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// The default ceiling, applied when a Rule does not name one.
+///
+/// The earlier reading — that an omitted limit means unlimited — was withdrawn.
+/// Every v1 Rule has a finite effective ceiling, so "how many attempts does this
+/// get" always has an answer without consulting anything outside the Rule.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// One Rule's review policy, **with the defaults already applied**.
+///
+/// This type never holds "unspecified". A Rule that omits `max_attempts` and one
+/// that writes `max_attempts: 5` produce the identical value here, which is the
+/// point: the effective semantics participate in review identity, and YAML
+/// spelling does not. Two rules that mean the same thing must not hash
+/// differently because one author was explicit.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Review {
+    pub max_attempts: u32,
+    pub on_exhaustion: OnExhaustion,
+}
+
+impl Default for Review {
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            on_exhaustion: OnExhaustion::Reject,
+        }
+    }
+}
+
+impl Review {
+    /// Whether this attempt is past the ceiling.
+    ///
+    /// Strictly greater, so a limit of 5 leaves attempts 1 through 5 reviewable
+    /// and exhausts at 6. The attempt number is agent-attested process metadata
+    /// and is deliberately not stored: engr does not count attempts, it only
+    /// says what a given count means.
+    pub fn exhausted(self, attempt: Attempt) -> bool {
+        attempt.get() > self.max_attempts
     }
 }
 
@@ -309,6 +431,8 @@ pub struct Rule {
     pub domains: Vec<Domain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub based_on: Vec<Basis>,
+    /// The review policy in force, defaults resolved. See [`Review`].
+    pub review: Review,
     /// The normative text, exactly as written.
     pub body: String,
     /// Where it was found. Not part of identity and not hashed.
@@ -329,6 +453,22 @@ impl Rule {
 /// indeterminate set proves nothing. Sorted by id so the set is independent of
 /// filesystem enumeration order — the hash depends on this.
 pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
+    // The workspace version decides how these bytes are read, so it is checked
+    // before they are read — here, at the one place rules enter the process,
+    // rather than in the command that happens to have asked.
+    //
+    // Leaving it to the CLI made persisted meaning depend on which public door a
+    // caller came through: `engr rules ls` refused a version 1 workspace while
+    // `rules::load_all` accepted the same file and assigned it the version 2
+    // defaults, which is precisely the silent reinterpretation the version
+    // exists to prevent. Same shape as the raw single-file loader that was made
+    // private for the same reason: one door.
+    //
+    // `bind` and `check` reach rules only through `applicable`, which reaches
+    // them only through here, so this one check covers every semantic entry
+    // point. It deliberately does not touch the historical snapshot decoder,
+    // which answers a different question about a different workspace.
+    store::require_current(root)?;
     let dir = dir(root);
     // `exists()` follows links, so a dangling `rules` symlink answered "no" and
     // took the empty-set path — reporting that a workspace has no policy when
@@ -552,6 +692,45 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
     }
     based_on.sort_by(|left, right| left.path.cmp(&right.path));
 
+    // Resolved to effective values here, at the one place a Rule is read, so
+    // nothing downstream ever has to know whether a default was written out.
+    let review = match front.review {
+        None => Review::default(),
+        Some(written) => {
+            let max_attempts = match written.max_attempts {
+                None => DEFAULT_MAX_ATTEMPTS,
+                Some(limit) => {
+                    // Zero would exhaust before the first attempt, which is not
+                    // a ceiling but a way of spelling "never reviewable" that
+                    // the schema does not offer. Refused rather than read as an
+                    // unreachable rule.
+                    ensure!(
+                        limit > 0,
+                        EXIT_SCHEMA,
+                        "{where_}: rule {} sets max_attempts to 0, and a positive limit is what makes a rule reviewable",
+                        front.id
+                    );
+                    limit
+                }
+            };
+            let on_exhaustion = match written.on_exhaustion.as_deref() {
+                None => OnExhaustion::Reject,
+                Some(name) => OnExhaustion::parse(name).ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!(
+                            "{where_}: {name:?} is not an exhaustion action; v1 has reject and human_confirmation"
+                        ),
+                    )
+                })?,
+            };
+            Review {
+                max_attempts,
+                on_exhaustion,
+            }
+        }
+    };
+
     // The body is stored exactly as written. Trimming it would rewrite the
     // normative material — leading and trailing whitespace can carry meaning in
     // Markdown, and more to the point, the text a review surface shows has to be
@@ -567,6 +746,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         id: front.id,
         domains,
         based_on,
+        review,
         body: body.to_owned(),
         source: path.to_path_buf(),
     })
@@ -580,6 +760,24 @@ struct FrontMatter {
     applies: Applies,
     #[serde(default)]
     based_on: Vec<Basis>,
+    /// Absent is a first-class answer: it means the defaults, not "no policy".
+    #[serde(default)]
+    review: Option<ReviewFrontMatter>,
+}
+
+/// The review block as it may be written, where every field may be left out.
+///
+/// Kept separate from [`Review`] on purpose. This type is what the file is
+/// allowed to say; `Review` is what the Rule means. Collapsing them would put an
+/// `Option` into the value that gets hashed, and then an omitted default and a
+/// written one would be two different review identities.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewFrontMatter {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    on_exhaustion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -600,4 +798,457 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
         offset += line.len();
     }
     None
+}
+
+/// The exact subject of a review, fingerprinted.
+///
+/// This is the whole mechanism. An attestation is not a claim that an agent
+/// understood anything — it is a claim that it reviewed *this* mutation against
+/// *these* rules resting on *this* material. So the binding names all three
+/// exactly, and the hash over it is the identity of that subject. Change any of
+/// them and the hash changes, and the previous attestation stops naming
+/// anything that exists.
+///
+/// Deterministic and stateless by construction. There is no pending review
+/// object, no nonce, no session: a process that restarts recomputes the same
+/// value from the same inputs, and admission recomputes it from current state
+/// rather than trusting anything it was handed.
+#[derive(Serialize)]
+pub struct ReviewBinding {
+    /// A discriminator, so a hash from this version can never be mistaken for
+    /// one produced under different binding rules.
+    binding: &'static str,
+    version: u32,
+    domain: Domain,
+    /// The exact semantic mutation, as the domain canonicalizes it.
+    mutation: serde_json::Value,
+    /// The exact state the mutation is being applied to.
+    ///
+    /// Without this the binding would cover only the proposed output, and
+    /// another agent could change the target underneath a review while leaving
+    /// the proposal untouched — the attestation would still verify, against a
+    /// subject that no longer exists.
+    precondition: serde_json::Value,
+    rules: Vec<BoundRule>,
+}
+
+/// One rule as it stood, with everything it rests on resolved.
+#[derive(Serialize)]
+pub struct BoundRule {
+    pub id: String,
+    /// Sorted, because the set is semantically order-insensitive.
+    pub domains: Vec<Domain>,
+    /// Sorted by path, for the same reason.
+    pub based_on: Vec<ResolvedBasis>,
+    /// The effective review policy, defaults resolved before it got here.
+    ///
+    /// It belongs in the identity because it decides the outcome: the same
+    /// wording reviewed under a ceiling of 5 and under a ceiling of 1 are not
+    /// the same review, and one that escalates to a human on exhaustion is not
+    /// the same as one that simply refuses. A binding that omitted this would
+    /// verify unchanged while the thing it governs had changed meaning.
+    pub review: Review,
+    /// The normative text, exactly as written and never normalized.
+    ///
+    /// Built from parsed semantics plus this exact body rather than from the
+    /// file's raw bytes. Raw bytes would make review identity depend on
+    /// incidental YAML spelling: reordering `applies.domains` changes nothing
+    /// about what the rule means or what a reviewer had to read, and it must
+    /// not invalidate an attestation. The body is the one part where every
+    /// byte is meaning, so it is carried untouched.
+    pub body: String,
+}
+
+pub const BINDING: &str = "engr-rule-review";
+pub const BINDING_VERSION: u32 = 1;
+
+/// The compact diagnostic Backlog records when it admits an exhausted mutation.
+///
+/// Deliberately two numbers. It exists to say "this went in without a passing
+/// review, and here is roughly why", not to reconstruct the review: the complete
+/// applicable set and its effective semantics live in the binding, and
+/// duplicating per-rule ids or limits here would be a persisted review history
+/// that #25 refuses.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RuleReview {
+    /// The mutation-level attempt value supplied for the review.
+    pub attempts: u32,
+    /// The earliest ceiling in the applicable set — the one that made this
+    /// exhausted, since a shared attempt passes the smallest ceiling first.
+    pub limit: u32,
+}
+
+/// What the applicable rules say about one attempt, **in the terms its domain
+/// defines**.
+///
+/// There is deliberately no domain-neutral answer. #25 gives Object and Backlog
+/// opposite ones: Object stops and may call a human, while Backlog admits the
+/// unresolved state anyway and marks it, because preserving unresolved
+/// engineering intent is the whole point of that domain. A single enum meaning
+/// the same thing everywhere would hand the next caller Object's behaviour for a
+/// Backlog mutation, which is exactly what #25 forbids.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Exhaustion {
+    /// No applicable rule is past its ceiling at this attempt. Every domain.
+    NotReached,
+    /// **Object.** At least one rule is past its ceiling and none asks for a
+    /// human, so autonomous admission stops and the mutation does not happen.
+    Refused,
+    /// **Object.** At least one exhausted rule asks a human to confirm.
+    ///
+    /// Escalation wins over refusal among exhausted Object rules, because a rule
+    /// naming a human is asking for a decision rather than for the attempt to be
+    /// discarded — and a human can still decide to refuse.
+    HumanConfirmation,
+    /// **Backlog.** Exhausted, with the diagnostic to record — and no
+    /// escalation, whatever any exhausted rule's `on_exhaustion` says.
+    ///
+    /// Whether the mutation may then proceed is the *mutation's* question, not
+    /// this one's: a non-destructive Backlog edit soft-admits and stores this
+    /// marker, while a consume does not, because destroying unresolved work
+    /// needs a review that actually passed. This variant reports that the
+    /// ceiling was passed and what to record; it does not authorize anything.
+    Exhausted(RuleReview),
+}
+
+impl ReviewBinding {
+    /// The applicable rules this attempt has exhausted, in the hashed order.
+    ///
+    /// Returned rather than counted because "which rule stopped this" is what a
+    /// caller has to be able to say. A composition that reports only a verdict
+    /// leaves a person told no and not told by what.
+    pub fn exhausted(&self, attempt: Attempt) -> Vec<&BoundRule> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.review.exhausted(attempt))
+            .collect()
+    }
+
+    /// Compose one mutation-level attempt across every applicable rule.
+    ///
+    /// v1 carries **one scalar for the whole prepared mutation**, compared
+    /// independently against each rule's own effective ceiling — there is no
+    /// per-rule attempt map, and no counter engr keeps. The number is
+    /// agent-attested process metadata, which is why it arrives as an argument
+    /// here and is not a field of the binding: it must not be able to reach
+    /// [`Self::sha256`], and the shape makes that structural rather than
+    /// remembered.
+    ///
+    /// Attempt numbers run from 1, so a ceiling of 5 leaves 1 through 5
+    /// reviewable and exhausts at 6. Zero is not a value this can be asked
+    /// about: [`Attempt`] refuses it at construction, so the question never
+    /// arrives here as an ordinary "nothing exhausted yet".
+    pub fn exhaustion(&self, attempt: Attempt) -> Result<Exhaustion> {
+        // The smallest ceiling in the applicable set decides whether anything is
+        // exhausted at all. One shared attempt passes the smallest ceiling
+        // first, so "some rule is past its ceiling" and "the attempt exceeds the
+        // smallest ceiling" are the same statement — which is also why this
+        // number is the one Backlog records as `limit`.
+        let Some(limit) = self.rules.iter().map(|rule| rule.review.max_attempts).min() else {
+            return Ok(Exhaustion::NotReached);
+        };
+        if attempt.get() <= limit {
+            return Ok(Exhaustion::NotReached);
+        }
+        match self.domain {
+            Domain::Object => {
+                if self
+                    .exhausted(attempt)
+                    .iter()
+                    .any(|rule| rule.review.on_exhaustion == OnExhaustion::HumanConfirmation)
+                {
+                    Ok(Exhaustion::HumanConfirmation)
+                } else {
+                    Ok(Exhaustion::Refused)
+                }
+            }
+            // `on_exhaustion` is deliberately not consulted. For Backlog it
+            // never routes to the Human Gate: the domain prioritizes keeping
+            // unresolved intent over blocking admission, and the marker is what
+            // tells a later reader this was not a passing review.
+            Domain::Backlog => Ok(Exhaustion::Exhausted(RuleReview {
+                attempts: attempt.get(),
+                limit,
+            })),
+            // Refused rather than answered. #25 leaves these open on purpose,
+            // and the one thing this must not do is invent behaviour for them
+            // by letting another domain's composition stand in.
+            Domain::Collection | Domain::Work => Err(Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "v1 does not define what an exhausted rule means for a {} mutation",
+                    self.domain.as_str()
+                ),
+            )),
+        }
+    }
+}
+
+impl ReviewBinding {
+    /// SHA-256 over the **RFC 8785 (JCS)** bytes of this binding.
+    ///
+    /// Deliberately not [`crate::confirmation::fingerprint`], which this used to
+    /// delegate to. That primitive canonicalizes through `serde_json`, which is
+    /// stable for one implementation and is not JCS — and every value it hashes
+    /// is already persisted in confirmed Events and Section seals, so changing
+    /// it changes hashes that exist. That is a coordinated workspace migration,
+    /// not a refactor, and it is not this slice's.
+    ///
+    /// Which leaves engr with **two canonicalizations at once**, and that is
+    /// worth saying out loud rather than discovering later: this one is JCS, the
+    /// gate's is serde. They agree on everything engr's own schema produces and
+    /// disagree on exotic object keys and number formats. Unifying them is the
+    /// open question, recorded on the PR — not something to settle by quietly
+    /// pointing one at the other.
+    ///
+    /// The rule and basis lists were put in canonical order before they got
+    /// here; see [`canonical_order`].
+    pub fn sha256(&self) -> Result<String> {
+        let canonical = canonical_bytes(self, "review binding")?;
+        Ok(format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(canonical.as_bytes())
+        ))
+    }
+
+    pub fn rules(&self) -> &[BoundRule] {
+        &self.rules
+    }
+
+    /// Every rule id this review must cover, in the order the hash saw them.
+    /// Sorted by id, which is **not** the order the hash saw them.
+    ///
+    /// The hashed order is the protocol's canonical-bytes order, which for a
+    /// rule begins with its bases rather than its name. That is right for a
+    /// hash and useless for a person or for comparing what an agent said it
+    /// reviewed, so this answers the set question in the one order both sides
+    /// can produce independently.
+    pub fn rule_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.rules.iter().map(|rule| rule.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+}
+
+/// Whether this integer is exactly a binary64 value.
+///
+/// An integer is `m · 2^k` with `m` odd; a double holds 53 significant bits, so
+/// it is exact precisely when `m < 2^53`. Computed by shifting off the trailing
+/// zeros — **no float cast anywhere**, because the obvious `(n as f64) as u64 ==
+/// n` is wrong in Rust: that cast saturates, so `u64::MAX` compares equal to
+/// itself and passes.
+///
+/// This is the RFC 8785 domain (§3.1, "expressible as IEEE-754 binary64"), not
+/// the ±(2^53 − 1) safe-integer range — that is a SHOULD for ECMAScript interop,
+/// and the RFC's own Appendix B lists `9007199254740992` as a valid canonical
+/// number. Using the recommendation as the domain refuses values the standard
+/// accepts.
+fn exactly_binary64(magnitude: u64) -> bool {
+    magnitude == 0 || (magnitude >> magnitude.trailing_zeros()) < (1 << 53)
+}
+
+/// Refuse a subject JCS cannot carry without changing it.
+///
+/// Not a formality. `serde_jcs` canonicalizes numbers through `f64`, correctly
+/// and per the standard — which means an integer past the safe range does not
+/// fail, it **quietly becomes a different one**:
+///
+/// ```text
+/// 9007199254740993  ->  {"n":9007199254740992}
+/// 9007199254740992  ->  {"n":9007199254740992}
+/// ```
+///
+/// Two different review subjects, one set of canonical bytes, one hash. For a
+/// value whose entire job is naming an exact subject, that is the worst
+/// available failure: an attestation over one would verify against the other,
+/// and nothing anywhere would report it.
+///
+/// So the input domain is checked before the bytes are computed, and a number
+/// outside it is refused with what to do instead — RFC 8785 says such values
+/// belong in strings. Applied where arbitrary JSON enters, which is `bind`'s two
+/// subject arguments; every other value reaching [`canonical_bytes`] is an
+/// engr-owned struct whose numbers are `u32`.
+///
+/// What this does **not** promise is that the canonical spelling matches the
+/// literal that was written. `2^60` canonicalizes to `1152921504606847000`,
+/// because that is what ECMAScript's shortest round-tripping form is, and it
+/// parses back to exactly `2^60`. The value survives; only its decimal spelling
+/// is the standard's rather than the author's. Anything accepted here is exactly
+/// a double, so two accepted subjects that differ still differ after
+/// canonicalization — which is the property that matters.
+fn within_safe_numbers(value: &serde_json::Value, what: &str) -> Result<()> {
+    match value {
+        serde_json::Value::Number(number) => {
+            let safe = match (number.as_u64(), number.as_i64()) {
+                (Some(unsigned), _) => exactly_binary64(unsigned),
+                (_, Some(signed)) => exactly_binary64(signed.unsigned_abs()),
+                // Already a double, so exact by construction.
+                _ => true,
+            };
+            ensure!(
+                safe,
+                EXIT_USAGE,
+                "{what}: {number} is not exactly a binary64 value, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
+            );
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                within_safe_numbers(item, what)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(entries) => {
+            for entry in entries.values() {
+                within_safe_numbers(entry, what)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The canonical bytes of one value, as **RFC 8785 (JCS)**.
+///
+/// Not `serde_json::to_string`, and the difference is not academic. JCS orders
+/// object members by their **UTF-16** code units, while `serde_json`'s map is
+/// ordered by Rust string comparison, which is UTF-8 order. For keys `U+E000`
+/// and `U+1F600` the two disagree — `U+1F600`'s first UTF-16 unit is `D83D`,
+/// which precedes `E000`, while in UTF-8 `U+E000` sorts first. JCS also fixes
+/// number formatting, which stable serde output does not promise.
+///
+/// The point of naming a standard is that a second implementation, in another
+/// language, computes the same bytes. "Deterministic for us" is a weaker claim
+/// wearing the same word, and a review hash is exactly where the difference
+/// bites: an attestation is meant to be checkable by whoever recomputes it.
+fn canonical_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
+    serde_jcs::to_string(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))
+}
+
+/// Put an unordered collection into the one order the protocol defines.
+///
+/// Canonicalize each element, sort by the lexicographic order of those canonical
+/// bytes, and refuse duplicates. That is the protocol-wide rule for any field
+/// whose semantics are a set, and it exists to keep implementation-specific
+/// ordering — Rust's `derive(Ord)`, struct declaration order, or sorting by
+/// whichever field seemed natural — out of a hash contract two implementations
+/// must agree on.
+///
+/// Sorting by one field is the trap this replaces, and it is not obviously
+/// wrong: `based_on` sorted by `path` is deterministic and stable. It is still a
+/// different order, because canonical JSON sorts keys, so a basis's bytes begin
+/// with `commit` rather than `path`. Two conforming implementations would then
+/// hash the same rule differently.
+fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
+    let mut keyed: Vec<(String, T)> = Vec::with_capacity(items.len());
+    for item in std::mem::take(items) {
+        let canonical = canonical_bytes(&item, what)?;
+        keyed.push((canonical, item));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in keyed.windows(2) {
+        ensure!(
+            pair[0].0 != pair[1].0,
+            EXIT_SCHEMA,
+            "the same {what} appears twice"
+        );
+    }
+    items.extend(keyed.into_iter().map(|(_, item)| item));
+    Ok(())
+}
+
+/// Freeze what a review of this mutation has to cover.
+///
+/// Fails closed if any applicable rule cannot be fully resolved. An unusable
+/// rule is not a rule that does not apply: admitting under an incomplete set is
+/// the one outcome this mechanism exists to prevent, so the mutation it governs
+/// is blocked until the rule is repaired.
+pub fn bind(
+    root: &Path,
+    domain: Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+) -> Result<ReviewBinding> {
+    // Before anything is resolved or hashed: the two arguments that are
+    // arbitrary caller JSON must be inside what canonical bytes can carry.
+    within_safe_numbers(&mutation, "mutation")?;
+    within_safe_numbers(&precondition, "precondition")?;
+    let mut bound = Vec::new();
+    for rule in applicable(root, domain)? {
+        let mut based_on = Vec::new();
+        for basis in &rule.based_on {
+            based_on.push(basis.resolve(root, &rule.id)?);
+        }
+        // Every set that reaches the hash goes through the one protocol rule.
+        // `Rule::based_on` is kept in path order for reading; the *hashed* order
+        // is this one, because the two answer different questions and only one
+        // of them is a contract.
+        canonical_order(&mut based_on, "basis")?;
+        let mut domains = rule.domains;
+        canonical_order(&mut domains, "domain")?;
+        bound.push(BoundRule {
+            id: rule.id,
+            domains,
+            based_on,
+            review: rule.review,
+            body: rule.body,
+        });
+    }
+    canonical_order(&mut bound, "applicable rule")?;
+    Ok(ReviewBinding {
+        binding: BINDING,
+        version: BINDING_VERSION,
+        domain,
+        mutation,
+        precondition,
+        rules: bound,
+    })
+}
+
+/// Check an attestation against the subject as it stands right now.
+///
+/// Recomputed, never looked up. The hash an agent submits is only meaningful if
+/// the thing it names is recomputed from current state at the moment of
+/// admission — otherwise the interval between review and admission is exactly
+/// where the subject can change.
+///
+/// The rule ids are checked as well as the hash. They are redundant against a
+/// correct implementation, and they are not redundant against a confused one: an
+/// agent that names the wrong set has told us its review covered something else,
+/// and it is better to say so than to accept a hash it may have obtained without
+/// reading what the hash was over.
+pub fn check(
+    root: &Path,
+    domain: Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+    attested: &str,
+    reviewed: &[String],
+) -> Result<()> {
+    let binding = bind(root, domain, mutation, precondition)?;
+    let expected = binding.sha256()?;
+    let ids = binding.rule_ids();
+    let mut named: Vec<String> = reviewed.to_vec();
+    named.sort();
+    named.dedup();
+    ensure!(
+        named == ids,
+        EXIT_INVARIANT,
+        "the review names {}, and what governs this {} mutation is {}",
+        if named.is_empty() {
+            "no rules".to_owned()
+        } else {
+            named.join(", ")
+        },
+        domain.as_str(),
+        ids.join(", ")
+    );
+    ensure!(
+        attested == expected,
+        EXIT_INVARIANT,
+        "this review was of something else: the mutation, its target, a rule, or a rule's material has changed since it was reviewed. Review the current subject and attest to {expected}"
+    );
+    Ok(())
 }

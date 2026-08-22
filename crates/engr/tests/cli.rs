@@ -61,6 +61,26 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+/// Commit with an identity supplied on the command line.
+///
+/// A bare `git commit` reads the committer from global config, which exists on a
+/// developer machine and on some CI images and not on others. Supplying it per
+/// invocation is what the other tests here already do; this is that, named once.
+fn commit_as_test(root: &Path, message: &str) {
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            message,
+        ],
+    );
+}
+
 fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let path = store::object_path(root, id);
     let mut value: Value =
@@ -512,20 +532,24 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         events_before,
         "compatible retained Event history is not rewritten"
     );
-    assert_eq!(
+    assert_ne!(
         std::fs::read(&format_path).expect("format after migration"),
         format_before,
-        "a valid workspace authority is not rewritten"
+        "the workspace authority moves forward, because version 1 no longer denotes what this build writes"
     );
     assert_eq!(
         migrated_object["format"], "engr-object",
         "compatible legacy marker is preserved"
     );
-    assert_eq!(migrated_object["version"], 1);
+    assert_eq!(
+        migrated_object["version"], 1,
+        "the Object's own legacy envelope marker is compatible and is not touched"
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
-        1
+        engr::WORKSPACE_VERSION,
+        "and the workspace authority now names the version this build writes"
     );
 }
 
@@ -4091,4 +4115,198 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("both legacy status"), "{error}");
+}
+
+/// A workspace at an older version is refused, not reinterpreted.
+///
+/// This is the whole reason the Rule review policy moved the workspace version.
+/// The same `.engr/rules/*.md` bytes mean different things under version 1 and
+/// version 2 — a file with no `review:` block now carries an effective ceiling
+/// and an exhaustion action, and an explicit block is an unknown field to the
+/// older build. Two builds must not both accept the workspace and disagree about
+/// what its rules say, so a build that does not write this version refuses it
+/// and says which version it found.
+#[test]
+fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("policy.md"),
+        "---\nid: recording-policy\napplies:\n  domains:\n    - backlog\n---\n\n# Recording policy\n\nSay what changed.\n",
+    )
+    .expect("rule");
+
+    // Exactly what a version 1 workspace looks like: intact, well formed, and
+    // written by a build that had never heard of `review:`.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+
+    let listed = run_engr(root, &["rules", "ls"]);
+    assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
+    let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
+    assert!(
+        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        "the refusal names the version it found and what to do: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).is_empty(),
+        "and nothing about the rule reaches stdout, because it was never read \
+         under this build's semantics"
+    );
+    // A mutation is refused for the same reason, through the same door.
+    let prepared = run_engr(root, &["prepare", "--new", "--text", "not under version 1"]);
+    assert_eq!(prepared.status.code(), Some(engr::EXIT_SCHEMA));
+
+    // And the explicit migration is what makes the newer semantics apply.
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION
+    );
+    let shown = run_engr(root, &["rules", "show", "recording-policy"]);
+    assert!(shown.status.success());
+    let stdout = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(
+        stdout.contains("5 attempts; on_exhaustion = reject"),
+        "after migrating, the same bytes carry the version 2 effective policy: {stdout}"
+    );
+    // This rule governs `backlog` only, where exhaustion neither refuses nor
+    // summons anyone. The line therefore states the policy and not an outcome —
+    // the earlier wording asserted the Object consequence for a rule that can
+    // never have it.
+    assert!(
+        !stdout.contains("refused") && !stdout.contains("human confirms"),
+        "no read surface claims a universal consequence: {stdout}"
+    );
+}
+
+/// Moving the workspace version forward must not break provenance recorded
+/// before it moved.
+///
+/// A reference pins a commit, and that snapshot carries whatever version was
+/// current when it was taken. If the historical decoder insisted on the newest
+/// version, every reference pinned before a migration would stop resolving —
+/// the workspace moving forward would retroactively invalidate provenance that
+/// was correct when it was recorded, which is the opposite of what pinning is
+/// for. Only versions this build actually recognizes are readable; an unknown
+/// one is still refused.
+#[test]
+fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+    let created = prepare(root, &["prepare", "--new", "--text", "pinned wording"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id").to_owned();
+
+    // Commit while the workspace still says version 1, which is what every
+    // commit made before this change looks like.
+    let format_path = store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    commit_as_test(root, "before the migration");
+    let commit = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+
+    run_engr(root, &["migrate"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
+            .expect("json")["version"],
+        engr::WORKSPACE_VERSION,
+        "the workspace really did move"
+    );
+
+    let historical = engr::git::object_at(root, &commit, &id)
+        .expect("a snapshot at a recognized older version is readable");
+    assert_eq!(
+        historical.expect("object present in that snapshot").id,
+        id,
+        "and it decodes to the object that was pinned"
+    );
+
+    // A version nobody here recognizes is still refused, so this is a widening
+    // to what is known rather than the check being dropped.
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+    git(root, &["add", "-A", "."]);
+    commit_as_test(root, "a version from the future");
+    let future = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_owned();
+    let error =
+        engr::git::object_at(root, &future, &id).expect_err("an unknown version is refused");
+    assert!(error.message.contains("99"), "{}", error.message);
+}
+
+/// No read surface promises a consequence the rule's domain does not have.
+///
+/// The sharpest case: a Backlog-only rule asking for `human_confirmation`.
+/// Backlog exhaustion never routes through the Human Gate, so a line reading
+/// "then a human confirms" would be telling a reader the opposite of what will
+/// happen — and it would be the surface, not the code, that they act on.
+///
+/// A rule does not have one consequence. It depends on the domain, and inside
+/// Backlog on whether the mutation destroys unresolved work. So the surfaces
+/// state the effective policy, and the protocol states the consequence per
+/// domain, exactly once.
+#[test]
+fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("staging.md"),
+        "---\nid: staging-policy\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 3\n  on_exhaustion: human_confirmation\n---\n\n# Staging policy\n\nSay what is unresolved.\n",
+    )
+    .expect("rule");
+
+    for args in [vec!["rules", "show", "staging-policy"], vec!["rules", "ls"]] {
+        let output = run_engr(root, &args);
+        assert!(output.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(
+            stdout.contains("3 attempts; on_exhaustion = human_confirmation"),
+            "{args:?} states the effective policy: {stdout}"
+        );
+        assert!(
+            !stdout.contains("human confirms") && !stdout.contains("refused"),
+            "{args:?} must not promise an outcome this domain does not have: {stdout}"
+        );
+    }
+
+    // The machine surface already carried effective values and no prose
+    // consequence; it stays that way.
+    let json = run_engr(root, &["rules", "show", "staging-policy", "--json"]);
+    let document: Value =
+        serde_json::from_slice(&json.stdout).expect("rules show --json is a document");
+    assert_eq!(document["review"]["max_attempts"], 3);
+    assert_eq!(document["review"]["on_exhaustion"], "human_confirmation");
 }

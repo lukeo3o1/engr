@@ -110,6 +110,14 @@ struct Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceFormat {
     LegacyV0,
+    /// A recognized workspace at an older version of the authority.
+    ///
+    /// Distinct from [`Self::LegacyV0`], which predates the authority or still
+    /// spells an Object's lifecycle the old way. This one is well formed and
+    /// says exactly what it is; what it is is not what this build writes. Both
+    /// are read-only until `engr migrate`, and they say different things to
+    /// whoever is reading the error.
+    OlderVersion(u32),
     Current,
 }
 
@@ -178,13 +186,21 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         "{}: not an engr workspace",
         path.display()
     );
-    ensure!(
-        format.version == WORKSPACE_VERSION,
-        EXIT_SCHEMA,
-        "workspace version {} is not supported by engr {}",
-        format.version,
-        crate::IMPLEMENTATION_VERSION
-    );
+    if format.version != WORKSPACE_VERSION {
+        // Recognized-but-older is reported, not refused, because the workspace
+        // is intact and one explicit command moves it forward. Anything else —
+        // a version this build has never heard of, including a newer one — is
+        // refused outright: reading it under this build's rules is precisely
+        // the silent reinterpretation the version exists to prevent.
+        ensure!(
+            crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&format.version),
+            EXIT_SCHEMA,
+            "workspace version {} is not supported by engr {}",
+            format.version,
+            crate::IMPLEMENTATION_VERSION
+        );
+        return Ok(WorkspaceFormat::OlderVersion(format.version));
+    }
     if contains_legacy_objects(root)? {
         return Ok(WorkspaceFormat::LegacyV0);
     }
@@ -245,12 +261,22 @@ fn contains_legacy_objects(root: &Path) -> Result<bool> {
 }
 
 pub fn require_current(root: &Path) -> Result<()> {
-    ensure!(
-        validate_format(root)? == WorkspaceFormat::Current,
-        EXIT_SCHEMA,
-        "legacy v0 workspace is read-only; run `engr migrate` before mutation"
-    );
-    Ok(())
+    // Named rather than lumped together: "legacy v0" is wrong and confusing for
+    // a workspace that states a version perfectly clearly, and the reader's next
+    // question — what is stale about mine — has a different answer in each case.
+    match validate_format(root)? {
+        WorkspaceFormat::Current => Ok(()),
+        WorkspaceFormat::LegacyV0 => Err(Error::new(
+            EXIT_SCHEMA,
+            "legacy v0 workspace is read-only; run `engr migrate` before mutation".to_owned(),
+        )),
+        WorkspaceFormat::OlderVersion(version) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "workspace version {version} is read-only here; this engr writes version {WORKSPACE_VERSION}. Run `engr migrate` before mutation"
+            ),
+        )),
+    }
 }
 
 struct MigrationEntry {
@@ -359,8 +385,9 @@ fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
 }
 
 pub fn migrate(root: &Path) -> Result<()> {
+    let before = validate_format(root)?;
     ensure!(
-        validate_format(root)? == WorkspaceFormat::LegacyV0,
+        before != WorkspaceFormat::Current,
         EXIT_SCHEMA,
         "workspace does not require migration"
     );
@@ -371,7 +398,11 @@ pub fn migrate(root: &Path) -> Result<()> {
         }
     }
     let format_path = engr_dir(root).join("format.json");
-    if !format_path.exists() {
+    // Rewritten when it is absent *or* when it names an older version. A
+    // workspace already at the current version keeps its file byte for byte:
+    // migration exists to move representation, not to touch what is already
+    // right.
+    if !format_path.exists() || matches!(before, WorkspaceFormat::OlderVersion(_)) {
         write_json(
             &format_path,
             &Format {

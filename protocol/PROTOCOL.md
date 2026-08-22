@@ -1449,6 +1449,179 @@ Applicability is domain-only: `object`, `backlog`, `collection`, `work`. What an
 **empty** applicable set means belongs to the domain that owns the mutation, not
 to this layer.
 
+### How many attempts, and what happens after
+
+```yaml
+review:
+  max_attempts: 5                      # optional, positive
+  on_exhaustion: human_confirmation     # optional: reject | human_confirmation
+```
+
+Both fields are optional and both have **effective values**, so every rule
+answers "how many attempts does this get" from the rule alone:
+
+```text
+max_attempts omitted    -> 5
+on_exhaustion omitted   -> reject
+```
+
+There is no unlimited rule in v1. A rule may raise or lower the ceiling, and a
+ceiling of `0` is refused: it is not a tighter limit but a way of spelling "never
+reviewable", which the schema does not offer.
+
+Exhaustion is `attempt > effective max_attempts`, so a ceiling of 5 leaves
+attempts 1 through 5 reviewable and exhausts at 6. The attempt number is
+**agent-attested process metadata**. engr does not count attempts and stores no
+review series; it says what a given count means.
+
+**Attempts are counted from 1, and 0 is not a value.** A number below the first
+attempt is not a quieter way of saying "not yet" — it is outside what the
+protocol defines, and it is refused rather than answered. The failure it prevents
+is the silent one: an evaluator handed 0 would report that nothing is exhausted,
+which reads exactly like a successful policy result.
+
+The scope of that number is **one active review sequence**, and saying so matters
+because it bounds what the ceiling guarantees:
+
+```text
+same sequence          attempt = 1 -> 2 -> 3 -> ...
+sequence abandoned,
+lost, or restarted     a later independent sequence may begin again at 1
+```
+
+So `max_attempts` bounds repeated self-review within one continuous sequence. It
+is **not a rate limit and not a security control**: nothing persists across a
+restart, so cumulative exhaustion is not guaranteed and must not be relied on as
+though it were. v1 adds no persisted review series, retry counter, reset or
+abandonment record, and no pending-review resource — which is the same decision
+seen from the other side, since any of those would be the durable counter this
+is not.
+
+### Unordered sets have one order
+
+Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable
+serialization. Every field whose semantics are a set — a rule's domains, its
+bases, the applicable rule set itself — is canonicalized the same way before it
+is hashed:
+
+```text
+1. JCS each element on its own
+2. sort by the lexicographic order of those canonical bytes
+3. reject canonical-equivalent duplicates
+4. JCS the resulting structure and hash it
+```
+
+A review subject must be inside what those bytes can carry. RFC 8785 requires
+numbers **expressible as IEEE-754 binary64**, so an integer that is not exactly
+a double is refused rather than hashed. This is not pedantry about a standard:
+canonicalization takes numbers through a double, so such an integer does not
+fail — it becomes a different one, and `9007199254740993` and `9007199254740992`
+produce the *same* canonical bytes. Two distinct subjects, one hash, and an
+attestation over either verifying against the other. Values needing more
+precision are carried as strings.
+
+The domain is exact representability, **not** the ±(2^53 − 1) safe-integer
+range: that is a recommendation for ECMAScript interoperability, and RFC 8785's
+own examples include `9007199254740992`. Treating the recommendation as the
+domain refuses numbers the standard accepts.
+
+The canonical *spelling* is the standard's, not the author's. `2^60`
+canonicalizes to `1152921504606847000` — the shortest form that parses back to
+exactly `2^60`. The value is unchanged; only the decimal is. Every accepted
+number is exactly a double, so two accepted subjects that differ still differ
+after canonicalization, which is the property the seal depends on.
+
+Naming a standard is the point: JCS orders object members by **UTF-16** code
+units and fixes number formatting, so a second implementation in another
+language computes the same bytes. A stable serializer gives determinism for one
+implementation, which is a weaker claim wearing the same word — and a review
+hash is exactly where the difference bites, because an attestation is meant to
+be checkable by whoever recomputes it. The orders genuinely differ: `U+1F600`
+precedes `U+E000` under UTF-16 and follows it under UTF-8.
+
+Sorting by whichever field looks natural is the trap this replaces, and it is
+not obviously wrong: bases sorted by `path` are deterministic and stable. They
+are still in a different order, because canonical JSON sorts keys, so a basis's
+bytes begin with `commit` and a pinned basis precedes a floating one whatever
+the paths say. Two implementations, one sorting by path and one by canonical
+bytes, would hash the same rule differently — and a hash contract that two
+conforming implementations disagree about is not a contract.
+
+The order a surface *shows* is a separate question with a separate answer: bases
+are listed by path because that is what a reader is looking for, and the
+applicable set is reported by id because an agent must be able to name the set
+without first reproducing the hash.
+
+The **effective** values are what participate in review identity — not whether
+the YAML happened to spell a default out. These two are one rule, and a binding
+over either produces the same hash:
+
+```yaml
+review:                          review:
+  on_exhaustion: human_confirmation      max_attempts: 5
+                                         on_exhaustion: human_confirmation
+```
+
+That equality is the point. An author tidying their front matter must not
+silently invalidate every attestation made against the rule, and two rules that
+mean the same thing must not hash differently because one author was explicit.
+The policy is nonetheless *in* the identity, because it decides the outcome: the
+same wording under a ceiling of 5 and under a ceiling of 1 is not the same
+review, and one that escalates to a person is not one that refuses.
+
+One prepared mutation carries **one scalar attempt**, compared independently
+against each applicable rule's own ceiling. There is no per-rule counter and
+engr keeps no attempt state:
+
+```text
+prepare(exact mutation, attempt=N)
+
+  rule A max_attempts=5, attempt=3  ->  reviewable
+  rule B max_attempts=2, attempt=3  ->  exhausted
+```
+
+Which rules are past their ceiling is a mechanical fact and the same everywhere.
+**What that means is the domain's, and the domains deliberately disagree.**
+
+For an **Object**, an exhausted applicable rule stops the autonomous path. If at
+least one *actually exhausted* rule asks for `human_confirmation` the mutation
+escalates to the Human Gate, and otherwise it is refused. Escalation outranks
+refusal among exhausted rules, because a rule naming a human is asking for a
+decision rather than for the attempt to be discarded — and a human can still
+decide to refuse. A rule that asks for a human but is not exhausted escalates
+nothing: the action describes what happens at the ceiling, not a standing
+property.
+
+For the **Backlog**, exhaustion does **not** escalate and does not block, whatever
+any exhausted rule's `on_exhaustion` says. The domain exists to hold unresolved
+engineering intent, so the mutation is admitted and marked:
+
+```json
+"rule_review": { "attempts": 6, "limit": 2 }
+```
+
+`attempts` is the mutation-level attempt supplied; `limit` is the smallest
+effective ceiling in the applicable set — the one that made this exhausted, since
+a shared attempt passes the smallest ceiling first. It is a compact diagnostic,
+not a review history: per-rule ids and limits are not recorded, because the
+complete applicable set already lives in the review binding. A later successful
+revision clears the marker; a later exhausted admission replaces it.
+
+That soft-admission covers mutations that **preserve** unresolved information.
+Consuming a Backlog Section is destructive, so it requires a review that actually
+passed: an exhausted consume does not happen and the Section stays as it was.
+
+**Collection and Work have no exhaustion behaviour in v1.** It is refused rather
+than borrowed from another domain, because a composition that answers for a
+domain nobody has decided is an invented rule that looks settled at the call
+site.
+
+Because the workspace version governs how a rule is read, **every path that
+reads rule semantics enforces that version** — not only the commands. A workspace
+at an older version is refused identically whether it is reached through the CLI
+or through the library, so persisted meaning never depends on which door a caller
+came through.
+
 ### What a rule rests on
 
 ```yaml
@@ -1519,14 +1692,45 @@ validates.
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
-workspace. New resource files do not repeat those fields. Phase 0 workspaces
-already carrying version 1 are still recognized as transitional while any
-Object uses `status`; workspaces without the authority may also be recognized
-from their legacy resource markers. Either form remains read-only until
-`engr migrate` is explicitly run. Migration changes only incompatible
-representation (`Object.status` to `Object.state`) and preserves compatible
-legacy markers and confirmed Event envelopes. Unknown or newer workspace
-versions are never mutated.
+workspace, and this build writes **version 2**. New resource files do not repeat
+those fields. Workspaces at version 1 are recognized and migratable; workspaces
+without the authority may also be recognized from their legacy resource markers;
+a Phase 0 workspace is transitional while any Object uses `status`. Every one of
+those forms remains read-only until `engr migrate` is explicitly run, and each
+says which of them it is rather than being reported as one thing. Migration
+changes only incompatible representation (`Object.status` to `Object.state`),
+moves the authority to the current version, and preserves compatible legacy
+markers and confirmed Event envelopes. Unknown or newer workspace versions are
+never mutated and never read.
+
+### What the workspace version is for
+
+It governs how **persisted data is interpreted**, including data whose bytes do
+not change. Version 2 exists because a project Rule gained `review.max_attempts`
+and `review.on_exhaustion` *with effective defaults*: an unchanged rule file with
+no `review:` block means one thing to a version 2 build and another to a version
+1 build, and an explicit block is an unknown field to the older one. Two builds
+accepting one workspace and disagreeing about what its policy says is the failure
+this authority exists to prevent, so a build that does not know a version refuses
+the workspace instead of reading it under its own rules.
+
+This is distinct from the review binding's own version, which identifies the
+deterministic binding contract and changes when *that* contract changes. A Rule
+does **not** carry a schema version of its own; the workspace answers for it.
+
+A prepared Rule Review attestation does not survive a migration that changes Rule
+interpretation. It named a subject computed under the old semantics, so it is
+stale by definition and must be prepared again.
+
+A **historical** snapshot carries the version that was current when it was taken,
+and is readable at any version this build recognizes. Refusing an older snapshot
+would make every reference pinned before a migration unresolvable — moving the
+workspace forward would retroactively break provenance that was correct when it
+was recorded. This is safe only while the recognized versions represent the
+resource identically, which is true of 1 and 2: version 2 changes how a Rule is
+read, and no Rule is read out of a historical snapshot. A future version that
+changes a resource representation must decode a snapshot under the snapshot's own
+version rather than widening that check again.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain
