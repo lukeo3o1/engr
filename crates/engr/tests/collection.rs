@@ -8,6 +8,7 @@
 //! membership rather than the target, completing a plan proves nothing about
 //! what is in it, and a consumed member is shown rather than quietly repointed.
 
+use engr::backlog::Prepared;
 use engr::collection::{self, Level, Priority, Schedule, State};
 use engr::model::{Action, Content, Object, Payload};
 use engr::{backlog, gate, ops, store};
@@ -387,6 +388,7 @@ fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
         "refresh strategy",
         "offline may invalidate it",
         Vec::new(),
+        &Prepared::first(),
     )
     .expect("backlog");
     let plan = plan(&root, "with a backlog member");
@@ -394,7 +396,7 @@ fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
     collection::add_member(&root, &plan.id, &target, Some(10), None).expect("add");
 
     // The point is settled and removed from staging.
-    backlog::delete_item(&root, &item.id).expect("consume");
+    backlog::consume_section(&root, &item.id, 1, &Prepared::first()).expect("consume");
     assert!(backlog::load(&root, &item.id).is_err());
 
     // The plan still says what it said. Nothing was rewritten.
@@ -611,7 +613,14 @@ fn a_stored_collection_name_carries_no_surrounding_whitespace() {
 #[test]
 fn a_target_consumed_before_the_membership_is_written_is_not_admitted() {
     let (_dir, root) = workspace();
-    let item = backlog::create(&root, "still staging", "for now", Vec::new()).expect("backlog");
+    let item = backlog::create(
+        &root,
+        "still staging",
+        "for now",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("backlog");
     let plan = plan(&root, "racing a consumer");
     let target = backlog_ref(&item.id);
     let path = backlog::item_path(&root, &item.id);

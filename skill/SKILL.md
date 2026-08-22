@@ -244,14 +244,52 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
-engr backlog rm <id> --section 2          # removing it is what says "settled"
+engr backlog merge <id> --into 2 --sections 5 --text "one point after all"
+engr backlog produced <id> --section 2 --target engr:obj:<id>:3
+engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
+
+`merge` keeps the destination you name and removes the sources; it never mints a
+third section, so anything already pointing at `--into` still points at it. What
+the sources produced comes along.
+
+When a project rule governs backlog, read before you write and say what you
+read:
+
+```bash
+engr backlog show <id> --format json    # each point carries an `expect` value
+```
+
+Pass it back as `--expect <token>` on the mutation — once per point, so a merge
+passes two. If it no longer matches, the point moved between your reading it and
+your changing it, and you get told to read it again rather than landing a change
+on wording you never saw. Without a rule there is no review to anchor and
+`--expect` is optional, but it is still honoured if you give it.
+
+Every one of these takes `--attempt <n>` when a project rule governs backlog —
+which try of your own review this is, counted from 1, and 1 if you say nothing.
+Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so
+say the real number: the point is kept either way, and an honest one tells the
+next reader what it went in on. **Consume, merge and rename are the
+exceptions**, and past the ceiling they simply do not happen. Consume and merge
+remove a point; rename has nowhere to put the marker, and an exhausted change
+that leaves no trace is the one thing the marker exists to prevent. Revise it,
+or raise the ceiling.
 
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can
 assert, propose it through the gate like anything else — the wording a human
 confirms is usually not the wording you staged.
+
+**Admitting the Object does not touch the point it came from.** They are two
+separate operations, and the second is yours to remember: once the record has
+the outcome, either record it against the point with `backlog produced`, or
+consume the point if it is settled. engr will not infer the link, because an
+inferred one would eventually consume something nobody meant to resolve.
+
+Recording an outcome does **not** resolve anything — a point can produce several
+outcomes across sessions and still have work left. Only consuming says settled.
 
 Two rules keep it honest:
 
