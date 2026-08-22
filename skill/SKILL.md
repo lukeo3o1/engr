@@ -253,6 +253,19 @@ engr backlog consume <id> --section 2     # consuming it is what says "settled"
 third section, so anything already pointing at `--into` still points at it. What
 the sources produced comes along.
 
+When a project rule governs backlog, read before you write and say what you
+read:
+
+```bash
+engr backlog show <id> --format json    # each point carries an `expect` value
+```
+
+Pass it back as `--expect <token>` on the mutation — once per point, so a merge
+passes two. If it no longer matches, the point moved between your reading it and
+your changing it, and you get told to read it again rather than landing a change
+on wording you never saw. Without a rule there is no review to anchor and
+`--expect` is optional, but it is still honoured if you give it.
+
 Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
 Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so

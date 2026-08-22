@@ -870,6 +870,12 @@ struct JsonBacklogSection<'a> {
     /// refuses outright. A machine-readable contract that only permissive
     /// readers can read is not one.
     reference: String,
+    /// What to hand back to `--expect` when changing or consuming this point.
+    ///
+    /// The predecessor an agent read, in a form a command line can carry. It
+    /// covers the whole Section and the parent topic, so anything either of them
+    /// does between reading and applying changes it.
+    expect: String,
     #[serde(flatten)]
     section: &'a backlog::Section,
 }
@@ -885,7 +891,20 @@ struct JsonBacklogItem<'a> {
     authority: &'static str,
     next_section_id: u64,
     updated_at: &'a str,
+    /// The two item-level predecessors, for the two mutations that do not name
+    /// an existing point: renaming the topic, and adding a point.
+    ///
+    /// Separate values because they bind different things. A rename rests on the
+    /// complete item, so any point moving stales it; an add rests only on the
+    /// topic and the id it will receive, so a sibling being reworded does not.
+    expect: JsonBacklogExpect,
     sections: Vec<JsonBacklogSection<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonBacklogExpect {
+    rename: String,
+    add: String,
 }
 
 pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
@@ -898,14 +917,21 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
         authority: "unconfirmed_staging",
         next_section_id: item.next_section_id,
         updated_at: item.updated_at(),
+        expect: JsonBacklogExpect {
+            rename: backlog::Precondition::of_item(item).token()?,
+            add: backlog::Precondition::of_add(item).token()?,
+        },
         sections: item
             .sections
             .iter()
-            .map(|section| JsonBacklogSection {
-                reference: format!("{}:{}", backlog_reference(&item.id), section.id),
-                section,
+            .map(|section| {
+                Ok(JsonBacklogSection {
+                    reference: format!("{}:{}", backlog_reference(&item.id), section.id),
+                    expect: backlog::Precondition::of_section(item, section.id)?.token()?,
+                    section,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     })
     .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }

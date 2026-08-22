@@ -783,8 +783,31 @@ impl Precondition {
 
     /// Read the current predecessor for a topic change.
     pub fn topic(root: &Path, item: &str) -> Result<Self> {
-        Ok(Self::Item {
-            item: load(root, item)?,
+        Ok(Self::of_item(&load(root, item)?))
+    }
+
+    /// The same three predecessors, from an item already in hand.
+    ///
+    /// The read surface has to print the exact values the mutations will
+    /// compare against, and re-reading the file to do it would let the two
+    /// disagree about a state neither of them saw.
+    pub fn of_item(item: &Item) -> Self {
+        Self::Item { item: item.clone() }
+    }
+
+    pub fn of_add(item: &Item) -> Self {
+        Self::SectionAbsent {
+            item: item.id.clone(),
+            topic: item.topic.clone(),
+            section: item.next_section_id,
+        }
+    }
+
+    pub fn of_section(item: &Item, section: u64) -> Result<Self> {
+        Ok(Self::Section {
+            item: item.id.clone(),
+            topic: item.topic.clone(),
+            section: item.section(section)?.clone(),
         })
     }
 
@@ -794,22 +817,12 @@ impl Precondition {
     /// that takes it stales this one — two adds must not each believe they are
     /// creating the same point.
     pub fn section_absent(root: &Path, item: &str) -> Result<Self> {
-        let loaded = load(root, item)?;
-        Ok(Self::SectionAbsent {
-            item: loaded.id.clone(),
-            topic: loaded.topic.clone(),
-            section: loaded.next_section_id,
-        })
+        Ok(Self::of_add(&load(root, item)?))
     }
 
     /// Read the current predecessor for changing or consuming one Section.
     pub fn section(root: &Path, item: &str, section: u64) -> Result<Self> {
-        let loaded = load(root, item)?;
-        Ok(Self::Section {
-            item: loaded.id.clone(),
-            topic: loaded.topic.clone(),
-            section: loaded.section(section)?.clone(),
-        })
+        Self::of_section(&load(root, item)?, section)
     }
 
     /// Read the current predecessor for a merge over several Sections.
@@ -825,6 +838,78 @@ impl Precondition {
             topic: loaded.topic.clone(),
             sections: bound,
         })
+    }
+
+    /// Fold the predecessors a merge names into the one it binds.
+    ///
+    /// A merge is a single judgement about several points, so it binds them
+    /// together: if any of them moved, the judgement was about something else.
+    /// They arrive separately because a caller reads them separately — one token
+    /// per point, from the line describing that point.
+    pub fn combine(mut bound: Vec<Self>) -> Result<Self> {
+        ensure!(
+            !bound.is_empty(),
+            EXIT_INVARIANT,
+            "a mutation binds at least one predecessor"
+        );
+        if bound.len() == 1 {
+            return Ok(bound.remove(0));
+        }
+        let mut item = None;
+        let mut topic = None;
+        let mut sections = Vec::new();
+        for one in bound {
+            let Self::Section {
+                item: owner,
+                topic: context,
+                section,
+            } = one
+            else {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    "only unresolved points combine into one predecessor".to_owned(),
+                ));
+            };
+            // A merge is within one item by construction; two owners means the
+            // caller read points that were never siblings.
+            if let Some(first) = &item {
+                ensure!(
+                    first == &owner && topic.as_ref() == Some(&context),
+                    EXIT_INVARIANT,
+                    "these points do not belong to the same topic"
+                );
+            }
+            item = Some(owner);
+            topic = Some(context);
+            sections.push(section);
+        }
+        sections.sort_by_key(|section| section.id);
+        Ok(Self::Merge {
+            item: item.expect("checked non-empty"),
+            topic: topic.expect("checked non-empty"),
+            sections,
+        })
+    }
+
+    /// A short stand-in for this predecessor, for a caller that cannot hold the
+    /// whole thing.
+    ///
+    /// A command line cannot carry a complete Section, so an agent that read one
+    /// needs some way to say *which* state it read. This is that: engr prints it
+    /// beside what it describes, and takes it back on the mutation.
+    ///
+    /// **Not a fingerprint, and never persisted.** §8 removed
+    /// `canonical(text, subjects[])` as a protocol concept and allows an
+    /// implementation to compare a predecessor internally by hash; this is that
+    /// allowance and nothing more. Nothing stores it, no field records it, and
+    /// its spelling is engr's own business — the authority is still the whole
+    /// predecessor, compared under the lock.
+    pub fn token(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(canonical_json(self)?.as_bytes())
+        ))
     }
 
     /// The item this precondition is about.

@@ -1001,6 +1001,21 @@ signal that fires on unrelated work stops being read.
 An implementation MAY compare a hash internally. There is **no** protocol-level
 persisted Backlog fingerprint, and no field records one.
 
+That allowance is what makes the model reachable from a command line, which it
+otherwise would not be: an agent cannot hand back a complete Section as an
+argument. So a read surface MAY print a short stand-in for each predecessor and
+a mutation MAY take it back, as long as nothing persists it and the authority
+remains the whole predecessor compared at apply time.
+
+Carrying it is not optional decoration. Review happens before the mutation runs,
+so a command that reads and writes under one lock still leaves the entire
+interval between reviewing and running unguarded — a concurrent edit in that gap
+lands underneath a mutation nobody reviewed against it, and every check inside
+the lock passes, because they compare against what the command itself read
+rather than against what the agent read. **Where a Rule Review was required, the
+mutation MUST carry the predecessor it was reviewed against.** Where no rule
+applies there was no review to anchor, and a predecessor MAY be omitted.
+
 Staleness is its own outcome, not a failed mutation and not corrupt data: the
 caller did nothing wrong and the world moved underneath it. The refusal MUST say
 which part moved, so the retry is intelligent rather than reflexive.
