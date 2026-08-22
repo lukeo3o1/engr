@@ -28,12 +28,17 @@ pub struct Candidate {
 }
 
 /// Everything prepared beside the mutation itself: what the human will be
-/// shown, and what a successful confirmation will reconcile in Backlog.
+/// shown when they are asked to confirm it.
+///
+/// Backlog is deliberately not here any more. Admission and Backlog bookkeeping
+/// are two independent operations, so confirming an Object reaches into staging
+/// for nothing — which also means a candidate outstanding across that change
+/// names an integrity value this build cannot reproduce, and is refused rather
+/// than read as though its prepared context were the current one.
 ///
 /// None of it belongs in `payload_sha256` — that value travels into the
-/// confirmed Event and identifies the mutation, and Backlog must not become
-/// part of the authoritative record. All of it belongs in `integrity_sha256`,
-/// because all of it changes what happens at confirm.
+/// confirmed Event and identifies the mutation. All of it belongs in
+/// `integrity_sha256`, because all of it changes what happens at confirm.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PreparedContext {
     /// What the human is shown when the candidate carries a change to existing

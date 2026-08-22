@@ -1806,3 +1806,42 @@ fn there_is_no_attempt_zero() {
     let error = engr::rules::Attempt::new(0).expect_err("no such attempt");
     assert_eq!(error.code, engr::EXIT_USAGE);
 }
+
+/// An add binds the identity slot it will receive, not merely that the slot
+/// looks free.
+///
+/// Absence is not the same question. Another writer can take the reserved id and
+/// then consume it: the id reads as absent again, while the counter has moved on
+/// permanently and this add would now receive a different one. A precondition
+/// that only asks "is it absent" says yes to that, and the add lands on an
+/// identity nobody reviewed — under a number other subjects may already be
+/// pointing at from the first allocation.
+#[test]
+fn an_add_binds_the_identity_it_will_receive_not_merely_a_free_looking_slot() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    let bound = backlog::Precondition::section_absent(&root, &id).expect("observe");
+    bound
+        .still_holds(&root)
+        .expect("§2 is still what this add would take");
+
+    // Somebody else takes §2 and then judges it resolved. §2 is absent again.
+    backlog::add_section(
+        &root,
+        &id,
+        "someone else got there",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("race");
+    assert!(!backlog::consume_section(&root, &id, 2, &Prepared::first()).expect("consume"));
+    assert!(
+        backlog::load(&root, &id).expect("load").section(2).is_err(),
+        "the id is absent, which is exactly what makes this the interesting case"
+    );
+
+    let error = bound
+        .still_holds(&root)
+        .expect_err("the reserved slot is gone for good, absent or not");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}

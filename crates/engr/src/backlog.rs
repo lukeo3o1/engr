@@ -844,8 +844,15 @@ impl Precondition {
                 if &current.topic != topic {
                     return stale("the topic");
                 }
-                if current.section(*section).is_ok() {
-                    return stale("that section id");
+                // The allocation state, not merely whether the id looks free.
+                // Absence alone says yes to a slot that was taken and then
+                // consumed: the id reads free again while the counter has moved
+                // on permanently, so the add would receive a different identity
+                // than the one reviewed — under a number earlier subjects may
+                // already be aimed at. Comparing the counter asks the question
+                // that was actually reserved.
+                if current.next_section_id != *section {
+                    return stale("the section id this would take");
                 }
                 Ok(())
             }

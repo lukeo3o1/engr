@@ -1457,3 +1457,64 @@ fn a_live_challenge_code_is_kept_out_of_git() {
     assert!(!ignored(&root, &format!(".engr/objects/{id}.json")));
     assert!(!ignored(&root, &format!(".engr/events/{id}.jsonl")));
 }
+
+/// A candidate prepared before Backlog left the gate cannot be admitted.
+///
+/// Admission and Backlog bookkeeping became two operations, and the declared
+/// Backlog material left `PreparedContext` — which the candidate's integrity
+/// hash covered. So a candidate that was outstanding across that change names an
+/// integrity value the current build cannot reproduce.
+///
+/// What matters is which way it fails. Unknown fields are ignored on read, so
+/// the danger would be recomputing a hash that happens to match and admitting a
+/// candidate whose prepared context is not the one being checked. It does not:
+/// the stored value was taken over the wider context and no longer agrees, so
+/// the candidate is refused, told to be prepared again, and never rendered as
+/// though it were current.
+#[test]
+fn a_candidate_that_still_declares_backlog_material_is_refused_not_reinterpreted() {
+    let (_dir, root) = workspace();
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::ObjectCreated, &engr::model::new_id(), "a record"),
+    )
+    .expect("prepare");
+    let challenge = prepared.candidate.gate.challenge.clone();
+    let path = store::candidate_path(&root, &challenge).expect("path");
+
+    // Reconstruct what the earlier build wrote: the same candidate, with the
+    // declared Backlog material still in its prepared context, and an integrity
+    // value taken over that wider context.
+    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+    let mut context = serde_json::to_value(&prepared.candidate.context).expect("context");
+    let backlog = serde_json::json!([{ "item": "0195", "section": 1 }]);
+    context
+        .as_object_mut()
+        .expect("object")
+        .insert("backlog".to_owned(), backlog.clone());
+    let older = engr::confirmation::integrity(
+        &challenge,
+        &prepared.candidate.gate.payload_sha256,
+        &prepared.candidate.gate.binding,
+        &context,
+    )
+    .expect("integrity as the earlier build computed it");
+    let object = stored.as_object_mut().expect("object");
+    object.insert("backlog".to_owned(), backlog);
+    object.insert("integrity_sha256".to_owned(), serde_json::json!(older));
+    store::write_json(&path, &stored).expect("rewrite as the earlier build");
+
+    let error = gate::find(&root, &challenge).expect_err("prepared under a different contract");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("prepare it again"),
+        "the refusal says what to do about it: {}",
+        error.message
+    );
+
+    // And it is refused wherever a candidate is loaded, not only at confirm —
+    // rendering it would present a prepared context nobody can check.
+    assert!(gate::pending(&root).is_err() || gate::pending(&root).expect("pending").is_empty());
+    let response = format!("CONFIRM {challenge}");
+    assert!(gate::confirm(&root, &response).is_err());
+}
