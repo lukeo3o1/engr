@@ -181,6 +181,18 @@ enum Backlog {
         #[command(flatten)]
         subjects: SubjectArgs,
     },
+    /// Record durable knowledge this point produced. Does not resolve it
+    Produced {
+        item: String,
+        #[arg(long)]
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        /// Take the outcome back off: the bookkeeping was wrong, not the record
+        #[arg(long)]
+        forget: bool,
+    },
     /// Consume a resolved point. The topic goes when its last one does
     Consume {
         item: String,
@@ -816,6 +828,29 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 subjects.build(root)?,
             )?;
             println!("merged into §{section}");
+            Ok(())
+        }
+        Backlog::Produced {
+            item,
+            section,
+            target,
+            forget,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let outcome = backlog::Produced::object(
+                backlog::EngrTarget::new(target.clone()).reference.clone(),
+            );
+            if forget {
+                if backlog::forget_produced(root, &id, section, &outcome)? {
+                    println!("§{section} no longer records that outcome");
+                } else {
+                    println!("§{section} was not recording that outcome");
+                }
+            } else if backlog::record_produced(root, &id, section, outcome)? {
+                println!("§{section} produced {target}; still unresolved");
+            } else {
+                println!("§{section} already recorded that outcome");
+            }
             Ok(())
         }
         Backlog::Consume { item, section } => {

@@ -790,6 +790,90 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
     })
 }
 
+/// Record that working on this point produced durable knowledge.
+///
+/// **The second of two independent operations.** Admitting the Object does not
+/// reach in here, so an agent that produced something records it afterwards, as
+/// an ordinary staging edit. Forgetting leaves the bookkeeping stale and the
+/// admitted record perfectly valid — which is the trade #8 chose over an
+/// inferred link that would eventually consume a point nobody meant to resolve.
+///
+/// Existence is checked **here and only here**, and only in this direction. A
+/// target must exist to be claimed; afterwards it may be superseded, deleted or
+/// absorbed by a merge, and the entry becomes an unavailable historical pointer
+/// rather than corruption. It is never a reverse constraint: no Object operation
+/// consults `produced[]`, and nothing retargets an entry to a replacement,
+/// because that would rewrite what was actually produced.
+pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -> Result<bool> {
+    outcome.validate()?;
+    let (object, target_section) = outcome.target()?;
+    let projected = crate::ops::effective(root, &object).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "produced outcome names object {}, which does not exist: {}",
+                short(&object),
+                error.message
+            ),
+        )
+    })?;
+    if let Some(target_section) = target_section {
+        projected.section(target_section).map_err(|_| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "produced outcome names {} §{target_section}, which does not exist",
+                    short(&object)
+                ),
+            )
+        })?;
+    }
+    edit(root, id, |item| {
+        item.section(section)?;
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|candidate| candidate.id == section)
+            .expect("section presence checked above");
+        // A set: claiming the same outcome twice carries no more than claiming
+        // it once, so a repeated call is not an error and not a duplicate.
+        if slot.produced.contains(&outcome) {
+            return Ok(false);
+        }
+        slot.produced.push(outcome.clone());
+        // Bookkeeping *is* activity on the unresolved work, even though the
+        // wording did not move: `updated_at` means last meaningful activity, and
+        // learning what a point produced is meaningful to whoever picks it up.
+        slot.updated_at = now();
+        Ok(true)
+    })
+}
+
+/// Take an outcome back off a point.
+///
+/// Mutable bookkeeping, not append-only history: an entry recorded in error is
+/// corrected here. What it corrects is the *relationship* — that this point
+/// produced that outcome — and never the target, which is why removal asks
+/// nothing about whether the target still resolves. Requiring it to would make
+/// a mistaken entry uncorrectable exactly when the target has gone.
+pub fn forget_produced(root: &Path, id: &str, section: u64, outcome: &Produced) -> Result<bool> {
+    edit(root, id, |item| {
+        item.section(section)?;
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|candidate| candidate.id == section)
+            .expect("section presence checked above");
+        let before = slot.produced.len();
+        slot.produced.retain(|entry| entry != outcome);
+        let removed = slot.produced.len() != before;
+        if removed {
+            slot.updated_at = now();
+        }
+        Ok(removed)
+    })
+}
+
 /// Consolidate unresolved points into one, taking a new id.
 ///
 /// The absorbed Sections' `produced[]` carry forward, deduplicated. Dropping

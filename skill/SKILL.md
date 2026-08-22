@@ -244,6 +244,7 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
+engr backlog produced <id> --section 2 --target engr:obj:<id>:3
 engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
 
@@ -254,10 +255,13 @@ assert, propose it through the gate like anything else — the wording a human
 confirms is usually not the wording you staged.
 
 **Admitting the Object does not touch the point it came from.** They are two
-separate operations, and the second one is yours to remember: after the record
-gains the outcome, either record it on the point with `produced` or consume the
-point if it is settled. engr will not infer the link, because an inferred one
-would eventually consume something nobody meant to resolve.
+separate operations, and the second is yours to remember: once the record has
+the outcome, either record it against the point with `backlog produced`, or
+consume the point if it is settled. engr will not infer the link, because an
+inferred one would eventually consume something nobody meant to resolve.
+
+Recording an outcome does **not** resolve anything — a point can produce several
+outcomes across sessions and still have work left. Only consuming says settled.
 
 Two rules keep it honest:
 

@@ -993,3 +993,98 @@ fn the_dirty_marker_is_not_part_of_subject_identity() {
         "the same target re-observed is not activity"
     );
 }
+
+/// `produced[]` is the second of two independent operations.
+///
+/// Admitting an Object no longer reaches into staging, so recording what a point
+/// produced is an ordinary Backlog edit the agent performs afterwards. That is
+/// the trade #8 chose: forgetting leaves the bookkeeping stale and the admitted
+/// record perfectly valid, where an inferred link would eventually consume a
+/// point nobody meant to resolve.
+#[test]
+fn recording_an_outcome_is_a_separate_operation_from_admitting_it() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "the decision that came out of it");
+    let id = item(&root, "topic", "unresolved");
+
+    // Admission alone records nothing here.
+    assert!(
+        backlog::load(&root, &id).expect("load").sections[0]
+            .produced
+            .is_empty(),
+        "confirming an Object does not touch staging"
+    );
+
+    let outcome = Produced::object(format!("obj:{}", compact(&object)));
+    assert!(backlog::record_produced(&root, &id, 1, outcome.clone()).expect("record"));
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").sections[0].produced,
+        vec![outcome.clone()]
+    );
+
+    // A set: claiming the same outcome twice is not an error and not a
+    // duplicate, so a retried command is harmless.
+    assert!(!backlog::record_produced(&root, &id, 1, outcome.clone()).expect("again"));
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").sections[0]
+            .produced
+            .len(),
+        1
+    );
+
+    // And it is not a resolution signal: the point is still there.
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").sections.len(),
+        1,
+        "an outcome does not settle the point that produced it"
+    );
+
+    // Mutable bookkeeping, so a mistaken entry is correctable.
+    assert!(backlog::forget_produced(&root, &id, 1, &outcome).expect("forget"));
+    assert!(!backlog::forget_produced(&root, &id, 1, &outcome).expect("idempotent"));
+    assert!(backlog::load(&root, &id).expect("load").sections[0]
+        .produced
+        .is_empty());
+}
+
+/// Existence is checked when the claim is made, and in that direction only.
+///
+/// A target must exist to be claimed — otherwise `produced[]` would record
+/// outcomes that never happened. Afterwards the entry is history: the target may
+/// be superseded, deleted or absorbed, and the entry becomes an unavailable
+/// historical pointer rather than corruption. It never constrains the Object
+/// domain, and it is never retargeted to a replacement, because that would
+/// rewrite what was actually produced.
+#[test]
+fn a_produced_target_is_checked_at_the_claim_and_never_again() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "an outcome");
+    let id = item(&root, "topic", "unresolved");
+
+    // Forward: a target that does not exist cannot be claimed.
+    let missing = Produced::object(format!("obj:{}", compact(&engr::model::new_id())));
+    let error = backlog::record_produced(&root, &id, 1, missing).expect_err("no such object");
+    assert!(
+        error.message.contains("does not exist"),
+        "{}",
+        error.message
+    );
+
+    // Nor a section the object does not have.
+    let no_section = Produced::object(format!("obj:{}:9", compact(&object)));
+    backlog::record_produced(&root, &id, 1, no_section).expect_err("no such section");
+
+    // A real one is accepted, then the staging around it survives the target
+    // going away — loading must not depend on a recorded outcome still
+    // resolving.
+    let outcome = Produced::object(format!("obj:{}", compact(&object)));
+    backlog::record_produced(&root, &id, 1, outcome.clone()).expect("record");
+    std::fs::remove_file(engr::store::object_path(&root, &object)).expect("delete the object");
+    std::fs::remove_file(engr::store::events_path(&root, &object)).expect("delete its events");
+    let loaded = backlog::load(&root, &id).expect("staging still loads");
+    assert_eq!(loaded.sections[0].produced, vec![outcome.clone()]);
+
+    // And the bookkeeping is still correctable with the target gone, which is
+    // exactly when a mistaken entry is hardest to live with.
+    assert!(backlog::forget_produced(&root, &id, 1, &outcome).expect("forget"));
+}
