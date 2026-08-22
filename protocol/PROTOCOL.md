@@ -1497,6 +1497,71 @@ abandonment record, and no pending-review resource — which is the same decisio
 seen from the other side, since any of those would be the durable counter this
 is not.
 
+### A long-lived proof carries its own contract version
+
+A digest that must still be checkable years later is persisted as a **versioned
+scalar**:
+
+```text
+<contract-version>:<digest>          1:<64 lowercase hex>
+```
+
+The version travels with the value because a bare digest says what it is worth
+and not which calculation produced it. Both ways of guessing later are silent:
+verify it under current rules and a mismatch looks like tampering, or relabel it
+and claim a guarantee nobody made. A stored value may be relabelled under a newer
+contract **only** if the calculation is exactly equivalent.
+
+The scalar grammar is shared and owns only syntax:
+
+```text
+version := [1-9][0-9]*        positive uint32, 1..4294967295
+                              0 is permanently reserved and never means
+                              "legacy" or "unversioned"
+digest  := lowercase hex      uppercase is invalid, never silently normalized
+                              length is not fixed here
+```
+
+Contract versions are **field-local**. `ReviewDigestContract 1` and
+`CandidateDigestContract 1` are unrelated contracts that share a number, and each
+validates its own digest length — which is what lets one change hash algorithm
+without touching the grammar or the others. Versions need not be contiguous.
+
+**A number is never redefined, and that is not the same as a support promise.**
+Changing what a version calculates always takes a new version, even while the
+contract is experimental — otherwise one number would mean two things and no
+stored value could be read with confidence. What a *stable* declaration adds is
+the obligation to keep verifying: an experimental contract may be retired and its
+verifier dropped, while a version explicitly declared stable for durable use, and
+emitted under that status, must stay interpretable by later implementations.
+
+Development or pre-release emission alone does not cross that boundary. Stability
+is release policy and is deliberately **not** encoded in the scalar — a stability
+bit in the persisted value would make the guarantee a property of the data rather
+than of the release that made it.
+
+Where such a scalar takes part in canonical ordering it is compared as the parsed
+pair `(version, digest)`, not as text, because `2:` precedes `10:` and string
+order gets that backwards.
+
+**Supported is two questions, not one.** A contract may still verify values
+written under it long after it has stopped being what new values are written
+under; exactly one version per family emits at a time. So a well-formed scalar
+naming a version this build does not know is **not malformed data** — it is
+readable data this build cannot check, and it is reported that way. Only a
+grammar violation is malformed.
+
+**Verification recomputes under the version the value names**, not under the
+current one. That is the difference between carrying a version and using one: a
+build that only asks "is version 1 still supported" will accept a `1:` value and
+then compare it against a recomputation under version 2 — and those disagree by
+construction, because two calculations that agreed would not have needed two
+versions. The valid historical proof is then reported as a changed subject, and
+the guarantee exists only in the support table. A version listed as verifiable
+that this build cannot actually compute is refused rather than served the
+current calculation, since being promised in the contract is not evidence that
+an implementation has it.
+
 ### Unordered sets have one order
 
 Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable

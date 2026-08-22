@@ -986,7 +986,22 @@ impl ReviewBinding {
 }
 
 impl ReviewBinding {
-    /// SHA-256 over the **RFC 8785 (JCS)** bytes of this binding.
+    /// The review proof: SHA-256 over the **RFC 8785 (JCS)** bytes of this
+    /// binding, carried as `ReviewDigestContract` `<version>:<digest>`.
+    ///
+    /// The version travels with the value because this is a long-lived proof. A
+    /// bare digest tells a later reader what it is worth and not which
+    /// calculation produced it, and both ways of guessing are silent: verify it
+    /// under today's rules and a mismatch looks like tampering, or relabel it
+    /// and claim a guarantee nobody made.
+    ///
+    /// Note the version in the persisted scalar is `ReviewDigestContract`, which
+    /// is field-local, while `version` *inside* the hashed payload is
+    /// [`BINDING_VERSION`]. They are both 1 and they are not by construction the
+    /// same number. Whether the in-payload discriminator should remain once the
+    /// contract version travels outside is an open question on #25; nothing is
+    /// persisted yet, so it stays as it is and costs nothing either way until a
+    /// proof is emitted.
     ///
     /// Deliberately not [`crate::confirmation::fingerprint`], which this used to
     /// delegate to. That primitive canonicalizes through `serde_json`, which is
@@ -1004,12 +1019,35 @@ impl ReviewBinding {
     ///
     /// The rule and basis lists were put in canonical order before they got
     /// here; see [`canonical_order`].
-    pub fn sha256(&self) -> Result<String> {
-        let canonical = canonical_bytes(self, "review binding")?;
-        Ok(format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(canonical.as_bytes())
-        ))
+    pub fn digest(&self) -> Result<crate::digest::Versioned> {
+        crate::digest::REVIEW.emit(self.digest_under(crate::digest::REVIEW.current)?)
+    }
+
+    /// The bare digest this binding has **under one contract version**.
+    ///
+    /// Selected by version rather than by "whatever this build computes",
+    /// because that is what makes a historical proof checkable at all: an
+    /// attestation names the contract it was made under, and recomputing it any
+    /// other way answers a different question. A version with no calculation
+    /// here is refused rather than quietly served the current one — being
+    /// listed as verifiable in the support table is not the same as this build
+    /// knowing how to reproduce it.
+    pub fn digest_under(&self, version: u32) -> Result<String> {
+        match version {
+            1 => {
+                let canonical = canonical_bytes(self, "review binding")?;
+                Ok(format!(
+                    "{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(canonical.as_bytes())
+                ))
+            }
+            other => Err(Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "ReviewDigestContract: this build cannot compute version {other}, only the versions it implements"
+                ),
+            )),
+        }
     }
 
     pub fn rules(&self) -> &[BoundRule] {
@@ -1227,8 +1265,21 @@ pub fn check(
     attested: &str,
     reviewed: &[String],
 ) -> Result<()> {
+    // `bind` first, because it is what enforces the workspace-version boundary:
+    // an older workspace must be told to migrate, not handed a complaint about
+    // the attestation's spelling. Reading the digest first inverted that and
+    // reported the wrong refusal for the more fundamental problem.
     let binding = bind(root, domain, mutation, precondition)?;
-    let expected = binding.sha256()?;
+    // Then read the attestation through its contract, and recompute **under the
+    // version it names** rather than under the current emitter. A malformed
+    // scalar and a scalar naming a contract this build cannot verify are
+    // different answers, and neither is "the subject moved" — reporting either
+    // as a mismatch would tell an agent to re-review something that was never
+    // the problem, and recomputing an old proof with today's calculation would
+    // do exactly that to every historical attestation the moment a version 2
+    // exists.
+    let checked =
+        crate::digest::REVIEW.recheck(attested, |version| binding.digest_under(version))?;
     let ids = binding.rule_ids();
     let mut named: Vec<String> = reviewed.to_vec();
     named.sort();
@@ -1246,9 +1297,10 @@ pub fn check(
         ids.join(", ")
     );
     ensure!(
-        attested == expected,
+        checked.agrees(),
         EXIT_INVARIANT,
-        "this review was of something else: the mutation, its target, a rule, or a rule's material has changed since it was reviewed. Review the current subject and attest to {expected}"
+        "this review was of something else: the mutation, its target, a rule, or a rule's material has changed since it was reviewed. Review the current subject and attest to {}",
+        checked.expected
     );
     Ok(())
 }
