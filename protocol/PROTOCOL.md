@@ -1525,8 +1525,20 @@ digest  := lowercase hex      uppercase is invalid, never silently normalized
 Contract versions are **field-local**. `ReviewDigestContract 1` and
 `CandidateDigestContract 1` are unrelated contracts that share a number, and each
 validates its own digest length — which is what lets one change hash algorithm
-without touching the grammar or the others. Versions need not be contiguous;
-once a version has actually been emitted its meaning is fixed forever.
+without touching the grammar or the others. Versions need not be contiguous.
+
+**A number is never redefined, and that is not the same as a support promise.**
+Changing what a version calculates always takes a new version, even while the
+contract is experimental — otherwise one number would mean two things and no
+stored value could be read with confidence. What a *stable* declaration adds is
+the obligation to keep verifying: an experimental contract may be retired and its
+verifier dropped, while a version explicitly declared stable for durable use, and
+emitted under that status, must stay interpretable by later implementations.
+
+Development or pre-release emission alone does not cross that boundary. Stability
+is release policy and is deliberately **not** encoded in the scalar — a stability
+bit in the persisted value would make the guarantee a property of the data rather
+than of the release that made it.
 
 Where such a scalar takes part in canonical ordering it is compared as the parsed
 pair `(version, digest)`, not as text, because `2:` precedes `10:` and string

@@ -158,6 +158,14 @@ impl Serialize for Versioned {
 /// having to read the values already written under it. Collapsing them into a
 /// boolean would force a choice between refusing to read history and emitting
 /// under several contracts at once.
+///
+/// Setting `verify: false` is how an experimental contract is retired, and it is
+/// legitimate — a version is only owed lasting verification once it has been
+/// declared stable for durable use and emitted under that status. That
+/// declaration is release policy and lives outside this type, because a
+/// stability flag in the data would make the promise a property of the value
+/// rather than of the release that made it. What is *never* allowed either way
+/// is redefining what a number calculates: that always takes a new version.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Support {
     /// May new values be written under this version?
