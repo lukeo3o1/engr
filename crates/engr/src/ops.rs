@@ -44,6 +44,34 @@ pub fn effective_section(root: &Path, id: &str, section: u64) -> Result<Section>
     effective(root, id)?.section(section).cloned()
 }
 
+/// Refuse authority whose stored seal no longer matches its own wording.
+///
+/// Existence is not soundness. [`effective`] answers whether an Object is there
+/// and readable, which is a different question from whether what it says is
+/// still what was confirmed — a section edited outside the gate loads perfectly
+/// and reads as authority.
+///
+/// Recomputed, never compared seal-to-seal: the stored value is a claim about
+/// what was confirmed, and only recomputing establishes what the target says
+/// now. `section` narrows it to one; without it the whole Object is judged,
+/// because an Object-level claim is a claim about all of it.
+pub fn sound(object: &Object, section: Option<u64>) -> Result<()> {
+    let sections = match section {
+        Some(id) => vec![object.section(id)?],
+        None => object.sections.iter().collect(),
+    };
+    for section in sections {
+        ensure!(
+            section.recomputed_sha256()? == section.sha256,
+            EXIT_INVARIANT,
+            "{} §{} does not match its own confirmed hash; its wording was changed outside the gate",
+            object.id,
+            section.id
+        );
+    }
+    Ok(())
+}
+
 /// Close the window between appending an event and saving the projection.
 ///
 /// Current workspaces persist crash repair. Legacy workspaces expose the same

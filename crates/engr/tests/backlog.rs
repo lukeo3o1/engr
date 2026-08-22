@@ -2336,3 +2336,76 @@ fn an_explicit_revision_is_inexact_when_the_file_read_is_not_what_it_holds() {
     assert_eq!(pinned, now);
     assert!(!dirty, "this baseline reconstructs exactly what was read");
 }
+
+/// A produced outcome may only claim authority that is still intact.
+///
+/// Existing is not the same as sound. The effective projection answers whether
+/// an Object is there and readable; a section edited outside the gate loads
+/// perfectly and reads as authority. This entry asserts that a durably admitted
+/// outcome exists, and it is checked once and never again — so the one check it
+/// gets cannot be the weaker of the two questions.
+#[test]
+fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() {
+    let (_dir, root) = workspace();
+    let sound = new_object(&root, "a sound record");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &sound, "confirmed wording"),
+    );
+    let moved = new_object(&root, "a record that will move");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &moved, "also confirmed"),
+    );
+    let id = item(&root, "topic", "unresolved");
+
+    // The wording moves without the gate. It still loads, and it is still
+    // structurally a record — which is exactly the trap.
+    let mut tampered = store::load_object(&root, &moved).expect("object");
+    "edited outside the gate".clone_into(&mut tampered.sections[0].text);
+    store::save_object(&root, &tampered).expect("tamper");
+
+    let before = backlog::load(&root, &id).expect("load");
+    for target in [
+        format!("obj:{}", compact(&moved)),
+        format!("obj:{}:1", compact(&moved)),
+    ] {
+        let error = backlog::record_produced(
+            &root,
+            &id,
+            1,
+            Produced::object(target.clone()),
+            &Prepared::first(),
+        )
+        .expect_err("that authority is not intact");
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{target}");
+        assert!(
+            error.message.contains("not intact"),
+            "{target}: {}",
+            error.message
+        );
+    }
+    assert_eq!(
+        backlog::load(&root, &id).expect("load"),
+        before,
+        "a refused claim writes nothing"
+    );
+
+    // Intact authority is claimable, at both granularities.
+    for target in [
+        format!("obj:{}", compact(&sound)),
+        format!("obj:{}:1", compact(&sound)),
+    ] {
+        assert!(
+            backlog::record_produced(
+                &root,
+                &id,
+                1,
+                Produced::object(target.clone()),
+                &Prepared::first(),
+            )
+            .expect("intact authority"),
+            "{target}"
+        );
+    }
+}

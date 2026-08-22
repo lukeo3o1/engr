@@ -1092,9 +1092,12 @@ engr never infers the link, because an inferred one would eventually consume a
 point nobody meant to resolve.
 
 A declared outcome asserts that authority exists, so appending one MUST refuse a
-target that does not exist. **Existence is checked when the claim is made and
-never again** — which is why it MUST be checked where the claim is *written*,
-under the same lock. Validating first and appending afterwards leaves a gap an
+target that does not exist — and MUST refuse one whose persisted integrity no
+longer holds. Existing and sound are different questions: a section edited
+outside the gate loads perfectly and reads as authority, and an entry claiming
+it would launder that edit into a record of what was produced. **Existence and
+integrity are checked when the claim is made and never again** — which is why
+they MUST be checked where the claim is *written*, under the same lock. Validating first and appending afterwards leaves a gap an
 Object mutation fits through, and the single check this relationship ever gets
 would have been against something that no longer existed when it landed. This
 holds in that direction only: `produced[]` is a record of what happened,

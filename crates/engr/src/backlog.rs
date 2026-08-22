@@ -1503,6 +1503,20 @@ pub fn record_produced(
                     )
                 })?;
             }
+            // Existing is not the same as sound. This entry asserts that a
+            // durably admitted outcome exists, and authority whose wording was
+            // changed outside the gate is exactly what that assertion must not
+            // be allowed to launder — the claim gets made once and is never
+            // re-examined, so the one check it gets has to be the real one.
+            crate::ops::sound(&projected, target_section).map_err(|error| {
+                Error::new(
+                    error.code,
+                    format!(
+                        "produced outcome names authority that is not intact: {}",
+                        error.message
+                    ),
+                )
+            })?;
             item.section(section)?;
             let slot = item
                 .sections
