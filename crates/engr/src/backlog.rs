@@ -318,6 +318,28 @@ impl Section {
                 self.id
             );
         }
+        // The marker exists only to describe an exhausted review, so a stored
+        // value that could not have come from one is not a diagnostic — it is a
+        // claim about a review that never happened. Refusing unknown fields
+        // while accepting `{attempts: 0, limit: 0}` would make the strictness
+        // decorative: this file is hand-editable by design, and the realistic
+        // failure is a plausible value, not a corrupt one.
+        if let Some(review) = self.rule_review {
+            ensure!(
+                review.limit >= 1,
+                EXIT_SCHEMA,
+                "§{}: a review ceiling of 0 is not a limit, it is a rule nothing can pass",
+                self.id
+            );
+            ensure!(
+                review.attempts > review.limit,
+                EXIT_SCHEMA,
+                "§{}: attempt {} is within a ceiling of {}, so it is not exhausted and there is nothing for this marker to record",
+                self.id,
+                review.attempts,
+                review.limit
+            );
+        }
         Ok(())
     }
 }
@@ -1000,22 +1022,105 @@ impl Reviewed {
         section.rule_review = self.0;
     }
 
-    /// Refuse a mutation that would destroy unresolved work.
+    /// Refuse a mutation that soft-admission does not cover.
     ///
-    /// Preservation is the whole reason Backlog admits an exhausted mutation at
-    /// all, so the exception cannot cover the one operation that preserves
-    /// nothing. Nothing is written, marker included: no mutation was admitted,
-    /// so there is nothing for a diagnostic to describe.
-    fn may_destroy(&self) -> Result<()> {
+    /// Soft-admission buys exactly one thing: an unresolved point survives a
+    /// review it could not pass, *and* the marker says so. A mutation that
+    /// cannot deliver both halves does not get the exception — either because it
+    /// preserves nothing, or because there is nowhere for the marker to go.
+    /// Nothing is written when this refuses, marker included: no mutation was
+    /// admitted, so there is nothing for a diagnostic to describe.
+    fn must_have_passed(&self, refusal: &str) -> Result<()> {
         match self.0 {
             None => Ok(()),
             Some(marker) => Err(Error::new(
                 EXIT_INVARIANT,
                 format!(
-                    "this is attempt {} and a project rule allows {}: an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
+                    "this is attempt {} and a project rule allows {}: {refusal}",
                     marker.attempts, marker.limit
                 ),
             )),
+        }
+    }
+}
+
+/// What a given mutation is entitled to have been prepared against.
+///
+/// A precondition that still holds is not the same as a precondition that
+/// authorizes *this* change. `still_holds` asks the world whether the thing it
+/// names has moved, and answers honestly about a thing nobody is mutating — so
+/// without this, a caller holding a perfectly valid predecessor for one item can
+/// apply it to another, or bind §1 and consume §5, and the exact-predecessor
+/// guarantee is gone precisely where it looks satisfied.
+enum Binds<'a> {
+    /// The topic, and therefore the complete item.
+    Topic,
+    /// The Section id an add is about to receive.
+    NewSection,
+    /// One whole Section, by id.
+    Section(u64),
+    /// A merge: the destination and every source, and nothing else.
+    Merge {
+        destination: u64,
+        sources: &'a [u64],
+    },
+}
+
+impl Precondition {
+    /// Whether this predecessor is the one *this* mutation rests on.
+    ///
+    /// Checked before [`Self::still_holds`], because "you prepared against
+    /// something else entirely" is a more fundamental answer than "what you
+    /// prepared against has moved", and reporting the second for the first would
+    /// send a caller off to re-read the wrong thing.
+    fn authorizes(&self, item: &str, binds: &Binds) -> Result<()> {
+        ensure!(
+            self.item() == item,
+            EXIT_INVARIANT,
+            "this was prepared against backlog {}, and the change is to {}; a predecessor that still holds is not a predecessor for this",
+            short(self.item()),
+            short(item)
+        );
+        let matches = match (self, binds) {
+            (Self::Item { .. }, Binds::Topic) => true,
+            (Self::SectionAbsent { .. }, Binds::NewSection) => true,
+            (Self::Section { section, .. }, Binds::Section(target)) => section.id == *target,
+            (
+                Self::Merge { sections, .. },
+                Binds::Merge {
+                    destination,
+                    sources,
+                },
+            ) => {
+                let bound: BTreeSet<u64> = sections.iter().map(|section| section.id).collect();
+                let touched: BTreeSet<u64> = std::iter::once(*destination)
+                    .chain(sources.iter().copied())
+                    .collect();
+                bound == touched
+            }
+            _ => false,
+        };
+        ensure!(
+            matches,
+            EXIT_INVARIANT,
+            "this was prepared against {}, which is not what this change touches",
+            self.describes()
+        );
+        Ok(())
+    }
+
+    /// What this predecessor covers, for a refusal to name.
+    fn describes(&self) -> String {
+        match self {
+            Self::ItemAbsent { .. } => "an item that does not exist yet".to_owned(),
+            Self::Item { .. } => "the whole item".to_owned(),
+            Self::SectionAbsent { section, .. } => format!("§{section} not existing yet"),
+            Self::Section { section, .. } => format!("§{}", section.id),
+            Self::Merge { sections, .. } => sections
+                .iter()
+                .map(|section| format!("§{}", section.id))
+                .collect::<Vec<_>>()
+                .join(" + "),
         }
     }
 }
@@ -1037,10 +1142,12 @@ fn edit<T>(
     root: &Path,
     id: &str,
     prepared: &Prepared,
+    binds: Binds,
     body: impl FnOnce(&mut Item, &Reviewed) -> Result<T>,
 ) -> Result<T> {
     locked(root, || {
         if let Some(precondition) = &prepared.precondition {
+            precondition.authorizes(id, &binds)?;
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
@@ -1062,9 +1169,16 @@ pub fn create(
     check_topic(topic)?;
     check_text(text)?;
     locked(root, || {
-        if let Some(precondition) = &prepared.precondition {
-            precondition.still_holds(root)?;
-        }
+        // engr allocates the identity here, so a creation has no predecessor to
+        // bind: whatever id a caller prepared against, the item created is a
+        // different one, and checking the first would authorize the second.
+        // Refused rather than ignored — silently accepting a precondition that
+        // cannot apply is how a caller comes to believe it has a guarantee.
+        ensure!(
+            prepared.precondition.is_none(),
+            EXIT_INVARIANT,
+            "a new backlog item takes an id engr allocates, so there is nothing for a precondition to bind"
+        );
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
         let mut section = Section {
             id: 1,
@@ -1089,14 +1203,19 @@ pub fn create(
 /// Renaming the topic is not activity on any unresolved point, so it must not
 /// refresh Section timestamps — that would make every item look freshly worked.
 ///
-/// For the same reason an exhausted rename marks nothing. The marker says how
-/// the wording standing in a point got admitted, and a rename admits no wording:
-/// stamping every Section would claim of each one something that is not true of
-/// any of them. The review still happens; there is simply nothing to record it
-/// against.
+/// An exhausted rename is **refused**, and that is the interesting case. The
+/// marker is a Section field, and a rename admits no Section wording: stamping
+/// every Section would claim of each one something true of none. But letting the
+/// rename through unmarked would make it the one soft-admission nothing records,
+/// which is worse — the whole point of the marker is that an exhausted change
+/// cannot be silent. What an item-level marker should look like is a persisted
+/// representation nobody has settled, so this refuses rather than inventing one.
 pub fn rename(root: &Path, id: &str, topic: &str, prepared: &Prepared) -> Result<Item> {
     check_topic(topic)?;
-    edit(root, id, prepared, |item, _| {
+    edit(root, id, prepared, Binds::Topic, |item, reviewed| {
+        reviewed.must_have_passed(
+            "a topic is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
+        )?;
         topic.trim().clone_into(&mut item.topic);
         Ok(item.clone())
     })
@@ -1110,7 +1229,7 @@ pub fn add_section(
     prepared: &Prepared,
 ) -> Result<u64> {
     check_text(text)?;
-    edit(root, id, prepared, |item, reviewed| {
+    edit(root, id, prepared, Binds::NewSection, |item, reviewed| {
         let section = take_id(item)?;
         let mut added = Section {
             id: section,
@@ -1134,27 +1253,33 @@ pub fn revise_section(
     prepared: &Prepared,
 ) -> Result<()> {
     check_text(text)?;
-    edit(root, id, prepared, |item, reviewed| {
-        item.section(section)?;
-        let slot = item
-            .sections
-            .iter_mut()
-            .find(|candidate| candidate.id == section)
-            .expect("section presence checked above");
-        // Rewriting a section with the wording it already had is not work on
-        // it. An idempotent write must not manufacture activity, or a retried
-        // command makes an untouched point look like the freshest one.
-        //
-        // The verdict follows the same test, for the same reason: a write that
-        // changed nothing admitted nothing, so it neither earns a marker nor
-        // clears one somebody else's write put there.
-        if slot.text != text {
-            text.clone_into(&mut slot.text);
-            slot.updated_at = now();
-            reviewed.mark(slot);
-        }
-        Ok(())
-    })
+    edit(
+        root,
+        id,
+        prepared,
+        Binds::Section(section),
+        |item, reviewed| {
+            item.section(section)?;
+            let slot = item
+                .sections
+                .iter_mut()
+                .find(|candidate| candidate.id == section)
+                .expect("section presence checked above");
+            // Rewriting a section with the wording it already had is not work on
+            // it. An idempotent write must not manufacture activity, or a retried
+            // command makes an untouched point look like the freshest one.
+            //
+            // The verdict follows the same test, for the same reason: a write that
+            // changed nothing admitted nothing, so it neither earns a marker nor
+            // clears one somebody else's write put there.
+            if slot.text != text {
+                text.clone_into(&mut slot.text);
+                slot.updated_at = now();
+                reviewed.mark(slot);
+            }
+            Ok(())
+        },
+    )
 }
 
 pub fn set_subjects(
@@ -1164,24 +1289,30 @@ pub fn set_subjects(
     subjects: Vec<Subject>,
     prepared: &Prepared,
 ) -> Result<()> {
-    edit(root, id, prepared, |item, reviewed| {
-        item.section(section)?;
-        let slot = item
-            .sections
-            .iter_mut()
-            .find(|candidate| candidate.id == section)
-            .expect("section presence checked above");
-        // The caller's order is persisted, because no canonical order is
-        // required — but reordering a set is not a change to what is
-        // unresolved, and the set comparison already says so.
-        let changed = !same_subjects(&slot.subjects, &subjects)?;
-        slot.subjects = subjects;
-        if changed {
-            slot.updated_at = now();
-            reviewed.mark(slot);
-        }
-        Ok(())
-    })
+    edit(
+        root,
+        id,
+        prepared,
+        Binds::Section(section),
+        |item, reviewed| {
+            item.section(section)?;
+            let slot = item
+                .sections
+                .iter_mut()
+                .find(|candidate| candidate.id == section)
+                .expect("section presence checked above");
+            // The caller's order is persisted, because no canonical order is
+            // required — but reordering a set is not a change to what is
+            // unresolved, and the set comparison already says so.
+            let changed = !same_subjects(&slot.subjects, &subjects)?;
+            slot.subjects = subjects;
+            if changed {
+                slot.updated_at = now();
+                reviewed.mark(slot);
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Record that working on this point produced durable knowledge.
@@ -1207,47 +1338,59 @@ pub fn record_produced(
 ) -> Result<bool> {
     outcome.validate()?;
     let (object, target_section) = outcome.target()?;
-    let projected = crate::ops::effective(root, &object).map_err(|error| {
-        Error::new(
-            error.code,
-            format!(
-                "produced outcome names object {}, which does not exist: {}",
-                short(&object),
-                error.message
-            ),
-        )
-    })?;
-    if let Some(target_section) = target_section {
-        projected.section(target_section).map_err(|_| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!(
-                    "produced outcome names {} §{target_section}, which does not exist",
-                    short(&object)
-                ),
-            )
-        })?;
-    }
-    edit(root, id, prepared, |item, reviewed| {
-        item.section(section)?;
-        let slot = item
-            .sections
-            .iter_mut()
-            .find(|candidate| candidate.id == section)
-            .expect("section presence checked above");
-        // A set: claiming the same outcome twice carries no more than claiming
-        // it once, so a repeated call is not an error and not a duplicate.
-        if slot.produced.contains(&outcome) {
-            return Ok(false);
-        }
-        slot.produced.push(outcome.clone());
-        // Bookkeeping *is* activity on the unresolved work, even though the
-        // wording did not move: `updated_at` means last meaningful activity, and
-        // learning what a point produced is meaningful to whoever picks it up.
-        slot.updated_at = now();
-        reviewed.mark(slot);
-        Ok(true)
-    })
+    edit(
+        root,
+        id,
+        prepared,
+        Binds::Section(section),
+        |item, reviewed| {
+            // Inside the lock, not before it. Existence is checked exactly once, at
+            // the moment the claim is made — so it has to be checked at the moment
+            // the claim is *written*. Validating first and appending afterwards
+            // leaves a gap an Object mutation fits through, and the one check this
+            // relationship ever gets would have been against something that no
+            // longer existed when the relationship landed.
+            let projected = crate::ops::effective(root, &object).map_err(|error| {
+                Error::new(
+                    error.code,
+                    format!(
+                        "produced outcome names object {}, which does not exist: {}",
+                        short(&object),
+                        error.message
+                    ),
+                )
+            })?;
+            if let Some(target_section) = target_section {
+                projected.section(target_section).map_err(|_| {
+                    Error::new(
+                        EXIT_NOT_FOUND,
+                        format!(
+                            "produced outcome names {} §{target_section}, which does not exist",
+                            short(&object)
+                        ),
+                    )
+                })?;
+            }
+            item.section(section)?;
+            let slot = item
+                .sections
+                .iter_mut()
+                .find(|candidate| candidate.id == section)
+                .expect("section presence checked above");
+            // A set: claiming the same outcome twice carries no more than claiming
+            // it once, so a repeated call is not an error and not a duplicate.
+            if slot.produced.contains(&outcome) {
+                return Ok(false);
+            }
+            slot.produced.push(outcome.clone());
+            // Bookkeeping *is* activity on the unresolved work, even though the
+            // wording did not move: `updated_at` means last meaningful activity, and
+            // learning what a point produced is meaningful to whoever picks it up.
+            slot.updated_at = now();
+            reviewed.mark(slot);
+            Ok(true)
+        },
+    )
 }
 
 /// Take an outcome back off a point.
@@ -1264,22 +1407,28 @@ pub fn forget_produced(
     outcome: &Produced,
     prepared: &Prepared,
 ) -> Result<bool> {
-    edit(root, id, prepared, |item, reviewed| {
-        item.section(section)?;
-        let slot = item
-            .sections
-            .iter_mut()
-            .find(|candidate| candidate.id == section)
-            .expect("section presence checked above");
-        let before = slot.produced.len();
-        slot.produced.retain(|entry| entry != outcome);
-        let removed = slot.produced.len() != before;
-        if removed {
-            slot.updated_at = now();
-            reviewed.mark(slot);
-        }
-        Ok(removed)
-    })
+    edit(
+        root,
+        id,
+        prepared,
+        Binds::Section(section),
+        |item, reviewed| {
+            item.section(section)?;
+            let slot = item
+                .sections
+                .iter_mut()
+                .find(|candidate| candidate.id == section)
+                .expect("section presence checked above");
+            let before = slot.produced.len();
+            slot.produced.retain(|entry| entry != outcome);
+            let removed = slot.produced.len() != before;
+            if removed {
+                slot.updated_at = now();
+                reviewed.mark(slot);
+            }
+            Ok(removed)
+        },
+    )
 }
 
 /// Consolidate unresolved points into one, **into an explicit destination**.
@@ -1326,39 +1475,50 @@ pub fn merge_into(
         EXIT_INVARIANT,
         "§{destination} is the destination, so it cannot also be merged into itself"
     );
-    edit(root, id, prepared, |item, reviewed| {
-        // A merge removes the sources, and a Section leaves only through a
-        // review that passed — a consume, or atomically as the source of a
-        // merge. Soft-admission is for mutations that keep the unresolved point
-        // available, and the sources' own wording does not survive this one.
-        reviewed.may_destroy()?;
-        // Every participant is checked before anything moves, so a merge naming
-        // a section that is not there changes nothing at all.
-        let mut produced = item.section(destination)?.produced.clone();
-        for source in sources {
-            for outcome in &item.section(*source)?.produced {
-                if !produced.contains(outcome) {
-                    produced.push(outcome.clone());
+    edit(
+        root,
+        id,
+        prepared,
+        Binds::Merge {
+            destination,
+            sources,
+        },
+        |item, reviewed| {
+            // A merge removes the sources, and a Section leaves only through a
+            // review that passed — a consume, or atomically as the source of a
+            // merge. Soft-admission is for mutations that keep the unresolved point
+            // available, and the sources' own wording does not survive this one.
+            reviewed.must_have_passed(
+            "a merge removes its sources, and an unresolved point is not removed on an exhausted review",
+        )?;
+            // Every participant is checked before anything moves, so a merge naming
+            // a section that is not there changes nothing at all.
+            let mut produced = item.section(destination)?.produced.clone();
+            for source in sources {
+                for outcome in &item.section(*source)?.produced {
+                    if !produced.contains(outcome) {
+                        produced.push(outcome.clone());
+                    }
                 }
             }
-        }
-        item.sections
-            .retain(|section| !sources.contains(&section.id));
-        let slot = item
-            .sections
-            .iter_mut()
-            .find(|section| section.id == destination)
-            .expect("destination presence checked above");
-        text.clone_into(&mut slot.text);
-        slot.subjects = subjects;
-        slot.produced = produced;
-        // Unambiguously activity: the destination now states something it did
-        // not state before, whatever the wording happens to be.
-        slot.updated_at = now();
-        // Reached only on a review that passed, so this always clears.
-        reviewed.mark(slot);
-        Ok(())
-    })
+            item.sections
+                .retain(|section| !sources.contains(&section.id));
+            let slot = item
+                .sections
+                .iter_mut()
+                .find(|section| section.id == destination)
+                .expect("destination presence checked above");
+            text.clone_into(&mut slot.text);
+            slot.subjects = subjects;
+            slot.produced = produced;
+            // Unambiguously activity: the destination now states something it did
+            // not state before, whatever the wording happens to be.
+            slot.updated_at = now();
+            // Reached only on a review that passed, so this always clears.
+            reviewed.mark(slot);
+            Ok(())
+        },
+    )
 }
 
 /// Consume one unresolved point: judge it resolved and take it out.
@@ -1382,9 +1542,12 @@ pub fn merge_into(
 pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared) -> Result<bool> {
     locked(root, || {
         if let Some(precondition) = &prepared.precondition {
+            precondition.authorizes(id, &Binds::Section(section))?;
             precondition.still_holds(root)?;
         }
-        Reviewed::compose(root, prepared.attempt)?.may_destroy()?;
+        Reviewed::compose(root, prepared.attempt)?.must_have_passed(
+            "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
+        )?;
         let mut item = load(root, id)?;
         item.section(section)?;
         item.sections.retain(|candidate| candidate.id != section);

@@ -257,9 +257,11 @@ Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
 Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so
 say the real number: the point is kept either way, and an honest one tells the
-next reader what it went in on. **Consume and merge are the exceptions.** They
-remove a point, so past the ceiling they simply do not happen, and nothing is
-written. Revise it, or raise the ceiling.
+next reader what it went in on. **Consume, merge and rename are the
+exceptions**, and past the ceiling they simply do not happen. Consume and merge
+remove a point; rename has nowhere to put the marker, and an exhausted change
+that leaves no trace is the one thing the marker exists to prevent. Revise it,
+or raise the ceiling.
 
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human

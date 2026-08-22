@@ -1845,3 +1845,280 @@ fn an_add_binds_the_identity_it_will_receive_not_merely_a_free_looking_slot() {
         .expect_err("the reserved slot is gone for good, absent or not");
     assert_eq!(error.code, engr::EXIT_STALE);
 }
+
+/// A precondition that still holds is not a precondition for *this* change.
+///
+/// `still_holds` asks the world whether the thing it names has moved, and
+/// answers honestly about a thing nobody is mutating. So a caller holding a
+/// perfectly valid predecessor for one item could apply it to another and get a
+/// clean answer — the exact-predecessor guarantee failing precisely where it
+/// looks satisfied, which is worse than not having one.
+#[test]
+fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
+    let (_dir, root) = workspace();
+    let mine = item(&root, "mine", "unresolved");
+    let theirs = item(&root, "theirs", "also unresolved");
+    backlog::add_section(
+        &root,
+        &mine,
+        "a second point",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("add");
+
+    // Another item's predecessor. It genuinely still holds; it authorizes
+    // nothing here.
+    let elsewhere = backlog::Precondition::section(&root, &theirs, 1).expect("observe");
+    elsewhere
+        .still_holds(&root)
+        .expect("it really has not moved");
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
+        "reworded",
+        &Prepared::first().against(elsewhere),
+    )
+    .expect_err("a predecessor for another item is not one for this");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // The right item, the wrong point.
+    let sibling = backlog::Precondition::section(&root, &mine, 2).expect("observe");
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
+        "reworded",
+        &Prepared::first().against(sibling),
+    )
+    .expect_err("§2 is not what this changes");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // The right item and point, the wrong kind of binding: a whole-item
+    // predecessor is what a rename rests on, not a reword.
+    let whole = backlog::Precondition::topic(&root, &mine).expect("observe");
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
+        "reworded",
+        &Prepared::first().against(whole),
+    )
+    .expect_err("that is a rename's predecessor");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    assert_eq!(
+        backlog::load(&root, &mine)
+            .expect("load")
+            .section(1)
+            .expect("§1")
+            .text,
+        "unresolved",
+        "none of those refusals wrote anything"
+    );
+
+    // And the one that does authorize it goes through.
+    let exact = backlog::Precondition::section(&root, &mine, 1).expect("observe");
+    backlog::revise_section(
+        &root,
+        &mine,
+        1,
+        "reworded",
+        &Prepared::first().against(exact),
+    )
+    .expect("the predecessor this rests on");
+}
+
+/// A merge binds the points it touches — all of them, and only them.
+#[test]
+fn a_merge_precondition_must_cover_exactly_the_destination_and_its_sources() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
+    backlog::add_section(&root, &id, "third", Vec::new(), &Prepared::first()).expect("add");
+
+    for (name, bound) in [
+        ("missing the source", vec![1u64]),
+        ("a point this merge never touches", vec![1, 2, 3]),
+    ] {
+        let partial = backlog::Precondition::merge(&root, &id, &bound).expect("observe");
+        let error = backlog::merge_into(
+            &root,
+            &id,
+            1,
+            &[2],
+            "one point",
+            Vec::new(),
+            &Prepared::first().against(partial),
+        )
+        .expect_err("the reviewed judgement was about a different set");
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{name}");
+    }
+
+    let exact = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
+    backlog::merge_into(
+        &root,
+        &id,
+        1,
+        &[2],
+        "one point",
+        Vec::new(),
+        &Prepared::first().against(exact),
+    )
+    .expect("destination and source, exactly");
+}
+
+/// A creation has no predecessor to bind, so it refuses to pretend it does.
+///
+/// engr allocates the identity, so whatever id a caller prepared against, the
+/// item created is a different one. Checking the first and creating the second
+/// is not a weaker guarantee than none — it is a false one.
+#[test]
+fn creating_an_item_refuses_a_precondition_it_could_not_honour() {
+    let (_dir, root) = workspace();
+    let fresh = engr::model::new_id();
+    let bound = backlog::Precondition::item_absent(fresh);
+    bound.still_holds(&root).expect("nothing occupies it");
+
+    let error = backlog::create(
+        &root,
+        "topic",
+        "unresolved",
+        Vec::new(),
+        &Prepared::first().against(bound),
+    )
+    .expect_err("the id checked would not be the id created");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        backlog::ids(&root).expect("ids").is_empty(),
+        "and nothing was created"
+    );
+}
+
+/// An exhausted rename is refused rather than admitted unmarked.
+///
+/// Every other soft-admission leaves a marker saying the wording went in without
+/// a passing review. A rename admits no wording, so there is nowhere for that
+/// marker to go — and letting it through anyway would make it the one exhausted
+/// change nothing records. What an item-level marker should look like is not
+/// settled, so this refuses instead of inventing one.
+#[test]
+fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 2\n");
+    let id = item(&root, "original topic", "unresolved");
+
+    let error = backlog::rename(&root, &id, "a different topic", &attempt(3))
+        .expect_err("nowhere to record it");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("nowhere to record"),
+        "the refusal says why this one is different: {}",
+        error.message
+    );
+    assert_eq!(
+        backlog::load(&root, &id).expect("load").topic,
+        "original topic"
+    );
+    assert_eq!(
+        marker(&root, &id, 1),
+        None,
+        "and no point was marked for a change that was not about it"
+    );
+
+    backlog::rename(&root, &id, "a different topic", &attempt(2)).expect("within the ceiling");
+}
+
+/// A produced target is checked at the moment the claim is written.
+///
+/// Existence is checked exactly once, ever — so it has to be checked where the
+/// write happens. Validating first and appending afterwards leaves a gap an
+/// Object mutation fits through, and the single check this relationship gets
+/// would have been against something that no longer existed when it landed.
+#[test]
+fn a_produced_target_is_checked_inside_the_lock_that_writes_it() {
+    use std::sync::mpsc;
+
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    let missing = format!("obj:{}", compact(&engr::model::new_id()));
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        // Hold the workspace lock, then ask for a claim on a target that does
+        // not exist. If the target were checked before the lock, the refusal
+        // would arrive immediately; under the lock it cannot arrive at all until
+        // the lock is free.
+        engr::store::with_lock(&root, || {
+            let claim_root = &root;
+            let claim_id = id.clone();
+            let claim_target = missing.clone();
+            scope.spawn(move || {
+                let outcome = backlog::record_produced(
+                    claim_root,
+                    &claim_id,
+                    1,
+                    Produced::object(claim_target),
+                    &Prepared::first(),
+                );
+                tx.send(outcome).expect("send");
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err(),
+                "the target was judged before the lock was held"
+            );
+            Ok(())
+        })
+        .expect("held");
+    });
+
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("it proceeds once the lock is free");
+    let error = outcome.expect_err("the target does not exist");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+}
+
+/// The marker records an exhausted review, so a stored value that could not have
+/// come from one is not a diagnostic — it is a claim about a review that never
+/// happened.
+#[test]
+fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    let path = backlog::item_path(&root, &id);
+    let pristine: serde_json::Value = store::read_json(&path).expect("item");
+
+    for (name, marker) in [
+        (
+            "a ceiling of zero",
+            serde_json::json!({"attempts": 1, "limit": 0}),
+        ),
+        (
+            "an attempt of zero",
+            serde_json::json!({"attempts": 0, "limit": 0}),
+        ),
+        (
+            "an attempt within the ceiling",
+            serde_json::json!({"attempts": 2, "limit": 5}),
+        ),
+        (
+            "an attempt exactly at the ceiling",
+            serde_json::json!({"attempts": 5, "limit": 5}),
+        ),
+    ] {
+        let mut corrupt = pristine.clone();
+        corrupt["sections"][0]["rule_review"] = marker;
+        store::write_json(&path, &corrupt).expect("hand edit");
+        let error = backlog::load(&root, &id).unwrap_err();
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+    }
+
+    // The shape an exhausted review does produce still loads.
+    let mut fine = pristine;
+    fine["sections"][0]["rule_review"] = serde_json::json!({"attempts": 6, "limit": 5});
+    store::write_json(&path, &fine).expect("hand edit");
+    backlog::load(&root, &id).expect("a real diagnostic");
+}

@@ -963,11 +963,33 @@ What each mutation binds is exactly what it rests on:
 
 | mutation | binds |
 | --- | --- |
-| create an item | that the item id is still absent |
+| create an item | nothing — see below |
 | change the topic | the **complete** parent item |
-| add a Section | the parent topic, and that the Section id is still absent |
+| add a Section | the parent topic, and the id the add will **receive** |
 | change or consume a Section | that **whole** Section, and the parent topic |
 | merge Sections | the parent topic, and the **whole** destination and every source |
+
+A predecessor that still holds is not the same as a predecessor for *this*
+mutation, so an implementation MUST also check that the bound predecessor is the
+one the mutation rests on: the same item, and the same Sections. Otherwise a
+caller holding a genuinely valid predecessor for one item can apply it to
+another, or bind §1 and consume §5, and the guarantee fails exactly where it
+looks satisfied. Which is the wrong answer to report first, so the mismatch MUST
+be distinguishable from staleness — "you prepared against something else" is a
+different problem from "what you prepared against moved".
+
+An add binds the id it will **receive**, not merely that some id is absent.
+Another writer can take that id and consume it: the id reads as absent again
+while the allocation counter has advanced permanently, so an absence check
+passes and the add lands on an identity nobody reviewed — under a number the
+first allocation's subjects may already name.
+
+Creating an item binds nothing, because engr allocates its identity: whatever id
+a caller prepared against, the item created is a different one, and checking the
+first would authorize the second. A creation therefore MUST refuse a
+precondition rather than accept one it cannot honour. Whether a caller should be
+able to propose the id — which would give creation a predecessor to bind — is
+not decided here.
 
 The scope is the decision. Binding less than the whole Section is what the
 removed `canonical(text, subjects[])` fingerprint did, and it was blind to every
@@ -1035,7 +1057,11 @@ point nobody meant to resolve.
 
 A declared outcome asserts that authority exists, so appending one MUST refuse a
 target that does not exist. **Existence is checked when the claim is made and
-never again**, in that direction only: `produced[]` is a record of what happened,
+never again** — which is why it MUST be checked where the claim is *written*,
+under the same lock. Validating first and appending afterwards leaves a gap an
+Object mutation fits through, and the single check this relationship ever gets
+would have been against something that no longer existed when it landed. This
+holds in that direction only: `produced[]` is a record of what happened,
 not a referential-integrity constraint, so it never constrains the Object
 domain. A target may later be superseded, deleted, or absorbed by a merge while
 an entry still names it; the entry becomes an unavailable historical pointer,
@@ -1053,9 +1079,17 @@ Absent is the ordinary case, and it means exactly one thing: this went in
 normally, or no project rule governed it. It MUST NOT be written for a mutation
 that changed nothing, since an idempotent write admitted nothing.
 
-A topic rename admits no wording, so an exhausted rename writes no marker. There
-is nothing it would be true of: marking every Section would claim of each one
-something that happened to none of them.
+`attempts` MUST be greater than `limit`, and `limit` MUST be at least 1. A
+stored value outside that is not a diagnostic but a claim about a review that
+never happened, and it MUST be refused on read like any other impossible state.
+
+A topic rename admits no Section wording, so there is nowhere for this marker to
+go — and an exhausted rename MUST NOT simply proceed unmarked, which would make
+it the one soft-admission nothing records. Marking every Section instead would
+claim of each one something true of none. So an implementation MUST either
+persist the exhaustion in item-level state or **refuse the exhausted rename**.
+What an item-level marker looks like is not settled here, and an implementation
+MUST NOT invent one; refusing is the conforming choice until it is.
 
 It is an ordinary persisted Section field, so it participates in the mutation
 precondition like any other — a mutation prepared against a Section that has
