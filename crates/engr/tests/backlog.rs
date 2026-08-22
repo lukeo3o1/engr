@@ -1508,6 +1508,15 @@ fn attempt(value: u32) -> Prepared {
     Prepared::attempt(engr::rules::Attempt::new(value).expect("attempt"))
 }
 
+/// A governed mutation of one point, carrying the predecessor it rests on.
+///
+/// Under a rule every mutation must say what it was reviewed against, so these
+/// read the current point and bind it — which is what an agent does between
+/// reading and writing.
+fn reviewing(root: &Path, id: &str, section: u64, value: u32) -> Prepared {
+    attempt(value).against(backlog::Precondition::section(root, id, section).expect("observe"))
+}
+
 /// An exhausted Backlog mutation goes in anyway, and says so.
 ///
 /// This is the whole reason the domain exists. An agent that has been round a
@@ -1523,14 +1532,28 @@ fn an_exhausted_point_is_still_written_down_and_carries_the_diagnostic() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1, "within the ceiling", &attempt(2)).expect("revise");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "within the ceiling",
+        &reviewing(&root, &id, 1, 2),
+    )
+    .expect("revise");
     assert_eq!(
         marker(&root, &id, 1),
         None,
         "attempt 2 of 2 is still a review, so there is nothing to diagnose"
     );
 
-    backlog::revise_section(&root, &id, 1, "past the ceiling", &attempt(3)).expect("soft-admit");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "past the ceiling",
+        &reviewing(&root, &id, 1, 3),
+    )
+    .expect("soft-admit");
     assert_eq!(
         backlog::load(&root, &id)
             .expect("load")
@@ -1561,7 +1584,8 @@ fn the_recorded_limit_is_the_ceiling_that_ran_out_first() {
     rule(&root, "strict", "review:\n  max_attempts: 1\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1, "reworded", &attempt(4)).expect("soft-admit");
+    backlog::revise_section(&root, &id, 1, "reworded", &reviewing(&root, &id, 1, 4))
+        .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
         Some(engr::rules::RuleReview {
@@ -1588,8 +1612,14 @@ fn an_exhausted_backlog_rule_asking_for_a_human_still_does_not_get_one() {
     );
     let id = item(&root, "topic", "unresolved");
 
-    backlog::add_section(&root, &id, "a second point", Vec::new(), &attempt(2))
-        .expect("admitted, not escalated");
+    backlog::add_section(
+        &root,
+        &id,
+        "a second point",
+        Vec::new(),
+        &attempt(2).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+    )
+    .expect("admitted, not escalated");
     assert_eq!(
         marker(&root, &id, 2),
         Some(engr::rules::RuleReview {
@@ -1610,7 +1640,8 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(5)).expect("soft-admit");
+    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 5))
+        .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
         Some(engr::rules::RuleReview {
@@ -1620,7 +1651,14 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     );
 
     // Exhausted again, differently: the diagnostic is replaced, not accumulated.
-    backlog::revise_section(&root, &id, 1, "exhausted again", &attempt(9)).expect("soft-admit");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "exhausted again",
+        &reviewing(&root, &id, 1, 9),
+    )
+    .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
         Some(engr::rules::RuleReview {
@@ -1631,7 +1669,14 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     );
 
     // And a review that passed says this wording did not need the excuse.
-    backlog::revise_section(&root, &id, 1, "reviewed properly", &attempt(1)).expect("revise");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "reviewed properly",
+        &reviewing(&root, &id, 1, 1),
+    )
+    .expect("revise");
     assert_eq!(marker(&root, &id, 1), None);
 }
 
@@ -1641,11 +1686,25 @@ fn an_idempotent_write_neither_earns_a_marker_nor_clears_one() {
     let (_dir, root) = workspace();
     rule(&root, "careful", "review:\n  max_attempts: 1\n");
     let id = item(&root, "topic", "unresolved");
-    backlog::revise_section(&root, &id, 1, "exhausted wording", &attempt(2)).expect("soft-admit");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "exhausted wording",
+        &reviewing(&root, &id, 1, 2),
+    )
+    .expect("soft-admit");
     let marked = marker(&root, &id, 1);
     assert!(marked.is_some());
 
-    backlog::revise_section(&root, &id, 1, "exhausted wording", &attempt(1)).expect("no-op");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "exhausted wording",
+        &reviewing(&root, &id, 1, 1),
+    )
+    .expect("no-op");
     assert_eq!(
         marker(&root, &id, 1),
         marked,
@@ -1664,10 +1723,18 @@ fn an_exhausted_review_does_not_get_to_remove_an_unresolved_point() {
     let (_dir, root) = workspace();
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
-    backlog::add_section(&root, &id, "a second point", Vec::new(), &attempt(1)).expect("add");
+    backlog::add_section(
+        &root,
+        &id,
+        "a second point",
+        Vec::new(),
+        &attempt(1).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+    )
+    .expect("add");
     let before = backlog::load(&root, &id).expect("load");
 
-    let error = backlog::consume_section(&root, &id, 1, &attempt(3)).expect_err("not on this one");
+    let error = backlog::consume_section(&root, &id, 1, &reviewing(&root, &id, 1, 3))
+        .expect_err("not on this one");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
         error.message.contains("still here"),
@@ -1681,14 +1748,19 @@ fn an_exhausted_review_does_not_get_to_remove_an_unresolved_point() {
     );
 
     // A merge removes its sources, so it is refused for the same reason.
-    let error = backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &attempt(3))
+    let merging = |value: u32| {
+        attempt(value).against(backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe"))
+    };
+    let error = backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &merging(3))
         .expect_err("a merge removes the sources");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert_eq!(backlog::load(&root, &id).expect("load"), before);
 
     // Under the ceiling, both go through.
-    backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &attempt(2)).expect("merge");
-    assert!(backlog::consume_section(&root, &id, 1, &attempt(2)).expect("consume"));
+    backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &merging(2)).expect("merge");
+    assert!(
+        backlog::consume_section(&root, &id, 1, &reviewing(&root, &id, 1, 2)).expect("consume")
+    );
 }
 
 /// No applicable rule means there is no review to be exhausted.
@@ -1726,7 +1798,8 @@ fn the_marker_is_a_section_field_that_is_absent_unless_it_is_needed() {
         stored["sections"][0]
     );
 
-    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(2)).expect("soft-admit");
+    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 2))
+        .expect("soft-admit");
     let stored: serde_json::Value =
         store::read_json(&backlog::item_path(&root, &id)).expect("item");
     assert_eq!(
@@ -1754,7 +1827,8 @@ fn the_marker_participates_in_the_precondition_like_every_other_field() {
     let id = item(&root, "topic", "unresolved");
 
     let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
-    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(2)).expect("soft-admit");
+    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 2))
+        .expect("soft-admit");
     let error = bound.still_holds(&root).expect_err("the point moved");
     assert_eq!(error.code, engr::EXIT_STALE);
 }
@@ -2009,7 +2083,10 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "original topic", "unresolved");
 
-    let error = backlog::rename(&root, &id, "a different topic", &attempt(3))
+    let renaming = |value: u32| {
+        attempt(value).against(backlog::Precondition::topic(&root, &id).expect("observe"))
+    };
+    let error = backlog::rename(&root, &id, "a different topic", &renaming(3))
         .expect_err("nowhere to record it");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
@@ -2027,7 +2104,7 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
         "and no point was marked for a change that was not about it"
     );
 
-    backlog::rename(&root, &id, "a different topic", &attempt(2)).expect("within the ceiling");
+    backlog::rename(&root, &id, "a different topic", &renaming(2)).expect("within the ceiling");
 }
 
 /// A produced target is checked at the moment the claim is written.
@@ -2121,4 +2198,141 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
     fine["sections"][0]["rule_review"] = serde_json::json!({"attempts": 6, "limit": 5});
     store::write_json(&path, &fine).expect("hand edit");
     backlog::load(&root, &id).expect("a real diagnostic");
+}
+
+/// The library is the same semantic mutation, so it is held to the same rule.
+///
+/// Enforcing "a reviewed mutation carries what it was reviewed against" only at
+/// the command line enforces the command line. A direct caller reaches the same
+/// write path, and `Prepared::first()` is an ordinary constructor — so without a
+/// check at the domain boundary a governed point can be reworded, or destroyed,
+/// having reviewed nothing, while every check that does run passes.
+#[test]
+fn a_governed_library_mutation_cannot_skip_the_predecessor_by_going_direct() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    backlog::add_section(&root, &id, "a second point", Vec::new(), &Prepared::first())
+        .expect("add");
+    // The rule arrives after the item exists, as it would in a real workspace.
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    for (name, outcome) in [
+        (
+            "reword",
+            backlog::revise_section(&root, &id, 1, "reworded", &Prepared::first()),
+        ),
+        (
+            "destroy",
+            backlog::consume_section(&root, &id, 1, &Prepared::first()).map(|_| ()),
+        ),
+    ] {
+        let error = outcome.unwrap_err();
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{name}");
+        assert!(
+            error.message.contains("reviewed against"),
+            "{name}: {}",
+            error.message
+        );
+    }
+    assert_eq!(
+        backlog::load(&root, &id)
+            .expect("load")
+            .section(1)
+            .expect("§1")
+            .text,
+        "unresolved",
+        "neither of those wrote anything"
+    );
+
+    // Carrying it, the same mutations go through.
+    backlog::revise_section(&root, &id, 1, "reworded", &reviewing(&root, &id, 1, 1))
+        .expect("with a predecessor");
+}
+
+/// Creating a point stays possible in a workspace that has rules about points.
+///
+/// Creation binds nothing engr can check, because engr allocates the id. So it
+/// is the one mutation exempt from carrying a predecessor — requiring what it
+/// cannot express would make `backlog new` impossible in exactly the workspaces
+/// that care most about unresolved work.
+#[test]
+fn creating_a_point_is_still_possible_where_a_rule_governs_backlog() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    let created = backlog::create(&root, "topic", "unresolved", Vec::new(), &attempt(1))
+        .expect("a rule about points must not make points uncreatable");
+    assert_eq!(created.sections.len(), 1);
+
+    // And an exhausted creation still soft-admits and marks, like any other
+    // mutation that preserves the point.
+    let exhausted = backlog::create(&root, "another", "unresolved", Vec::new(), &attempt(9))
+        .expect("soft-admit");
+    assert_eq!(
+        exhausted.sections[0].rule_review,
+        Some(engr::rules::RuleReview {
+            attempts: 9,
+            limit: 5
+        })
+    );
+}
+
+/// One target at one commit is one subject, whichever way it was observed.
+///
+/// Equality strips `dirty` and activity strips `dirty`, so duplicate detection
+/// has to strip it too. Comparing raw bytes lets the same file at the same
+/// commit sit in one set twice — once clean, once dirty — while every other part
+/// of the model insists those are the same subject.
+#[test]
+fn the_same_target_cannot_appear_twice_by_differing_only_in_dirty() {
+    let (_dir, root) = workspace();
+    repository(&root);
+    std::fs::write(root.join("session.rs"), "fn read() {}\n").expect("write");
+    let commit = commit_all(&root, "source");
+    let id = item(&root, "topic", "unresolved");
+
+    let path = backlog::item_path(&root, &id);
+    let mut stored: serde_json::Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["subjects"] = serde_json::json!([
+        { "kind": "file", "path": "session.rs", "commit": commit },
+        { "kind": "file", "path": "session.rs", "commit": commit, "dirty": true },
+    ]);
+    store::write_json(&path, &stored).expect("hand edit");
+
+    let error = backlog::load(&root, &id).expect_err("that is one subject listed twice");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("same subject twice"),
+        "{}",
+        error.message
+    );
+}
+
+/// `dirty` is measured against the commit the subject pins, not against HEAD.
+///
+/// They are the same question only when the pin is HEAD. Choose an older
+/// revision from a perfectly clean worktree and a status check says "clean",
+/// while the file is plainly not what that commit reconstructs — which is the
+/// claim the subject then goes on to make.
+#[test]
+fn an_explicit_revision_is_inexact_when_the_file_read_is_not_what_it_holds() {
+    let (_dir, root) = workspace();
+    repository(&root);
+    std::fs::write(root.join("session.rs"), "fn first() {}\n").expect("write");
+    let earlier = commit_all(&root, "first");
+    std::fs::write(root.join("session.rs"), "fn second() {}\n").expect("rewrite");
+    let now = commit_all(&root, "second");
+
+    // The worktree is clean, so nothing about `git status` is interesting here.
+    let (pinned, dirty) = backlog::pin(&root, "session.rs", Some(&earlier)).expect("pin");
+    assert_eq!(pinned, earlier);
+    assert!(
+        dirty,
+        "what was read is `fn second`, and the pinned commit holds `fn first`"
+    );
+
+    // Pinning what the file actually is stays exact.
+    let (pinned, dirty) = backlog::pin(&root, "session.rs", Some(&now)).expect("pin");
+    assert_eq!(pinned, now);
+    assert!(!dirty, "this baseline reconstructs exactly what was read");
 }

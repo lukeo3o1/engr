@@ -301,8 +301,14 @@ impl Section {
             // subjects[] is a set: two identical entries carry no more meaning
             // than one, and permitting them would make "equivalent subjects"
             // ambiguous when the set is compared.
+            //
+            // Compared through the same projection equality uses. `dirty` is a
+            // note about the moment of writing, not part of which target is
+            // meant — so comparing raw bytes here would let one file at one
+            // commit sit in the set twice, once clean and once dirty, while
+            // every other part of the model insists those are one subject.
             ensure!(
-                seen.insert(canonical_json(subject)?),
+                seen.insert(canonical_json(&subject.identity())?),
                 EXIT_SCHEMA,
                 "§{} lists the same subject twice",
                 self.id
@@ -670,19 +676,6 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 /// that never held the file reconstructs nothing.
 pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, bool)> {
     validate_repo_path(path)?;
-    // Asked in every branch, because pinning an explicit revision does not make
-    // the working file match it either — an agent reading a modified file and
-    // naming an older commit has the same gap, and the marker is about what was
-    // read rather than about which commit was chosen.
-    let dirty = git::path_dirty(root, path).ok_or_else(|| {
-        Error::new(
-            EXIT_INVARIANT,
-            format!(
-                "could not determine whether {path} is clean; \
-                 a subject records whether what was read matches what it pins"
-            ),
-        )
-    })?;
     let commit = match revision {
         Some(revision) => git::resolve(root, revision).ok_or_else(|| {
             Error::new(
@@ -705,6 +698,22 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, b
         "{path} does not exist at commit {}; a subject cannot pin a snapshot that never held it",
         short(&commit)
     );
+    // Against the commit being pinned, not against HEAD. They are the same
+    // question only when the pin is HEAD: choose an older revision from a clean
+    // worktree and a status check says "clean" while the file is plainly not
+    // what that commit reconstructs — which is exactly the claim this subject
+    // is about to make. Answering the easy question would put `dirty: false` on
+    // a subject whose baseline never held what the agent read.
+    let dirty = git::path_differs_at(root, &commit, path).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "could not compare {path} against {}; \
+                 a subject records whether what was read matches what it pins",
+                short(&commit)
+            ),
+        )
+    })?;
     Ok((commit, dirty))
 }
 
@@ -1077,15 +1086,27 @@ impl Prepared {
 /// Composed inside the lock, immediately before the change lands. Composing it
 /// earlier would leave the interval between the verdict and the write open to
 /// exactly the rule change that would have altered the verdict.
-struct Reviewed(Option<crate::rules::RuleReview>);
+struct Reviewed {
+    marker: Option<crate::rules::RuleReview>,
+    /// Whether any project rule governed this mutation at all — and so whether
+    /// a review was required, and a predecessor with it.
+    governed: bool,
+}
 
 impl Reviewed {
     fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
+        let governed = crate::rules::governs(root, crate::rules::Domain::Backlog)?;
         match crate::rules::exhaustion(root, crate::rules::Domain::Backlog, attempt)? {
             // No applicable rule, or none of them out of attempts. Either way
             // there is no diagnostic to carry.
-            crate::rules::Exhaustion::NotReached => Ok(Self(None)),
-            crate::rules::Exhaustion::Exhausted(marker) => Ok(Self(Some(marker))),
+            crate::rules::Exhaustion::NotReached => Ok(Self {
+                marker: None,
+                governed,
+            }),
+            crate::rules::Exhaustion::Exhausted(marker) => Ok(Self {
+                marker: Some(marker),
+                governed,
+            }),
             // The Object verdicts. Reaching one here would mean the composition
             // answered for the wrong domain, and the failure mode — a Backlog
             // mutation quietly refused, or sent to a human — is precisely what
@@ -1104,7 +1125,24 @@ impl Reviewed {
     /// describes how the wording standing now got in, and this mutation is now
     /// the answer to that.
     fn mark(&self, section: &mut Section) {
-        section.rule_review = self.0;
+        section.rule_review = self.marker;
+    }
+
+    /// A reviewed mutation must carry what it was reviewed against.
+    ///
+    /// Here rather than only at the command line, because the library exposes
+    /// the same semantic mutation. `Prepared::first()` is a perfectly ordinary
+    /// constructor, and without this a direct caller could reword — or
+    /// destructively consume — a governed point having reviewed nothing, while
+    /// every check that does run passes. Enforcement that lives one layer above
+    /// the thing it protects is enforcement of the layer, not of the thing.
+    fn needs_predecessor(&self, precondition: Option<&Precondition>) -> Result<()> {
+        ensure!(
+            !self.governed || precondition.is_some(),
+            EXIT_INVARIANT,
+            "a project rule governs backlog, so this mutation must carry the predecessor it was reviewed against"
+        );
+        Ok(())
     }
 
     /// Refuse a mutation that soft-admission does not cover.
@@ -1116,7 +1154,7 @@ impl Reviewed {
     /// Nothing is written when this refuses, marker included: no mutation was
     /// admitted, so there is nothing for a diagnostic to describe.
     fn must_have_passed(&self, refusal: &str) -> Result<()> {
-        match self.0 {
+        match self.marker {
             None => Ok(()),
             Some(marker) => Err(Error::new(
                 EXIT_INVARIANT,
@@ -1236,6 +1274,7 @@ fn edit<T>(
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
         let mut item = load(root, id)?;
         let outcome = body(&mut item, &reviewed)?;
         item.sections.sort_by_key(|section| section.id);
@@ -1259,6 +1298,14 @@ pub fn create(
         // different one, and checking the first would authorize the second.
         // Refused rather than ignored — silently accepting a precondition that
         // cannot apply is how a caller comes to believe it has a guarantee.
+        //
+        // And so creation is the one mutation exempt from carrying a
+        // predecessor under a governing rule. It has to be: requiring what it
+        // cannot express would make creating an unresolved point impossible in
+        // exactly the workspaces that have rules about unresolved points, which
+        // is the opposite of what a rule is for. §8 does say creation binds a
+        // *proposed* id's absence, so the exemption ends when #8 settles who
+        // mints that id.
         ensure!(
             prepared.precondition.is_none(),
             EXIT_INVARIANT,
@@ -1630,7 +1677,9 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
             precondition.authorizes(id, &Binds::Section(section))?;
             precondition.still_holds(root)?;
         }
-        Reviewed::compose(root, prepared.attempt)?.must_have_passed(
+        let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
+        reviewed.must_have_passed(
             "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
         )?;
         let mut item = load(root, id)?;

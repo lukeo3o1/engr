@@ -254,6 +254,22 @@ impl ReviewArg {
     /// precondition then travels into the mutation and is checked again under
     /// the writer lock — this comparison narrows the window, and that one closes
     /// it.
+    /// Creating an item, which binds nothing engr can check.
+    ///
+    /// `--expect` is refused rather than ignored, and refused with an answer: a
+    /// caller that offers one has a predecessor in mind, and being told the id
+    /// is not theirs to choose is more use than silence.
+    fn for_creation(&self) -> Result<backlog::Prepared> {
+        ensure!(
+            self.expect.is_empty(),
+            EXIT_USAGE,
+            "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
+        );
+        Ok(backlog::Prepared::attempt(rules::Attempt::new(
+            self.attempt,
+        )?))
+    }
+
     fn prepared(
         &self,
         governed: bool,
@@ -852,7 +868,11 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &topic,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(governed(root)?, || unreachable!("creation binds nothing"))?,
+                // Creation binds nothing, so it is never treated as governed
+                // here: engr allocates the id, and demanding a predecessor it
+                // cannot express would make `backlog new` impossible in every
+                // workspace that has a backlog rule.
+                &review.for_creation()?,
             )?;
             print!("{}", view::render_backlog_show(root, &item));
             Ok(())

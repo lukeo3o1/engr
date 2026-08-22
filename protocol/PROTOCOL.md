@@ -931,6 +931,12 @@ earlier rule and the wrong trade: the agent genuinely read something, and losing
 that context is worse than recording a baseline that is honestly labelled
 inexact. The commit stays recoverable; the extra context may be gone.
 
+The comparison is against **the commit being pinned**, not against the repository
+head. Those coincide only when the pin is the head: an explicitly chosen older
+revision differs from a perfectly clean worktree, and a working-tree cleanliness
+check reports `dirty: false` there while the file is not what that commit
+reconstructs — which is precisely the claim the field makes.
+
 `dirty` is **target-local**. It says nothing about the repository as a whole and
 nothing about `git worktree`. For a `symbol` it means the **containing file**
 was modified — proving a diff intersects one symbol's own source range would
@@ -945,7 +951,11 @@ A subject that later stops resolving is a stale signpost, and MUST NOT make the
 item unreadable. Backlog is staging, not a referential-integrity database.
 
 `subjects[]` is semantically **unordered**, and exact duplicates are refused so
-that "the same set" has one meaning. No persisted sort order is required.
+that "the same set" has one meaning. Duplicates are judged by the same identity
+that decides equality, so a target that differs only in `dirty` is a duplicate:
+`dirty` is not part of identity, and a comparison that included it would let one
+target sit in a set twice while the rest of the model calls them one subject. No
+persisted sort order is required.
 
 ### Mutation preconditions
 
@@ -1015,6 +1025,17 @@ the lock passes, because they compare against what the command itself read
 rather than against what the agent read. **Where a Rule Review was required, the
 mutation MUST carry the predecessor it was reviewed against.** Where no rule
 applies there was no review to anchor, and a predecessor MAY be omitted.
+
+That requirement belongs to the **mutation**, not to whichever interface reached
+it. An implementation that enforces it only at its command line has enforced its
+command line: any other caller reaches the same semantic mutation, and the check
+has to sit where they meet.
+
+Creating an item is the one exception, and only while the implementation
+allocates the id itself. It binds nothing it could carry, so requiring a
+predecessor would make creating an unresolved point impossible in exactly the
+workspaces that have rules about unresolved points. An implementation MUST NOT
+resolve that by accepting a predecessor it will not honour.
 
 Staleness is its own outcome, not a failed mutation and not corrupt data: the
 caller did nothing wrong and the world moved underneath it. The refusal MUST say

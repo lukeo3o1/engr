@@ -1273,6 +1273,16 @@ pub fn exhaustion(root: &Path, domain: Domain, attempt: Attempt) -> Result<Exhau
     compose(domain, &bound_rules(root, domain)?, attempt)
 }
 
+/// Whether any project rule governs this domain — and so whether a review was
+/// required at all.
+///
+/// The question every caller that enforces "a reviewed mutation must carry what
+/// it was reviewed against" has to ask first, because with no applicable rule
+/// there is no review for a predecessor to anchor.
+pub fn governs(root: &Path, domain: Domain) -> Result<bool> {
+    Ok(!applicable(root, domain)?.is_empty())
+}
+
 /// Check an attestation against the subject as it stands right now.
 ///
 /// Recomputed, never looked up. The hash an agent submits is only meaningful if

@@ -4417,7 +4417,8 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
         &id,
         1,
         "sharpened by someone else",
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(root, &id, 1).expect("observe")),
     )
     .expect("concurrent");
 
@@ -4478,7 +4479,8 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
         &id,
         "a second point",
         Vec::new(),
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section_absent(root, &id).expect("observe")),
     )
     .expect("add");
 
@@ -4584,4 +4586,70 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_STALE));
+}
+
+/// A rule about unresolved points must not make unresolved points uncreatable.
+///
+/// Creation binds nothing engr can check, because engr allocates the id. Putting
+/// it on the governed path made `backlog new` refuse without `--expect` and
+/// panic with one, so the ordinary creation path could neither succeed nor fail
+/// safely in any workspace that had a backlog rule — which is every workspace
+/// that cares most about unresolved work.
+#[test]
+fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 5\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let created = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "a topic",
+            "--text",
+            "unresolved",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "creation must stay reachable: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(engr::backlog::ids(root).expect("ids").len(), 1);
+
+    // Offering a predecessor is usage, and answered rather than ignored — and
+    // above all not a panic.
+    let offered = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--topic",
+            "another",
+            "--text",
+            "unresolved",
+            "--expect",
+            "whatever",
+        ],
+    );
+    assert_eq!(offered.status.code(), Some(engr::EXIT_USAGE));
+    let said = String::from_utf8_lossy(&offered.stderr);
+    assert!(
+        said.contains("engr allocates"),
+        "the refusal says why: {said}"
+    );
+    assert!(
+        !said.contains("panicked"),
+        "a reachable path must not panic: {said}"
+    );
+    assert_eq!(engr::backlog::ids(root).expect("ids").len(), 1);
 }
