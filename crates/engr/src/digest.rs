@@ -253,6 +253,37 @@ impl Family {
         Ok(parsed)
     }
 
+    /// Check an attestation by recomputing **under the version it names**.
+    ///
+    /// This is the whole point of carrying the version, and it is easy to build
+    /// the metadata without it: a family that only answers "is version 1 still
+    /// supported" will happily accept a `1:` attestation and then compare it
+    /// against a value recomputed under version 2. The two disagree by
+    /// construction — if they did not, version 2 would not have been needed —
+    /// so a valid historical proof gets reported as a changed subject, and the
+    /// lifetime verification promise exists in the support table and nowhere
+    /// else.
+    ///
+    /// `recompute` is handed the attested version and must answer with what
+    /// *that* contract's calculation yields for the subject as it stands now.
+    pub fn recheck(
+        &self,
+        attested: &str,
+        recompute: impl FnOnce(u32) -> Result<String>,
+    ) -> Result<Attestation> {
+        let attested = self.verify(attested)?;
+        let version = attested.version();
+        let expected = Versioned::new(version, recompute(version)?)?;
+        let (_, length) = self.support(version).ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: no contract for version {version}", self.name),
+            )
+        })?;
+        self.check_length(&expected, length)?;
+        Ok(Attestation { attested, expected })
+    }
+
     fn check_length(&self, value: &Versioned, length: usize) -> Result<()> {
         ensure!(
             value.digest().len() == length,
@@ -264,6 +295,23 @@ impl Family {
             value.digest().len()
         );
         Ok(())
+    }
+}
+
+/// What an attestation claimed, beside what it should have been.
+///
+/// Both are kept rather than reduced to a boolean, because the caller has to be
+/// able to say what the correct value is — an agent told only "wrong" cannot
+/// tell a moved subject from a mis-copied digest.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Attestation {
+    pub attested: Versioned,
+    pub expected: Versioned,
+}
+
+impl Attestation {
+    pub fn agrees(&self) -> bool {
+        self.attested == self.expected
     }
 }
 

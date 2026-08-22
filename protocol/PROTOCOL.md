@@ -1551,6 +1551,17 @@ naming a version this build does not know is **not malformed data** — it is
 readable data this build cannot check, and it is reported that way. Only a
 grammar violation is malformed.
 
+**Verification recomputes under the version the value names**, not under the
+current one. That is the difference between carrying a version and using one: a
+build that only asks "is version 1 still supported" will accept a `1:` value and
+then compare it against a recomputation under version 2 — and those disagree by
+construction, because two calculations that agreed would not have needed two
+versions. The valid historical proof is then reported as a changed subject, and
+the guarantee exists only in the support table. A version listed as verifiable
+that this build cannot actually compute is refused rather than served the
+current calculation, since being promised in the contract is not evidence that
+an implementation has it.
+
 ### Unordered sets have one order
 
 Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable

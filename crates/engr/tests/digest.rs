@@ -221,3 +221,88 @@ fn the_shipped_families_emit_and_verify_their_own_current_version() {
             .expect_err("contract versions are not a shared namespace");
     }
 }
+
+/// A historical attestation is recomputed under **its own** contract version.
+///
+/// This is the difference between carrying a version and using one. A family
+/// that only answers "is version 1 still supported" accepts a `1:` attestation
+/// and then compares it against a value recomputed under the current version —
+/// and those disagree by construction, because if the two calculations agreed
+/// there would have been no reason to add a second version. The valid
+/// historical proof is then reported as a changed subject, and the lifetime
+/// verification promise lives in the support table and nowhere else.
+///
+/// The two versions here calculate deliberately differently, so routing through
+/// the current emitter cannot accidentally pass.
+#[test]
+fn a_historical_attestation_is_recomputed_under_the_version_it_names() {
+    let family = family(); // current = 3, version 1 verify-only
+    let v1 = "1".repeat(64);
+    let v3 = "3".repeat(64);
+    let calculation = |version: u32| match version {
+        1 => Ok(v1.clone()),
+        3 => Ok(v3.clone()),
+        other => Err(engr::Error::new(
+            engr::EXIT_SCHEMA,
+            format!("no calculation for {other}"),
+        )),
+    };
+
+    // The historical proof verifies, because it is recomputed as version 1.
+    let historical = family
+        .recheck(&format!("1:{v1}"), calculation)
+        .expect("version 1 is still verifiable");
+    assert!(historical.agrees(), "{historical:?}");
+    assert_eq!(historical.expected.version(), 1);
+    assert_eq!(
+        historical.expected.digest(),
+        v1,
+        "recomputed under 1, not under the current emitter"
+    );
+
+    // The same scalar routed through the current version would not have matched,
+    // which is what makes the assertion above worth making.
+    assert_ne!(v1, v3);
+
+    // A current-version attestation still verifies against the current
+    // calculation, so the fix did not simply pin everything to the oldest.
+    let current = family
+        .recheck(&format!("3:{v3}"), calculation)
+        .expect("version 3 verifies");
+    assert!(current.agrees());
+
+    // And a genuine mismatch is still a mismatch, reported with the value the
+    // caller should have produced under that same version.
+    let wrong = family
+        .recheck(&format!("1:{}", "a".repeat(64)), calculation)
+        .expect("well formed and supported");
+    assert!(!wrong.agrees());
+    assert_eq!(
+        wrong.expected.to_string(),
+        format!("1:{v1}"),
+        "the expected value is stated under the attested version"
+    );
+}
+
+/// A version the support table allows but this build cannot compute is refused.
+///
+/// Being listed as verifiable is a promise about the contract, not evidence that
+/// this binary implements it. Serving the current calculation instead would turn
+/// a missing implementation into a silent wrong answer.
+#[test]
+fn a_supported_version_without_a_calculation_is_refused_rather_than_approximated() {
+    let family = family();
+    let error = family
+        .recheck(&format!("1:{}", "b".repeat(64)), |_| {
+            Err(engr::Error::new(
+                engr::EXIT_SCHEMA,
+                "this build cannot compute version 1".to_owned(),
+            ))
+        })
+        .expect_err("no calculation, no verdict");
+    assert!(
+        error.message.contains("cannot compute"),
+        "{}",
+        error.message
+    );
+}
