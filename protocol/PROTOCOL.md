@@ -865,6 +865,46 @@ Section ids are monotonic and never reused, for the reason the record's are —
 `max(existing) + 1` would hand back the id of a consumed Section and silently
 repoint every subject aimed at it.
 
+### Merging says two points were one
+
+A merge names one **destination** and one or more **sources**, and is one
+mutation:
+
+```text
+destination survives, keeping its Section id, with the merged wording
+sources are removed
+```
+
+The destination identity survives. A merge MUST NOT allocate a replacement
+Section identity, and MUST NOT reuse a source id later. Minting a fresh id to
+hold the merged wording is the tempting shape and the wrong one: everything
+already aimed at the destination — subjects, `produced[]` entries elsewhere, a
+human's own note — would be left naming a Section that stopped existing at the
+moment somebody observed the two were the same point.
+
+`produced[]` MUST be carried by **set union**:
+
+```text
+destination.produced = union(destination.produced, source.produced)
+```
+
+Merging says these were one unresolved point, not that the outcomes never
+happened. Dropping a source's outcomes would lose the one thing that stops a
+later session re-solving work an earlier one already got confirmed.
+
+The merged destination receives a refreshed `updated_at`: it now states
+something it did not state before.
+
+It is **atomic**. Consolidation is a single judgement, and half of it applied is
+a state nobody decided on — a destination carrying merged wording while a source
+it supposedly absorbed still sits there unresolved. An implementation MUST check
+every participant before removing anything, so a merge naming a Section that is
+not there changes nothing at all.
+
+The precondition binds the parent topic, the complete destination and every
+complete source. An unrelated sibling Section changing MUST NOT stale it; any
+change to the topic, the destination or a source MUST.
+
 A confirmed section never moves back into backlog. The confirmed wording remains
 the last-admitted wording until another confirmed revision replaces it; the
 doubt goes into backlog instead, and is later settled by a normal record action.
@@ -927,7 +967,7 @@ What each mutation binds is exactly what it rests on:
 | change the topic | the **complete** parent item |
 | add a Section | the parent topic, and that the Section id is still absent |
 | change or consume a Section | that **whole** Section, and the parent topic |
-| merge Sections | the parent topic, and every Section involved |
+| merge Sections | the parent topic, and the **whole** destination and every source |
 
 The scope is the decision. Binding less than the whole Section is what the
 removed `canonical(text, subjects[])` fingerprint did, and it was blind to every

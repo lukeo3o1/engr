@@ -1893,8 +1893,10 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "backlog",
             "merge",
             &id,
+            "--into",
+            "1",
             "--sections",
-            "1,2",
+            "2",
             "--text",
             "one point"
         ]
@@ -1910,7 +1912,10 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     let item = engr::backlog::load(root, &id).expect("item");
     assert_eq!(item.topic, "refresh");
     assert_eq!(item.sections.len(), 1);
-    assert_eq!(item.sections[0].id, 3);
+    assert_eq!(
+        item.sections[0].id, 1,
+        "the merge destination survives as itself; nothing new was allocated"
+    );
     assert!(
         engr::gate::pending(root).expect("candidates").is_empty(),
         "staging edits never mint a challenge code"

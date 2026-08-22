@@ -171,9 +171,13 @@ enum Backlog {
         #[command(flatten)]
         subjects: SubjectArgs,
     },
-    /// Consolidate unresolved points into one
+    /// Consolidate unresolved points into one of them
     Merge {
         item: String,
+        /// The point that survives, keeping its id and taking the merged wording
+        #[arg(long = "into", value_name = "SECTION")]
+        into: u64,
+        /// The points merged into it. They are removed, and their ids not reused
         #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
         sections: Vec<u64>,
         #[command(flatten)]
@@ -815,19 +819,26 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
         }
         Backlog::Merge {
             item,
+            into,
             sections,
             text,
             subjects,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::merge_sections(
+            backlog::merge_into(
                 root,
                 &id,
+                into,
                 &sections,
                 &text.read()?,
                 subjects.build(root)?,
             )?;
-            println!("merged into §{section}");
+            let absorbed = sections
+                .iter()
+                .map(|section| format!("§{section}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("merged {absorbed} into §{into}");
             Ok(())
         }
         Backlog::Produced {

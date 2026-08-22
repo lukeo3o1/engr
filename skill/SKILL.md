@@ -244,9 +244,14 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
+engr backlog merge <id> --into 2 --sections 5 --text "one point after all"
 engr backlog produced <id> --section 2 --target engr:obj:<id>:3
 engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
+
+`merge` keeps the destination you name and removes the sources; it never mints a
+third section, so anything already pointing at `--into` still points at it. What
+the sources produced comes along.
 
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human

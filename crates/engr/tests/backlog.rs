@@ -140,10 +140,85 @@ fn section_ids_are_monotonic_and_never_reused() {
         "the gap where §2 was is information: something was there"
     );
 
-    // Merging also takes a fresh id rather than reusing either absorbed one.
-    let merged =
-        backlog::merge_sections(&root, &id, &[1, 3], "one point", Vec::new()).expect("merge");
-    assert_eq!(merged, 5);
+    // Merging consumes ids like anything else: §1 goes, and the counter does not
+    // hand it back. What merging does *not* do is mint a new one.
+    backlog::merge_into(&root, &id, 3, &[1], "one point", Vec::new()).expect("merge");
+    let stored = backlog::load(&root, &id).expect("load");
+    assert_eq!(
+        stored.sections.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![3, 4],
+        "the destination kept its id and the source's id is simply gone"
+    );
+    assert_eq!(
+        stored.next_section_id, 5,
+        "a merge allocates nothing, so it does not advance the counter"
+    );
+}
+
+/// A merge does not create a third point; the destination survives as itself.
+///
+/// Minting a fresh id would silently orphan everything already pointing at the
+/// destination — subjects, `produced[]` bookkeeping, a reviewer's own notes —
+/// all naming a Section that stopped existing at the moment somebody said these
+/// two were the same thing.
+#[test]
+fn a_merge_keeps_the_destination_identity_and_removes_the_sources() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "several concerns", "first");
+    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "third", Vec::new()).expect("add");
+    let before = backlog::load(&root, &id).expect("load");
+    let untouched = before.section(1).expect("§1").updated_at.clone();
+
+    backlog::merge_into(&root, &id, 2, &[1, 3], "one point", Vec::new()).expect("merge");
+
+    let stored = backlog::load(&root, &id).expect("load");
+    assert_eq!(
+        stored.sections.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![2],
+        "one point survives, and it is the one named as the destination"
+    );
+    let merged = stored.section(2).expect("destination");
+    assert_eq!(merged.text, "one point");
+    assert!(
+        merged.updated_at >= untouched,
+        "the destination now says something it did not say before"
+    );
+
+    // The source ids are consumed, not freed.
+    let next = backlog::add_section(&root, &id, "later", Vec::new()).expect("add");
+    assert_eq!(next, 4, "a merged-away id is never handed back out");
+}
+
+/// Every participant is checked before anything moves.
+#[test]
+fn a_merge_naming_a_point_that_is_not_there_changes_nothing() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
+
+    for (name, destination, sources) in [
+        ("an absent source", 1u64, vec![2u64, 9]),
+        ("an absent destination", 9, vec![1, 2]),
+    ] {
+        assert!(
+            backlog::merge_into(&root, &id, destination, &sources, "one point", Vec::new())
+                .is_err(),
+            "{name} should refuse"
+        );
+        let stored = backlog::load(&root, &id).expect("load");
+        assert_eq!(
+            stored.sections.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "{name}: a refused merge leaves the item exactly as it was"
+        );
+    }
+
+    // A point cannot be merged into itself: that is not a judgement about two
+    // points, and taken literally it would remove the destination.
+    let error = backlog::merge_into(&root, &id, 1, &[1], "one point", Vec::new())
+        .expect_err("self-merge is not a merge");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
 }
 
 #[test]
@@ -850,17 +925,17 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
     ];
     store::write_json(&backlog::item_path(&root, &staging), &stored).expect("seed outcomes");
 
-    let merged =
-        backlog::merge_sections(&root, &staging, &[1, 2], "one point", Vec::new()).expect("merge");
-    let section = backlog::load(&root, &staging).expect("load");
-    let section = section.section(merged).expect("merged section");
+    backlog::merge_into(&root, &staging, 1, &[2], "one point", Vec::new()).expect("merge");
+    let stored = backlog::load(&root, &staging).expect("load");
+    let section = stored.section(1).expect("destination");
     assert_eq!(
         section.produced,
         vec![
             Produced::object(format!("obj:{object}:1")),
             Produced::object(format!("obj:{object}:2")),
         ],
-        "the outcomes happened; merging says the points were one, not that they did not"
+        "the union of both, deduplicated: the outcomes happened, and merging says \
+         the points were one, not that they did not"
     );
 }
 
@@ -1234,4 +1309,40 @@ fn creating_an_item_binds_only_its_own_absence() {
     let taken = backlog::Precondition::item_absent(existing);
     let error = taken.still_holds(&root).expect_err("the id is occupied");
     assert_eq!(error.code, engr::EXIT_STALE);
+}
+
+/// A merge binds the topic and every point it touches — destination included.
+///
+/// The destination is not a bystander that merely receives: it is being
+/// rewritten, and the judgement that these were one point was made about what it
+/// said at the time. A sibling nobody named is still exempt, for the same reason
+/// it is exempt everywhere else.
+#[test]
+fn a_merge_binds_the_topic_and_both_ends_but_not_an_unnamed_sibling() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "destination");
+    backlog::add_section(&root, &id, "source", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "bystander", Vec::new()).expect("add");
+
+    let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
+    bound.still_holds(&root).expect("nothing has moved yet");
+
+    backlog::revise_section(&root, &id, 3, "bystander, sharpened").expect("revise sibling");
+    bound
+        .still_holds(&root)
+        .expect("a point this merge never read cannot stale it");
+
+    for (name, moved) in [("the destination", 1u64), ("the source", 2)] {
+        let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
+        backlog::revise_section(&root, &id, moved, &format!("{name}, sharpened")).expect("revise");
+        let error = bound.still_holds(&root).err();
+        let error = error.unwrap_or_else(|| panic!("{name} moving must stale the merge"));
+        assert_eq!(error.code, engr::EXIT_STALE, "{name}");
+    }
+
+    // The topic scopes every point under it, so it is bound too.
+    let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
+    backlog::rename(&root, &id, "a different topic").expect("rename");
+    let error = bound.still_holds(&root).expect_err("the context moved");
+    assert!(error.message.contains("topic"), "{}", error.message);
 }

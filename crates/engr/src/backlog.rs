@@ -1086,52 +1086,74 @@ pub fn forget_produced(root: &Path, id: &str, section: u64, outcome: &Produced) 
     })
 }
 
-/// Consolidate unresolved points into one, taking a new id.
+/// Consolidate unresolved points into one, **into an explicit destination**.
 ///
-/// The absorbed Sections' `produced[]` carry forward, deduplicated. Dropping
-/// them would lose the one thing that stops a later session re-solving work an
-/// earlier one already got confirmed — and merging says these were the same
-/// unresolved point, not that the outcomes never happened.
-pub fn merge_sections(
+/// The destination survives with its own id and the merged wording; the sources
+/// are removed in the same mutation. It allocates nothing: a merge says these
+/// were one unresolved point all along, and minting a third id to say that would
+/// leave every subject pointing at the destination suddenly naming something
+/// that no longer exists. Source ids are not reused, like any consumed id.
+///
+/// All or nothing, under one lock. Consolidation is a single judgement, and half
+/// of it applied is a state nobody decided on — a destination rewritten with
+/// merged wording while the source it merged still sits there unresolved.
+///
+/// `produced[]` is carried by **set union**. Dropping the sources' outcomes
+/// would lose the one thing that stops a later session re-solving work an
+/// earlier one already got confirmed: merging says these were the same point,
+/// not that the outcomes never happened.
+pub fn merge_into(
     root: &Path,
     id: &str,
-    absorbs: &[u64],
+    destination: u64,
+    sources: &[u64],
     text: &str,
     subjects: Vec<Subject>,
-) -> Result<u64> {
+) -> Result<()> {
     check_text(text)?;
-    let mut unique = absorbs.to_vec();
+    let mut unique = sources.to_vec();
     unique.sort_unstable();
     unique.dedup();
     ensure!(
-        absorbs.len() >= 2,
+        !sources.is_empty(),
         EXIT_INVARIANT,
-        "a merge must absorb at least two sections"
+        "a merge needs at least one section to merge into the destination"
     );
     ensure!(
-        unique.len() == absorbs.len(),
+        unique.len() == sources.len(),
         EXIT_INVARIANT,
-        "a merge cannot absorb the same section twice"
+        "a merge cannot take the same section twice"
+    );
+    ensure!(
+        !sources.contains(&destination),
+        EXIT_INVARIANT,
+        "§{destination} is the destination, so it cannot also be merged into itself"
     );
     edit(root, id, |item| {
-        let mut produced: Vec<Produced> = Vec::new();
-        for absorbed in absorbs {
-            for outcome in &item.section(*absorbed)?.produced {
+        // Every participant is checked before anything moves, so a merge naming
+        // a section that is not there changes nothing at all.
+        let mut produced = item.section(destination)?.produced.clone();
+        for source in sources {
+            for outcome in &item.section(*source)?.produced {
                 if !produced.contains(outcome) {
                     produced.push(outcome.clone());
                 }
             }
         }
-        let section = take_id(item)?;
-        item.sections.retain(|item| !absorbs.contains(&item.id));
-        item.sections.push(Section {
-            id: section,
-            text: text.to_owned(),
-            updated_at: now(),
-            subjects,
-            produced,
-        });
-        Ok(section)
+        item.sections
+            .retain(|section| !sources.contains(&section.id));
+        let slot = item
+            .sections
+            .iter_mut()
+            .find(|section| section.id == destination)
+            .expect("destination presence checked above");
+        text.clone_into(&mut slot.text);
+        slot.subjects = subjects;
+        slot.produced = produced;
+        // Unambiguously activity: the destination now states something it did
+        // not state before, whatever the wording happens to be.
+        slot.updated_at = now();
+        Ok(())
     })
 }
 
