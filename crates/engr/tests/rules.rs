@@ -2029,20 +2029,40 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
         serde_json::json!({"a": [1, {"b": 9007199254740993u64}]}),
         serde_json::json!({"a": -9007199254740993i64}),
         serde_json::json!([[[u64::MAX]]]),
+        // 2^60 + 1: one past an exact value, and it collides with it.
+        serde_json::json!({"a": (1u64 << 60) + 1}),
     ] {
         rules::bind(&root, Domain::Backlog, buried, ok.clone())
             .err()
             .expect("refused wherever it is buried");
     }
 
-    // And the boundary itself is usable: the largest safe integer, its negative,
-    // and ordinary floats all pass.
+    // The domain is RFC 8785's -- exactly a binary64 value -- not the
+    // +-(2^53-1) safe-integer recommendation. The RFC's own Appendix B lists
+    // 9007199254740992 as a valid canonical number, and 2^60 is exact too:
+    // using the recommendation as the domain would refuse both.
     for fine in [
         serde_json::json!({"n": 9007199254740991u64}),
-        serde_json::json!({"n": -9007199254740991i64}),
+        serde_json::json!({"n": 9007199254740992u64}), // 2^53, exact
+        serde_json::json!({"n": 1u64 << 60}),
+        serde_json::json!({"n": -(1i64 << 60)}),
         serde_json::json!({"n": 1.5}),
         serde_json::json!({"n": 0}),
     ] {
-        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("inside the range");
+        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("exactly a binary64 value");
     }
+
+    // One accepted value whose canonical *spelling* is not its literal, to pin
+    // that this is deliberate: 2^60 renders as ECMAScript's shortest
+    // round-tripping form, which parses back to exactly 2^60. The value
+    // survives; only the decimal is the standard's rather than the author's.
+    let big = serde_json::json!({"n": 1u64 << 60});
+    let canonical = serde_jcs::to_string(&big).expect("jcs");
+    assert_eq!(canonical, "{\"n\":1152921504606847000}");
+    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("parse");
+    assert_eq!(
+        parsed["n"].as_f64().expect("number"),
+        (1u64 << 60) as f64,
+        "the spelling moved, the value did not"
+    );
 }

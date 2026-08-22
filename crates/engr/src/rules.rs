@@ -1031,12 +1031,22 @@ impl ReviewBinding {
     }
 }
 
-/// The largest integer JCS can carry without losing which integer it was.
+/// Whether this integer is exactly a binary64 value.
 ///
-/// RFC 8785 §3.1 requires numbers to be expressible as IEEE-754 binary64, and
-/// I-JSON gives the interoperable range as ±(2^53 − 1). Beyond it, distinct
-/// integers stop being distinguishable.
-const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+/// An integer is `m · 2^k` with `m` odd; a double holds 53 significant bits, so
+/// it is exact precisely when `m < 2^53`. Computed by shifting off the trailing
+/// zeros — **no float cast anywhere**, because the obvious `(n as f64) as u64 ==
+/// n` is wrong in Rust: that cast saturates, so `u64::MAX` compares equal to
+/// itself and passes.
+///
+/// This is the RFC 8785 domain (§3.1, "expressible as IEEE-754 binary64"), not
+/// the ±(2^53 − 1) safe-integer range — that is a SHOULD for ECMAScript interop,
+/// and the RFC's own Appendix B lists `9007199254740992` as a valid canonical
+/// number. Using the recommendation as the domain refuses values the standard
+/// accepts.
+fn exactly_binary64(magnitude: u64) -> bool {
+    magnitude == 0 || (magnitude >> magnitude.trailing_zeros()) < (1 << 53)
+}
 
 /// Refuse a subject JCS cannot carry without changing it.
 ///
@@ -1059,21 +1069,27 @@ const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// belong in strings. Applied where arbitrary JSON enters, which is `bind`'s two
 /// subject arguments; every other value reaching [`canonical_bytes`] is an
 /// engr-owned struct whose numbers are `u32`.
+///
+/// What this does **not** promise is that the canonical spelling matches the
+/// literal that was written. `2^60` canonicalizes to `1152921504606847000`,
+/// because that is what ECMAScript's shortest round-tripping form is, and it
+/// parses back to exactly `2^60`. The value survives; only its decimal spelling
+/// is the standard's rather than the author's. Anything accepted here is exactly
+/// a double, so two accepted subjects that differ still differ after
+/// canonicalization — which is the property that matters.
 fn within_safe_numbers(value: &serde_json::Value, what: &str) -> Result<()> {
     match value {
         serde_json::Value::Number(number) => {
-            // Deliberately not `(n as f64) as u64 == n`: Rust saturates that
-            // cast, so `u64::MAX` compares equal to itself and passes while JCS
-            // renders it as 18446744073709552000.
             let safe = match (number.as_u64(), number.as_i64()) {
-                (Some(unsigned), _) => unsigned <= MAX_SAFE_INTEGER,
-                (_, Some(signed)) => signed.unsigned_abs() <= MAX_SAFE_INTEGER,
+                (Some(unsigned), _) => exactly_binary64(unsigned),
+                (_, Some(signed)) => exactly_binary64(signed.unsigned_abs()),
+                // Already a double, so exact by construction.
                 _ => true,
             };
             ensure!(
                 safe,
                 EXIT_USAGE,
-                "{what}: {number} is outside the range canonical JSON can carry exactly (±{MAX_SAFE_INTEGER}), so two different subjects would hash alike; carry it as a string"
+                "{what}: {number} is not exactly a binary64 value, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
             );
             Ok(())
         }

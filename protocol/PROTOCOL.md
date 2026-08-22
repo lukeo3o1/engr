@@ -1512,13 +1512,24 @@ is hashed:
 ```
 
 A review subject must be inside what those bytes can carry. RFC 8785 requires
-numbers expressible as IEEE-754 binary64, so an integer outside ±(2^53 − 1) is
-**refused** rather than hashed. This is not pedantry about a standard:
-canonicalization takes numbers through a `double`, so an integer past that range
-does not fail — it becomes a different integer, and `9007199254740993` and
-`9007199254740992` produce the *same* canonical bytes. Two distinct subjects,
-one hash, and an attestation over either verifying against the other. Values
-needing more precision are carried as strings.
+numbers **expressible as IEEE-754 binary64**, so an integer that is not exactly
+a double is refused rather than hashed. This is not pedantry about a standard:
+canonicalization takes numbers through a double, so such an integer does not
+fail — it becomes a different one, and `9007199254740993` and `9007199254740992`
+produce the *same* canonical bytes. Two distinct subjects, one hash, and an
+attestation over either verifying against the other. Values needing more
+precision are carried as strings.
+
+The domain is exact representability, **not** the ±(2^53 − 1) safe-integer
+range: that is a recommendation for ECMAScript interoperability, and RFC 8785's
+own examples include `9007199254740992`. Treating the recommendation as the
+domain refuses numbers the standard accepts.
+
+The canonical *spelling* is the standard's, not the author's. `2^60`
+canonicalizes to `1152921504606847000` — the shortest form that parses back to
+exactly `2^60`. The value is unchanged; only the decimal is. Every accepted
+number is exactly a double, so two accepted subjects that differ still differ
+after canonicalization, which is the property the seal depends on.
 
 Naming a standard is the point: JCS orders object members by **UTF-16** code
 units and fixes number formatting, so a second implementation in another
