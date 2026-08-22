@@ -5,7 +5,7 @@
 //! authority, and a candidate written against one unresolved point mutating a
 //! different one.
 
-use engr::backlog::{self, Produced, Subject};
+use engr::backlog::{self, Prepared, Produced, Subject};
 use engr::model::{Action, Content, Payload, Ref};
 use engr::{gate, ops, reference, store};
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ fn compact(id: &str) -> String {
 }
 
 fn item(root: &Path, topic: &str, text: &str) -> String {
-    backlog::create(root, topic, text, Vec::new())
+    backlog::create(root, topic, text, Vec::new(), &Prepared::first())
         .expect("create backlog item")
         .id
 }
@@ -123,12 +123,15 @@ fn backlog_files_carry_no_schema_version_of_their_own() {
 fn section_ids_are_monotonic_and_never_reused() {
     let (_dir, root) = workspace();
     let id = item(&root, "several concerns", "first");
-    let second = backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
-    let third = backlog::add_section(&root, &id, "third", Vec::new()).expect("add");
+    let second =
+        backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
+    let third =
+        backlog::add_section(&root, &id, "third", Vec::new(), &Prepared::first()).expect("add");
     assert_eq!((second, third), (2, 3));
 
-    assert!(!backlog::consume_section(&root, &id, 2).expect("delete"));
-    let fourth = backlog::add_section(&root, &id, "fourth", Vec::new()).expect("add");
+    assert!(!backlog::consume_section(&root, &id, 2, &Prepared::first()).expect("delete"));
+    let fourth =
+        backlog::add_section(&root, &id, "fourth", Vec::new(), &Prepared::first()).expect("add");
     assert_eq!(
         fourth, 4,
         "the counter is persisted, so a gap is never handed back out"
@@ -142,7 +145,16 @@ fn section_ids_are_monotonic_and_never_reused() {
 
     // Merging consumes ids like anything else: §1 goes, and the counter does not
     // hand it back. What merging does *not* do is mint a new one.
-    backlog::merge_into(&root, &id, 3, &[1], "one point", Vec::new()).expect("merge");
+    backlog::merge_into(
+        &root,
+        &id,
+        3,
+        &[1],
+        "one point",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("merge");
     let stored = backlog::load(&root, &id).expect("load");
     assert_eq!(
         stored.sections.iter().map(|s| s.id).collect::<Vec<_>>(),
@@ -165,12 +177,21 @@ fn section_ids_are_monotonic_and_never_reused() {
 fn a_merge_keeps_the_destination_identity_and_removes_the_sources() {
     let (_dir, root) = workspace();
     let id = item(&root, "several concerns", "first");
-    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
-    backlog::add_section(&root, &id, "third", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
+    backlog::add_section(&root, &id, "third", Vec::new(), &Prepared::first()).expect("add");
     let before = backlog::load(&root, &id).expect("load");
     let untouched = before.section(1).expect("§1").updated_at.clone();
 
-    backlog::merge_into(&root, &id, 2, &[1, 3], "one point", Vec::new()).expect("merge");
+    backlog::merge_into(
+        &root,
+        &id,
+        2,
+        &[1, 3],
+        "one point",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("merge");
 
     let stored = backlog::load(&root, &id).expect("load");
     assert_eq!(
@@ -186,7 +207,8 @@ fn a_merge_keeps_the_destination_identity_and_removes_the_sources() {
     );
 
     // The source ids are consumed, not freed.
-    let next = backlog::add_section(&root, &id, "later", Vec::new()).expect("add");
+    let next =
+        backlog::add_section(&root, &id, "later", Vec::new(), &Prepared::first()).expect("add");
     assert_eq!(next, 4, "a merged-away id is never handed back out");
 }
 
@@ -195,15 +217,23 @@ fn a_merge_keeps_the_destination_identity_and_removes_the_sources() {
 fn a_merge_naming_a_point_that_is_not_there_changes_nothing() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "first");
-    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
 
     for (name, destination, sources) in [
         ("an absent source", 1u64, vec![2u64, 9]),
         ("an absent destination", 9, vec![1, 2]),
     ] {
         assert!(
-            backlog::merge_into(&root, &id, destination, &sources, "one point", Vec::new())
-                .is_err(),
+            backlog::merge_into(
+                &root,
+                &id,
+                destination,
+                &sources,
+                "one point",
+                Vec::new(),
+                &Prepared::first()
+            )
+            .is_err(),
             "{name} should refuse"
         );
         let stored = backlog::load(&root, &id).expect("load");
@@ -216,8 +246,16 @@ fn a_merge_naming_a_point_that_is_not_there_changes_nothing() {
 
     // A point cannot be merged into itself: that is not a judgement about two
     // points, and taken literally it would remove the destination.
-    let error = backlog::merge_into(&root, &id, 1, &[1], "one point", Vec::new())
-        .expect_err("self-merge is not a merge");
+    let error = backlog::merge_into(
+        &root,
+        &id,
+        1,
+        &[1],
+        "one point",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect_err("self-merge is not a merge");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
 }
 
@@ -225,7 +263,7 @@ fn a_merge_naming_a_point_that_is_not_there_changes_nothing() {
 fn a_stored_item_with_duplicate_or_impossible_section_ids_is_refused() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "first");
-    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
     let path = backlog::item_path(&root, &id);
     let pristine: serde_json::Value = store::read_json(&path).expect("item");
 
@@ -348,6 +386,7 @@ fn stored_backlog_data_outside_the_schema_is_refused_rather_than_dropped() {
         "topic",
         "unresolved",
         vec![Subject::engr(&reference)],
+        &Prepared::first(),
     )
     .expect("create")
     .id;
@@ -421,7 +460,7 @@ fn removing_the_last_unresolved_point_removes_the_item() {
     let (_dir, root) = workspace();
     let id = item(&root, "one point only", "the only unresolved thing");
     assert!(
-        backlog::consume_section(&root, &id, 1).expect("delete"),
+        backlog::consume_section(&root, &id, 1, &Prepared::first()).expect("delete"),
         "an item is a topic that still has unresolved work in it"
     );
     assert!(!backlog::item_path(&root, &id).exists());
@@ -432,7 +471,14 @@ fn removing_the_last_unresolved_point_removes_the_item() {
 fn backlog_keeps_no_event_log_and_needs_no_confirmation() {
     let (_dir, root) = workspace();
     let id = item(&root, "agent editable", "unresolved");
-    backlog::revise_section(&root, &id, 1, "reworded without asking anyone").expect("revise");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "reworded without asking anyone",
+        &Prepared::first(),
+    )
+    .expect("revise");
 
     assert!(
         gate::pending(&root).expect("candidates").is_empty(),
@@ -466,7 +512,7 @@ fn a_legacy_workspace_refuses_backlog_mutation_until_it_is_migrated() {
     object.insert("status".to_owned(), state);
     store::write_json(&path, &value).expect("legacy object");
 
-    let error = backlog::create(&root, "topic", "unresolved", Vec::new())
+    let error = backlog::create(&root, "topic", "unresolved", Vec::new(), &Prepared::first())
         .expect_err("a legacy workspace is read-only until migration");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("engr migrate"));
@@ -477,7 +523,7 @@ fn a_legacy_workspace_refuses_backlog_mutation_until_it_is_migrated() {
 fn a_backlog_write_is_never_seen_half_finished() {
     let (_dir, root) = workspace();
     let id = item(&root, "atomic", "first");
-    backlog::add_section(&root, &id, "second", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "second", Vec::new(), &Prepared::first()).expect("add");
     let path = backlog::item_path(&root, &id);
     let text = std::fs::read_to_string(&path).expect("read");
     serde_json::from_str::<serde_json::Value>(&text).expect("a complete JSON document");
@@ -503,11 +549,23 @@ fn ordinary_backlog_mutations_serialize_through_the_workspace_lock() {
         let second_id = id.clone();
         let first = scope.spawn(move || {
             first_start.wait();
-            backlog::add_section(first_root, &first_id, "second", Vec::new())
+            backlog::add_section(
+                first_root,
+                &first_id,
+                "second",
+                Vec::new(),
+                &Prepared::first(),
+            )
         });
         let second = scope.spawn(move || {
             second_start.wait();
-            backlog::add_section(second_root, &second_id, "third", Vec::new())
+            backlog::add_section(
+                second_root,
+                &second_id,
+                "third",
+                Vec::new(),
+                &Prepared::first(),
+            )
         });
         (first.join().expect("first"), second.join().expect("second"))
     });
@@ -550,6 +608,7 @@ fn a_subject_may_name_an_object_a_section_or_another_unresolved_point() {
         "concerns four things",
         "unresolved",
         subjects.clone(),
+        &Prepared::first(),
     )
     .expect("create")
     .id;
@@ -568,6 +627,7 @@ fn backlog_subjects_may_form_a_cycle() {
         "second",
         "unresolved",
         vec![Subject::engr(format!("backlog:{}:1", compact(&first)))],
+        &Prepared::first(),
     )
     .expect("create")
     .id;
@@ -576,6 +636,7 @@ fn backlog_subjects_may_form_a_cycle() {
         &first,
         1,
         vec![Subject::engr(format!("backlog:{}:1", compact(&second)))],
+        &Prepared::first(),
     )
     .expect("subjects[] is navigation, not a dependency DAG");
 
@@ -599,6 +660,7 @@ fn a_subject_cannot_name_a_collection_or_a_snapshot_or_nonsense() {
             "topic",
             "unresolved",
             vec![Subject::engr(&reference)],
+            &Prepared::first(),
         )
         .expect_err(&reference);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{reference}");
@@ -615,6 +677,7 @@ fn exactly_duplicated_subjects_are_refused() {
         "topic",
         "unresolved",
         vec![subject.clone(), subject.clone()],
+        &Prepared::first(),
     )
     .expect_err("subjects[] is a set");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
@@ -626,6 +689,7 @@ fn exactly_duplicated_subjects_are_refused() {
         "topic",
         "unresolved",
         vec![subject, Subject::engr(format!("obj:{object}:3"))],
+        &Prepared::first(),
     )
     .expect("two distinct subjects");
 }
@@ -655,6 +719,7 @@ fn file_and_symbol_subjects_pin_a_full_committed_object_id() {
                 dirty: false,
             },
         ],
+        &Prepared::first(),
     )
     .expect("create")
     .id;
@@ -809,15 +874,27 @@ fn reordering_an_equivalent_subject_set_is_not_activity() {
         Subject::engr(format!("obj:{object}:1")),
         Subject::engr(format!("obj:{object}:2")),
     ];
-    let id = backlog::create(&root, "topic", "unresolved", subjects.clone())
-        .expect("create")
-        .id;
+    let id = backlog::create(
+        &root,
+        "topic",
+        "unresolved",
+        subjects.clone(),
+        &Prepared::first(),
+    )
+    .expect("create")
+    .id;
     let before = backlog::load(&root, &id).expect("load");
     let activity = before.sections[0].updated_at.clone();
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::set_subjects(&root, &id, 1, subjects.iter().rev().cloned().collect())
-        .expect("reorder");
+    backlog::set_subjects(
+        &root,
+        &id,
+        1,
+        subjects.iter().rev().cloned().collect(),
+        &Prepared::first(),
+    )
+    .expect("reorder");
     let after = backlog::load(&root, &id).expect("load");
     assert_eq!(
         after.sections[0].updated_at, activity,
@@ -830,21 +907,23 @@ fn reordering_an_equivalent_subject_set_is_not_activity() {
     );
 
     // Rewriting the identical text is not work either.
-    backlog::revise_section(&root, &id, 1, "unresolved").expect("idempotent write");
+    backlog::revise_section(&root, &id, 1, "unresolved", &Prepared::first())
+        .expect("idempotent write");
     assert_eq!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         activity
     );
 
     // A real change to either does advance it.
-    backlog::set_subjects(&root, &id, 1, vec![subjects[0].clone()]).expect("drop one");
+    backlog::set_subjects(&root, &id, 1, vec![subjects[0].clone()], &Prepared::first())
+        .expect("drop one");
     let changed = backlog::load(&root, &id).expect("load").sections[0]
         .updated_at
         .clone();
     assert_ne!(changed, activity);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::revise_section(&root, &id, 1, "reworded").expect("revise");
+    backlog::revise_section(&root, &id, 1, "reworded", &Prepared::first()).expect("revise");
     assert_ne!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         changed
@@ -859,7 +938,7 @@ fn a_topic_rename_does_not_refresh_section_activity() {
         .updated_at
         .clone();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::rename(&root, &id, "after").expect("rename");
+    backlog::rename(&root, &id, "after", &Prepared::first()).expect("rename");
     let after = backlog::load(&root, &id).expect("load");
     assert_eq!(after.topic, "after");
     assert_eq!(
@@ -867,7 +946,7 @@ fn a_topic_rename_does_not_refresh_section_activity() {
         "renaming a topic is not activity on any unresolved point"
     );
 
-    backlog::revise_section(&root, &id, 1, "reworded").expect("revise");
+    backlog::revise_section(&root, &id, 1, "reworded", &Prepared::first()).expect("revise");
     assert_ne!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         before,
@@ -915,7 +994,14 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
     let (_dir, root) = workspace();
     let object = compact(&engr::model::new_id());
     let staging = item(&root, "two halves", "first half");
-    backlog::add_section(&root, &staging, "second half", Vec::new()).expect("add");
+    backlog::add_section(
+        &root,
+        &staging,
+        "second half",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("add");
 
     let mut stored = backlog::load(&root, &staging).expect("load");
     stored.sections[0].produced = vec![Produced::object(format!("obj:{object}:1"))];
@@ -925,7 +1011,16 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
     ];
     store::write_json(&backlog::item_path(&root, &staging), &stored).expect("seed outcomes");
 
-    backlog::merge_into(&root, &staging, 1, &[2], "one point", Vec::new()).expect("merge");
+    backlog::merge_into(
+        &root,
+        &staging,
+        1,
+        &[2],
+        "one point",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("merge");
     let stored = backlog::load(&root, &staging).expect("load");
     let section = stored.section(1).expect("destination");
     assert_eq!(
@@ -958,6 +1053,7 @@ fn effective_authority_is_unchanged_by_anything_in_staging() {
         "reconsider",
         "the confirmed wording may be wrong",
         vec![Subject::engr(format!("obj:{}:1", compact(&object)))],
+        &Prepared::first(),
     )
     .expect("stage a doubt");
 
@@ -1054,14 +1150,21 @@ fn the_dirty_marker_is_not_part_of_subject_identity() {
     };
     assert_ne!(clean, observed_dirty, "structurally they still differ");
 
-    let id = backlog::create(&root, "topic", "unresolved", vec![clean])
-        .expect("create")
-        .id;
+    let id = backlog::create(
+        &root,
+        "topic",
+        "unresolved",
+        vec![clean],
+        &Prepared::first(),
+    )
+    .expect("create")
+    .id;
     let before = backlog::load(&root, &id).expect("load").sections[0]
         .updated_at
         .clone();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::set_subjects(&root, &id, 1, vec![observed_dirty]).expect("re-observe");
+    backlog::set_subjects(&root, &id, 1, vec![observed_dirty], &Prepared::first())
+        .expect("re-observe");
     assert_eq!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         before,
@@ -1091,7 +1194,10 @@ fn recording_an_outcome_is_a_separate_operation_from_admitting_it() {
     );
 
     let outcome = Produced::object(format!("obj:{}", compact(&object)));
-    assert!(backlog::record_produced(&root, &id, 1, outcome.clone()).expect("record"));
+    assert!(
+        backlog::record_produced(&root, &id, 1, outcome.clone(), &Prepared::first())
+            .expect("record")
+    );
     assert_eq!(
         backlog::load(&root, &id).expect("load").sections[0].produced,
         vec![outcome.clone()]
@@ -1099,7 +1205,10 @@ fn recording_an_outcome_is_a_separate_operation_from_admitting_it() {
 
     // A set: claiming the same outcome twice is not an error and not a
     // duplicate, so a retried command is harmless.
-    assert!(!backlog::record_produced(&root, &id, 1, outcome.clone()).expect("again"));
+    assert!(
+        !backlog::record_produced(&root, &id, 1, outcome.clone(), &Prepared::first())
+            .expect("again")
+    );
     assert_eq!(
         backlog::load(&root, &id).expect("load").sections[0]
             .produced
@@ -1115,8 +1224,10 @@ fn recording_an_outcome_is_a_separate_operation_from_admitting_it() {
     );
 
     // Mutable bookkeeping, so a mistaken entry is correctable.
-    assert!(backlog::forget_produced(&root, &id, 1, &outcome).expect("forget"));
-    assert!(!backlog::forget_produced(&root, &id, 1, &outcome).expect("idempotent"));
+    assert!(backlog::forget_produced(&root, &id, 1, &outcome, &Prepared::first()).expect("forget"));
+    assert!(
+        !backlog::forget_produced(&root, &id, 1, &outcome, &Prepared::first()).expect("idempotent")
+    );
     assert!(backlog::load(&root, &id).expect("load").sections[0]
         .produced
         .is_empty());
@@ -1138,7 +1249,8 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
 
     // Forward: a target that does not exist cannot be claimed.
     let missing = Produced::object(format!("obj:{}", compact(&engr::model::new_id())));
-    let error = backlog::record_produced(&root, &id, 1, missing).expect_err("no such object");
+    let error = backlog::record_produced(&root, &id, 1, missing, &Prepared::first())
+        .expect_err("no such object");
     assert!(
         error.message.contains("does not exist"),
         "{}",
@@ -1147,13 +1259,14 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
 
     // Nor a section the object does not have.
     let no_section = Produced::object(format!("obj:{}:9", compact(&object)));
-    backlog::record_produced(&root, &id, 1, no_section).expect_err("no such section");
+    backlog::record_produced(&root, &id, 1, no_section, &Prepared::first())
+        .expect_err("no such section");
 
     // A real one is accepted, then the staging around it survives the target
     // going away — loading must not depend on a recorded outcome still
     // resolving.
     let outcome = Produced::object(format!("obj:{}", compact(&object)));
-    backlog::record_produced(&root, &id, 1, outcome.clone()).expect("record");
+    backlog::record_produced(&root, &id, 1, outcome.clone(), &Prepared::first()).expect("record");
     std::fs::remove_file(engr::store::object_path(&root, &object)).expect("delete the object");
     std::fs::remove_file(engr::store::events_path(&root, &object)).expect("delete its events");
     let loaded = backlog::load(&root, &id).expect("staging still loads");
@@ -1161,7 +1274,7 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
 
     // And the bookkeeping is still correctable with the target gone, which is
     // exactly when a mistaken entry is hardest to live with.
-    assert!(backlog::forget_produced(&root, &id, 1, &outcome).expect("forget"));
+    assert!(backlog::forget_produced(&root, &id, 1, &outcome, &Prepared::first()).expect("forget"));
 }
 
 /// A prepared mutation binds exactly what it rests on — no less, and no more.
@@ -1173,20 +1286,22 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
 fn a_precondition_binds_what_the_mutation_rests_on_and_not_the_whole_item() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "first point");
-    backlog::add_section(&root, &id, "second point", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "second point", Vec::new(), &Prepared::first()).expect("add");
 
     let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
     bound.still_holds(&root).expect("nothing has moved yet");
 
     // An unrelated sibling moving does not stale it: this mutation never read
     // §2, so §2 changing says nothing about whether it is still applicable.
-    backlog::revise_section(&root, &id, 2, "second point, sharpened").expect("revise sibling");
+    backlog::revise_section(&root, &id, 2, "second point, sharpened", &Prepared::first())
+        .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a sibling is not part of what this rests on");
 
     // The bound Section moving does.
-    backlog::revise_section(&root, &id, 1, "first point, sharpened").expect("revise target");
+    backlog::revise_section(&root, &id, 1, "first point, sharpened", &Prepared::first())
+        .expect("revise target");
     let error = bound.still_holds(&root).expect_err("the target moved");
     assert_eq!(error.code, engr::EXIT_STALE);
     assert!(
@@ -1221,6 +1336,7 @@ fn every_field_of_the_bound_section_stales_it_not_only_the_wording() {
                     &id,
                     1,
                     vec![Subject::engr(format!("obj:{}", compact(&object)))],
+                    &Prepared::first(),
                 )
                 .expect("subjects");
             }
@@ -1230,6 +1346,7 @@ fn every_field_of_the_bound_section_stales_it_not_only_the_wording() {
                     &id,
                     1,
                     Produced::object(format!("obj:{}", compact(&object))),
+                    &Prepared::first(),
                 )
                 .expect("produced");
             }
@@ -1247,7 +1364,7 @@ fn a_topic_change_stales_a_section_mutation_prepared_under_it() {
     let (_dir, root) = workspace();
     let id = item(&root, "original topic", "unresolved");
     let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
-    backlog::rename(&root, &id, "a different topic").expect("rename");
+    backlog::rename(&root, &id, "a different topic", &Prepared::first()).expect("rename");
     let error = bound.still_holds(&root).expect_err("the context moved");
     assert!(error.message.contains("topic"), "{}", error.message);
 }
@@ -1264,13 +1381,21 @@ fn adding_a_point_binds_the_id_it_will_take_and_not_the_siblings() {
     let bound = backlog::Precondition::section_absent(&root, &id).expect("observe");
     bound.still_holds(&root).expect("the id is still free");
 
-    backlog::revise_section(&root, &id, 1, "first, sharpened").expect("revise sibling");
+    backlog::revise_section(&root, &id, 1, "first, sharpened", &Prepared::first())
+        .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a sibling is not part of an add");
 
     // Somebody else takes the id this add was going to use.
-    backlog::add_section(&root, &id, "someone else got there", Vec::new()).expect("race");
+    backlog::add_section(
+        &root,
+        &id,
+        "someone else got there",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect("race");
     let error = bound.still_holds(&root).expect_err("the id was taken");
     assert_eq!(error.code, engr::EXIT_STALE);
 }
@@ -1283,7 +1408,8 @@ fn a_topic_mutation_binds_the_whole_item() {
     let bound = backlog::Precondition::topic(&root, &id).expect("observe");
     bound.still_holds(&root).expect("unchanged");
 
-    backlog::add_section(&root, &id, "a second point", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "a second point", Vec::new(), &Prepared::first())
+        .expect("add");
     let error = bound
         .still_holds(&root)
         .expect_err("renaming is about all of them, so any of them moving matters");
@@ -1300,7 +1426,8 @@ fn creating_an_item_binds_only_its_own_absence() {
     bound.still_holds(&root).expect("nothing occupies it");
 
     // Unrelated Backlog activity cannot stale a creation.
-    backlog::add_section(&root, &existing, "more", Vec::new()).expect("add elsewhere");
+    backlog::add_section(&root, &existing, "more", Vec::new(), &Prepared::first())
+        .expect("add elsewhere");
     bound
         .still_holds(&root)
         .expect("another item is not this one");
@@ -1321,20 +1448,28 @@ fn creating_an_item_binds_only_its_own_absence() {
 fn a_merge_binds_the_topic_and_both_ends_but_not_an_unnamed_sibling() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "destination");
-    backlog::add_section(&root, &id, "source", Vec::new()).expect("add");
-    backlog::add_section(&root, &id, "bystander", Vec::new()).expect("add");
+    backlog::add_section(&root, &id, "source", Vec::new(), &Prepared::first()).expect("add");
+    backlog::add_section(&root, &id, "bystander", Vec::new(), &Prepared::first()).expect("add");
 
     let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
     bound.still_holds(&root).expect("nothing has moved yet");
 
-    backlog::revise_section(&root, &id, 3, "bystander, sharpened").expect("revise sibling");
+    backlog::revise_section(&root, &id, 3, "bystander, sharpened", &Prepared::first())
+        .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a point this merge never read cannot stale it");
 
     for (name, moved) in [("the destination", 1u64), ("the source", 2)] {
         let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
-        backlog::revise_section(&root, &id, moved, &format!("{name}, sharpened")).expect("revise");
+        backlog::revise_section(
+            &root,
+            &id,
+            moved,
+            &format!("{name}, sharpened"),
+            &Prepared::first(),
+        )
+        .expect("revise");
         let error = bound.still_holds(&root).err();
         let error = error.unwrap_or_else(|| panic!("{name} moving must stale the merge"));
         assert_eq!(error.code, engr::EXIT_STALE, "{name}");
@@ -1342,7 +1477,332 @@ fn a_merge_binds_the_topic_and_both_ends_but_not_an_unnamed_sibling() {
 
     // The topic scopes every point under it, so it is bound too.
     let bound = backlog::Precondition::merge(&root, &id, &[1, 2]).expect("observe");
-    backlog::rename(&root, &id, "a different topic").expect("rename");
+    backlog::rename(&root, &id, "a different topic", &Prepared::first()).expect("rename");
     let error = bound.still_holds(&root).expect_err("the context moved");
     assert!(error.message.contains("topic"), "{}", error.message);
+}
+
+// ---------------------------------------------------------------------------
+// Rule Review
+// ---------------------------------------------------------------------------
+
+fn rule(root: &Path, name: &str, review: &str) {
+    let dir = engr::rules::dir(root);
+    std::fs::create_dir_all(&dir).expect("rules dir");
+    std::fs::write(
+        dir.join(format!("{name}.md")),
+        format!("---\nid: {name}\napplies:\n  domains:\n    - backlog\n{review}---\n\n# {name}\n\nSomething to check against.\n"),
+    )
+    .expect("write rule");
+}
+
+fn marker(root: &Path, id: &str, section: u64) -> Option<engr::rules::RuleReview> {
+    backlog::load(root, id)
+        .expect("load")
+        .section(section)
+        .expect("section")
+        .rule_review
+}
+
+fn attempt(value: u32) -> Prepared {
+    Prepared::attempt(engr::rules::Attempt::new(value).expect("attempt"))
+}
+
+/// An exhausted Backlog mutation goes in anyway, and says so.
+///
+/// This is the whole reason the domain exists. An agent that has been round a
+/// self-review more times than a project rule allows still knows something is
+/// unresolved, and refusing to let it write that down sends the thought
+/// nowhere — there is no other place for it, which is exactly what makes
+/// blocking here different from blocking at the record's gate. So the mutation
+/// is admitted and marked, and the marker is what stops the soft admission from
+/// being silent.
+#[test]
+fn an_exhausted_point_is_still_written_down_and_carries_the_diagnostic() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 2\n");
+    let id = item(&root, "topic", "unresolved");
+
+    backlog::revise_section(&root, &id, 1, "within the ceiling", &attempt(2)).expect("revise");
+    assert_eq!(
+        marker(&root, &id, 1),
+        None,
+        "attempt 2 of 2 is still a review, so there is nothing to diagnose"
+    );
+
+    backlog::revise_section(&root, &id, 1, "past the ceiling", &attempt(3)).expect("soft-admit");
+    assert_eq!(
+        backlog::load(&root, &id)
+            .expect("load")
+            .section(1)
+            .expect("section")
+            .text,
+        "past the ceiling",
+        "the point an agent could not get reviewed is the one it most needs kept"
+    );
+    assert_eq!(
+        marker(&root, &id, 1),
+        Some(engr::rules::RuleReview {
+            attempts: 3,
+            limit: 2
+        })
+    );
+}
+
+/// `limit` is the earliest ceiling in the applicable set.
+///
+/// One attempt is compared against every rule's own ceiling, so the smallest is
+/// the one that made this exhausted — and it is the number worth recording,
+/// because it is the one an agent has to get under.
+#[test]
+fn the_recorded_limit_is_the_ceiling_that_ran_out_first() {
+    let (_dir, root) = workspace();
+    rule(&root, "lenient", "review:\n  max_attempts: 9\n");
+    rule(&root, "strict", "review:\n  max_attempts: 1\n");
+    let id = item(&root, "topic", "unresolved");
+
+    backlog::revise_section(&root, &id, 1, "reworded", &attempt(4)).expect("soft-admit");
+    assert_eq!(
+        marker(&root, &id, 1),
+        Some(engr::rules::RuleReview {
+            attempts: 4,
+            limit: 1
+        }),
+        "the compact diagnostic names the earliest ceiling, not a per-rule history"
+    );
+}
+
+/// A rule asking for a human does not summon one for Backlog.
+///
+/// The Object domain escalates on exhaustion because admitting to the record is
+/// a claim somebody has to stand behind. Staging claims nothing, and stopping to
+/// ask about an unresolved note would cost a person's attention to protect a
+/// statement that carries no authority in the first place.
+#[test]
+fn an_exhausted_backlog_rule_asking_for_a_human_still_does_not_get_one() {
+    let (_dir, root) = workspace();
+    rule(
+        &root,
+        "escalating",
+        "review:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n",
+    );
+    let id = item(&root, "topic", "unresolved");
+
+    backlog::add_section(&root, &id, "a second point", Vec::new(), &attempt(2))
+        .expect("admitted, not escalated");
+    assert_eq!(
+        marker(&root, &id, 2),
+        Some(engr::rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        })
+    );
+    assert!(
+        engr::gate::pending(&root).expect("candidates").is_empty(),
+        "no human was asked for anything"
+    );
+}
+
+/// The marker describes the wording standing now, so a later write settles it.
+#[test]
+fn a_later_mutation_clears_the_marker_or_replaces_it() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 2\n");
+    let id = item(&root, "topic", "unresolved");
+
+    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(5)).expect("soft-admit");
+    assert_eq!(
+        marker(&root, &id, 1),
+        Some(engr::rules::RuleReview {
+            attempts: 5,
+            limit: 2
+        })
+    );
+
+    // Exhausted again, differently: the diagnostic is replaced, not accumulated.
+    backlog::revise_section(&root, &id, 1, "exhausted again", &attempt(9)).expect("soft-admit");
+    assert_eq!(
+        marker(&root, &id, 1),
+        Some(engr::rules::RuleReview {
+            attempts: 9,
+            limit: 2
+        }),
+        "one diagnostic about the current wording, never a series"
+    );
+
+    // And a review that passed says this wording did not need the excuse.
+    backlog::revise_section(&root, &id, 1, "reviewed properly", &attempt(1)).expect("revise");
+    assert_eq!(marker(&root, &id, 1), None);
+}
+
+/// A write that changed nothing admitted nothing, so it settles nothing.
+#[test]
+fn an_idempotent_write_neither_earns_a_marker_nor_clears_one() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 1\n");
+    let id = item(&root, "topic", "unresolved");
+    backlog::revise_section(&root, &id, 1, "exhausted wording", &attempt(2)).expect("soft-admit");
+    let marked = marker(&root, &id, 1);
+    assert!(marked.is_some());
+
+    backlog::revise_section(&root, &id, 1, "exhausted wording", &attempt(1)).expect("no-op");
+    assert_eq!(
+        marker(&root, &id, 1),
+        marked,
+        "rewriting the same wording did not re-admit it under a passing review"
+    );
+}
+
+/// Removal is the one thing an exhausted review does not buy.
+///
+/// Everywhere else Backlog prefers keeping the thought to losing it. Here there
+/// would be nothing left to keep, so the exception cannot reach: the point stays
+/// exactly as it was, and nothing is written — not even a marker, because no
+/// mutation was admitted for one to describe.
+#[test]
+fn an_exhausted_review_does_not_get_to_remove_an_unresolved_point() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 2\n");
+    let id = item(&root, "topic", "unresolved");
+    backlog::add_section(&root, &id, "a second point", Vec::new(), &attempt(1)).expect("add");
+    let before = backlog::load(&root, &id).expect("load");
+
+    let error = backlog::consume_section(&root, &id, 1, &attempt(3)).expect_err("not on this one");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("still here"),
+        "the refusal says the work was not lost: {}",
+        error.message
+    );
+    assert_eq!(
+        backlog::load(&root, &id).expect("load"),
+        before,
+        "a refused consume writes nothing at all, marker included"
+    );
+
+    // A merge removes its sources, so it is refused for the same reason.
+    let error = backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &attempt(3))
+        .expect_err("a merge removes the sources");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(backlog::load(&root, &id).expect("load"), before);
+
+    // Under the ceiling, both go through.
+    backlog::merge_into(&root, &id, 1, &[2], "one point", Vec::new(), &attempt(2)).expect("merge");
+    assert!(backlog::consume_section(&root, &id, 1, &attempt(2)).expect("consume"));
+}
+
+/// No applicable rule means there is no review to be exhausted.
+#[test]
+fn a_workspace_with_no_backlog_rule_reviews_nothing_and_marks_nothing() {
+    let (_dir, root) = workspace();
+    rule(&root, "elsewhere", "review:\n  max_attempts: 1\n");
+    // Applies to the record, not to staging.
+    let path = engr::rules::dir(&root).join("elsewhere.md");
+    let text = std::fs::read_to_string(&path).expect("rule");
+    std::fs::write(&path, text.replace("- backlog", "- object")).expect("rewrite");
+
+    let id = item(&root, "topic", "unresolved");
+    backlog::revise_section(&root, &id, 1, "reworded", &attempt(50)).expect("no rule, no review");
+    assert_eq!(
+        marker(&root, &id, 1),
+        None,
+        "absent means what it says: nothing governed this"
+    );
+    assert!(backlog::consume_section(&root, &id, 1, &attempt(50)).expect("consume"));
+}
+
+/// The marker is persisted, and absent when there is nothing to say.
+#[test]
+fn the_marker_is_a_section_field_that_is_absent_unless_it_is_needed() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 1\n");
+    let id = item(&root, "topic", "unresolved");
+
+    let stored: serde_json::Value =
+        store::read_json(&backlog::item_path(&root, &id)).expect("item");
+    assert!(
+        stored["sections"][0].get("rule_review").is_none(),
+        "an ordinary point carries no diagnostic: {}",
+        stored["sections"][0]
+    );
+
+    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(2)).expect("soft-admit");
+    let stored: serde_json::Value =
+        store::read_json(&backlog::item_path(&root, &id)).expect("item");
+    assert_eq!(
+        stored["sections"][0]["rule_review"],
+        serde_json::json!({"attempts": 2, "limit": 1}),
+        "two numbers, and deliberately not a review history"
+    );
+
+    // And it survives the round trip, since the precondition compares whole
+    // Sections and a field that vanished on read would never stale anything.
+    assert_eq!(
+        marker(&root, &id, 1),
+        Some(engr::rules::RuleReview {
+            attempts: 2,
+            limit: 1
+        })
+    );
+}
+
+/// The marker is part of the Section, so it stales a mutation like any field.
+#[test]
+fn the_marker_participates_in_the_precondition_like_every_other_field() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 1\n");
+    let id = item(&root, "topic", "unresolved");
+
+    let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
+    backlog::revise_section(&root, &id, 1, "exhausted", &attempt(2)).expect("soft-admit");
+    let error = bound.still_holds(&root).expect_err("the point moved");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}
+
+/// A mutation carrying a precondition is refused when it no longer holds.
+///
+/// The check belongs inside the mutation, under the same lock as the write.
+/// Checking beforehand and writing afterwards leaves open precisely the gap it
+/// exists to close.
+#[test]
+fn a_prepared_mutation_is_refused_when_its_predecessor_moved() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
+
+    // Somebody else gets there first.
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "sharpened by someone else",
+        &Prepared::first(),
+    )
+    .expect("concurrent");
+
+    let error = backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "written against the old wording",
+        &Prepared::first().against(bound),
+    )
+    .expect_err("prepared against something else");
+    assert_eq!(error.code, engr::EXIT_STALE);
+    assert_eq!(
+        backlog::load(&root, &id)
+            .expect("load")
+            .section(1)
+            .expect("section")
+            .text,
+        "sharpened by someone else",
+        "the refused mutation did not land on top of the change it never read"
+    );
+}
+
+/// An attempt is counted from 1, and the CLI cannot smuggle in a zero.
+#[test]
+fn there_is_no_attempt_zero() {
+    let error = engr::rules::Attempt::new(0).expect_err("no such attempt");
+    assert_eq!(error.code, engr::EXIT_USAGE);
 }

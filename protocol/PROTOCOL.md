@@ -1042,6 +1042,25 @@ an entry still names it; the entry becomes an unavailable historical pointer,
 which is not corruption, and it MUST NOT be retargeted to a replacement —
 rewriting it would rewrite what was actually produced.
 
+### rule_review
+
+Present on a Section only when the wording standing in it was admitted **without
+a passing review** — the attempt had gone past a project rule's ceiling and
+Backlog admitted it anyway. See "How many attempts, and what happens after" for
+why this domain admits rather than refuses, and for the two numbers.
+
+Absent is the ordinary case, and it means exactly one thing: this went in
+normally, or no project rule governed it. It MUST NOT be written for a mutation
+that changed nothing, since an idempotent write admitted nothing.
+
+A topic rename admits no wording, so an exhausted rename writes no marker. There
+is nothing it would be true of: marking every Section would claim of each one
+something that happened to none of them.
+
+It is an ordinary persisted Section field, so it participates in the mutation
+precondition like any other — a mutation prepared against a Section that has
+since been marked is stale.
+
 ### Read surfaces
 
 Backlog lives under an explicit namespace and every surface it prints MUST state
@@ -1716,8 +1735,11 @@ complete applicable set already lives in the review binding. A later successful
 revision clears the marker; a later exhausted admission replaces it.
 
 That soft-admission covers mutations that **preserve** unresolved information.
-Consuming a Backlog Section is destructive, so it requires a review that actually
-passed: an exhausted consume does not happen and the Section stays as it was.
+Removing a Backlog Section destroys it, so removal requires a review that
+actually passed. A Section leaves only two ways, and both are reviewed: a consume,
+or atomically as the source of a merge. Exhausted, neither happens, the Sections
+stay exactly as they were, and **no marker is written** — nothing was admitted for
+a diagnostic to describe.
 
 **Collection and Work have no exhaustion behaviour in v1.** It is refused rather
 than borrowed from another domain, because a composition that answers for a

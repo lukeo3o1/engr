@@ -1740,9 +1740,15 @@ fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     assert!(run_engr(root, &["init"]).status.success(), "init");
-    let item = engr::backlog::create(root, "topic", "unresolved", Vec::new())
-        .expect("stage")
-        .id;
+    let item = engr::backlog::create(
+        root,
+        "topic",
+        "unresolved",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("stage")
+    .id;
     let compact =
         engr::reference::encode_uuid(uuid::Uuid::parse_str(&item).expect("uuid is a uuid"));
     let absent =
@@ -3724,8 +3730,22 @@ fn backlog_json_sections_do_not_repeat_a_key() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
-    let item = engr::backlog::create(root, "strictness", "a point", Vec::new()).expect("backlog");
-    engr::backlog::add_section(root, &item.id, "a second point", Vec::new()).expect("second");
+    let item = engr::backlog::create(
+        root,
+        "strictness",
+        "a point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
+    engr::backlog::add_section(
+        root,
+        &item.id,
+        "a second point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("second");
 
     let shown = run_engr(root, &["backlog", "show", &item.id, "--format", "json"]);
     assert!(shown.status.success());
@@ -3950,7 +3970,14 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     let broken = prepare(root, &["prepare", "--new", "--text", "about to be broken"]);
     confirm(root, &broken);
     let broken = broken["object"].as_str().expect("object id").to_owned();
-    engr::backlog::create(root, "staging", "an unresolved point", Vec::new()).expect("backlog");
+    engr::backlog::create(
+        root,
+        "staging",
+        "an unresolved point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
     engr::work::start(root, &healthy, Some("underway")).expect("work");
     engr::collection::create(root, "a plan", None, None).expect("collection");
 
@@ -4184,4 +4211,111 @@ fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
         serde_json::from_slice(&json.stdout).expect("rules show --json is a document");
     assert_eq!(document["review"]["max_attempts"], 3);
     assert_eq!(document["review"]["on_exhaustion"], "human_confirmation");
+}
+
+/// `--attempt` reaches the mutation, and means the same thing at the CLI as it
+/// does in the library.
+///
+/// A flag that parses and is then dropped is the worst version of this: the
+/// command reports success, the point goes in unmarked, and the diagnostic that
+/// was supposed to say "this was not reviewed" is simply absent — which is how
+/// an unreviewed edit reads as a reviewed one.
+#[test]
+fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n---\n\n# Careful\n\nTwo tries.\n",
+    )
+    .expect("rule");
+
+    let item = engr::backlog::create(
+        root,
+        "staging",
+        "an unresolved point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
+    let id = item.id.clone();
+
+    // Counted from 1, so there is no attempt 0 to smuggle past the ceiling.
+    let zero = run_engr(
+        root,
+        &["backlog", "add", &id, "--text", "another", "--attempt", "0"],
+    );
+    assert_eq!(zero.status.code(), Some(engr::EXIT_USAGE));
+
+    // Under the ceiling: admitted, and nothing to diagnose.
+    assert!(run_engr(
+        root,
+        &["backlog", "add", &id, "--text", "another", "--attempt", "2"]
+    )
+    .status
+    .success());
+    let stored = engr::backlog::load(root, &id).expect("load");
+    assert_eq!(stored.section(2).expect("§2").rule_review, None);
+
+    // Past it: still admitted, and marked with what it went in on.
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "2",
+            "--text",
+            "reworded",
+            "--attempt",
+            "7"
+        ]
+    )
+    .status
+    .success());
+    let stored = engr::backlog::load(root, &id).expect("load");
+    assert_eq!(
+        stored.section(2).expect("§2").rule_review,
+        Some(engr::rules::RuleReview {
+            attempts: 7,
+            limit: 2
+        })
+    );
+
+    // Except where the mutation would remove the point.
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            "2",
+            "--attempt",
+            "7",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(engr::backlog::load(root, &id)
+        .expect("load")
+        .section(2)
+        .is_ok());
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            "2",
+            "--attempt",
+            "2"
+        ]
+    )
+    .status
+    .success());
 }

@@ -26,6 +26,7 @@
 
 use crate::model::new_id;
 use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
+use crate::rules::Attempt;
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_STALE, EXIT_USAGE,
@@ -255,6 +256,20 @@ pub struct Section {
     pub subjects: Vec<Subject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced: Vec<Produced>,
+    /// Present only when this point's current wording was admitted **without a
+    /// passing review**, because the attempt had passed a project rule's
+    /// ceiling.
+    ///
+    /// Backlog admits it anyway — preserving unresolved engineering intent is
+    /// what this domain is for, and refusing would send the thought back to
+    /// nowhere. The marker is what stops that from being silent: a reader can
+    /// see that this wording went in exhausted, and roughly why.
+    ///
+    /// Absent is the ordinary case and means what it says — this went in
+    /// normally, or no project rule governed it at all. A later successful
+    /// mutation clears it; a later exhausted one replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_review: Option<crate::rules::RuleReview>,
 }
 
 impl Section {
@@ -898,6 +913,106 @@ fn take_id(item: &mut Item) -> Result<u64> {
     Ok(id)
 }
 
+/// Everything a Backlog mutation carries besides the change itself.
+///
+/// One argument rather than two loose parameters on nine functions, because the
+/// two travel together: both are established when the mutation is prepared and
+/// both are settled at the moment it is applied, inside the same lock. Splitting
+/// them invites a caller to pass one and forget the other.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    /// Which attempt of this review sequence the agent is on.
+    ///
+    /// Agent-attested process metadata: engr keeps no counter, and a sequence
+    /// that is abandoned or lost may honestly begin again at 1.
+    pub attempt: Attempt,
+    /// What the mutation was written against, when it was prepared separately.
+    ///
+    /// Absent when there was no gap to protect — a caller that reads and writes
+    /// inside one invocation was never exposed to the race this closes, and
+    /// making it invent a predecessor would be ceremony rather than safety.
+    pub precondition: Option<Precondition>,
+}
+
+impl Prepared {
+    /// A first attempt, prepared against nothing.
+    pub fn first() -> Self {
+        Self {
+            attempt: Attempt::FIRST,
+            precondition: None,
+        }
+    }
+
+    /// A given attempt of a review sequence.
+    pub fn attempt(attempt: Attempt) -> Self {
+        Self {
+            attempt,
+            precondition: None,
+        }
+    }
+
+    /// Bind the predecessor this mutation was written against.
+    pub fn against(mut self, precondition: Precondition) -> Self {
+        self.precondition = Some(precondition);
+        self
+    }
+}
+
+/// What Rule Review said about the mutation now being applied.
+///
+/// Composed inside the lock, immediately before the change lands. Composing it
+/// earlier would leave the interval between the verdict and the write open to
+/// exactly the rule change that would have altered the verdict.
+struct Reviewed(Option<crate::rules::RuleReview>);
+
+impl Reviewed {
+    fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
+        match crate::rules::exhaustion(root, crate::rules::Domain::Backlog, attempt)? {
+            // No applicable rule, or none of them out of attempts. Either way
+            // there is no diagnostic to carry.
+            crate::rules::Exhaustion::NotReached => Ok(Self(None)),
+            crate::rules::Exhaustion::Exhausted(marker) => Ok(Self(Some(marker))),
+            // The Object verdicts. Reaching one here would mean the composition
+            // answered for the wrong domain, and the failure mode — a Backlog
+            // mutation quietly refused, or sent to a human — is precisely what
+            // #25 says must not happen to unresolved intent.
+            other => Err(Error::new(
+                EXIT_INVARIANT,
+                format!("a backlog mutation was given the {other:?} verdict, which is not its own"),
+            )),
+        }
+    }
+
+    /// Stamp the verdict onto a point this mutation preserved.
+    ///
+    /// Both directions matter. An exhausted admission gains the marker; an
+    /// ordinary one **clears** any marker already there, because the diagnostic
+    /// describes how the wording standing now got in, and this mutation is now
+    /// the answer to that.
+    fn mark(&self, section: &mut Section) {
+        section.rule_review = self.0;
+    }
+
+    /// Refuse a mutation that would destroy unresolved work.
+    ///
+    /// Preservation is the whole reason Backlog admits an exhausted mutation at
+    /// all, so the exception cannot cover the one operation that preserves
+    /// nothing. Nothing is written, marker included: no mutation was admitted,
+    /// so there is nothing for a diagnostic to describe.
+    fn may_destroy(&self) -> Result<()> {
+        match self.0 {
+            None => Ok(()),
+            Some(marker) => Err(Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "this is attempt {} and a project rule allows {}: an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
+                    marker.attempts, marker.limit
+                ),
+            )),
+        }
+    }
+}
+
 fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
@@ -906,31 +1021,58 @@ fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
     })
 }
 
-fn edit<T>(root: &Path, id: &str, body: impl FnOnce(&mut Item) -> Result<T>) -> Result<T> {
+/// Apply one mutation to one item, under the lock, having earned the right to.
+///
+/// The order is the contract. The precondition is checked first, because a
+/// mutation prepared against something else is not a mutation anyone reviewed;
+/// then the verdict is composed against the rules as they stand right now.
+fn edit<T>(
+    root: &Path,
+    id: &str,
+    prepared: &Prepared,
+    body: impl FnOnce(&mut Item, &Reviewed) -> Result<T>,
+) -> Result<T> {
     locked(root, || {
+        if let Some(precondition) = &prepared.precondition {
+            precondition.still_holds(root)?;
+        }
+        let reviewed = Reviewed::compose(root, prepared.attempt)?;
         let mut item = load(root, id)?;
-        let outcome = body(&mut item)?;
+        let outcome = body(&mut item, &reviewed)?;
         item.sections.sort_by_key(|section| section.id);
         save(root, &item)?;
         Ok(outcome)
     })
 }
 
-pub fn create(root: &Path, topic: &str, text: &str, subjects: Vec<Subject>) -> Result<Item> {
+pub fn create(
+    root: &Path,
+    topic: &str,
+    text: &str,
+    subjects: Vec<Subject>,
+    prepared: &Prepared,
+) -> Result<Item> {
     check_topic(topic)?;
     check_text(text)?;
     locked(root, || {
+        if let Some(precondition) = &prepared.precondition {
+            precondition.still_holds(root)?;
+        }
+        let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        let mut section = Section {
+            id: 1,
+            text: text.to_owned(),
+            updated_at: now(),
+            subjects,
+            produced: Vec::new(),
+            rule_review: None,
+        };
+        reviewed.mark(&mut section);
         let item = Item {
             id: new_id(),
             topic: topic.trim().to_owned(),
             next_section_id: 2,
-            sections: vec![Section {
-                id: 1,
-                text: text.to_owned(),
-                updated_at: now(),
-                subjects,
-                produced: Vec::new(),
-            }],
+            sections: vec![section],
         };
         save(root, &item)?;
         Ok(item)
@@ -939,32 +1081,53 @@ pub fn create(root: &Path, topic: &str, text: &str, subjects: Vec<Subject>) -> R
 
 /// Renaming the topic is not activity on any unresolved point, so it must not
 /// refresh Section timestamps — that would make every item look freshly worked.
-pub fn rename(root: &Path, id: &str, topic: &str) -> Result<Item> {
+///
+/// For the same reason an exhausted rename marks nothing. The marker says how
+/// the wording standing in a point got admitted, and a rename admits no wording:
+/// stamping every Section would claim of each one something that is not true of
+/// any of them. The review still happens; there is simply nothing to record it
+/// against.
+pub fn rename(root: &Path, id: &str, topic: &str, prepared: &Prepared) -> Result<Item> {
     check_topic(topic)?;
-    edit(root, id, |item| {
+    edit(root, id, prepared, |item, _| {
         topic.trim().clone_into(&mut item.topic);
         Ok(item.clone())
     })
 }
 
-pub fn add_section(root: &Path, id: &str, text: &str, subjects: Vec<Subject>) -> Result<u64> {
+pub fn add_section(
+    root: &Path,
+    id: &str,
+    text: &str,
+    subjects: Vec<Subject>,
+    prepared: &Prepared,
+) -> Result<u64> {
     check_text(text)?;
-    edit(root, id, |item| {
+    edit(root, id, prepared, |item, reviewed| {
         let section = take_id(item)?;
-        item.sections.push(Section {
+        let mut added = Section {
             id: section,
             text: text.to_owned(),
             updated_at: now(),
             subjects,
             produced: Vec::new(),
-        });
+            rule_review: None,
+        };
+        reviewed.mark(&mut added);
+        item.sections.push(added);
         Ok(section)
     })
 }
 
-pub fn revise_section(root: &Path, id: &str, section: u64, text: &str) -> Result<()> {
+pub fn revise_section(
+    root: &Path,
+    id: &str,
+    section: u64,
+    text: &str,
+    prepared: &Prepared,
+) -> Result<()> {
     check_text(text)?;
-    edit(root, id, |item| {
+    edit(root, id, prepared, |item, reviewed| {
         item.section(section)?;
         let slot = item
             .sections
@@ -974,16 +1137,27 @@ pub fn revise_section(root: &Path, id: &str, section: u64, text: &str) -> Result
         // Rewriting a section with the wording it already had is not work on
         // it. An idempotent write must not manufacture activity, or a retried
         // command makes an untouched point look like the freshest one.
+        //
+        // The verdict follows the same test, for the same reason: a write that
+        // changed nothing admitted nothing, so it neither earns a marker nor
+        // clears one somebody else's write put there.
         if slot.text != text {
             text.clone_into(&mut slot.text);
             slot.updated_at = now();
+            reviewed.mark(slot);
         }
         Ok(())
     })
 }
 
-pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>) -> Result<()> {
-    edit(root, id, |item| {
+pub fn set_subjects(
+    root: &Path,
+    id: &str,
+    section: u64,
+    subjects: Vec<Subject>,
+    prepared: &Prepared,
+) -> Result<()> {
+    edit(root, id, prepared, |item, reviewed| {
         item.section(section)?;
         let slot = item
             .sections
@@ -997,6 +1171,7 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
         slot.subjects = subjects;
         if changed {
             slot.updated_at = now();
+            reviewed.mark(slot);
         }
         Ok(())
     })
@@ -1016,7 +1191,13 @@ pub fn set_subjects(root: &Path, id: &str, section: u64, subjects: Vec<Subject>)
 /// rather than corruption. It is never a reverse constraint: no Object operation
 /// consults `produced[]`, and nothing retargets an entry to a replacement,
 /// because that would rewrite what was actually produced.
-pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -> Result<bool> {
+pub fn record_produced(
+    root: &Path,
+    id: &str,
+    section: u64,
+    outcome: Produced,
+    prepared: &Prepared,
+) -> Result<bool> {
     outcome.validate()?;
     let (object, target_section) = outcome.target()?;
     let projected = crate::ops::effective(root, &object).map_err(|error| {
@@ -1040,7 +1221,7 @@ pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -
             )
         })?;
     }
-    edit(root, id, |item| {
+    edit(root, id, prepared, |item, reviewed| {
         item.section(section)?;
         let slot = item
             .sections
@@ -1057,6 +1238,7 @@ pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -
         // wording did not move: `updated_at` means last meaningful activity, and
         // learning what a point produced is meaningful to whoever picks it up.
         slot.updated_at = now();
+        reviewed.mark(slot);
         Ok(true)
     })
 }
@@ -1068,8 +1250,14 @@ pub fn record_produced(root: &Path, id: &str, section: u64, outcome: Produced) -
 /// produced that outcome — and never the target, which is why removal asks
 /// nothing about whether the target still resolves. Requiring it to would make
 /// a mistaken entry uncorrectable exactly when the target has gone.
-pub fn forget_produced(root: &Path, id: &str, section: u64, outcome: &Produced) -> Result<bool> {
-    edit(root, id, |item| {
+pub fn forget_produced(
+    root: &Path,
+    id: &str,
+    section: u64,
+    outcome: &Produced,
+    prepared: &Prepared,
+) -> Result<bool> {
+    edit(root, id, prepared, |item, reviewed| {
         item.section(section)?;
         let slot = item
             .sections
@@ -1081,6 +1269,7 @@ pub fn forget_produced(root: &Path, id: &str, section: u64, outcome: &Produced) 
         let removed = slot.produced.len() != before;
         if removed {
             slot.updated_at = now();
+            reviewed.mark(slot);
         }
         Ok(removed)
     })
@@ -1109,6 +1298,7 @@ pub fn merge_into(
     sources: &[u64],
     text: &str,
     subjects: Vec<Subject>,
+    prepared: &Prepared,
 ) -> Result<()> {
     check_text(text)?;
     let mut unique = sources.to_vec();
@@ -1129,7 +1319,12 @@ pub fn merge_into(
         EXIT_INVARIANT,
         "§{destination} is the destination, so it cannot also be merged into itself"
     );
-    edit(root, id, |item| {
+    edit(root, id, prepared, |item, reviewed| {
+        // A merge removes the sources, and a Section leaves only through a
+        // review that passed — a consume, or atomically as the source of a
+        // merge. Soft-admission is for mutations that keep the unresolved point
+        // available, and the sources' own wording does not survive this one.
+        reviewed.may_destroy()?;
         // Every participant is checked before anything moves, so a merge naming
         // a section that is not there changes nothing at all.
         let mut produced = item.section(destination)?.produced.clone();
@@ -1153,6 +1348,8 @@ pub fn merge_into(
         // Unambiguously activity: the destination now states something it did
         // not state before, whatever the wording happens to be.
         slot.updated_at = now();
+        // Reached only on a review that passed, so this always clears.
+        reviewed.mark(slot);
         Ok(())
     })
 }
@@ -1171,8 +1368,16 @@ pub fn merge_into(
 /// still has unresolved work in it, and an empty one is not a canonical state.
 /// That removal is mechanical structural cleanup inside this same mutation, not
 /// a second deletion anyone has to ask for.
-pub fn consume_section(root: &Path, id: &str, section: u64) -> Result<bool> {
+/// Removal is the one mutation an exhausted review does not get. Everywhere
+/// else Backlog would rather admit the thought and mark it than lose it; here
+/// there would be nothing left to mark. The point stays exactly as it was, and
+/// no marker is written, because nothing was admitted for one to describe.
+pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared) -> Result<bool> {
     locked(root, || {
+        if let Some(precondition) = &prepared.precondition {
+            precondition.still_holds(root)?;
+        }
+        Reviewed::compose(root, prepared.attempt)?.may_destroy()?;
         let mut item = load(root, id)?;
         item.section(section)?;
         item.sections.retain(|candidate| candidate.id != section);

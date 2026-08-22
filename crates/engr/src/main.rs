@@ -129,6 +129,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// List unresolved topics
     Ls {
@@ -146,6 +148,8 @@ enum Backlog {
         item: String,
         #[arg(long)]
         topic: String,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Add another unresolved point to a topic
     Add {
@@ -154,6 +158,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Reword an unresolved point
     Revise {
@@ -162,6 +168,8 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         text: TextArg,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Replace what an unresolved point concerns
     Subjects {
@@ -170,6 +178,8 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Consolidate unresolved points into one of them
     Merge {
@@ -184,6 +194,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Record durable knowledge this point produced. Does not resolve it
     Produced {
@@ -196,6 +208,8 @@ enum Backlog {
         /// Take the outcome back off: the bookkeeping was wrong, not the record
         #[arg(long)]
         forget: bool,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Consume a resolved point. The topic goes when its last one does
     Consume {
@@ -203,7 +217,29 @@ enum Backlog {
         /// The point being judged resolved
         #[arg(long)]
         section: u64,
+        #[command(flatten)]
+        review: ReviewArg,
     },
+}
+
+/// How many times the agent has been round this review already.
+///
+/// Attested, not counted: engr keeps no retry state, so nothing here can be
+/// checked against anything. It is honest because saying a lower number buys an
+/// agent nothing except a review it has already failed.
+#[derive(Args, Clone, Copy)]
+struct ReviewArg {
+    /// Which attempt of this review sequence this is, counted from 1
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    attempt: u32,
+}
+
+impl ReviewArg {
+    fn prepared(self) -> Result<backlog::Prepared> {
+        Ok(backlog::Prepared::attempt(rules::Attempt::new(
+            self.attempt,
+        )?))
+    }
 }
 
 #[derive(Args)]
@@ -753,8 +789,15 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             topic,
             text,
             subjects,
+            review,
         } => {
-            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            let item = backlog::create(
+                root,
+                &topic,
+                &text.read()?,
+                subjects.build(root)?,
+                &review.prepared()?,
+            )?;
             print!("{}", view::render_backlog_show(root, &item));
             Ok(())
         }
@@ -779,9 +822,13 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             }
             Ok(())
         }
-        Backlog::Rename { item, topic } => {
+        Backlog::Rename {
+            item,
+            topic,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let item = backlog::rename(root, &id, &topic)?;
+            let item = backlog::rename(root, &id, &topic, &review.prepared()?)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
         }
@@ -789,9 +836,16 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            let section = backlog::add_section(
+                root,
+                &id,
+                &text.read()?,
+                subjects.build(root)?,
+                &review.prepared()?,
+            )?;
             println!("added §{section}");
             Ok(())
         }
@@ -799,9 +853,10 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             text,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            backlog::revise_section(root, &id, section, &text.read()?)?;
+            backlog::revise_section(root, &id, section, &text.read()?, &review.prepared()?)?;
             println!("revised §{section}");
             Ok(())
         }
@@ -809,11 +864,12 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            backlog::set_subjects(root, &id, section, subjects)?;
+            backlog::set_subjects(root, &id, section, subjects, &review.prepared()?)?;
             println!("§{section} now concerns {count} subject(s)");
             Ok(())
         }
@@ -823,6 +879,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             sections,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             backlog::merge_into(
@@ -832,6 +889,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &sections,
                 &text.read()?,
                 subjects.build(root)?,
+                &review.prepared()?,
             )?;
             let absorbed = sections
                 .iter()
@@ -846,27 +904,33 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             section,
             target,
             forget,
+            review,
         } => {
+            let prepared = review.prepared()?;
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let outcome = backlog::Produced::object(
                 backlog::EngrTarget::new(target.clone()).reference.clone(),
             );
             if forget {
-                if backlog::forget_produced(root, &id, section, &outcome)? {
+                if backlog::forget_produced(root, &id, section, &outcome, &prepared)? {
                     println!("§{section} no longer records that outcome");
                 } else {
                     println!("§{section} was not recording that outcome");
                 }
-            } else if backlog::record_produced(root, &id, section, outcome)? {
+            } else if backlog::record_produced(root, &id, section, outcome, &prepared)? {
                 println!("§{section} produced {target}; still unresolved");
             } else {
                 println!("§{section} already recorded that outcome");
             }
             Ok(())
         }
-        Backlog::Consume { item, section } => {
+        Backlog::Consume {
+            item,
+            section,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            if backlog::consume_section(root, &id, section)? {
+            if backlog::consume_section(root, &id, section, &review.prepared()?)? {
                 println!(
                     "consumed §{section}, and the topic with it — nothing else was unresolved"
                 );

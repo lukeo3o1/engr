@@ -253,6 +253,14 @@ engr backlog consume <id> --section 2     # consuming it is what says "settled"
 third section, so anything already pointing at `--into` still points at it. What
 the sources produced comes along.
 
+Every one of these takes `--attempt <n>` when a project rule governs backlog —
+which try of your own review this is, counted from 1, and 1 if you say nothing.
+Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so
+say the real number: the point is kept either way, and an honest one tells the
+next reader what it went in on. **Consume and merge are the exceptions.** They
+remove a point, so past the ceiling they simply do not happen, and nothing is
+written. Revise it, or raise the ceiling.
+
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can
