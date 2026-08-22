@@ -907,6 +907,42 @@ item unreadable. Backlog is staging, not a referential-integrity database.
 `subjects[]` is semantically **unordered**, and exact duplicates are refused so
 that "the same set" has one meaning. No persisted sort order is required.
 
+### Mutation preconditions
+
+A prepared Backlog mutation binds the predecessor it was written against, and is
+applied only while that predecessor still holds:
+
+```text
+read the exact predecessor
+-> prepare and review the exact mutation
+-> apply only while the predecessor still matches
+-> otherwise stale: read again and re-prepare
+```
+
+What each mutation binds is exactly what it rests on:
+
+| mutation | binds |
+| --- | --- |
+| create an item | that the item id is still absent |
+| change the topic | the **complete** parent item |
+| add a Section | the parent topic, and that the Section id is still absent |
+| change or consume a Section | that **whole** Section, and the parent topic |
+| merge Sections | the parent topic, and every Section involved |
+
+The scope is the decision. Binding less than the whole Section is what the
+removed `canonical(text, subjects[])` fingerprint did, and it was blind to every
+field outside its list — including fields added later, which nobody would think
+to add to it. Binding more, such as the whole item for a single-Section change,
+would stale a mutation because an unrelated sibling moved, and a staleness
+signal that fires on unrelated work stops being read.
+
+An implementation MAY compare a hash internally. There is **no** protocol-level
+persisted Backlog fingerprint, and no field records one.
+
+Staleness is its own outcome, not a failed mutation and not corrupt data: the
+caller did nothing wrong and the world moved underneath it. The refusal MUST say
+which part moved, so the retry is intelligent rather than reflexive.
+
 ### updated_at
 
 When the unresolved statement itself last changed: creation, text revision,

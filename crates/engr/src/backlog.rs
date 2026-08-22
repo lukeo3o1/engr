@@ -28,7 +28,7 @@ use crate::model::new_id;
 use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
-    EXIT_USAGE,
+    EXIT_STALE, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -669,6 +669,218 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, b
         short(&commit)
     );
     Ok((commit, dirty))
+}
+
+// ---------------------------------------------------------------------------
+// Mutation preconditions
+// ---------------------------------------------------------------------------
+
+/// Exactly what a prepared Backlog mutation was written against.
+///
+/// There is a gap between reading a point, reviewing a change to it, and
+/// applying that change. Whatever happens in that gap must not be applied over:
+/// a review of v1 wording must not silently land on v2, and a consume prepared
+/// against a point somebody has since sharpened must not destroy the sharpening.
+///
+/// This replaces the old Backlog-specific `canonical(text, subjects[])`
+/// fingerprint, which is gone as a protocol concept. The difference is not the
+/// hashing — an implementation may still hash internally — it is the **scope**.
+/// The fingerprint covered a hand-picked subset and was therefore blind to any
+/// field outside it; these bind the whole predecessor the mutation actually
+/// depends on, so a field added later is covered without anyone remembering.
+///
+/// Each variant binds what that mutation genuinely rests on and deliberately no
+/// more. Binding the whole item everywhere would be simpler and wrong: an
+/// unrelated sibling Section moving would stale a mutation that never read it,
+/// and a model that cries stale for unrelated work teaches people to re-prepare
+/// without looking.
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(tag = "precondition", rename_all = "snake_case")]
+pub enum Precondition {
+    /// Creating an item: only that the id is still free.
+    ///
+    /// Nothing else can affect it. Other Backlog activity is irrelevant to
+    /// whether this new item can exist.
+    ItemAbsent { item: String },
+    /// Changing the topic: the complete parent item.
+    ///
+    /// The topic is shared context for every Section under it, so a change to
+    /// any of them can change what renaming it means.
+    Item { item: Item },
+    /// Adding a Section: the parent topic, and that the id is still free.
+    ///
+    /// Sibling Sections are excluded on purpose — adding a point does not read
+    /// them, so their moving says nothing about this add.
+    SectionAbsent {
+        item: String,
+        topic: String,
+        section: u64,
+    },
+    /// Changing or consuming a Section: that whole Section, and the topic.
+    ///
+    /// The whole Section rather than its wording: `subjects[]`, `produced[]` and
+    /// `updated_at` are all things a reviewer may have taken into account, and a
+    /// subset would be blind to exactly the field somebody else touched. The
+    /// topic comes too, because it is the context the Section is read in.
+    Section {
+        item: String,
+        topic: String,
+        section: Section,
+    },
+    /// Merging: the topic, and every Section the merge consumes or keeps.
+    ///
+    /// All of them, because a merge is one judgement about several points at
+    /// once: if any of them moved, the judgement was about something else.
+    Merge {
+        item: String,
+        topic: String,
+        sections: Vec<Section>,
+    },
+}
+
+impl Precondition {
+    /// What a new item's creation rests on.
+    pub fn item_absent(item: impl Into<String>) -> Self {
+        Self::ItemAbsent { item: item.into() }
+    }
+
+    /// Read the current predecessor for a topic change.
+    pub fn topic(root: &Path, item: &str) -> Result<Self> {
+        Ok(Self::Item {
+            item: load(root, item)?,
+        })
+    }
+
+    /// Read the current predecessor for adding a Section.
+    ///
+    /// The id bound is the one the item will hand out next, so a concurrent add
+    /// that takes it stales this one — two adds must not each believe they are
+    /// creating the same point.
+    pub fn section_absent(root: &Path, item: &str) -> Result<Self> {
+        let loaded = load(root, item)?;
+        Ok(Self::SectionAbsent {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            section: loaded.next_section_id,
+        })
+    }
+
+    /// Read the current predecessor for changing or consuming one Section.
+    pub fn section(root: &Path, item: &str, section: u64) -> Result<Self> {
+        let loaded = load(root, item)?;
+        Ok(Self::Section {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            section: loaded.section(section)?.clone(),
+        })
+    }
+
+    /// Read the current predecessor for a merge over several Sections.
+    pub fn merge(root: &Path, item: &str, sections: &[u64]) -> Result<Self> {
+        let loaded = load(root, item)?;
+        let mut bound = Vec::new();
+        for id in sections {
+            bound.push(loaded.section(*id)?.clone());
+        }
+        bound.sort_by_key(|section| section.id);
+        Ok(Self::Merge {
+            item: loaded.id.clone(),
+            topic: loaded.topic.clone(),
+            sections: bound,
+        })
+    }
+
+    /// The item this precondition is about.
+    pub fn item(&self) -> &str {
+        match self {
+            Self::ItemAbsent { item }
+            | Self::SectionAbsent { item, .. }
+            | Self::Section { item, .. }
+            | Self::Merge { item, .. } => item,
+            Self::Item { item } => &item.id,
+        }
+    }
+
+    /// Whether the world still looks the way this mutation was written against.
+    ///
+    /// Called inside the same lock that performs the write; checking outside it
+    /// would leave open the very gap it exists to close.
+    pub fn still_holds(&self, root: &Path) -> Result<()> {
+        match self {
+            Self::ItemAbsent { item } => match load(root, item) {
+                Err(error) if error.code == EXIT_NOT_FOUND => Ok(()),
+                Ok(_) => stale("that backlog id"),
+                Err(error) => Err(error),
+            },
+            Self::Item { item } => {
+                let current = load(root, &item.id)?;
+                if &current == item {
+                    Ok(())
+                } else {
+                    stale("the backlog item")
+                }
+            }
+            Self::SectionAbsent {
+                item,
+                topic,
+                section,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                if current.section(*section).is_ok() {
+                    return stale("that section id");
+                }
+                Ok(())
+            }
+            Self::Section {
+                item,
+                topic,
+                section,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                match current.section(section.id) {
+                    Ok(now) if now == section => Ok(()),
+                    _ => stale("that unresolved point"),
+                }
+            }
+            Self::Merge {
+                item,
+                topic,
+                sections,
+            } => {
+                let current = load(root, item)?;
+                if &current.topic != topic {
+                    return stale("the topic");
+                }
+                for section in sections {
+                    match current.section(section.id) {
+                        Ok(now) if now == section => {}
+                        _ => return stale("one of the points being merged"),
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Stale is its own outcome, not a failure of the mutation.
+///
+/// The caller did nothing wrong and the data is not corrupt: the world moved
+/// between reading and writing. Saying which part moved is what makes the retry
+/// intelligent rather than a reflex.
+fn stale(what: &str) -> Result<()> {
+    Err(Error::new(
+        EXIT_STALE,
+        format!(
+            "{what} changed since this was prepared, so the change was prepared against something else; read it again and re-prepare"
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------

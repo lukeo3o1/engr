@@ -1088,3 +1088,150 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
     // exactly when a mistaken entry is hardest to live with.
     assert!(backlog::forget_produced(&root, &id, 1, &outcome).expect("forget"));
 }
+
+/// A prepared mutation binds exactly what it rests on — no less, and no more.
+///
+/// No less, or a change in the gap between reading and writing lands under it.
+/// No more, or unrelated work cries stale and teaches people to re-prepare
+/// without looking, which is how a staleness check stops being read at all.
+#[test]
+fn a_precondition_binds_what_the_mutation_rests_on_and_not_the_whole_item() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first point");
+    backlog::add_section(&root, &id, "second point", Vec::new()).expect("add");
+
+    let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
+    bound.still_holds(&root).expect("nothing has moved yet");
+
+    // An unrelated sibling moving does not stale it: this mutation never read
+    // §2, so §2 changing says nothing about whether it is still applicable.
+    backlog::revise_section(&root, &id, 2, "second point, sharpened").expect("revise sibling");
+    bound
+        .still_holds(&root)
+        .expect("a sibling is not part of what this rests on");
+
+    // The bound Section moving does.
+    backlog::revise_section(&root, &id, 1, "first point, sharpened").expect("revise target");
+    let error = bound.still_holds(&root).expect_err("the target moved");
+    assert_eq!(error.code, engr::EXIT_STALE);
+    assert!(
+        error.message.contains("re-prepare"),
+        "the refusal says what to do: {}",
+        error.message
+    );
+}
+
+/// The whole Section, not a chosen subset of its fields.
+///
+/// The removed fingerprint covered `text` and `subjects[]`, so it was blind to
+/// everything else — and blind by construction, since a field added later was
+/// not in the list. Binding the Section covers what exists now and what is added
+/// later without anyone remembering to extend it.
+#[test]
+fn every_field_of_the_bound_section_stales_it_not_only_the_wording() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "an outcome");
+    let id = item(&root, "topic", "unresolved");
+
+    for change in [
+        "subjects",
+        // `produced[]` is exactly the field the old fingerprint excluded.
+        "produced",
+    ] {
+        let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
+        match change {
+            "subjects" => {
+                backlog::set_subjects(
+                    &root,
+                    &id,
+                    1,
+                    vec![Subject::engr(format!("obj:{}", compact(&object)))],
+                )
+                .expect("subjects");
+            }
+            _ => {
+                backlog::record_produced(
+                    &root,
+                    &id,
+                    1,
+                    Produced::object(format!("obj:{}", compact(&object))),
+                )
+                .expect("produced");
+            }
+        }
+        let error = bound
+            .still_holds(&root)
+            .expect_err("this field should stale the mutation");
+        assert_eq!(error.code, engr::EXIT_STALE, "{change}");
+    }
+}
+
+/// The topic is context every Section is read in, so it is bound with them.
+#[test]
+fn a_topic_change_stales_a_section_mutation_prepared_under_it() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "original topic", "unresolved");
+    let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
+    backlog::rename(&root, &id, "a different topic").expect("rename");
+    let error = bound.still_holds(&root).expect_err("the context moved");
+    assert!(error.message.contains("topic"), "{}", error.message);
+}
+
+/// Adding binds the topic and the id it is about to take, not its siblings.
+///
+/// Two concurrent adds must not each believe they are creating the same point,
+/// which is what binding the next id catches — while a sibling being revised
+/// meanwhile has nothing to do with whether this add is still what was reviewed.
+#[test]
+fn adding_a_point_binds_the_id_it_will_take_and_not_the_siblings() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    let bound = backlog::Precondition::section_absent(&root, &id).expect("observe");
+    bound.still_holds(&root).expect("the id is still free");
+
+    backlog::revise_section(&root, &id, 1, "first, sharpened").expect("revise sibling");
+    bound
+        .still_holds(&root)
+        .expect("a sibling is not part of an add");
+
+    // Somebody else takes the id this add was going to use.
+    backlog::add_section(&root, &id, "someone else got there", Vec::new()).expect("race");
+    let error = bound.still_holds(&root).expect_err("the id was taken");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}
+
+/// A topic change binds the complete item, because it scopes every point.
+#[test]
+fn a_topic_mutation_binds_the_whole_item() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "first");
+    let bound = backlog::Precondition::topic(&root, &id).expect("observe");
+    bound.still_holds(&root).expect("unchanged");
+
+    backlog::add_section(&root, &id, "a second point", Vec::new()).expect("add");
+    let error = bound
+        .still_holds(&root)
+        .expect_err("renaming is about all of them, so any of them moving matters");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}
+
+/// Creating an item binds only that the id is free.
+#[test]
+fn creating_an_item_binds_only_its_own_absence() {
+    let (_dir, root) = workspace();
+    let existing = item(&root, "unrelated", "unresolved");
+    let fresh = engr::model::new_id();
+    let bound = backlog::Precondition::item_absent(fresh.clone());
+    bound.still_holds(&root).expect("nothing occupies it");
+
+    // Unrelated Backlog activity cannot stale a creation.
+    backlog::add_section(&root, &existing, "more", Vec::new()).expect("add elsewhere");
+    bound
+        .still_holds(&root)
+        .expect("another item is not this one");
+
+    // An item appearing at that id is the one thing that does.
+    let taken = backlog::Precondition::item_absent(existing);
+    let error = taken.still_holds(&root).expect_err("the id is occupied");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}
