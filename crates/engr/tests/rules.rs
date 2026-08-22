@@ -1120,7 +1120,7 @@ fn the_review_hash_is_the_identity_of_what_had_to_be_reviewed() {
             precondition.clone(),
         )
         .expect("bind")
-        .sha256()
+        .digest()
         .expect("hash")
     };
     let original = hash(&mutation, &precondition);
@@ -1203,7 +1203,7 @@ fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
         precondition.clone(),
     )
     .expect("bind");
-    let attested = binding.sha256().expect("hash");
+    let attested = binding.digest().expect("digest").to_string();
     assert_eq!(binding.rule_ids(), reviewed);
 
     rules::check(
@@ -1275,7 +1275,7 @@ fn an_attestation_is_checked_against_the_subject_as_it_stands_now() {
         Domain::Collection,
         mutation.clone(),
         precondition.clone(),
-        &empty.sha256().expect("hash"),
+        &empty.digest().expect("digest").to_string(),
         &[],
     )
     .expect("an empty set is still a subject");
@@ -1337,7 +1337,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
             precondition.clone(),
         )
         .expect("bind")
-        .sha256()
+        .digest()
         .expect("hash")
     };
 
@@ -1404,7 +1404,7 @@ fn changing_the_effective_review_policy_changes_the_review_identity() {
             precondition.clone(),
         )
         .expect("bind")
-        .sha256()
+        .digest()
         .expect("hash")
     };
     let with = |front: &str| ARCHITECTURE.replace("based_on:", &format!("{front}based_on:"));
@@ -1582,13 +1582,13 @@ fn one_mutation_level_attempt_is_judged_against_each_rules_own_ceiling() {
 
     // The number is agent-attested process metadata, so it must not be able to
     // move the identity of what had to be reviewed.
-    let hash = bound.sha256().expect("hash");
+    let hash = bound.digest().expect("digest").to_string();
     for number in [1, 3, 99] {
         let _ = bound.exhaustion(attempt(number));
     }
     assert_eq!(
         hash,
-        bound.sha256().expect("hash"),
+        bound.digest().expect("digest").to_string(),
         "attempt is an argument, never a field, so it cannot reach the hash"
     );
 }
@@ -1900,7 +1900,7 @@ fn the_reported_rule_set_is_by_id_even_though_the_hash_is_not() {
         Domain::Backlog,
         mutation,
         precondition,
-        &bound.sha256().expect("hash"),
+        &bound.digest().expect("digest").to_string(),
         &["zebra".to_owned(), "alpha".to_owned()],
     )
     .expect("the named set is a set, whatever order it arrives in");
@@ -1956,18 +1956,18 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     )
     .expect("bind");
     assert_eq!(
-        bound.sha256().expect("hash"),
-        "47eb5a407a4d4769325129310bd877e50a30e0584377c761cab3ed3c88eebd5d",
-        "the review binding digest is SHA-256 over its RFC 8785 bytes"
+        bound.digest().expect("digest").to_string(),
+        "1:47eb5a407a4d4769325129310bd877e50a30e0584377c761cab3ed3c88eebd5d",
+        "the review binding digest is ReviewDigestContract 1 over its RFC 8785 bytes"
     );
 
     // Nothing is remembered, so recomputation is the same value.
     assert_eq!(
         rules::bind(&root, Domain::Backlog, mutation, precondition)
             .expect("bind")
-            .sha256()
-            .expect("hash"),
-        bound.sha256().expect("hash")
+            .digest()
+            .expect("digest"),
+        bound.digest().expect("digest")
     );
 }
 

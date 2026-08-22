@@ -1497,6 +1497,48 @@ abandonment record, and no pending-review resource — which is the same decisio
 seen from the other side, since any of those would be the durable counter this
 is not.
 
+### A long-lived proof carries its own contract version
+
+A digest that must still be checkable years later is persisted as a **versioned
+scalar**:
+
+```text
+<contract-version>:<digest>          1:<64 lowercase hex>
+```
+
+The version travels with the value because a bare digest says what it is worth
+and not which calculation produced it. Both ways of guessing later are silent:
+verify it under current rules and a mismatch looks like tampering, or relabel it
+and claim a guarantee nobody made. A stored value may be relabelled under a newer
+contract **only** if the calculation is exactly equivalent.
+
+The scalar grammar is shared and owns only syntax:
+
+```text
+version := [1-9][0-9]*        positive uint32, 1..4294967295
+                              0 is permanently reserved and never means
+                              "legacy" or "unversioned"
+digest  := lowercase hex      uppercase is invalid, never silently normalized
+                              length is not fixed here
+```
+
+Contract versions are **field-local**. `ReviewDigestContract 1` and
+`CandidateDigestContract 1` are unrelated contracts that share a number, and each
+validates its own digest length — which is what lets one change hash algorithm
+without touching the grammar or the others. Versions need not be contiguous;
+once a version has actually been emitted its meaning is fixed forever.
+
+Where such a scalar takes part in canonical ordering it is compared as the parsed
+pair `(version, digest)`, not as text, because `2:` precedes `10:` and string
+order gets that backwards.
+
+**Supported is two questions, not one.** A contract may still verify values
+written under it long after it has stopped being what new values are written
+under; exactly one version per family emits at a time. So a well-formed scalar
+naming a version this build does not know is **not malformed data** — it is
+readable data this build cannot check, and it is reported that way. Only a
+grammar violation is malformed.
+
 ### Unordered sets have one order
 
 Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable

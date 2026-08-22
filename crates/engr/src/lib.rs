@@ -7,6 +7,7 @@
 pub mod backlog;
 pub mod collection;
 pub mod confirmation;
+pub mod digest;
 pub mod gate;
 pub mod git;
 pub mod model;
