@@ -57,17 +57,23 @@ There is deliberately **no `object.admission`**. An object is an aggregate, and
 an aggregate holding one human section and one agent section has no single
 honest answer; the section is the only place the question has one.
 
+`admission` records **which door**, and only that. `human` means the wording was
+put through the Human Gate and is therefore treated as Human-authoritative. It
+is **not** evidence that a human was present, and no field here can be — see
+[what v0 does not solve](#what-v0-does-not-solve), which is explicit that
+nothing prevents an agent confirming its own proposal. Every rule below rests on
+the door, never on the presence.
+
 The ordering is one-way, and it is enforced rather than described:
 
 - A Human-Gated semantic mutation of a surviving agent section yields
-  `admission=human`. A human read those exact words and assented to them, so the
-  promotion is the point rather than a side effect.
+  `admission=human`. Those exact words went through the door where a human is
+  asked, so the promotion is the point rather than a side effect.
 - Nothing demotes human to agent. An agent rewording a human section would
-  replace words somebody assented to with words nobody did, and is refused.
+  replace gated wording with ungated wording, and is refused.
 - An agent merge may consolidate only agent sections. Absorbing a human section
-  into an agent one would leave assented wording standing under no human's
-  authority — the same rule, applied where it would otherwise be possible to
-  launder.
+  into an agent one would take gated wording and leave it standing as ungated —
+  the same rule, applied where it would otherwise be possible to launder.
 
 Two pieces of the semantic surface are human-authoritative in themselves, so an
 agent section MUST NOT carry them: `relations[]`, and `role=supersession`. A
@@ -77,7 +83,7 @@ check, and `role=supersession` is the reason an object was retired.
 `admitted_at` is the time those semantics were admitted, by whichever path
 admitted them. It was called `confirmed_at` while the Human Gate was the only
 way in; the instant is the same one, but a name saying *confirmed* would now be
-claiming a human read every section that has one.
+saying something untrue of half the sections that have one.
 
 Integrity is not authority. A legitimate mechanical reseal does not promote
 agent knowledge to human authority.

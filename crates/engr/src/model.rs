@@ -88,7 +88,8 @@ impl Ref {
     }
 }
 
-/// The part of a section a human actually reads and assents to.
+/// The part of a section that is put through admission — the wording a human is
+/// shown at the gate, and the wording Rule Review is run against.
 ///
 /// Every semantic field a Section carries lives here, and only here, because
 /// this is what the section hash covers. A field held outside it would be
@@ -489,6 +490,21 @@ fn check_supersession(object: &Object, code: i32) -> Result<()> {
     }
 }
 
+/// A Section id is positive wherever it is written down.
+///
+/// Stated once and used by every action that names one, because "ids start at
+/// 1" is a property of the field rather than of any one operation. A payload is
+/// validated when an Event is *loaded*, so a value outside the field's schema
+/// that only the reducer catches is a stored record that passed validation.
+fn check_section_id(section: u64) -> Result<()> {
+    ensure!(
+        section > 0,
+        EXIT_SCHEMA,
+        "section ids start at 1, so §{section} is not one"
+    );
+    Ok(())
+}
+
 /// Which sections a merge consolidates, and which one comes out the other side.
 ///
 /// Two shapes, because the answer to "which id survives" changed and the events
@@ -545,6 +561,16 @@ impl Merge {
                 destination,
                 sources,
             } => {
+                // The field's own lower bound, checked where the field is
+                // validated. Section ids start at 1, so 0 is not a section that
+                // happens to be missing — it is a value outside the schema, and
+                // letting the reducer discover it means a persisted Event was
+                // accepted as well formed on the strength of what some Object
+                // happened to contain.
+                check_section_id(*destination)?;
+                for source in sources {
+                    check_section_id(*source)?;
+                }
                 ensure!(
                     !sources.is_empty(),
                     EXIT_INVARIANT,
@@ -569,6 +595,9 @@ impl Merge {
                 }
             }
             Merge::Absorbing { absorbs } => {
+                for absorbed in absorbs {
+                    check_section_id(*absorbed)?;
+                }
                 ensure!(
                     absorbs.len() >= 2,
                     EXIT_INVARIANT,
@@ -802,8 +831,16 @@ impl Payload {
                 "a superseded_by relation only enters through object.superseded, which confirms the state, the replacement and the reason together"
             );
         }
-        if let Action::SectionMerged { merge } = &self.action {
-            merge.validate()?;
+        match &self.action {
+            Action::SectionMerged { merge } => merge.validate()?,
+            // The same rule, for the other two actions that name a Section.
+            // These predate the merge representation and had the same gap: a
+            // payload naming §0 was accepted here and only refused later, by a
+            // lookup that failed for a different reason.
+            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+                check_section_id(*section)?
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1079,13 +1116,14 @@ fn admitting_path(_event: &Event) -> Admission {
 
 /// What a revised Section is admitted as.
 ///
-/// Human wins in both directions, and that is the whole rule. A human who reads
-/// new wording for a Section an agent wrote has now assented to those exact
-/// words, so the Section becomes Human — the promotion is the point, not a side
-/// effect. The other direction has no reading behind it at all: an agent
-/// rewording a Human Section would replace words a human assented to with words
-/// nobody did, while the Section went on claiming Human authority or quietly
-/// stopped claiming it. Neither is a thing engr may decide, so it is refused.
+/// Human wins in both directions, and that is the whole rule. New wording for a
+/// Section an agent wrote, put through the Human Gate, has been through the
+/// door where a human is asked — so the Section becomes Human, and the
+/// promotion is the point rather than a side effect. The other direction never
+/// went through that door at all: an agent rewording a Human Section would
+/// replace gated wording with ungated wording, while the Section went on
+/// claiming Human authority or quietly stopped claiming it. Neither is a thing
+/// engr may decide, so it is refused.
 fn revised_admission(section: &Section, admitted_by: Admission) -> Result<Admission> {
     ensure!(
         admitted_by == Admission::Human || section.admission == Admission::Agent,
@@ -1099,13 +1137,12 @@ fn revised_admission(section: &Section, admitted_by: Admission) -> Result<Admiss
 /// What the surviving Section of a merge is admitted as.
 ///
 /// The two paths are not symmetric, and the asymmetry is the rule rather than
-/// an accident of implementation. A human who reads the merged wording and
-/// assents to it has authorized exactly those words, whatever the parts were
-/// admitted as before — so a Human merge may consume Agent Sections and what
-/// comes out is Human. An Agent merge has no such reading behind it: it may
-/// consolidate only knowledge that was already Agent-admitted, because
-/// absorbing a Human Section into an Agent one would take words a human
-/// assented to and leave them standing under no human's authority.
+/// an accident of implementation. The merged wording goes through the Human
+/// Gate as one statement, whatever the parts were admitted as before — so a
+/// Human merge may consume Agent Sections and what comes out is Human. An Agent
+/// merge passes through no such door: it may consolidate only knowledge that was
+/// already Agent-admitted, because absorbing a Human Section into an Agent one
+/// would take gated wording and leave it standing as ungated.
 ///
 /// That is the same one-way ordering [`Admission`] states, applied where it
 /// would otherwise be possible to launder: not by demoting a Section, but by
@@ -1230,7 +1267,7 @@ mod tests {
         assert_eq!(
             revised_admission(&agent, Admission::Human).expect("human revises agent"),
             Admission::Human,
-            "a human who reads the new wording has assented to those exact words"
+            "wording put through the human gate carries what that door confers"
         );
         assert_eq!(
             revised_admission(&agent, Admission::Agent).expect("agent revises agent"),
@@ -1238,7 +1275,7 @@ mod tests {
         );
         assert!(
             revised_admission(&human, Admission::Agent).is_err(),
-            "an agent rewording human-assented wording would leave it claiming an authority nobody gave it"
+            "an agent rewording gated wording would leave it claiming a door it never went through"
         );
     }
 
@@ -1256,7 +1293,7 @@ mod tests {
         );
         assert!(
             merged_admission(&object, 1, &[3], Admission::Agent).is_err(),
-            "consuming a human section into an agent one launders away the assent"
+            "consuming a human section into an agent one launders away the gate"
         );
         assert!(
             merged_admission(&object, 3, &[1], Admission::Agent).is_err(),
@@ -1265,13 +1302,73 @@ mod tests {
         assert_eq!(
             merged_admission(&object, 3, &[1, 2], Admission::Human).expect("human merge"),
             Admission::Human,
-            "a human merge may consume either, because a human read the result"
+            "a human merge may consume either, because the result went through the gate"
         );
         assert_eq!(
             merged_admission(&object, 1, &[2], Admission::Human).expect("human merge"),
             Admission::Human,
             "and what comes out of a human merge is human, whatever went in"
         );
+    }
+
+    /// A payload is validated when an Event is *loaded*, so a value outside a
+    /// field's schema that only the reducer catches is a stored record that
+    /// passed validation. Section ids start at 1, so §0 is not a section that
+    /// happens to be missing — it is not a section id.
+    #[test]
+    fn every_action_naming_a_section_holds_it_to_the_positive_id_bound() {
+        let object = new_id();
+        let carrying = |action: Action| Payload {
+            action,
+            object: object.clone(),
+            becomes: None,
+            content: Content {
+                text: "wording".to_owned(),
+                ..Content::default()
+            },
+        };
+        let bare = |action: Action| Payload {
+            action,
+            object: object.clone(),
+            becomes: None,
+            content: Content::default(),
+        };
+
+        for (what, payload) in [
+            (
+                "merge destination",
+                carrying(Action::SectionMerged {
+                    merge: Merge::Into {
+                        destination: 0,
+                        sources: vec![1],
+                    },
+                }),
+            ),
+            (
+                "merge source",
+                carrying(Action::SectionMerged {
+                    merge: Merge::Into {
+                        destination: 1,
+                        sources: vec![0],
+                    },
+                }),
+            ),
+            (
+                "retained merge",
+                carrying(Action::SectionMerged {
+                    merge: Merge::Absorbing {
+                        absorbs: vec![0, 1],
+                    },
+                }),
+            ),
+            ("revision", carrying(Action::SectionRevised { section: 0 })),
+            ("deletion", bare(Action::SectionDeleted { section: 0 })),
+        ] {
+            let error = payload
+                .validate()
+                .expect_err("§0 is outside the field's schema");
+            assert_eq!(error.code, EXIT_SCHEMA, "{what}: {}", error.message);
+        }
     }
 
     #[test]

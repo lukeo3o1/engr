@@ -488,15 +488,17 @@ leaving that dependency pointing at an id nothing will ever have again.
 Every section says which door it came through:
 
 ```text
-human    a human read these exact words at the gate
+human    admitted through the Human Gate, and treated as human-authoritative
 agent    admitted through Rule Review, and not human-authoritative
 ```
 
 `engr show` prints it beside the timestamp, and `--format json` carries it as
-`admission`. Do not read `admission=human` as proof a human was present — it
-says the wording went through the gate, which is what the record can honestly
-claim. A human revising or merging an agent section makes the result `human`;
-nothing goes the other way.
+`admission`. It records **which door**, and only that. Do not read
+`admission=human` as proof a human was present: `prepare` prints the challenge
+where the agent can read it, so nothing stops an agent confirming its own
+proposal, and going through the gate is the whole of what the record can
+honestly claim. A gated revision or merge of an agent section makes the result
+`human`; nothing goes the other way.
 
 ## Type, state and attention
 

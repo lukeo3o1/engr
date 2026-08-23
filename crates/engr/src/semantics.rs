@@ -181,9 +181,15 @@ pub fn needs_attention(object_type: Option<ObjectType>, state: State) -> bool {
 /// answer; asking the question of the Section is the only place it has one.
 ///
 /// The ordering is one-way. A Human-Gated semantic mutation of a surviving Agent
-/// Section yields [`Admission::Human`], because a human read those exact words
-/// and assented to them. Nothing demotes Human to Agent: that would be engr
-/// deciding a human's assent had expired.
+/// Section yields [`Admission::Human`], because those exact words were put
+/// through the gate where a human is asked. Nothing demotes Human to Agent:
+/// that would be engr deciding an admission it recorded had expired.
+///
+/// What this field records is **which door**, and only that. `human` says the
+/// wording went through the Human Gate; it is not evidence that a human was
+/// present, and nothing here can be — see the threat model in `PROTOCOL.md`,
+/// which is explicit that nothing stops an agent confirming its own proposal.
+/// Every rule below rests on the door, never on the presence.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Admission {
