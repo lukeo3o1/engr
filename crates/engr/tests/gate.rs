@@ -313,7 +313,7 @@ fn the_phase_three_merge_representation_cannot_be_admitted() {
     // What it may not do is reach disk.
     let object = store::load_object(&root, &id).expect("object");
     let mut projected = object.clone();
-    let merged = engr::model::merged_admission(&object, 1, &[2], engr::semantics::Admission::Human)
+    let merged = engr::model::merged_admission(&object, &[1, 2], engr::semantics::Admission::Human)
         .expect("a human merge");
     assert_eq!(merged, engr::semantics::Admission::Human);
     projected.sections.retain(|section| section.id != 2);

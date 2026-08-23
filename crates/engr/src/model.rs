@@ -940,6 +940,11 @@ pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(
 pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     let content = &event.payload.content;
     let admitted_by = admitting_path(event);
+    // Before anything is applied, `becomes` included: what the admitting path
+    // may do at all is a different question from what the action does, and
+    // asking it after the destination had been applied would be asking it too
+    // late.
+    check_admitting_authority(object, &event.payload, admitted_by)?;
     // Applied before the action, so the attention guard below sees the state
     // this confirmation *arrives at* rather than the one it left.
     //
@@ -1029,12 +1034,17 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             for id in merge.participants() {
                 object.section(id)?;
             }
+            // Asked of every participant, whichever shape the merge is written
+            // in. The rule is about what is being consolidated, not about how
+            // the operation spells itself: a merge that consumed everything and
+            // allocated a fresh id could otherwise absorb Human wording into
+            // Agent knowledge, which is the same laundering by another route.
+            let admission = merged_admission(object, &merge.participants(), admitted_by)?;
             match merge {
                 Merge::Into {
                     destination,
                     sources,
                 } => {
-                    let admission = merged_admission(object, *destination, sources, admitted_by)?;
                     let replacement = section_from(*destination, admission, event)?;
                     object.sections.retain(|section| {
                         section.id == *destination || !sources.contains(&section.id)
@@ -1051,7 +1061,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                     object
                         .sections
                         .retain(|section| !absorbs.contains(&section.id));
-                    object.sections.push(section_from(id, admitted_by, event)?);
+                    object.sections.push(section_from(id, admission, event)?);
                 }
             }
         }
@@ -1129,6 +1139,67 @@ fn admitting_path(_event: &Event) -> Admission {
     Admission::Human
 }
 
+/// What the admitting path is allowed to do at all.
+///
+/// The other half of mixed authority, and the half that is about the *Object*
+/// rather than about a Section's own admission. `type` and `state` are
+/// Human-authoritative after the neutral initialization, and a field does not
+/// become Agent-writable because it is reached through a different action — so
+/// the four lifecycle actions are Human-only, and a `becomes` destination is
+/// refused on the Agent path even though it is admissible on the Human one.
+///
+/// Deletion is the case that cannot be answered anywhere else. Whether removing
+/// §3 is legal depends on what §3 currently is, which no envelope carries and no
+/// schema can express: an Agent may retire knowledge an agent admitted, and may
+/// not delete wording that went through the Human Gate. That is why this lives
+/// in the current-state model rather than waiting for the Event layer.
+///
+/// Titles are deliberately absent from the refusals. `Object.title` is
+/// non-authoritative navigation metadata, so Agent create and rename are allowed
+/// here; whether a *particular* one passes is Rule Review's question, not this
+/// one's.
+///
+/// Public and taking the admitting path as an argument, so the whole matrix is
+/// exercisable now — the Agent path has no envelope to arrive through until the
+/// provenance slice, and a rule that cannot be run until then is a rule nobody
+/// has checked.
+pub fn check_admitting_authority(
+    object: &Object,
+    payload: &Payload,
+    admitted_by: Admission,
+) -> Result<()> {
+    if admitted_by == Admission::Human {
+        return Ok(());
+    }
+    ensure!(
+        payload.becomes.is_none(),
+        EXIT_INVARIANT,
+        "an agent-admitted {} cannot carry a destination: type and state are human-authoritative, and reaching them through another action does not change that",
+        payload.action.label()
+    );
+    ensure!(
+        !matches!(
+            payload.action,
+            Action::ObjectClosed
+                | Action::ObjectReopened
+                | Action::ObjectClassified { .. }
+                | Action::ObjectSuperseded
+        ),
+        EXIT_INVARIANT,
+        "{} sets the object's own lifecycle, which is a human admission",
+        payload.action.label()
+    );
+    if let Action::SectionDeleted { section } = &payload.action {
+        let target = object.section(*section)?;
+        ensure!(
+            target.admission == Admission::Agent,
+            EXIT_INVARIANT,
+            "§{section} was admitted through the human gate, so it is removed there too"
+        );
+    }
+    Ok(())
+}
+
 /// What a revised Section is admitted as.
 ///
 /// Human wins in both directions, and that is the whole rule. New wording for a
@@ -1164,14 +1235,13 @@ fn revised_admission(section: &Section, admitted_by: Admission) -> Result<Admiss
 /// consuming it into one that was never Human.
 pub fn merged_admission(
     object: &Object,
-    destination: u64,
-    sources: &[u64],
+    participants: &[u64],
     admitted_by: Admission,
 ) -> Result<Admission> {
     if admitted_by == Admission::Human {
         return Ok(Admission::Human);
     }
-    for id in std::iter::once(destination).chain(sources.iter().copied()) {
+    for id in participants.iter().copied() {
         let section = object.section(id)?;
         ensure!(
             section.admission == Admission::Agent,
@@ -1195,7 +1265,7 @@ fn take_id(object: &mut Object) -> Result<u64> {
 
 fn section_from(id: u64, admission: Admission, event: &Event) -> Result<Section> {
     let content = event.payload.content.clone();
-    Ok(Section {
+    let section = Section {
         id,
         admission,
         sha256: content.sha256()?,
@@ -1209,7 +1279,15 @@ fn section_from(id: u64, admission: Admission, event: &Event) -> Result<Section>
         // reconstruct the Section that was admitted, and a reducer that read a
         // clock would produce a different Object every time it ran.
         admitted_at: event.time.clone(),
-    })
+    };
+    // Checked here, so a state transition is closed under the model's own
+    // invariants rather than producing something a later save is expected to
+    // catch. The Agent restrictions are the case that matters: `role` and
+    // `relations[]` come from the payload, and whether they are admissible
+    // depends on the admission this Section is being given — which is a fact
+    // the payload does not carry and only this point knows.
+    section.validate()?;
+    Ok(section)
 }
 
 #[cfg(test)]
@@ -1303,26 +1381,166 @@ mod tests {
         ]);
 
         assert_eq!(
-            merged_admission(&object, 1, &[2], Admission::Agent).expect("all agent"),
+            merged_admission(&object, &[1, 2], Admission::Agent).expect("all agent"),
             Admission::Agent
         );
         assert!(
-            merged_admission(&object, 1, &[3], Admission::Agent).is_err(),
+            merged_admission(&object, &[1, 3], Admission::Agent).is_err(),
             "consuming a human section into an agent one launders away the gate"
         );
         assert!(
-            merged_admission(&object, 3, &[1], Admission::Agent).is_err(),
+            merged_admission(&object, &[3, 1], Admission::Agent).is_err(),
             "and so does merging agent wording into a human destination"
         );
         assert_eq!(
-            merged_admission(&object, 3, &[1, 2], Admission::Human).expect("human merge"),
+            merged_admission(&object, &[3, 1, 2], Admission::Human).expect("human merge"),
             Admission::Human,
             "a human merge may consume either, because the result went through the gate"
         );
         assert_eq!(
-            merged_admission(&object, 1, &[2], Admission::Human).expect("human merge"),
+            merged_admission(&object, &[1, 2], Admission::Human).expect("human merge"),
             Admission::Human,
             "and what comes out of a human merge is human, whatever went in"
+        );
+
+        // The rule is about what is being consolidated, not about how the merge
+        // spells itself. The retained shape names no survivor and allocates a
+        // fresh id, and it is the same laundering if it may absorb human wording.
+        assert!(
+            merged_admission(&object, &[1, 2, 3], Admission::Agent).is_err(),
+            "the shape that consumes every participant is held to the same rule"
+        );
+    }
+
+    /// The whole Agent action matrix, exercised now rather than when an
+    /// envelope can finally carry an Agent admission. Every one of these is a
+    /// consequence of `type` and `state` being Human-authoritative, or of a
+    /// Human Section's wording not being an agent's to remove.
+    #[test]
+    fn an_agent_admission_cannot_reach_the_objects_lifecycle() {
+        let object = holding(vec![
+            section(1, Admission::Agent),
+            section(2, Admission::Human),
+        ]);
+        let carrying = |action: Action| Payload {
+            action,
+            object: object.id.clone(),
+            becomes: None,
+            content: Content {
+                text: "wording".to_owned(),
+                ..Content::default()
+            },
+        };
+        let bare = |action: Action| Payload {
+            action,
+            object: object.id.clone(),
+            becomes: None,
+            content: Content::default(),
+        };
+
+        for action in [
+            Action::ObjectClosed,
+            Action::ObjectReopened,
+            Action::ObjectClassified {
+                object_type: None,
+                state: State::Closed,
+            },
+        ] {
+            let payload = bare(action);
+            let label = payload.action.label();
+            assert!(
+                check_admitting_authority(&object, &payload, Admission::Agent).is_err(),
+                "{label} is a human admission"
+            );
+            assert!(
+                check_admitting_authority(&object, &payload, Admission::Human).is_ok(),
+                "{label} is unchanged for the human path"
+            );
+        }
+        assert!(
+            check_admitting_authority(
+                &object,
+                &carrying(Action::ObjectSuperseded),
+                Admission::Agent
+            )
+            .is_err(),
+            "retiring an object is a human admission"
+        );
+
+        // A destination is admissible on the human path and refused on the
+        // agent one, on exactly the same action.
+        let mut becoming = carrying(Action::SectionAdded);
+        becoming.becomes = Some(Destination {
+            object_type: None,
+            state: State::Open,
+        });
+        assert!(check_admitting_authority(&object, &becoming, Admission::Human).is_ok());
+        assert!(
+            check_admitting_authority(&object, &becoming, Admission::Agent).is_err(),
+            "a field does not become agent-writable by being reached through another action"
+        );
+
+        // Deletion depends on what the target currently is, which is why it
+        // cannot be answered by any envelope.
+        let agent_target = bare(Action::SectionDeleted { section: 1 });
+        let human_target = bare(Action::SectionDeleted { section: 2 });
+        assert!(check_admitting_authority(&object, &agent_target, Admission::Agent).is_ok());
+        assert!(
+            check_admitting_authority(&object, &human_target, Admission::Agent).is_err(),
+            "an agent may retire agent knowledge, not wording that went through the gate"
+        );
+        assert!(check_admitting_authority(&object, &human_target, Admission::Human).is_ok());
+
+        // And the positive case: a title is navigation metadata, so the agent
+        // path reaches it. Whether a particular title passes is Rule Review's
+        // question, not this one's.
+        for action in [Action::ObjectCreated, Action::ObjectRenamed] {
+            assert!(
+                check_admitting_authority(&object, &carrying(action), Admission::Agent).is_ok(),
+                "object title is non-authoritative navigation metadata"
+            );
+        }
+    }
+
+    /// A state transition is closed under the model's own invariants. Without
+    /// this an Agent add could produce a Section carrying human-authoritative
+    /// semantics and leave a later save to notice.
+    #[test]
+    fn a_projected_section_cannot_be_one_the_model_would_refuse() {
+        let id = new_id();
+        let mut object = Object::new(id.clone(), "closure".to_owned()).expect("object");
+        object.rev = 1;
+        let mut payload = Payload {
+            action: Action::SectionAdded,
+            object: id.clone(),
+            becomes: None,
+            content: Content {
+                text: "wording".to_owned(),
+                role: Some(Role::Supersession),
+                ..Content::default()
+            },
+        };
+        payload.content.role = Some(Role::Supersession);
+        let event = Event {
+            format: EVENT_FORMAT.to_owned(),
+            version: crate::EVENT_ENVELOPE_VERSION_V0,
+            event_id: new_id(),
+            rev: 2,
+            time: "2026-08-23T00:00:00Z".to_owned(),
+            confirmation: Confirmation {
+                challenge: "TEST00".to_owned(),
+                payload_sha256: payload.sha256().expect("hash"),
+            },
+            payload,
+        };
+
+        assert!(
+            section_from(1, Admission::Human, &event).is_ok(),
+            "a human section may carry the supersession role"
+        );
+        assert!(
+            section_from(1, Admission::Agent, &event).is_err(),
+            "an agent section may not, and the reducer is where that is caught"
         );
     }
 
