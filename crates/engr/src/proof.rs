@@ -19,7 +19,7 @@
 //! - **The contract version lives outside.** Nothing here prepends a version or
 //!   a field name to the bytes; the version is the `1:` on the scalar.
 
-use crate::model::{Object, Ref, Section};
+use crate::model::{Action, Merge, Object, Payload, Ref, Section};
 use crate::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
 use crate::{ensure, Error, Result, EXIT_SCHEMA, EXIT_USAGE};
 use serde::Serialize;
@@ -279,6 +279,178 @@ impl CandidateSubject {
     }
 }
 
+/// Build the subject for one operation, from the states either side of it.
+///
+/// The table this implements is frozen: which projection each operation uses
+/// for `before` and `after`, and what its parameters carry. A projection may
+/// not be inferred from whatever the host language's structs happen to look
+/// like, because the whole point is that another implementation reaches the
+/// same bytes without seeing this code.
+///
+/// `before` and `after` are the Object either side of the reducer. Taking both
+/// rather than recomputing one here is deliberate: the projection must describe
+/// the transition that actually happened, including a lifecycle the same
+/// confirmed act moved, and re-deriving it would be a second opinion about the
+/// very thing being proved.
+pub fn candidate_subject(
+    before: &Object,
+    after: &Object,
+    payload: &Payload,
+    review_digest: Option<String>,
+) -> Result<CandidateSubject> {
+    let id = &payload.object;
+    let becomes = match &payload.becomes {
+        Some(destination) => serde_json::to_value(Lifecycle {
+            object_type: destination.object_type,
+            state: destination.state,
+        }),
+        None => Ok(serde_json::Value::Null),
+    }
+    .map_err(|error| Error::new(EXIT_SCHEMA, format!("becomes: {error}")))?;
+
+    let section_state = |object: &Object, section: u64| -> Result<SectionOperation> {
+        Ok(SectionOperation {
+            lifecycle: Lifecycle::of(object),
+            section: object.section(section).ok().map(SectionSemantic::of),
+        })
+    };
+    let json = |value: &dyn erased_json::Erased| value.to_json();
+
+    let (target, parameters, before_state, after_state) = match &payload.action {
+        Action::ObjectCreated => (
+            object_target(id),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+            json(&ObjectCreation {
+                title: after.title.clone(),
+                object_type: after.object_type,
+                state: after.state,
+                sections: Vec::new(),
+            })?,
+        ),
+        Action::ObjectRenamed => (
+            object_target(id),
+            serde_json::json!({ "becomes": becomes }),
+            json(&TitleLifecycle::of(before))?,
+            json(&TitleLifecycle::of(after))?,
+        ),
+        Action::ObjectClosed | Action::ObjectReopened => (
+            object_target(id),
+            serde_json::json!({}),
+            json(&Lifecycle::of(before))?,
+            json(&Lifecycle::of(after))?,
+        ),
+        Action::ObjectClassified { object_type, state } => (
+            object_target(id),
+            serde_json::json!({ "type": object_type, "state": state }),
+            json(&Lifecycle::of(before))?,
+            json(&Lifecycle::of(after))?,
+        ),
+        Action::SectionAdded => {
+            // The resulting id is the protocol's answer, not the caller's, so
+            // it is read off what the reducer produced rather than predicted.
+            let added = added_section(before, after)?;
+            (
+                object_target(id),
+                serde_json::json!({ "section": added, "becomes": becomes }),
+                json(&SectionOperation {
+                    lifecycle: Lifecycle::of(before),
+                    section: None,
+                })?,
+                json(&section_state(after, added)?)?,
+            )
+        }
+        Action::SectionRevised { section } => (
+            section_target(id, *section),
+            serde_json::json!({ "becomes": becomes }),
+            json(&section_state(before, *section)?)?,
+            json(&section_state(after, *section)?)?,
+        ),
+        Action::SectionDeleted { section } => (
+            section_target(id, *section),
+            serde_json::json!({ "becomes": becomes }),
+            json(&section_state(before, *section)?)?,
+            json(&SectionOperation {
+                lifecycle: Lifecycle::of(after),
+                section: None,
+            })?,
+        ),
+        Action::SectionMerged { merge } => {
+            // Only the representation that names its survivor has a frozen
+            // projection. The retained shape allocated a fresh id and named no
+            // destination, so there is no target for it to have — and this
+            // contract was written for the generation that replaced it.
+            let Merge::Into {
+                destination,
+                sources,
+            } = merge
+            else {
+                return Err(Error::new(
+                    EXIT_SCHEMA,
+                    "the retained merge representation has no candidate projection: it names no surviving section".to_owned(),
+                ));
+            };
+            (
+                section_target(id, *destination),
+                serde_json::json!({ "sources": sources, "becomes": becomes }),
+                json(&ObjectInvariant::of(before))?,
+                json(&ObjectInvariant::of(after))?,
+            )
+        }
+        Action::ObjectSuperseded => {
+            let added = added_section(before, after)?;
+            (
+                object_target(id),
+                serde_json::json!({ "rationale_section": added }),
+                json(&ObjectInvariant::of(before))?,
+                json(&ObjectInvariant::of(after))?,
+            )
+        }
+    };
+
+    Ok(CandidateSubject {
+        operation: Operation {
+            name: payload.action.label().to_owned(),
+            parameters,
+        },
+        target,
+        before: before_state,
+        after: after_state,
+        review_digest,
+    })
+}
+
+/// Which Section an operation brought into existence.
+///
+/// Read from the counter rather than from the list, because the list is sorted
+/// by id and the newest is not necessarily last — and because the counter is
+/// the protocol's own record of what it handed out.
+fn added_section(before: &Object, after: &Object) -> Result<u64> {
+    ensure!(
+        after.next_section_id == before.next_section_id + 1,
+        EXIT_SCHEMA,
+        "this operation is defined to allocate exactly one section id"
+    );
+    Ok(before.next_section_id)
+}
+
+/// Serializing a projection to JSON without naming its type twice.
+mod erased_json {
+    use super::{Error, Result, EXIT_SCHEMA};
+    use serde::Serialize;
+
+    pub trait Erased {
+        fn to_json(&self) -> Result<serde_json::Value>;
+    }
+
+    impl<T: Serialize> Erased for T {
+        fn to_json(&self) -> Result<serde_json::Value> {
+            serde_json::to_value(self)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("projection: {error}")))
+        }
+    }
+}
+
 /// The canonical target of an operation that names a whole Object.
 pub fn object_target(id: &str) -> String {
     format!("obj:{id}")
@@ -404,6 +576,190 @@ mod tests {
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
             vec![1, 3]
+        );
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+    use crate::model::{Content, Destination, Payload};
+
+    fn payload(action: Action, object: &str, text: &str) -> Payload {
+        Payload {
+            action,
+            object: object.to_owned(),
+            becomes: None,
+            content: Content {
+                text: text.to_owned(),
+                ..Content::default()
+            },
+        }
+    }
+
+    fn section(id: u64, text: &str) -> Section {
+        Section {
+            id,
+            admission: Admission::Human,
+            role: None,
+            text: text.to_owned(),
+            content: Vec::new(),
+            based_on: None,
+            refs: Vec::new(),
+            relations: Vec::new(),
+            sha256: String::new(),
+            admitted_at: "2026-08-23T00:00:00Z".to_owned(),
+        }
+    }
+
+    /// The whole frozen table, checked for the two things a reader of another
+    /// implementation needs: which target each operation names, and which
+    /// projection sits either side of it.
+    #[test]
+    fn every_operation_projects_the_shape_the_contract_freezes() {
+        let id = crate::model::new_id();
+        let mut before = Object::new(id.clone(), "before".to_owned()).expect("object");
+        before.rev = 1;
+        before.next_section_id = 3;
+        before.sections = vec![section(1, "one"), section(2, "two")];
+        let mut after = before.clone();
+        after.rev = 2;
+
+        let cases: Vec<(Action, String, &str, &str)> = vec![
+            (Action::ObjectRenamed, object_target(&id), "title", "title"),
+            (Action::ObjectClosed, object_target(&id), "state", "state"),
+            (Action::ObjectReopened, object_target(&id), "state", "state"),
+            (
+                Action::SectionRevised { section: 1 },
+                section_target(&id, 1),
+                "lifecycle",
+                "lifecycle",
+            ),
+            (
+                Action::SectionDeleted { section: 2 },
+                section_target(&id, 2),
+                "lifecycle",
+                "lifecycle",
+            ),
+            (
+                Action::ObjectSuperseded,
+                object_target(&id),
+                "sections",
+                "sections",
+            ),
+        ];
+
+        for (action, target, before_member, after_member) in cases {
+            let label = action.label();
+            let mut ending = after.clone();
+            if matches!(action, Action::ObjectSuperseded) {
+                // Superseding appends its rationale, so the counter moves.
+                ending.next_section_id = before.next_section_id + 1;
+            }
+            let subject = candidate_subject(&before, &ending, &payload(action, &id, "w"), None)
+                .unwrap_or_else(|error| panic!("{label}: {}", error.message));
+            assert_eq!(subject.target, target, "{label}");
+            assert_eq!(subject.operation.name, label);
+            assert!(
+                subject.before.get(before_member).is_some(),
+                "{label}: before projection"
+            );
+            assert!(
+                subject.after.get(after_member).is_some(),
+                "{label}: after projection"
+            );
+        }
+    }
+
+    /// Creation has no before, because there was nothing there — and its after
+    /// is the neutral shape the operation is defined to arrive at.
+    #[test]
+    fn creation_has_no_before() {
+        let id = crate::model::new_id();
+        let before = Object::new(id.clone(), String::new()).expect("object");
+        let mut after = before.clone();
+        after.title = "a title".to_owned();
+        after.rev = 1;
+
+        let subject = candidate_subject(
+            &before,
+            &after,
+            &payload(Action::ObjectCreated, &id, "a title"),
+            None,
+        )
+        .expect("subject");
+        assert_eq!(subject.before, serde_json::Value::Null);
+        assert_eq!(subject.after["title"], "a title");
+        assert_eq!(subject.after["type"], serde_json::Value::Null);
+        assert_eq!(subject.after["state"], "open");
+        assert_eq!(subject.after["sections"], serde_json::json!([]));
+    }
+
+    /// A destination is part of what was authorized, so it is a parameter of the
+    /// operation rather than something the after-state is left to imply.
+    #[test]
+    fn a_destination_is_named_in_the_parameters() {
+        let id = crate::model::new_id();
+        let mut before = Object::new(id.clone(), "t".to_owned()).expect("object");
+        before.rev = 1;
+        before.state = State::Closed;
+        let mut after = before.clone();
+        after.state = State::Open;
+        after.next_section_id = 2;
+        after.sections = vec![section(1, "w")];
+
+        let mut added = payload(Action::SectionAdded, &id, "w");
+        added.becomes = Some(Destination {
+            object_type: None,
+            state: State::Open,
+        });
+        let subject = candidate_subject(&before, &after, &added, None).expect("subject");
+        assert_eq!(
+            subject.operation.parameters,
+            serde_json::json!({ "section": 1, "becomes": { "type": null, "state": "open" } })
+        );
+        assert_eq!(subject.before["section"], serde_json::Value::Null);
+        assert_eq!(subject.after["section"]["text"], "w");
+    }
+
+    /// Only the representation that names its survivor has a frozen projection.
+    /// The retained shape named no destination, so there is no target it could
+    /// have — this contract was written for the generation that replaced it.
+    #[test]
+    fn the_retained_merge_representation_has_no_projection() {
+        let id = crate::model::new_id();
+        let mut before = Object::new(id.clone(), "t".to_owned()).expect("object");
+        before.rev = 1;
+        before.next_section_id = 3;
+        before.sections = vec![section(1, "one"), section(2, "two")];
+        let after = before.clone();
+
+        let retained = payload(
+            Action::SectionMerged {
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
+                },
+            },
+            &id,
+            "together",
+        );
+        assert!(candidate_subject(&before, &after, &retained, None).is_err());
+
+        let named = payload(
+            Action::SectionMerged {
+                merge: Merge::Into {
+                    destination: 1,
+                    sources: vec![2],
+                },
+            },
+            &id,
+            "together",
+        );
+        let subject = candidate_subject(&before, &after, &named, None).expect("subject");
+        assert_eq!(subject.target, section_target(&id, 1));
+        assert_eq!(
+            subject.operation.parameters["sources"],
+            serde_json::json!([2])
         );
     }
 }
