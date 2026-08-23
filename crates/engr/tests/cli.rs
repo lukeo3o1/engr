@@ -1596,7 +1596,26 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
 fn unsupported_event_versions_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
     event.version += 1;
-    assert_event_is_rejected(&root, event);
+    let id = event.payload.object.clone();
+
+    // Refused on the way in, so nothing writes one...
+    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        !store::events_path(&root, &id).exists(),
+        "nothing was written"
+    );
+
+    // ...and refused on the way out, because a file can arrive by other means
+    // than this build writing it.
+    write_event_to(&root, &id, &event);
+    let output = run_engr(&root, &["verify", &id]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

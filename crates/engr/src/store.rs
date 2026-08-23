@@ -648,6 +648,16 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 /// means something it does not, and replaying it would reconstruct a different
 /// Object from the one that was admitted.
 fn check_event_generation(event: &Event) -> Result<()> {
+    // The generation itself, before anything about its contents. Leaving this to
+    // the read side alone was the same asymmetry one level up: a record naming a
+    // generation this build does not emit could be written and then refused by
+    // the very next read of the log it was written to.
+    ensure!(
+        event.version == EVENT_ENVELOPE_VERSION_V0,
+        EXIT_SCHEMA,
+        "unsupported event version {}",
+        event.version
+    );
     ensure!(
         !matches!(
             &event.payload.action,
@@ -707,16 +717,10 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
             path.display(),
             index + 1
         );
-        // Reconciliation can turn an event back into authority after a crash,
-        // so corrupt recovery data must fail before it reaches the reducer.
-        ensure!(
-            event.version == EVENT_ENVELOPE_VERSION_V0,
-            EXIT_SCHEMA,
-            "{}:{}: unsupported event version {}",
-            path.display(),
-            index + 1,
-            event.version
-        );
+        // Reconciliation can turn an event back into authority after a crash, so
+        // corrupt recovery data must fail before it reaches the reducer — and it
+        // fails against the same rule the write boundary applied, rather than a
+        // second copy of it kept in step by hand.
         check_event_generation(&event).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,

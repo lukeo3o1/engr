@@ -1674,3 +1674,39 @@ fn the_object_write_boundary_refuses_authority_it_cannot_represent() {
         "and nothing on disk changed"
     );
 }
+
+/// The generation guard has to guard the generation, not only the shapes it
+/// defines. An ordinary payload carrying a version this build does not emit is
+/// the same self-corrupting write one level up: `append_event` writes it and
+/// `load_events` refuses it.
+#[test]
+fn the_event_write_boundary_refuses_a_generation_it_does_not_emit() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "generation boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    let before = std::fs::read(store::events_path(&root, &id)).expect("events");
+
+    let ordinary = payload(Action::SectionAdded, &id, "an ordinary payload");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::PHASE_3_EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: 3,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: ordinary.sha256().expect("hash"),
+        },
+        payload: ordinary,
+    };
+
+    let error =
+        store::append_event(&root, &event).expect_err("this build does not emit that generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(store::events_path(&root, &id)).expect("events"),
+        before,
+        "nothing was written"
+    );
+    store::load_events(&root, &id).expect("and the history is still readable");
+}
