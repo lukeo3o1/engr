@@ -910,6 +910,18 @@ fn historical_references_decode_the_snapshot_workspace_format() {
             .remove("state")
             .expect("state");
         object["status"] = state;
+        // The Sections too. A snapshot claiming the generation that predates the
+        // workspace authority, while carrying fields no build of that generation
+        // could have written, is a contradiction rather than history — and is
+        // now read as one.
+        if let Some(sections) = object["sections"].as_array_mut() {
+            for section in sections {
+                let section = section.as_object_mut().expect("section");
+                let admitted_at = section.remove("admitted_at").expect("admitted_at");
+                section.insert("confirmed_at".to_owned(), admitted_at);
+                section.remove("admission");
+            }
+        }
         std::fs::write(path, serde_json::to_vec_pretty(&object).expect("json"))
             .expect("legacy object");
     }

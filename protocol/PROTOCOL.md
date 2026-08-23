@@ -2040,9 +2040,53 @@ One function performs every one of those conversions, and **every** reader goes
 through it — the load path, migration, and the historical reader. A shape that
 predates a field therefore means the same thing to every reader, and a shape
 that contradicts itself is refused everywhere rather than wherever somebody
-remembered to check. A section carrying both `confirmed_at` and `admitted_at`
-cannot say which it means and is refused; so is an object carrying both `status`
-and `state`.
+remembered to check. An object carrying both `status` and `state` cannot say
+which it means and is refused.
+
+### A representation is read under the generation that wrote it
+
+The conversion is told which workspace generation the bytes came from. It is
+never inferred from the bytes, and that is the whole point: inferred, a file
+would be read under whichever contract its own contents suggest, and a field
+nobody could legitimately have written would become the evidence that writing it
+was legitimate.
+
+So a resource MUST match the generation its authority declares:
+
+```text
+before the mixed-authority generation
+  confirmed_at required
+  admission and admitted_at are refused outright
+
+the mixed-authority generation
+  admission and admitted_at required
+  confirmed_at is refused outright
+```
+
+The asymmetry matters most in one direction. `agent` is an authority no earlier
+generation had any path to produce, so a section from one of those generations
+claiming it was not written by that generation — and treating the claim as data
+would let a hand edit mint an authority no human ever gave. It fails closed
+instead. Reading `admission` as `human` when the field is simply *missing* from
+a current-generation file would be the same mistake from the other side: that is
+a file that lost a required field, not one that predates it.
+
+Historical snapshots follow the same rule under their own recorded version, so
+what a commit says is read as what it said.
+
+### A generation still being built is never committed to
+
+A coordinated transition may be implemented in stages. While it is unfinished, a
+build that implements part of it MUST NOT move an existing workspace into the
+new version. Migration is one way and confirmed history is never rewritten, so a
+workspace moved into a shape that is still changing could not be brought the
+rest of the way afterwards — it would be left declaring a version whose later
+requirements it cannot satisfy, with no way back.
+
+Such a build still reads existing workspaces, and still refuses to write to
+them. A workspace it creates itself is at the new version from the start and is
+a development artifact of an unreleased build. The refusal MUST say that the
+version is unfinished, so it is not read as corruption.
 
 ### What the workspace version is for
 
@@ -2076,10 +2120,10 @@ would make every reference pinned before a migration unresolvable — moving the
 workspace forward would retroactively break provenance that was correct when it
 was recorded.
 
-A snapshot is decoded through the same conversion migration uses, so it is read
-as what it said rather than as what today's build would have written. Nothing is
-written back: the commit is immutable and stays exactly as it is. Reading history
-is not rewriting it.
+A snapshot is decoded through the same conversion migration uses, **under the
+version the snapshot itself records**, so it is read as what it said rather than
+as what today's build would have written. Nothing is written back: the commit is
+immutable and stays exactly as it is. Reading history is not rewriting it.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain

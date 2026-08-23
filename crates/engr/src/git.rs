@@ -102,7 +102,7 @@ fn historical_path(commit: &str, path: &str) -> String {
     format!("{commit}:{path}")
 }
 
-fn validate_historical_format(path: &str, text: &str) -> Result<()> {
+fn validate_historical_format(path: &str, text: &str) -> Result<crate::store::Generation> {
     let format: HistoricalWorkspaceFormat = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     ensure!(
@@ -129,14 +129,14 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
-    Ok(())
+    Ok(crate::store::Generation::at(format.version))
 }
 
 /// A format-less snapshot predates the workspace authority. It is readable only
 /// when every flat Object file carries the old per-resource markers, matching
 /// the live legacy detector rather than guessing from whatever the target JSON
 /// happens to deserialize as today.
-fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
+fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<crate::store::Generation> {
     let objects = format!("{}/objects", crate::store::DIR);
     let paths = run(
         root,
@@ -179,7 +179,7 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
         let Some(id) = name.strip_suffix(".json") else {
             continue;
         };
-        crate::store::to_current_object(path, &mut value)?;
+        crate::store::to_current_object(path, crate::store::LEGACY_GENERATION, &mut value)?;
         let object: Object = serde_json::from_value(value)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
         object.validate()?;
@@ -195,7 +195,7 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
         EXIT_SCHEMA,
         "historical workspace at commit {commit} has no format.json and is not a recognized legacy v0 workspace"
     );
-    Ok(())
+    Ok(crate::store::LEGACY_GENERATION)
 }
 
 /// Read one object exactly as a commit contains it. References use this rather
@@ -203,10 +203,10 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
 /// own workspace authority decides which representation may be decoded.
 pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> {
     let format_path = format!("{}/format.json", crate::store::DIR);
-    match run(root, &["show", &historical_path(commit, &format_path)]) {
+    let source = match run(root, &["show", &historical_path(commit, &format_path)]) {
         Some(text) => validate_historical_format(&format_path, &text)?,
         None => validate_legacy_workspace_at(root, commit)?,
-    }
+    };
 
     let path = format!("{}/objects/{id}.json", crate::store::DIR);
     let Some(text) = run(root, &["show", &historical_path(commit, &path)]) else {
@@ -217,7 +217,7 @@ pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> 
     // The snapshot's own representation, converted the way migration converts
     // it. Nothing is written back — the commit is immutable and stays as it was
     // — so this is a reading of history rather than an edit to it.
-    crate::store::to_current_object(&path, &mut value)?;
+    crate::store::to_current_object(&path, source, &mut value)?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     object.validate()?;

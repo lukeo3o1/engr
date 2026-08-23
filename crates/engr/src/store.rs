@@ -252,15 +252,19 @@ fn detect_legacy(root: &Path) -> Result<bool> {
 fn contains_legacy_objects(root: &Path) -> Result<bool> {
     let mut legacy = false;
     for id in object_ids(root)? {
-        let Ok(mut value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
+        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
             continue;
         };
-        // The same question migration asks, asked by the same function, so the
-        // scan and the conversion cannot drift apart. A file that contradicts
-        // itself is not counted as legacy on the strength of one spelling:
-        // `decode_object` refuses it the moment it is loaded.
-        legacy |= to_current_object(&object_path(root, &id).display().to_string(), &mut value)
-            .unwrap_or(false);
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        // A file claiming both spellings cannot say which it means, so it is not
+        // counted as legacy on the strength of the one that happens to be there.
+        // `decode_object` refuses it when it is loaded.
+        if object.contains_key("state") {
+            continue;
+        }
+        legacy |= object.contains_key("status");
     }
     Ok(legacy)
 }
@@ -316,7 +320,11 @@ struct MigrationEntry {
 /// Every conversion restates a guarantee the old protocol had already made. No
 /// authority is invented: a Section written before [`Admission`] existed was
 /// admitted through the Human Gate, because that was the only door there was.
-pub fn to_current_object(label: &str, value: &mut serde_json::Value) -> Result<bool> {
+pub fn to_current_object(
+    label: &str,
+    source: Generation,
+    value: &mut serde_json::Value,
+) -> Result<bool> {
     let object = value.as_object_mut().ok_or_else(|| {
         Error::new(
             EXIT_SCHEMA,
@@ -344,20 +352,106 @@ pub fn to_current_object(label: &str, value: &mut serde_json::Value) -> Result<b
         let section = section
             .as_object_mut()
             .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{label} must be a JSON object")))?;
-        if let Some(confirmed_at) = take_superseded(section, "confirmed_at", "admitted_at", &label)?
-        {
-            section.insert("admitted_at".to_owned(), confirmed_at);
-            // Absent admission and a `confirmed_at` timestamp are one fact, not
-            // two: this Section was written when the Human Gate was the only way
-            // in. Filling it in without that evidence would be manufacturing
-            // authority from a missing field, so the two move together.
-            section
-                .entry("admission")
-                .or_insert_with(|| serde_json::Value::String(Admission::Human.as_str().to_owned()));
-            moved = true;
+        if source.admits_mixed_authority() {
+            // Its own generation's shape, exactly. `admission` is required
+            // there, so absence is a file that lost it rather than one that
+            // predates it, and reading a lost field as `human` would invent the
+            // answer this field exists to stop anybody inventing.
+            ensure!(
+                !section.contains_key("confirmed_at"),
+                EXIT_SCHEMA,
+                "{label}: workspace version {} spells this admitted_at",
+                source.version()
+            );
+            ensure!(
+                section.contains_key("admission") && section.contains_key("admitted_at"),
+                EXIT_SCHEMA,
+                "{label}: workspace version {} requires admission and admitted_at",
+                source.version()
+            );
+            continue;
         }
+        // Below the mixed-authority generation there is exactly one answer, and
+        // the file does not get to supply it. `agent` is an authority no version
+        // before this one had a path to produce, so a section claiming it did
+        // not come from that version — it was written by something else, and
+        // treating it as evidence would let a hand edit mint authority a human
+        // never gave. Fail closed instead: a field the source generation never
+        // defined is not data, it is a contradiction.
+        for invented in ["admission", "admitted_at"] {
+            ensure!(
+                !section.contains_key(invented),
+                EXIT_SCHEMA,
+                "{label}: workspace version {} has no {invented}, so this file is not what it says it is",
+                source.version()
+            );
+        }
+        let confirmed_at = section.remove("confirmed_at").ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{label}: workspace version {} requires confirmed_at",
+                    source.version()
+                ),
+            )
+        })?;
+        section.insert("admitted_at".to_owned(), confirmed_at);
+        // Mechanical, and justified by the old protocol rather than by the file:
+        // every Section admitted under that generation went through the Human
+        // Gate, because that was the only door it had.
+        section.insert(
+            "admission".to_owned(),
+            serde_json::Value::String(Admission::Human.as_str().to_owned()),
+        );
+        moved = true;
     }
     Ok(moved)
+}
+
+/// The workspace generation a stored representation was written under.
+///
+/// Carried explicitly rather than inferred from the bytes, because inferring it
+/// is precisely the mistake: a file is then read under whichever contract its
+/// own contents suggest, and a field nobody could legitimately have written
+/// becomes the evidence that it was legitimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generation(u32);
+
+/// The generation of a workspace with no `format.json`, which predates the
+/// authority entirely.
+pub const LEGACY_GENERATION: Generation = Generation(0);
+
+impl Generation {
+    pub fn at(version: u32) -> Self {
+        Self(version)
+    }
+
+    pub fn version(self) -> u32 {
+        self.0
+    }
+
+    /// Whether Sections written under this generation say which door they came
+    /// through. Below it, there was only one door.
+    fn admits_mixed_authority(self) -> bool {
+        self.0 >= MIXED_AUTHORITY_WORKSPACE_VERSION
+    }
+}
+
+/// The first workspace version whose Sections carry `admission`.
+const MIXED_AUTHORITY_WORKSPACE_VERSION: u32 = 3;
+
+/// What generation this workspace's stored resources were written under.
+///
+/// Read from the authority alone, without looking at a single resource. Any
+/// answer derived from the resources would be the resources deciding which
+/// contract to be read under.
+fn declared_generation(root: &Path) -> Result<Generation> {
+    let path = engr_dir(root).join("format.json");
+    if !path.exists() {
+        return Ok(LEGACY_GENERATION);
+    }
+    let format: Format = read_json(&path)?;
+    Ok(Generation::at(format.version))
 }
 
 /// Take the value of a field whose spelling was replaced, refusing a record that
@@ -376,11 +470,16 @@ fn take_superseded(
     Ok(value.remove(superseded))
 }
 
-fn decode_object(path: &Path, id: &str, mut value: serde_json::Value) -> Result<Object> {
+fn decode_object(
+    path: &Path,
+    id: &str,
+    source: Generation,
+    mut value: serde_json::Value,
+) -> Result<Object> {
     // Reading an unmigrated workspace is allowed; writing to one is not. So the
     // conversion happens here, on the way in, and `require_current` is what
     // stops anything from being written back through it.
-    to_current_object(&path.display().to_string(), &mut value)?;
+    to_current_object(&path.display().to_string(), source, &mut value)?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     object.validate()?;
@@ -398,15 +497,21 @@ fn decode_object(path: &Path, id: &str, mut value: serde_json::Value) -> Result<
 /// malformed legacy workspace must remain exactly legacy rather than becoming a
 /// mixture of old and new files because a later entry was invalid.
 fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
+    let source = declared_generation(root)?;
     let mut entries = Vec::new();
     for id in object_ids(root)? {
         let path = object_path(root, &id);
         let mut planned: serde_json::Value = read_json(&path)?;
-        let moved = to_current_object(&path.display().to_string(), &mut planned)?;
+        let moved = to_current_object(&path.display().to_string(), source, &mut planned)?;
         // Deserialize the planned form, not just its converted keys. This
         // catches missing required fields and illegal legacy values before any
         // neighboring file is rewritten.
-        let object = decode_object(&path, &id, planned.clone())?;
+        let object = decode_object(
+            &path,
+            &id,
+            Generation::at(WORKSPACE_VERSION),
+            planned.clone(),
+        )?;
         entries.push(MigrationEntry {
             id,
             path,
@@ -429,7 +534,16 @@ pub fn migrate(root: &Path) -> Result<()> {
         EXIT_SCHEMA,
         "workspace does not require migration"
     );
+    // Every retained representation is validated first, then this. The order is
+    // the point: a workspace that could not migrate anyway must hear why, and
+    // hear it in the same terms it always did, rather than being turned away at
+    // the door by an unrelated refusal that hides a real corruption.
     let entries = preflight_migration(root)?;
+    ensure!(
+        crate::WORKSPACE_VERSION_IS_COMPLETE,
+        EXIT_SCHEMA,
+        "this build implements workspace version {WORKSPACE_VERSION}, which is not finished yet, so it will not move a workspace into it. Migration is one way and confirmed history is never rewritten, so a workspace migrated into a shape that is still changing could not be brought the rest of the way afterwards. Use a released build"
+    );
     for entry in entries {
         if let Some(value) = entry.migrated {
             write_json(&entry.path, &value)?;
@@ -507,7 +621,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     let path = object_path(root, id);
     let value: serde_json::Value = read_json(&path)?;
-    decode_object(&path, id, value)
+    decode_object(&path, id, declared_generation(root)?, value)
 }
 
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {

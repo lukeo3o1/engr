@@ -89,31 +89,63 @@ fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Ma
     std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("object");
 }
 
+/// Put every Section back into the shape it had before a Section said which
+/// door it came through: `confirmed_at`, and no `admission` at all.
+///
+/// Fixtures that claim an older workspace version have to actually *be* that
+/// version. A file claiming version 1 while carrying version 3 fields is not a
+/// legacy workspace, it is a contradiction, and it is now refused as one.
+fn downgrade_sections(object: &mut serde_json::Map<String, Value>) {
+    let Some(sections) = object
+        .get_mut("sections")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for section in sections {
+        let section = section.as_object_mut().expect("section");
+        let admitted_at = section.remove("admitted_at").expect("admitted_at");
+        section.insert("confirmed_at".to_owned(), admitted_at);
+        section.remove("admission");
+    }
+}
+
 fn mark_legacy(root: &Path, id: &str) {
     rewrite_object(root, id, |object| {
         object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
         object.insert("version".to_owned(), Value::from(1));
         let state = object.remove("state").expect("state");
         object.insert("status".to_owned(), state);
+        downgrade_sections(object);
     });
+}
+
+/// `engr migrate` while the generation this build writes is still being built.
+///
+/// The refusal is the behaviour, not an obstacle to the test: migration is one
+/// way, so a build partway through a coordinated transition must not move a
+/// workspace into a shape that is still changing.
+fn assert_migration_is_deferred(root: &Path) {
+    let output = run_engr(root, &["migrate"]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "migration succeeded, so WORKSPACE_VERSION_IS_COMPLETE is now true and every \
+         caller of this helper must go back to asserting the migrated outcome: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("not finished"),
+        "the refusal says why, so nobody reads it as corruption: {said}"
+    );
 }
 
 /// Put one Object back into the workspace-version-2 Section representation:
 /// `confirmed_at` where the current one says `admitted_at`, and no `admission`
 /// at all, because under version 2 the Human Gate was the only door.
 fn mark_workspace_v2(root: &Path, id: &str) {
-    rewrite_object(root, id, |object| {
-        for section in object
-            .get_mut("sections")
-            .and_then(|value| value.as_array_mut())
-            .expect("sections")
-        {
-            let section = section.as_object_mut().expect("section");
-            let admitted_at = section.remove("admitted_at").expect("admitted_at");
-            section.insert("confirmed_at".to_owned(), admitted_at);
-            section.remove("admission");
-        }
-    });
+    rewrite_object(root, id, downgrade_sections);
     let path = store::engr_dir(root).join("format.json");
     std::fs::write(&path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 }
@@ -532,44 +564,30 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     assert_eq!(still_legacy["status"], "open");
     assert!(still_legacy.get("state").is_none());
 
-    let migrated = run_engr(root, &["migrate"]);
-    assert!(
-        migrated.status.success(),
-        "migration: {}",
-        String::from_utf8_lossy(&migrated.stderr)
-    );
-    let migrated_object: Value =
+    // And while the generation this build writes is still being built, that
+    // explicit migration is refused rather than performed. The preflight has
+    // already run and found nothing wrong: what stops it is that migration is
+    // one way, so a workspace moved into a shape that is still changing could
+    // not be brought the rest of the way afterwards.
+    assert_migration_is_deferred(root);
+    for (path, before) in [
+        (&object_path, std::fs::read(&object_path).expect("object")),
+        (&current_path, current_before),
+        (&events_path, events_before),
+        (&format_path, format_before),
+    ] {
+        assert_eq!(
+            std::fs::read(path).expect("snapshot after the refusal"),
+            before,
+            "{} changed despite a refused migration",
+            path.display()
+        );
+    }
+    let still_legacy: Value =
         serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
-    assert_eq!(migrated_object["state"], "open");
-    assert!(migrated_object.get("status").is_none());
     assert_eq!(
-        std::fs::read(&current_path).expect("current object after migration"),
-        current_before,
-        "an already current Object is not cosmetically rewritten"
-    );
-    assert_eq!(
-        std::fs::read(&events_path).expect("events after migration"),
-        events_before,
-        "compatible retained Event history is not rewritten"
-    );
-    assert_ne!(
-        std::fs::read(&format_path).expect("format after migration"),
-        format_before,
-        "the workspace authority moves forward, because version 1 no longer denotes what this build writes"
-    );
-    assert_eq!(
-        migrated_object["format"], "engr-object",
-        "compatible legacy marker is preserved"
-    );
-    assert_eq!(
-        migrated_object["version"], 1,
-        "the Object's own legacy envelope marker is compatible and is not touched"
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
-            .expect("json")["version"],
-        engr::WORKSPACE_VERSION,
-        "and the workspace authority now names the version this build writes"
+        still_legacy["status"], "open",
+        "the workspace is exactly as legacy as it was"
     );
 }
 
@@ -634,40 +652,38 @@ fn migration_states_the_admission_version_two_only_implied() {
         serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
     assert!(untouched["sections"][0].get("admission").is_none());
 
-    let migrated = run_engr(root, &["migrate"]);
-    assert!(
-        migrated.status.success(),
-        "migration: {}",
-        String::from_utf8_lossy(&migrated.stderr)
-    );
-    let after: Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
-    assert_eq!(after["sections"][0]["admission"], "human");
+    // Committing that conversion is deferred with the rest of the coordinated
+    // transition, so what it *produces* is asserted on the conversion itself.
+    // It is the same function the migration and every reader use, given the
+    // same generation the authority declares.
+    assert_migration_is_deferred(root);
+    let mut converted = untouched.clone();
+    let moved = store::to_current_object("fixture", store::Generation::at(2), &mut converted)
+        .expect("a version 2 object converts");
+    assert!(moved, "the representation really did move");
+    let section = &converted["sections"][0];
+    assert_eq!(section["admission"], "human");
     assert_eq!(
-        after["sections"][0]["admitted_at"], confirmed_at,
+        section["admitted_at"], confirmed_at,
         "the same instant, under the name that no longer claims a human read it"
     );
     assert!(
-        after["sections"][0].get("confirmed_at").is_none(),
+        section.get("confirmed_at").is_none(),
         "two spellings of one fact is how they start disagreeing"
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(
-            &std::fs::read(store::engr_dir(root).join("format.json")).expect("format")
-        )
-        .expect("json")["version"],
-        engr::WORKSPACE_VERSION
     );
 
     // The retained events were written before any of this and are not rewritten,
-    // so replaying them has to reconstruct exactly the migrated Object. If the
+    // so replaying them has to reconstruct exactly the converted Object. If the
     // conversion had invented a different instant or a different admission, this
     // is where the two would stop agreeing.
-    let verified = run_engr(root, &["verify", &id]);
-    assert!(
-        verified.status.success(),
-        "history and the migrated projection must still agree: {}",
-        String::from_utf8_lossy(&verified.stderr)
+    let replayed = ops::effective(root, &id).expect("replay the untouched history");
+    assert_eq!(
+        replayed.sections[0].admitted_at,
+        confirmed_at.as_str().expect("timestamp")
+    );
+    assert_eq!(
+        replayed.sections[0].admission,
+        engr::semantics::Admission::Human
     );
 }
 
@@ -777,17 +793,13 @@ fn a_current_workspace_holding_a_superseded_resource_says_so() {
     );
     confirm(root, &section);
 
-    // The authority is left saying the current version, as it would be after a
-    // file is restored from before a migration.
-    mark_workspace_v2(root, &id);
-    std::fs::write(
-        store::engr_dir(root).join("format.json"),
-        format!(
-            r#"{{"format":"engr-workspace","version":{}}}"#,
-            engr::WORKSPACE_VERSION
-        ),
-    )
-    .expect("format");
+    // The authority still says the current version while the file uses a
+    // spelling that version replaced, as it would after a restore from before a
+    // migration.
+    rewrite_object(root, &id, |object| {
+        let state = object.remove("state").expect("state");
+        object.insert("status".to_owned(), state);
+    });
     assert_eq!(
         store::validate_format(root).expect("detect"),
         store::WorkspaceFormat::SupersededResources
@@ -812,16 +824,80 @@ fn a_current_workspace_holding_a_superseded_resource_says_so() {
         !said.contains("legacy v0"),
         "this workspace states its version perfectly clearly: {said}"
     );
+}
 
-    let migrated = run_engr(root, &["migrate"]);
-    assert!(
-        migrated.status.success(),
-        "migration: {}",
-        String::from_utf8_lossy(&migrated.stderr)
+/// A file that claims one generation while carrying another generation's fields
+/// is not old data — it is a contradiction, and reading it under whichever
+/// contract its own contents suggest is exactly how a hand edit mints authority.
+#[test]
+fn a_resource_that_disagrees_with_its_declared_generation_is_refused() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "generation"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+    let current = std::fs::read(store::object_path(root, &id)).expect("object");
+
+    // Claiming the current version while spelling the timestamp the way the
+    // previous one did.
+    rewrite_object(root, &id, downgrade_sections);
+    for command in [vec!["show", &id], vec!["verify", &id]] {
+        let output = run_engr(root, &command);
+        assert_eq!(
+            output.status.code(),
+            Some(engr::EXIT_SCHEMA),
+            "{command:?} read a file that contradicts its own generation: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // And the other direction: claiming an older version while carrying an
+    // authority that version had no way to produce. This is the one that
+    // matters — `agent` did not exist before the mixed-authority generation, so
+    // a file offering it as evidence is offering something nobody could have
+    // written.
+    std::fs::write(store::object_path(root, &id), &current).expect("restore");
+    mark_workspace_v2(root, &id);
+    rewrite_object(root, &id, |object| {
+        object
+            .get_mut("sections")
+            .and_then(|value| value.as_array_mut())
+            .expect("sections")[0]
+            .as_object_mut()
+            .expect("section")
+            .insert("admission".to_owned(), Value::String("agent".to_owned()));
+    });
+    let shown = run_engr(root, &["show", &id]);
+    assert_eq!(
+        shown.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "a version 2 file cannot claim agent admission: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let converted = store::to_current_object(
+        "fixture",
+        store::Generation::at(2),
+        &mut serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json"),
     );
     assert_eq!(
-        store::validate_format(root).expect("detect"),
-        store::WorkspaceFormat::Current
+        converted.expect_err("conversion must fail closed").code,
+        engr::EXIT_SCHEMA,
+        "migration must not launder it into agent authority either"
     );
 }
 
@@ -4415,24 +4491,43 @@ fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics()
     let prepared = run_engr(root, &["prepare", "--new", "--text", "not under version 1"]);
     assert_eq!(prepared.status.code(), Some(engr::EXIT_SCHEMA));
 
-    // And the explicit migration is what makes the newer semantics apply.
-    let migrated = run_engr(root, &["migrate"]);
-    assert!(
-        migrated.status.success(),
-        "migration: {}",
-        String::from_utf8_lossy(&migrated.stderr)
-    );
+    // And the explicit migration is what would make the newer semantics apply —
+    // deferred here, because the generation it would move into is still being
+    // built. What matters for this test is that the refusal is the *version*
+    // boundary holding, and it holds either way.
+    assert_migration_is_deferred(root);
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
-        engr::WORKSPACE_VERSION
+        1,
+        "a refused migration leaves the authority exactly where it was"
     );
-    let shown = run_engr(root, &["rules", "show", "recording-policy"]);
+    let still_refused = run_engr(root, &["rules", "show", "recording-policy"]);
+    assert_eq!(
+        still_refused.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "and the rule is still not read under semantics this workspace never agreed to"
+    );
+
+    // The same bytes read under the current effective policy, which is the half
+    // of this that migration would have unlocked. Read from a workspace that is
+    // at the current version rather than from one that was moved there, so the
+    // policy assertion does not depend on a migration this build defers.
+    let current = TempDir::new().expect("temp dir");
+    let current = current.path();
+    store::init(current).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(current)).expect("rules dir");
+    std::fs::copy(
+        engr::rules::dir(root).join("policy.md"),
+        engr::rules::dir(current).join("policy.md"),
+    )
+    .expect("same rule bytes");
+    let shown = run_engr(current, &["rules", "show", "recording-policy"]);
     assert!(shown.status.success());
     let stdout = String::from_utf8_lossy(&shown.stdout).to_string();
     assert!(
         stdout.contains("5 attempts; on_exhaustion = reject"),
-        "after migrating, the same bytes carry the version 2 effective policy: {stdout}"
+        "the same bytes carry the current effective policy: {stdout}"
     );
     // This rule governs `backlog` only, where exhaustion neither refuses nor
     // summons anyone. The line therefore states the policy and not an outcome —
@@ -4464,10 +4559,13 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     confirm(root, &created);
     let id = created["object"].as_str().expect("object id").to_owned();
 
-    // Commit while the workspace still says version 1, which is what every
-    // commit made before this change looks like.
+    // Commit a genuine version 1 snapshot: the authority *and* the resources it
+    // governs, because a file claiming version 1 while carrying this version's
+    // fields is a contradiction rather than history.
     let format_path = store::engr_dir(root).join("format.json");
+    let current = std::fs::read(store::object_path(root, &id)).expect("object");
     std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    rewrite_object(root, &id, downgrade_sections);
     git(root, &["add", "-A", "."]);
     commit_as_test(root, "before the migration");
     let commit = String::from_utf8(
@@ -4483,20 +4581,32 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     .trim()
     .to_owned();
 
-    run_engr(root, &["migrate"]);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
-            .expect("json")["version"],
-        engr::WORKSPACE_VERSION,
-        "the workspace really did move"
-    );
+    // Bring the worktree back to the current generation. Written directly
+    // rather than migrated, because the coordinated migration is deferred and
+    // what this test is about is reading *history* across a version boundary.
+    std::fs::write(store::object_path(root, &id), &current).expect("restore");
+    std::fs::write(
+        &format_path,
+        format!(
+            r#"{{"format":"engr-workspace","version":{}}}"#,
+            engr::WORKSPACE_VERSION
+        ),
+    )
+    .expect("format");
 
     let historical = engr::git::object_at(root, &commit, &id)
         .expect("a snapshot at a recognized older version is readable");
+    let historical = historical.expect("object present in that snapshot");
     assert_eq!(
-        historical.expect("object present in that snapshot").id,
-        id,
+        historical.id, id,
         "and it decodes to the object that was pinned"
+    );
+    assert!(
+        historical
+            .sections
+            .iter()
+            .all(|section| section.admission == engr::semantics::Admission::Human),
+        "read under its own generation, where the human gate was the only door"
     );
 
     // A version nobody here recognizes is still refused, so this is a widening
@@ -5131,22 +5241,28 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
     let format_path = engr::store::engr_dir(root).join("format.json");
     std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
 
-    let migrated = run_engr(root, &["migrate"]);
-    assert!(
-        migrated.status.success(),
-        "migration must not block on a pending candidate: {}",
-        String::from_utf8_lossy(&migrated.stderr)
-    );
-
-    // Still there. Migration did not rule on it either way.
+    // Refused while the generation is still being built, and the candidate is
+    // no more disposed of by the refusal than it would be by the migration.
+    // Moving representation is not a licence to decide the fate of material a
+    // human was in the middle of, and neither is declining to.
+    assert_migration_is_deferred(root);
     assert_eq!(
         engr::gate::pending_codes(root).expect("pending"),
         vec![challenge.clone()],
         "migration does not dispose of material a human was in the middle of"
     );
 
-    // And it is still confirmable, because this candidate's context did not
-    // change shape — the fail-closed path is for one that did.
+    // And it is still confirmable once the workspace is at a version this build
+    // will write to, because this candidate's context did not change shape —
+    // the fail-closed path is for one that did.
+    std::fs::write(
+        &format_path,
+        format!(
+            r#"{{"format":"engr-workspace","version":{}}}"#,
+            engr::WORKSPACE_VERSION
+        ),
+    )
+    .expect("format");
     let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {challenge}")]);
     assert!(
         confirmed.status.success(),

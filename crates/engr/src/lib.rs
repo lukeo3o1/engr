@@ -37,6 +37,25 @@ pub mod work;
 /// that does not know a version refuses the workspace rather than reading it
 /// under its own rules.
 pub const WORKSPACE_VERSION: u32 = 3;
+/// Whether the generation [`WORKSPACE_VERSION`] names is finished.
+///
+/// Version 3 is one coordinated transition, and it is being built in slices. A
+/// build partway through implements a shape that is still moving: some of what
+/// version 3 will require is not written yet, and none of it can be added
+/// afterwards to a workspace that has already been migrated, because migration
+/// is one-way and confirmed history is never rewritten.
+///
+/// So while this is false, this build **will not move an existing workspace
+/// into version 3**. It can read one, and it refuses to write to one, which
+/// leaves every record that existed before this work exactly as it was. A
+/// workspace this build creates is version 3 from the start and is a
+/// development artifact of an unreleased build — nothing that already exists
+/// can be dragged into the unfinished shape and stranded there.
+///
+/// The last slice of the transition sets this true. It is not a feature flag
+/// and nothing reads it to choose behaviour: it says whether the version this
+/// build writes is the version it claims to be.
+pub const WORKSPACE_VERSION_IS_COMPLETE: bool = false;
 /// Older workspace versions this build recognizes and can migrate forward.
 ///
 /// Recognized is not the same as current: a workspace at one of these is read
@@ -54,6 +73,14 @@ pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
 /// that survives it instead of listing everything it consumed, which is a
 /// different statement about what the record contains afterwards — so it is a
 /// different generation rather than an addition to the old one.
+///
+/// It is **not finished**: the tagged admission provenance that completes it
+/// lands with the rest of the mixed-authority Event work, and until it does a
+/// version 2 record here carries the version 1 confirmation envelope. That
+/// would be a durable record claiming a generation whose contract it does not
+/// meet — which is why [`WORKSPACE_VERSION_IS_COMPLETE`] exists and is false.
+/// A build in this state cannot write to any workspace that predates it, so no
+/// existing record acquires one.
 pub const EVENT_ENVELOPE_VERSION: u32 = 2;
 /// Version carried by confirmed Event envelopes that remain readable unchanged.
 ///
