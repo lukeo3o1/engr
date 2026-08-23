@@ -4754,3 +4754,49 @@ fn an_explicit_historical_revision_is_still_a_valid_implemented_by_snapshot() {
         String::from_utf8_lossy(&refused.stderr)
     );
 }
+
+/// Migration moves representation; it does not decide the fate of a pending
+/// confirmation.
+///
+/// A candidate prepared under the older contract cannot be admitted afterwards,
+/// and that failure belongs at the moment somebody tries to act on it — not to
+/// migration, which would either block on material a human is in the middle of
+/// or quietly discard it. Both would have migration ruling on Human-Gate state,
+/// which is exactly what it must not do.
+#[test]
+fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let pending = prepare(root, &["prepare", "--new", "--text", "awaiting a human"]);
+    let challenge = pending["challenge"].as_str().expect("challenge").to_owned();
+    assert_eq!(engr::gate::pending_codes(root).expect("pending").len(), 1);
+
+    // Put the workspace back a generation, leaving the candidate where it is.
+    let format_path = engr::store::engr_dir(root).join("format.json");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration must not block on a pending candidate: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+
+    // Still there. Migration did not rule on it either way.
+    assert_eq!(
+        engr::gate::pending_codes(root).expect("pending"),
+        vec![challenge.clone()],
+        "migration does not dispose of material a human was in the middle of"
+    );
+
+    // And it is still confirmable, because this candidate's context did not
+    // change shape — the fail-closed path is for one that did.
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {challenge}")]);
+    assert!(
+        confirmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+}

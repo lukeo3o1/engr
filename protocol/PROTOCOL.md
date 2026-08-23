@@ -535,8 +535,8 @@ cannot be confirmed.
 A candidate stores two fingerprints. `payload_sha256` identifies the mutation:
 it travels into the confirmed event, and an already-applied retry is recognised
 by it, so **its input may never widen**. `integrity_sha256` covers that value
-together with the challenge and the whole prepared context — the binding, the
-previous wording a revision is diffed against, and any backlog declarations.
+together with the challenge and the whole prepared context — the binding and the
+previous wording a revision is diffed against.
 Every load of a candidate MUST check both, not only admission: re-rendering a
 candidate hours later is as much a use of its prepared context as confirming it
 is.
@@ -546,6 +546,20 @@ deciding what the human is shown and what confirmation does. This is **not** a
 boundary against someone who controls the machine — the file is on that machine
 and so is the binary. It is the narrower guarantee that a candidate rewritten on
 disk cannot present or bind a different confirmation context and still pass.
+
+That check is also what happens to a candidate prepared under an older contract.
+When the prepared context changes shape — as it did when Backlog declarations
+left it — an outstanding candidate names an integrity value the current build
+cannot reproduce, and it **fails closed at use**: refused wherever it is loaded,
+told to be prepared again, never reinterpreted under the new shape.
+
+Migration MUST NOT block on such candidates, and MUST NOT rewrite or discard
+them. Migration moves representation; it does not decide the fate of material a
+human was in the middle of, and a migration that silently reinterpreted stale
+Human-Gate material would be authorizing something nobody confirmed. Nor is a
+backward-compatible decoder kept for a withdrawn contract: the compatibility
+surface would then outlive the design that needed it, and the failure would be
+surfaced later and more quietly than at the moment somebody tries to act on it.
 
 The challenge is covered because it is the link between the two halves of the
 gate: what a human is shown, and what their answer admits. A candidate MUST
@@ -994,12 +1008,19 @@ while the allocation counter has advanced permanently, so an absence check
 passes and the add lands on an identity nobody reviewed — under a number the
 first allocation's subjects may already name.
 
-Creating an item binds nothing, because engr allocates its identity: whatever id
-a caller prepared against, the item created is a different one, and checking the
-first would authorize the second. A creation therefore MUST refuse a
-precondition rather than accept one it cannot honour. Whether a caller should be
-able to propose the id — which would give creation a predecessor to bind — is
-not decided here.
+Creating an item binds nothing, and that is settled rather than pending. **engr
+mints the UUIDv7 while performing the create, and a caller MUST NOT supply or
+choose it**, so there is no proposed id whose absence a creation could bind. A
+creation MUST refuse a precondition rather than accept one it cannot honour:
+whatever id a caller prepared against, the item created is a different one, and
+checking the first would authorize the second.
+
+The alternative was letting a caller propose the id so creation would have a
+predecessor like every other mutation. It was declined because pre-authorizing a
+UUID needs reservation or pending state, or a token proving the caller was
+allowed that id — a whole lifecycle bolted on to protect an identity nobody else
+can be racing for. Rule Review still governs the create intent; identity is
+simply engr's to issue.
 
 The scope is the decision. Binding less than the whole Section is what the
 removed `canonical(text, subjects[])` fingerprint did, and it was blind to every
@@ -1031,11 +1052,11 @@ it. An implementation that enforces it only at its command line has enforced its
 command line: any other caller reaches the same semantic mutation, and the check
 has to sit where they meet.
 
-Creating an item is the one exception, and only while the implementation
-allocates the id itself. It binds nothing it could carry, so requiring a
-predecessor would make creating an unresolved point impossible in exactly the
-workspaces that have rules about unresolved points. An implementation MUST NOT
-resolve that by accepting a predecessor it will not honour.
+Creating an item is the one exception, because engr issues the identity and
+there is nothing for a predecessor to name. Requiring one would make creating an
+unresolved point impossible in exactly the workspaces that have rules about
+unresolved points, and an implementation MUST NOT resolve that by accepting a
+predecessor it will not honour.
 
 Staleness is its own outcome, not a failed mutation and not corrupt data: the
 caller did nothing wrong and the world moved underneath it. The refusal MUST say

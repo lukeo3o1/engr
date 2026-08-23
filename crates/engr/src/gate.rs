@@ -33,8 +33,14 @@ pub struct Candidate {
 /// Backlog is deliberately not here any more. Admission and Backlog bookkeeping
 /// are two independent operations, so confirming an Object reaches into staging
 /// for nothing — which also means a candidate outstanding across that change
-/// names an integrity value this build cannot reproduce, and is refused rather
-/// than read as though its prepared context were the current one.
+/// names an integrity value this build cannot reproduce.
+///
+/// It **fails closed at use**, and that is the chosen policy rather than a
+/// consequence nobody looked at. Migration does not block on such a candidate
+/// and does not rewrite or discard it: moving representation is not a licence to
+/// decide the fate of material a human was in the middle of. Nor is a decoder
+/// kept for the withdrawn shape, which would outlive the design that needed it
+/// and move the failure somewhere quieter than the moment somebody acts on it.
 ///
 /// None of it belongs in `payload_sha256` — that value travels into the
 /// confirmed Event and identifies the mutation. All of it belongs in

@@ -1303,9 +1303,14 @@ pub fn create(
         // predecessor under a governing rule. It has to be: requiring what it
         // cannot express would make creating an unresolved point impossible in
         // exactly the workspaces that have rules about unresolved points, which
-        // is the opposite of what a rule is for. §8 does say creation binds a
-        // *proposed* id's absence, so the exemption ends when #8 settles who
-        // mints that id.
+        // is the opposite of what a rule is for.
+        //
+        // Settled rather than provisional: engr mints the id during the create
+        // and a caller may not choose one. The alternative — letting a caller
+        // propose it, so creation would bind that id's absence — needs
+        // reservation state or a token proving the caller was entitled to that
+        // id, which is a lifecycle bolted on to protect an identity nobody else
+        // can be racing for.
         ensure!(
             prepared.precondition.is_none(),
             EXIT_INVARIANT,
