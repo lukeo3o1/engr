@@ -647,31 +647,109 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 /// under the generation this build does emit would be claiming that version
 /// means something it does not, and replaying it would reconstruct a different
 /// Object from the one that was admitted.
+/// Members this generation's writers have legitimately omitted, at one time or
+/// another, without the record meaning anything different.
+///
+/// `based_on` is the one with history behind it: an absent basis was spelled
+/// `null` before it became an absent field, and every event emitted then still
+/// says so. The rest are optional semantic members this build omits when they
+/// carry nothing, so a record that spells one out explicitly is saying the same
+/// thing the longer way.
+///
+/// A list of what may be *absent from the model's own output*, never a list of
+/// what is forbidden. Forgetting to extend this one refuses a spelling; a list
+/// of forbidden keys, forgotten, accepts a field from a generation this build
+/// does not implement — and only one of those two mistakes is safe.
+const OMISSIBLE_EVENT_MEMBERS: &[&str] = &["becomes", "role", "content", "based_on", "relations"];
+
 /// Nothing in the stored bytes went missing on the way into the typed model.
 ///
 /// `Event` cannot use `deny_unknown_fields`: its payload is flattened, and serde
-/// forbids the two together. So the guarantee is obtained the other way round —
-/// serialize what was decoded and require it to equal what was read. A field the
-/// model has no place for cannot survive that comparison.
+/// forbids the two together. So the check is done against what the decode
+/// produced — every member the record carries must be one the model has a place
+/// for, and must survive with its value intact.
 ///
-/// It has to be checked *before* anything reads the decoded value, because the
-/// dropped field is exactly the one that would have said the record is not of
+/// It has to happen *before* anything reads the decoded value, because the
+/// dropped member is exactly the one that would have said the record is not of
 /// this generation. A record carrying admission provenance is not a record of
-/// the generation that had only one door; dropping that field leaves the stored
-/// `payload_sha256` verifying, since the field was never inside the payload, and
-/// replay then reports `human` for bytes that said `agent`. Reconciliation can
-/// make that reading authoritative after a crash.
+/// the generation that had only one door; dropping that member leaves the stored
+/// `payload_sha256` verifying, since it was never inside the payload, and replay
+/// then reports `human` for bytes that said `agent`. Reconciliation can make
+/// that reading authoritative after a crash.
 ///
-/// Generic rather than a list of forbidden keys, and deliberately: a list has to
-/// be extended every time a later generation adds a field, and the one that gets
-/// forgotten is the one that matters.
+/// What it must **not** do is treat the current serializer's single spelling as
+/// the whole historical read contract. History is read under its own contract
+/// and is never rewritten, so a member this build omits today but wrote
+/// yesterday is a valid record, not an unknown field.
 fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Result<()> {
     let decoded = serde_json::to_value(event)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+    let (stored, decoded) = match (stored.as_object(), decoded.as_object()) {
+        (Some(stored), Some(decoded)) => (stored, decoded),
+        _ => return Err(Error::new(EXIT_SCHEMA, "event must be a JSON object")),
+    };
+    for (member, value) in stored {
+        match decoded.get(member) {
+            Some(kept) => ensure!(
+                kept == value,
+                EXIT_SCHEMA,
+                "{member} did not survive being read, so this record does not mean what it says"
+            ),
+            None => ensure!(
+                OMISSIBLE_EVENT_MEMBERS.contains(&member.as_str()),
+                EXIT_SCHEMA,
+                "{member} is not a member this generation defines, so this record is not one of its records"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Everything a record must satisfy to belong in this store, asked on the way in
+/// and on the way out.
+///
+/// One function rather than two lists kept in step by hand. A write path that
+/// checks less than the read path is a write path that can append history
+/// nothing loads — which is the same self-corrupting asymmetry whichever member
+/// it is, so the whole contract moves together rather than the parts of it that
+/// happened to be noticed.
+///
+/// `stored` is the raw bytes when there are any. Appending has no raw form yet,
+/// and needs none: a value that came from this build's own model cannot be
+/// carrying a member the model has no place for.
+fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value>) -> Result<()> {
     ensure!(
-        &decoded == stored,
+        event.format == EVENT_FORMAT,
         EXIT_SCHEMA,
-        "this record is not exactly what this generation defines; it carries something the model has no place for, or omits something it writes"
+        "not an engr event"
+    );
+    if let Some(stored) = stored {
+        check_nothing_was_dropped(stored, event)?;
+    }
+    check_event_generation(event)?;
+    ensure!(
+        event.payload.object == id,
+        EXIT_SCHEMA,
+        "event belongs to object {:?}, not {:?}",
+        event.payload.object,
+        id
+    );
+    event.payload.validate().map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("invalid event payload: {}", error.message),
+        )
+    })?;
+    let payload_sha256 = event.payload.sha256().map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("invalid event payload: {}", error.message),
+        )
+    })?;
+    ensure!(
+        event.confirmation.payload_sha256 == payload_sha256,
+        EXIT_SCHEMA,
+        "confirmation does not match the event payload"
     );
     Ok(())
 }
@@ -710,8 +788,21 @@ pub fn append_event(root: &Path, event: &Event) -> Result<()> {
     // Before anything is written, and before the Object is saved — `confirm`
     // appends here first, so refusing at this point leaves the workspace exactly
     // as it was rather than advanced past history it could not record.
-    check_event_generation(event)?;
+    check_event_record(event, &event.payload.object, None)?;
     let path = events_path(root, &event.payload.object);
+    // Continuity against what is already there, which is the one part of the
+    // read contract that is about the file rather than the record. Reading the
+    // tail is the cost of not being able to append a revision the next load
+    // would refuse.
+    if let Some(last) = load_events(root, &event.payload.object)?.last() {
+        ensure!(
+            last.rev.checked_add(1) == Some(event.rev),
+            EXIT_SCHEMA,
+            "event rev {} does not immediately follow rev {}",
+            event.rev,
+            last.rev
+        );
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
@@ -750,67 +841,16 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
                 format!("{}:{}: {error}", path.display(), index + 1),
             )
         })?;
-        ensure!(
-            event.format == EVENT_FORMAT,
-            EXIT_SCHEMA,
-            "{}:{}: not an engr event",
-            path.display(),
-            index + 1
-        );
-        check_nothing_was_dropped(&stored, &event).map_err(|error| {
+        // Reconciliation can turn an event back into authority after a crash,
+        // so corrupt recovery data must fail before it reaches the reducer — and
+        // it fails against the same rules the write boundary applied, rather
+        // than a second copy of them kept in step by hand.
+        check_event_record(&event, id, Some(&stored)).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}:{}: {}", path.display(), index + 1, error.message),
             )
         })?;
-        // Reconciliation can turn an event back into authority after a crash, so
-        // corrupt recovery data must fail before it reaches the reducer — and it
-        // fails against the same rule the write boundary applied, rather than a
-        // second copy of it kept in step by hand.
-        check_event_generation(&event).map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}:{}: {}", path.display(), index + 1, error.message),
-            )
-        })?;
-        ensure!(
-            event.payload.object == id,
-            EXIT_SCHEMA,
-            "{}:{}: event belongs to object {:?}, not {:?}",
-            path.display(),
-            index + 1,
-            event.payload.object,
-            id
-        );
-        event.payload.validate().map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "{}:{}: invalid event payload: {}",
-                    path.display(),
-                    index + 1,
-                    error.message
-                ),
-            )
-        })?;
-        let payload_sha256 = event.payload.sha256().map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "{}:{}: invalid event payload: {}",
-                    path.display(),
-                    index + 1,
-                    error.message
-                ),
-            )
-        })?;
-        ensure!(
-            event.confirmation.payload_sha256 == payload_sha256,
-            EXIT_SCHEMA,
-            "{}:{}: confirmation does not match the event payload",
-            path.display(),
-            index + 1
-        );
         if let Some(previous) = events.last() {
             ensure!(
                 previous.rev.checked_add(1) == Some(event.rev),

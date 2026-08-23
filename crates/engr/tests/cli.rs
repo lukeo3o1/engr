@@ -1336,9 +1336,12 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     (workspace, root, event)
 }
 
+/// Written raw rather than appended, because the write boundary now refuses
+/// these too — and what is under test here is that a record which arrived by
+/// some other means is refused on the way back in.
 fn assert_event_is_rejected(root: &Path, event: Event) {
     let id = event.payload.object.clone();
-    store::append_event(root, &event).expect("write event");
+    append_raw(root, &id, &event);
     let output = run_engr(root, &["verify", &id]);
     assert_eq!(
         output.status.code(),
@@ -1346,6 +1349,17 @@ fn assert_event_is_rejected(root: &Path, event: Event) {
         "malformed events must be rejected as stored-data errors: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Append one record with no write-boundary checks, the way a hand edit, a
+/// restore or a merge resolution would put one there.
+fn append_raw(root: &Path, id: &str, event: &Event) {
+    let line = serde_json::to_string(event).expect("serialize event");
+    let path = store::events_path(root, id);
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }
 
 fn write_event_to(root: &Path, id: &str, event: &Event) {
@@ -1647,8 +1661,8 @@ fn event_confirmation_hashes_are_verified() {
 #[test]
 fn duplicate_event_revisions_are_rejected() {
     let (_workspace, root, event) = event_workspace();
-    store::append_event(&root, &event).expect("write first event");
-    store::append_event(&root, &event).expect("write duplicate event");
+    append_raw(&root, &event.payload.object.clone(), &event);
+    append_raw(&root, &event.payload.object.clone(), &event);
     let output = run_engr(&root, &["verify", &event.payload.object]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }
@@ -1656,10 +1670,10 @@ fn duplicate_event_revisions_are_rejected() {
 #[test]
 fn event_revisions_must_be_contiguous_within_history() {
     let (_workspace, root, event) = event_workspace();
-    store::append_event(&root, &event).expect("write first event");
+    append_raw(&root, &event.payload.object.clone(), &event);
     let mut skipped = event.clone();
     skipped.rev += 2;
-    store::append_event(&root, &skipped).expect("write skipped event");
+    append_raw(&root, &event.payload.object.clone(), &skipped);
     let output = run_engr(&root, &["verify", &event.payload.object]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }

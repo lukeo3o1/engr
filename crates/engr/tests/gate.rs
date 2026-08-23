@@ -1838,3 +1838,101 @@ fn appending_an_event_requires_a_workspace_this_build_may_write() {
         "and the store is byte-for-byte what it was"
     );
 }
+
+/// A historical record spells an absent basis `"based_on": null`, because that
+/// is what engr emitted before no-basis became an absent field. The generation
+/// guard must tell an unknown field apart from a spelling this generation once
+/// wrote — history is read under its own contract, and the current serializer's
+/// one spelling is not that whole contract.
+#[test]
+fn a_historical_event_spelling_an_absent_basis_as_null_still_reads() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "legacy spelling");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::events_path(&root, &id);
+
+    let mut lines = Vec::new();
+    for line in std::fs::read_to_string(&path).expect("events").lines() {
+        let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
+        let object = event.as_object_mut().expect("event");
+        assert!(
+            !object.contains_key("based_on"),
+            "this build omits it, which is why the older spelling has to be tolerated"
+        );
+        object.insert("based_on".to_owned(), serde_json::Value::Null);
+        lines.push(serde_json::to_string(&event).expect("event"));
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+    let events = store::load_events(&root, &id).expect("history is read under its own contract");
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.payload.content.based_on.is_none()));
+}
+
+/// The durable Event write path must not accept a record its own next read
+/// refuses. The generation is only part of that contract: the rest of what
+/// `load_events` demands has to be demanded here too, or a direct library caller
+/// writes history nothing can load.
+#[test]
+fn appending_an_event_enforces_the_contract_its_own_read_applies() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "append contract");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let sound = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+
+    let mut wrong_format = sound.clone();
+    wrong_format.format = "not-an-engr-event".to_owned();
+    let mut wrong_hash = sound.clone();
+    wrong_hash.confirmation.payload_sha256 = "0".repeat(64);
+    let mut wrong_rev = sound.clone();
+    wrong_rev.rev = 9;
+    let mut wrong_object = sound.clone();
+    wrong_object.payload.object = engr::model::new_id();
+
+    for (what, event) in [
+        ("format", wrong_format),
+        ("confirmation hash", wrong_hash),
+        ("revision continuity", wrong_rev),
+        ("object identity", wrong_object),
+    ] {
+        let error = store::append_event(&root, &event).unwrap_err_or_else_note(what);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert_eq!(
+            std::fs::read(&path).expect("events"),
+            before,
+            "{what}: nothing was written"
+        );
+    }
+
+    store::append_event(&root, &sound).expect("a sound record still appends");
+    store::load_events(&root, &id).expect("and reads back");
+}
+
+trait NoteErr {
+    fn unwrap_err_or_else_note(self, what: &str) -> engr::Error;
+}
+
+impl NoteErr for engr::Result<()> {
+    fn unwrap_err_or_else_note(self, what: &str) -> engr::Error {
+        match self {
+            Ok(()) => panic!("{what}: append accepted a record load_events refuses"),
+            Err(error) => error,
+        }
+    }
+}

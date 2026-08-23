@@ -1025,6 +1025,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                 EXIT_INVARIANT,
                 "object.created must be the first action"
             );
+            check_neutral_creation(object)?;
             object.title.clone_from(&content.text);
         }
         // Open, like everything else that changes the object. A title is part of
@@ -1224,21 +1225,32 @@ pub fn check_admitting_authority(
             "§{section} was admitted through the human gate, so it is removed there too"
         );
     }
-    // An Agent create begins from the protocol's neutral initialization and
-    // nowhere else. Being at revision zero with no Sections is not the same
-    // thing: a lifecycle can already have been set, and creation preserves it,
-    // so an Agent create over a pre-set `type`/`state` would inherit
-    // Human-authoritative values without ever admitting them. The one action
-    // that is allowed to bring an Object into existence must therefore say what
-    // it is allowed to bring it into existence *as*.
-    if matches!(payload.action, Action::ObjectCreated) {
-        ensure!(
-            object.object_type.is_none() && object.state == State::Open,
-            EXIT_INVARIANT,
-            "an agent create begins from the neutral initialization, and this object is already {}",
-            crate::view::classification(object)
-        );
-    }
+    Ok(())
+}
+
+/// Creation begins from the protocol's neutral initialization, whichever path
+/// admits it.
+///
+/// This is an invariant of the operation rather than a rule about authority, and
+/// the distinction matters. `object.created` carries no lifecycle members at
+/// all: its confirmed projection is a title, no type, `open`, no Sections. There
+/// is nothing in the action for a human to have authorized a `design/accepted`
+/// with, so preserving one would admit a lifecycle no confirmation represented —
+/// on either path.
+///
+/// Revision zero with no Sections is *not* the same condition. A lifecycle can
+/// already have been set, and creation preserves what it does not overwrite, so
+/// the reducer has to say what an Object may be brought into existence *as*.
+///
+/// The Agent path then adds its own, separate rule — that an Agent may not
+/// select lifecycle values at all — in [`check_admitting_authority`].
+fn check_neutral_creation(object: &Object) -> Result<()> {
+    ensure!(
+        object.object_type.is_none() && object.state == State::Open,
+        EXIT_INVARIANT,
+        "object.created carries no lifecycle, so it cannot arrive at one; this object is already {}",
+        crate::view::classification(object)
+    );
     Ok(())
 }
 
@@ -1542,31 +1554,55 @@ mod tests {
                 "object title is non-authoritative navigation metadata"
             );
         }
+    }
 
-        // But an agent create begins from the neutral initialization and
-        // nowhere else. Revision zero with no sections is not the same thing:
-        // creation preserves lifecycle, so an agent create over a pre-set
-        // type/state would inherit human-authoritative values it never admitted.
-        let mut settled = holding(Vec::new());
+    /// Creation is neutral on **both** paths, because the operation carries no
+    /// lifecycle for either to have authorized. Revision zero with no Sections
+    /// is a different condition: creation preserves what it does not overwrite,
+    /// so a pre-set lifecycle would survive an operation that never represented
+    /// one.
+    ///
+    /// The Agent restriction is a separate rule and lives separately: an Agent
+    /// may not select lifecycle values at all.
+    #[test]
+    fn creation_arrives_at_the_neutral_initialization_whoever_admits_it() {
+        let id = new_id();
+        let created = |object: &Object| {
+            let payload = Payload {
+                action: Action::ObjectCreated,
+                object: object.id.clone(),
+                becomes: None,
+                content: Content {
+                    text: "a title".to_owned(),
+                    ..Content::default()
+                },
+            };
+            Event {
+                format: EVENT_FORMAT.to_owned(),
+                version: crate::EVENT_ENVELOPE_VERSION_V0,
+                event_id: new_id(),
+                rev: 1,
+                time: "2026-08-23T00:00:00Z".to_owned(),
+                confirmation: Confirmation {
+                    challenge: "TEST00".to_owned(),
+                    payload_sha256: payload.sha256().expect("hash"),
+                },
+                payload,
+            }
+        };
+
+        let mut neutral = Object::new(id.clone(), String::new()).expect("object");
+        let event = created(&neutral);
+        project(&mut neutral, &event).expect("the neutral initialization is what creation is for");
+        assert_eq!(neutral.title, "a title");
+
+        let mut settled = Object::new(id, String::new()).expect("object");
         settled.object_type = Some(ObjectType::Design);
         settled.state = State::Accepted;
-        let creating = Payload {
-            action: Action::ObjectCreated,
-            object: settled.id.clone(),
-            becomes: None,
-            content: Content {
-                text: "a title".to_owned(),
-                ..Content::default()
-            },
-        };
-        assert!(
-            check_admitting_authority(&settled, &creating, Admission::Agent).is_err(),
-            "an agent create cannot inherit a lifecycle nobody admitted through it"
-        );
-        assert!(
-            check_admitting_authority(&settled, &creating, Admission::Human).is_ok(),
-            "and the human path is unchanged"
-        );
+        let event = created(&settled);
+        let error = project(&mut settled, &event)
+            .expect_err("object.created carries no lifecycle, so it cannot arrive at one");
+        assert_eq!(error.code, EXIT_INVARIANT);
     }
 
     /// A state transition is closed under the model's own invariants. Without
