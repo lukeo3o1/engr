@@ -647,6 +647,35 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 /// under the generation this build does emit would be claiming that version
 /// means something it does not, and replaying it would reconstruct a different
 /// Object from the one that was admitted.
+/// Nothing in the stored bytes went missing on the way into the typed model.
+///
+/// `Event` cannot use `deny_unknown_fields`: its payload is flattened, and serde
+/// forbids the two together. So the guarantee is obtained the other way round —
+/// serialize what was decoded and require it to equal what was read. A field the
+/// model has no place for cannot survive that comparison.
+///
+/// It has to be checked *before* anything reads the decoded value, because the
+/// dropped field is exactly the one that would have said the record is not of
+/// this generation. A record carrying admission provenance is not a record of
+/// the generation that had only one door; dropping that field leaves the stored
+/// `payload_sha256` verifying, since the field was never inside the payload, and
+/// replay then reports `human` for bytes that said `agent`. Reconciliation can
+/// make that reading authoritative after a crash.
+///
+/// Generic rather than a list of forbidden keys, and deliberately: a list has to
+/// be extended every time a later generation adds a field, and the one that gets
+/// forgotten is the one that matters.
+fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Result<()> {
+    let decoded = serde_json::to_value(event)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+    ensure!(
+        &decoded == stored,
+        EXIT_SCHEMA,
+        "this record is not exactly what this generation defines; it carries something the model has no place for, or omits something it writes"
+    );
+    Ok(())
+}
+
 fn check_event_generation(event: &Event) -> Result<()> {
     // The generation itself, before anything about its contents. Leaving this to
     // the read side alone was the same asymmetry one level up: a record naming a
@@ -673,6 +702,11 @@ fn check_event_generation(event: &Event) -> Result<()> {
 }
 
 pub fn append_event(root: &Path, event: &Event) -> Result<()> {
+    // The durable Event path is part of the workspace-generation boundary, and a
+    // direct library caller reaches it without passing the gate. Asked here as
+    // well as there, because "this build may write this workspace" is a property
+    // of the workspace rather than of the route taken to it.
+    require_current(root)?;
     // Before anything is written, and before the Object is saved — `confirm`
     // appends here first, so refusing at this point leaves the workspace exactly
     // as it was rather than advanced past history it could not record.
@@ -704,7 +738,13 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         if line.trim().is_empty() {
             continue;
         }
-        let event: Event = serde_json::from_str(line).map_err(|error| {
+        let stored: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {error}", path.display(), index + 1),
+            )
+        })?;
+        let event: Event = serde_json::from_value(stored.clone()).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}:{}: {error}", path.display(), index + 1),
@@ -717,6 +757,12 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
             path.display(),
             index + 1
         );
+        check_nothing_was_dropped(&stored, &event).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {}", path.display(), index + 1, error.message),
+            )
+        })?;
         // Reconciliation can turn an event back into authority after a crash, so
         // corrupt recovery data must fail before it reaches the reducer — and it
         // fails against the same rule the write boundary applied, rather than a

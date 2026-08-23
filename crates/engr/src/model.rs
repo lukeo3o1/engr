@@ -1224,6 +1224,21 @@ pub fn check_admitting_authority(
             "§{section} was admitted through the human gate, so it is removed there too"
         );
     }
+    // An Agent create begins from the protocol's neutral initialization and
+    // nowhere else. Being at revision zero with no Sections is not the same
+    // thing: a lifecycle can already have been set, and creation preserves it,
+    // so an Agent create over a pre-set `type`/`state` would inherit
+    // Human-authoritative values without ever admitting them. The one action
+    // that is allowed to bring an Object into existence must therefore say what
+    // it is allowed to bring it into existence *as*.
+    if matches!(payload.action, Action::ObjectCreated) {
+        ensure!(
+            object.object_type.is_none() && object.state == State::Open,
+            EXIT_INVARIANT,
+            "an agent create begins from the neutral initialization, and this object is already {}",
+            crate::view::classification(object)
+        );
+    }
     Ok(())
 }
 
@@ -1527,6 +1542,31 @@ mod tests {
                 "object title is non-authoritative navigation metadata"
             );
         }
+
+        // But an agent create begins from the neutral initialization and
+        // nowhere else. Revision zero with no sections is not the same thing:
+        // creation preserves lifecycle, so an agent create over a pre-set
+        // type/state would inherit human-authoritative values it never admitted.
+        let mut settled = holding(Vec::new());
+        settled.object_type = Some(ObjectType::Design);
+        settled.state = State::Accepted;
+        let creating = Payload {
+            action: Action::ObjectCreated,
+            object: settled.id.clone(),
+            becomes: None,
+            content: Content {
+                text: "a title".to_owned(),
+                ..Content::default()
+            },
+        };
+        assert!(
+            check_admitting_authority(&settled, &creating, Admission::Agent).is_err(),
+            "an agent create cannot inherit a lifecycle nobody admitted through it"
+        );
+        assert!(
+            check_admitting_authority(&settled, &creating, Admission::Human).is_ok(),
+            "and the human path is unchanged"
+        );
     }
 
     /// A state transition is closed under the model's own invariants. Without

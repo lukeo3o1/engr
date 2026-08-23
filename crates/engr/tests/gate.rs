@@ -1770,3 +1770,71 @@ fn a_historical_snapshot_carrying_p3_only_fields_fails_closed() {
         .expect_err("a snapshot is read under its own version, and refused when it disagrees");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
+
+/// The EventStore analogue of the Object read boundary. A record carrying
+/// admission provenance is not a record of the generation that had only one
+/// door, and the check has to happen before a typed decode can drop the field
+/// that says so.
+///
+/// Without this, the dropped field leaves the stored `payload_sha256` verifying
+/// — it was never inside the payload — and replay reaches `human` for bytes that
+/// explicitly claimed `agent`. Reconciliation can then make that authoritative.
+#[test]
+fn a_retained_event_carrying_admission_provenance_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "event read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::events_path(&root, &id);
+    let good = std::fs::read_to_string(&path).expect("events");
+
+    let mut lines = Vec::new();
+    for line in good.lines() {
+        let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
+        event.as_object_mut().expect("event").insert(
+            "admission".to_owned(),
+            serde_json::json!({ "kind": "agent" }),
+        );
+        lines.push(serde_json::to_string(&event).expect("event"));
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+    let error = store::load_events(&root, &id)
+        .expect_err("a record claiming an admission this generation never had");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// The durable Event write path is part of the workspace-generation boundary,
+/// and a direct library caller reaches it without going through the gate.
+#[test]
+fn appending_an_event_requires_a_workspace_this_build_may_write() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "append boundary");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let format = store::engr_dir(&root).join("format.json");
+    std::fs::write(&format, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("this build does not write a workspace at that version");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "and the store is byte-for-byte what it was"
+    );
+}
