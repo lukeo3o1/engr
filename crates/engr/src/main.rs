@@ -3,7 +3,7 @@ use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
 use engr::{collection, gate, git, ops, rules, store, view, work};
-use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
+use engr::{ensure, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -129,6 +129,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// List unresolved topics
     Ls {
@@ -146,6 +148,8 @@ enum Backlog {
         item: String,
         #[arg(long)]
         topic: String,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Add another unresolved point to a topic
     Add {
@@ -154,6 +158,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Reword an unresolved point
     Revise {
@@ -162,6 +168,8 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         text: TextArg,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Replace what an unresolved point concerns
     Subjects {
@@ -170,24 +178,134 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Consolidate unresolved points into one
+    /// Consolidate unresolved points into one of them
     Merge {
         item: String,
+        /// The point that survives, keeping its id and taking the merged wording
+        #[arg(long = "into", value_name = "SECTION")]
+        into: u64,
+        /// The points merged into it. They are removed, and their ids not reused
         #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
         sections: Vec<u64>,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Remove an unresolved point, or the whole topic
-    Rm {
+    /// Record durable knowledge this point produced. Does not resolve it
+    Produced {
         item: String,
-        /// Remove one point. The topic goes when its last one does
         #[arg(long)]
-        section: Option<u64>,
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        /// Take the outcome back off: the bookkeeping was wrong, not the record
+        #[arg(long)]
+        forget: bool,
+        #[command(flatten)]
+        review: ReviewArg,
     },
+    /// Consume a resolved point. The topic goes when its last one does
+    Consume {
+        item: String,
+        /// The point being judged resolved
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        review: ReviewArg,
+    },
+}
+
+/// What the agent read and reviewed, and how many times it has been round.
+///
+/// The attempt is attested, not counted: engr keeps no retry state, so nothing
+/// there can be checked against anything. It is honest because saying a lower
+/// number buys an agent nothing except a review it has already failed.
+///
+/// `--expect` is the other half, and it is the one engr *can* check. The review
+/// happens before the command is invoked, so a command that reads and writes
+/// under one lock still leaves the interval between what the agent reviewed and
+/// what gets applied wide open — a concurrent edit in that interval lands
+/// underneath a mutation nobody reviewed against it. The value is printed by
+/// `backlog show --json` beside the thing it describes.
+#[derive(Args, Clone)]
+struct ReviewArg {
+    /// Which attempt of this review sequence this is, counted from 1
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    attempt: u32,
+    /// The `expect` value from `backlog show --json` for what you read.
+    /// Repeat once per point for a merge
+    #[arg(long = "expect", value_name = "TOKEN")]
+    expect: Vec<String>,
+}
+
+impl ReviewArg {
+    /// Turn what the caller said into the predecessor this mutation binds.
+    ///
+    /// `binds` builds the precondition from current state; the caller's token is
+    /// compared against it, so a mismatch means the world moved between reading
+    /// and running rather than that the caller spelled something wrong. The
+    /// precondition then travels into the mutation and is checked again under
+    /// the writer lock — this comparison narrows the window, and that one closes
+    /// it.
+    /// Creating an item, which binds nothing engr can check.
+    ///
+    /// `--expect` is refused rather than ignored, and refused with an answer: a
+    /// caller that offers one has a predecessor in mind, and being told the id
+    /// is not theirs to choose is more use than silence.
+    fn for_creation(&self) -> Result<backlog::Prepared> {
+        ensure!(
+            self.expect.is_empty(),
+            EXIT_USAGE,
+            "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
+        );
+        Ok(backlog::Prepared::attempt(rules::Attempt::new(
+            self.attempt,
+        )?))
+    }
+
+    fn prepared(
+        &self,
+        governed: bool,
+        binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
+    ) -> Result<backlog::Prepared> {
+        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
+        if self.expect.is_empty() {
+            // Only where a review was actually required. With no applicable rule
+            // there is no review for a predecessor to anchor, and demanding one
+            // would be ceremony; with one, an unanchored mutation is a review of
+            // something nobody can show was what got applied.
+            ensure!(
+                !governed,
+                engr::EXIT_USAGE,
+                "a project rule governs backlog, so this needs --expect: run `engr backlog show <item> --json`, review what you read, and pass its expect value back"
+            );
+            return Ok(prepared);
+        }
+        let bound = binds()?;
+        let mut wanted = Vec::new();
+        for precondition in &bound {
+            wanted.push(precondition.token()?);
+        }
+        let mut given = self.expect.clone();
+        given.sort();
+        wanted.sort();
+        ensure!(
+            given == wanted,
+            engr::EXIT_STALE,
+            "what you read is not what is there now; read it again and review the current wording"
+        );
+        // One precondition per bound thing on the wire, one on the mutation: a
+        // merge is a single judgement about several points, so it binds them
+        // together rather than one at a time.
+        Ok(prepared.against(backlog::Precondition::combine(bound)?))
+    }
 }
 
 #[derive(Args)]
@@ -254,9 +372,11 @@ impl SubjectArgs {
             subjects.push(subject);
         }
         for path in &self.subject_file {
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-file", path, error))?;
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
             });
         }
@@ -267,9 +387,11 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-symbol", path, error))?;
             let subject = Subject::Symbol {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
                 symbol: symbol.clone(),
             };
@@ -533,12 +655,11 @@ impl Prepare {
         let revision = self.implemented_at.as_deref();
         let mut relations = Vec::new();
         for path in &self.implemented_by_file {
+            let commit = pin_exact(root, path, revision, "--implemented-by-file")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::File {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-file", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                 },
             });
@@ -550,12 +671,11 @@ impl Prepare {
                     "--implemented-by-symbol takes a path and a symbol name",
                 ));
             };
+            let commit = pin_exact(root, path, revision, "--implemented-by-symbol")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::Symbol {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-symbol", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                     symbol: symbol.clone(),
                 },
@@ -686,7 +806,6 @@ fn run(cli: Cli) -> Result<()> {
                 // later revision would say the wrong thing happened.
                 admitted.event.rev
             );
-            report_backlog(&root, &admitted.backlog);
             warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
@@ -730,31 +849,10 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Say what confirmation did to unresolved staging, in the same breath as the
-/// admission. A source that moved needs a decision, and the moment the human is
-/// still here is the moment to say so.
-fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
-    let width = view::backlog_width(root);
-    for outcome in outcomes {
-        let item = shorten(&outcome.item, width);
-        let line = match &outcome.result {
-            backlog::Reconciliation::Recorded { added: 0 } => {
-                "already recorded — nothing to add".to_owned()
-            }
-            backlog::Reconciliation::Recorded { added } => {
-                format!("recorded {added} produced outcome(s); still unresolved")
-            }
-            backlog::Reconciliation::Consumed { item_removed: true } => {
-                "resolved and consumed; the topic had nothing else unresolved".to_owned()
-            }
-            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
-            backlog::Reconciliation::SourceChanged => {
-                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
-            }
-            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
-        };
-        println!("backlog    {item} §{}  {line}", outcome.section);
-    }
+/// Whether a project rule governs backlog here, and so whether a review was
+/// required at all.
+fn governed(root: &Path) -> Result<bool> {
+    Ok(!rules::applicable(root, rules::Domain::Backlog)?.is_empty())
 }
 
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
@@ -763,8 +861,19 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             topic,
             text,
             subjects,
+            review,
         } => {
-            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            let item = backlog::create(
+                root,
+                &topic,
+                &text.read()?,
+                subjects.build(root)?,
+                // Creation binds nothing, so it is never treated as governed
+                // here: engr allocates the id, and demanding a predecessor it
+                // cannot express would make `backlog new` impossible in every
+                // workspace that has a backlog rule.
+                &review.for_creation()?,
+            )?;
             print!("{}", view::render_backlog_show(root, &item));
             Ok(())
         }
@@ -789,9 +898,16 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             }
             Ok(())
         }
-        Backlog::Rename { item, topic } => {
+        Backlog::Rename {
+            item,
+            topic,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let item = backlog::rename(root, &id, &topic)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::topic(root, &id)?])
+            })?;
+            let item = backlog::rename(root, &id, &topic, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
         }
@@ -799,9 +915,18 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            let section = backlog::add_section(
+                root,
+                &id,
+                &text.read()?,
+                subjects.build(root)?,
+                &review.prepared(governed(root)?, || {
+                    Ok(vec![backlog::Precondition::section_absent(root, &id)?])
+                })?,
+            )?;
             println!("added §{section}");
             Ok(())
         }
@@ -809,9 +934,13 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             text,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            backlog::revise_section(root, &id, section, &text.read()?)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
             Ok(())
         }
@@ -819,47 +948,92 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            backlog::set_subjects(root, &id, section, subjects)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
             Ok(())
         }
         Backlog::Merge {
             item,
+            into,
             sections,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::merge_sections(
+            backlog::merge_into(
                 root,
                 &id,
+                into,
                 &sections,
                 &text.read()?,
                 subjects.build(root)?,
+                &review.prepared(governed(root)?, || {
+                    let mut bound = vec![backlog::Precondition::section(root, &id, into)?];
+                    for source in &sections {
+                        bound.push(backlog::Precondition::section(root, &id, *source)?);
+                    }
+                    Ok(bound)
+                })?,
             )?;
-            println!("merged into §{section}");
+            let absorbed = sections
+                .iter()
+                .map(|section| format!("§{section}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("merged {absorbed} into §{into}");
             Ok(())
         }
-        Backlog::Rm { item, section } => {
+        Backlog::Produced {
+            item,
+            section,
+            target,
+            forget,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            match section {
-                Some(section) => {
-                    if backlog::delete_section(root, &id, section)? {
-                        println!(
-                            "removed §{section}, and the topic with it — nothing else was unresolved"
-                        );
-                    } else {
-                        println!("removed §{section}");
-                    }
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            let outcome = backlog::Produced::object(
+                backlog::EngrTarget::new(target.clone()).reference.clone(),
+            );
+            if forget {
+                if backlog::forget_produced(root, &id, section, &outcome, &prepared)? {
+                    println!("§{section} no longer records that outcome");
+                } else {
+                    println!("§{section} was not recording that outcome");
                 }
-                None => {
-                    backlog::delete_item(root, &id)?;
-                    println!("removed {}", shorten(&id, view::backlog_width(root)));
-                }
+            } else if backlog::record_produced(root, &id, section, outcome, &prepared)? {
+                println!("§{section} produced {target}; still unresolved");
+            } else {
+                println!("§{section} already recorded that outcome");
+            }
+            Ok(())
+        }
+        Backlog::Consume {
+            item,
+            section,
+            review,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            if backlog::consume_section(root, &id, section, &prepared)? {
+                println!(
+                    "consumed §{section}, and the topic with it — nothing else was unresolved"
+                );
+            } else {
+                println!("consumed §{section}");
             }
             Ok(())
         }
@@ -1103,6 +1277,47 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pin a commit for an **authoritative** relation target, refusing a dirty path.
+///
+/// Backlog subjects may now pin a baseline and record `dirty: true`, because
+/// losing the context entirely is worse than recording an inexact one. A record
+/// relation is not that: `implemented_by` is admitted wording claiming this
+/// assertion is implemented *there*, and a snapshot that does not describe what
+/// was read is a claim nobody can check later.
+///
+/// Whether the record should relax the same way is #9's and #35's question, not
+/// this slice's, so the refusal stays exactly where it was and only Backlog
+/// moved.
+///
+/// Which means asking the record's own question rather than reusing Backlog's
+/// answer. `backlog::pin` reports whether the file differs from **the commit
+/// being pinned**, which is right for a subject: `dirty` there says the observed
+/// target holds bytes outside its recoverable baseline. Reusing it here quietly
+/// rewrote this refusal — an author naming an explicit historical revision from
+/// a clean worktree got told the file had uncommitted changes, because the file
+/// had legitimately moved on since. What this guard is for is narrower: the
+/// wording claims something is implemented *there*, so what the author read must
+/// be committed somewhere, not identical to the revision they chose.
+fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
+    let (commit, _) = backlog::pin(root, path, revision)
+        .map_err(|error| malformed_argument(flag, path, error))?;
+    let uncommitted = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            engr::EXIT_INVARIANT,
+            format!("{flag} {path}: could not determine whether it has uncommitted changes"),
+        )
+    })?;
+    if uncommitted {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{flag} {path} has uncommitted changes, so no commit describes what was read; commit it first, or choose another committed revision"
+            ),
+        ));
+    }
+    Ok(commit)
 }
 
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
@@ -1474,7 +1689,6 @@ fn render_basis(basis: Option<&str>) -> String {
 /// consumes.
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
-    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
@@ -1642,26 +1856,6 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .map(|item| item.to_string())
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
-        }
-    }
-    // Confirming this will also edit unresolved staging, so the human reading
-    // the change is shown that before they type, not told about it afterwards.
-    for source in &candidate.context.backlog {
-        out.push_str(&format!(
-            "Backlog    {} §{}  {}\n",
-            shorten(&source.item, backlog_width),
-            source.section,
-            if source.resolves {
-                "resolved by this — will be consumed"
-            } else {
-                "still unresolved after this"
-            }
-        ));
-        for produced in &source.produced {
-            out.push_str(&format!(
-                "           produced engr:{}\n",
-                produced.target.reference
             ));
         }
     }

@@ -56,6 +56,31 @@ pub fn source_dirty(root: &Path) -> Option<bool> {
 /// untracked. Narrower than [`source_dirty`] on purpose: a Backlog subject pins
 /// the snapshot of the path it names, so an unrelated dirty file elsewhere says
 /// nothing about whether that pin would be honest.
+/// Whether the file at `path` right now differs from what `commit` holds.
+///
+/// The question a pinned subject actually asks. [`path_dirty`] answers a
+/// different one — whether the worktree differs from `HEAD`/the index — and the
+/// two only coincide when the pin *is* `HEAD`. Pin an older revision from a
+/// clean worktree and the status answer is "clean" while the file plainly is not
+/// what that commit reconstructs, which is the claim the subject goes on to
+/// make.
+///
+/// `git diff` exits 1 for "differs", so the status code is the answer and a
+/// non-zero exit must not be read as failure; anything else is `None`.
+pub fn path_differs_at(root: &Path, commit: &str, path: &str) -> Option<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--quiet", commit, "--", path])
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
+}
+
 pub fn path_dirty(root: &Path, path: &str) -> Option<bool> {
     let status = run(root, &["status", "--porcelain", "--", path])?;
     Some(!status.trim().is_empty())

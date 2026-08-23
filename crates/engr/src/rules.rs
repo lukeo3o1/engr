@@ -869,7 +869,8 @@ pub const BINDING_VERSION: u32 = 1;
 /// applicable set and its effective semantics live in the binding, and
 /// duplicating per-rule ids or limits here would be a persisted review history
 /// that #25 refuses.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct RuleReview {
     /// The mutation-level attempt value supplied for the review.
     pub attempts: u32,
@@ -940,48 +941,53 @@ impl ReviewBinding {
     /// about: [`Attempt`] refuses it at construction, so the question never
     /// arrives here as an ordinary "nothing exhausted yet".
     pub fn exhaustion(&self, attempt: Attempt) -> Result<Exhaustion> {
-        // The smallest ceiling in the applicable set decides whether anything is
-        // exhausted at all. One shared attempt passes the smallest ceiling
-        // first, so "some rule is past its ceiling" and "the attempt exceeds the
-        // smallest ceiling" are the same statement — which is also why this
-        // number is the one Backlog records as `limit`.
-        let Some(limit) = self.rules.iter().map(|rule| rule.review.max_attempts).min() else {
-            return Ok(Exhaustion::NotReached);
-        };
-        if attempt.get() <= limit {
-            return Ok(Exhaustion::NotReached);
-        }
-        match self.domain {
-            Domain::Object => {
-                if self
-                    .exhausted(attempt)
-                    .iter()
-                    .any(|rule| rule.review.on_exhaustion == OnExhaustion::HumanConfirmation)
-                {
-                    Ok(Exhaustion::HumanConfirmation)
-                } else {
-                    Ok(Exhaustion::Refused)
-                }
+        compose(self.domain, &self.rules, attempt)
+    }
+}
+
+/// Compose the verdict for one attempt over an already-resolved rule set.
+fn compose(domain: Domain, rules: &[BoundRule], attempt: Attempt) -> Result<Exhaustion> {
+    // The smallest ceiling in the applicable set decides whether anything is
+    // exhausted at all. One shared attempt passes the smallest ceiling
+    // first, so "some rule is past its ceiling" and "the attempt exceeds the
+    // smallest ceiling" are the same statement — which is also why this
+    // number is the one Backlog records as `limit`.
+    let Some(limit) = rules.iter().map(|rule| rule.review.max_attempts).min() else {
+        return Ok(Exhaustion::NotReached);
+    };
+    if attempt.get() <= limit {
+        return Ok(Exhaustion::NotReached);
+    }
+    match domain {
+        Domain::Object => {
+            if rules
+                .iter()
+                .filter(|rule| rule.review.exhausted(attempt))
+                .any(|rule| rule.review.on_exhaustion == OnExhaustion::HumanConfirmation)
+            {
+                Ok(Exhaustion::HumanConfirmation)
+            } else {
+                Ok(Exhaustion::Refused)
             }
-            // `on_exhaustion` is deliberately not consulted. For Backlog it
-            // never routes to the Human Gate: the domain prioritizes keeping
-            // unresolved intent over blocking admission, and the marker is what
-            // tells a later reader this was not a passing review.
-            Domain::Backlog => Ok(Exhaustion::Exhausted(RuleReview {
-                attempts: attempt.get(),
-                limit,
-            })),
-            // Refused rather than answered. #25 leaves these open on purpose,
-            // and the one thing this must not do is invent behaviour for them
-            // by letting another domain's composition stand in.
-            Domain::Collection | Domain::Work => Err(Error::new(
-                EXIT_INVARIANT,
-                format!(
-                    "v1 does not define what an exhausted rule means for a {} mutation",
-                    self.domain.as_str()
-                ),
-            )),
         }
+        // `on_exhaustion` is deliberately not consulted. For Backlog it
+        // never routes to the Human Gate: the domain prioritizes keeping
+        // unresolved intent over blocking admission, and the marker is what
+        // tells a later reader this was not a passing review.
+        Domain::Backlog => Ok(Exhaustion::Exhausted(RuleReview {
+            attempts: attempt.get(),
+            limit,
+        })),
+        // Refused rather than answered. #25 leaves these open on purpose,
+        // and the one thing this must not do is invent behaviour for them
+        // by letting another domain's composition stand in.
+        Domain::Collection | Domain::Work => Err(Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "v1 does not define what an exhausted rule means for a {} mutation",
+                domain.as_str()
+            ),
+        )),
     }
 }
 
@@ -1213,6 +1219,24 @@ pub fn bind(
     // arbitrary caller JSON must be inside what canonical bytes can carry.
     within_safe_numbers(&mutation, "mutation")?;
     within_safe_numbers(&precondition, "precondition")?;
+    Ok(ReviewBinding {
+        binding: BINDING,
+        version: BINDING_VERSION,
+        domain,
+        mutation,
+        precondition,
+        rules: bound_rules(root, domain)?,
+    })
+}
+
+/// The applicable rules with everything they rest on resolved, in hashed order.
+///
+/// Split out from [`bind`] because two callers need the rules and only one of
+/// them has a mutation to describe. Composing an exhaustion verdict reads no
+/// more than the rules — but it must read them the *same* way an attestation
+/// would, bases resolved and all, or a rule whose material has gone missing
+/// would quietly stop counting for one caller while refusing the other.
+fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
     let mut bound = Vec::new();
     for rule in applicable(root, domain)? {
         let mut based_on = Vec::new();
@@ -1235,14 +1259,50 @@ pub fn bind(
         });
     }
     canonical_order(&mut bound, "applicable rule")?;
-    Ok(ReviewBinding {
-        binding: BINDING,
-        version: BINDING_VERSION,
-        domain,
-        mutation,
-        precondition,
-        rules: bound,
-    })
+    Ok(bound)
+}
+
+/// What the applicable rules say about one attempt, without a mutation to
+/// describe.
+///
+/// A domain whose mutations are applied directly — Backlog — still has to ask
+/// the exhaustion question, and it has no prepared candidate to hang a binding
+/// on. The verdict is composed from the same resolved rules either way, so this
+/// and [`ReviewBinding::exhaustion`] cannot drift apart.
+pub fn exhaustion(root: &Path, domain: Domain, attempt: Attempt) -> Result<Exhaustion> {
+    compose(domain, &bound_rules(root, domain)?, attempt)
+}
+
+/// Whether any project rule governs this domain — and so whether a review was
+/// required at all.
+///
+/// The question every caller that enforces "a reviewed mutation must carry what
+/// it was reviewed against" has to ask first, because with no applicable rule
+/// there is no review for a predecessor to anchor.
+///
+/// For an answer a mutation will act on, use [`assess`] instead: this reads
+/// policy on its own, and two separate reads can disagree.
+pub fn governs(root: &Path, domain: Domain) -> Result<bool> {
+    Ok(!applicable(root, domain)?.is_empty())
+}
+
+/// Both questions a mutation asks of policy, from **one** read of it.
+///
+/// Whether a rule governs at all, and what the attempt means under the rules
+/// that do — asked separately, these come from two reads, and nothing stops the
+/// rules changing in between. The workspace lock does not help: `.engr/rules/`
+/// is edited by people and by `git checkout`, not through engr.
+///
+/// The dangerous direction is specific. A first read seeing no rule and a second
+/// seeing one gives `governed = false` with a verdict composed from the new set;
+/// at an in-limit attempt that verdict is `NotReached`, and the mutation then
+/// proceeds without the predecessor a governed mutation must carry — one apply
+/// acting on two contradictory pictures of policy. One snapshot cannot disagree
+/// with itself.
+pub fn assess(root: &Path, domain: Domain, attempt: Attempt) -> Result<(bool, Exhaustion)> {
+    let rules = bound_rules(root, domain)?;
+    let governed = !rules.is_empty();
+    Ok((governed, compose(domain, &rules, attempt)?))
 }
 
 /// Check an attestation against the subject as it stands right now.

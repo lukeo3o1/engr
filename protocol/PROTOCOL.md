@@ -535,8 +535,8 @@ cannot be confirmed.
 A candidate stores two fingerprints. `payload_sha256` identifies the mutation:
 it travels into the confirmed event, and an already-applied retry is recognised
 by it, so **its input may never widen**. `integrity_sha256` covers that value
-together with the challenge and the whole prepared context — the binding, the
-previous wording a revision is diffed against, and any backlog declarations.
+together with the challenge and the whole prepared context — the binding and the
+previous wording a revision is diffed against.
 Every load of a candidate MUST check both, not only admission: re-rendering a
 candidate hours later is as much a use of its prepared context as confirming it
 is.
@@ -546,6 +546,20 @@ deciding what the human is shown and what confirmation does. This is **not** a
 boundary against someone who controls the machine — the file is on that machine
 and so is the binary. It is the narrower guarantee that a candidate rewritten on
 disk cannot present or bind a different confirmation context and still pass.
+
+That check is also what happens to a candidate prepared under an older contract.
+When the prepared context changes shape — as it did when Backlog declarations
+left it — an outstanding candidate names an integrity value the current build
+cannot reproduce, and it **fails closed at use**: refused wherever it is loaded,
+told to be prepared again, never reinterpreted under the new shape.
+
+Migration MUST NOT block on such candidates, and MUST NOT rewrite or discard
+them. Migration moves representation; it does not decide the fate of material a
+human was in the middle of, and a migration that silently reinterpreted stale
+Human-Gate material would be authorizing something nobody confirmed. Nor is a
+backward-compatible decoder kept for a withdrawn contract: the compatibility
+surface would then outlive the design that needed it, and the failure would be
+surfaced later and more quietly than at the moment somebody tries to act on it.
 
 The challenge is covered because it is the link between the two halves of the
 gate: what a human is shown, and what their answer admits. A candidate MUST
@@ -865,6 +879,46 @@ Section ids are monotonic and never reused, for the reason the record's are —
 `max(existing) + 1` would hand back the id of a consumed Section and silently
 repoint every subject aimed at it.
 
+### Merging says two points were one
+
+A merge names one **destination** and one or more **sources**, and is one
+mutation:
+
+```text
+destination survives, keeping its Section id, with the merged wording
+sources are removed
+```
+
+The destination identity survives. A merge MUST NOT allocate a replacement
+Section identity, and MUST NOT reuse a source id later. Minting a fresh id to
+hold the merged wording is the tempting shape and the wrong one: everything
+already aimed at the destination — subjects, `produced[]` entries elsewhere, a
+human's own note — would be left naming a Section that stopped existing at the
+moment somebody observed the two were the same point.
+
+`produced[]` MUST be carried by **set union**:
+
+```text
+destination.produced = union(destination.produced, source.produced)
+```
+
+Merging says these were one unresolved point, not that the outcomes never
+happened. Dropping a source's outcomes would lose the one thing that stops a
+later session re-solving work an earlier one already got confirmed.
+
+The merged destination receives a refreshed `updated_at`: it now states
+something it did not state before.
+
+It is **atomic**. Consolidation is a single judgement, and half of it applied is
+a state nobody decided on — a destination carrying merged wording while a source
+it supposedly absorbed still sits there unresolved. An implementation MUST check
+every participant before removing anything, so a merge naming a Section that is
+not there changes nothing at all.
+
+The precondition binds the parent topic, the complete destination and every
+complete source. An unrelated sibling Section changing MUST NOT stale it; any
+change to the topic, the destination or a source MUST.
+
 A confirmed section never moves back into backlog. The confirmed wording remains
 the last-admitted wording until another confirmed revision replaces it; the
 doubt goes into backlog instead, and is later settled by a normal record action.
@@ -880,18 +934,133 @@ navigation relation, not a dependency graph. Authoritative `refs[]` MUST NOT
 gain the ability to target backlog: a confirmed section cannot stand on wording
 nobody read. The asymmetry is the point.
 
-A `file` or `symbol` subject pins a path and a full resolved commit. Where the
-caller does not choose a committed revision and the path is dirty, engr MUST
-refuse rather than pin HEAD — HEAD would not describe what was actually read.
-The path MUST exist in the commit pinned. Backlog is allowed to be unresolved;
-it is not allowed to claim provenance it does not have. Symbol identity is a
-path and a human-readable name; no language-specific resolution is attempted.
+A `file` or `symbol` subject pins a path and a full resolved commit. The path
+MUST exist in that commit: a baseline that never held the file reconstructs
+nothing. Symbol identity is a path and a human-readable name; no
+language-specific resolution is attempted.
+
+Where the observed target carried changes the pinned commit does not hold, the
+subject is still written and MUST record `dirty: true`. Refusing it was the
+earlier rule and the wrong trade: the agent genuinely read something, and losing
+that context is worse than recording a baseline that is honestly labelled
+inexact. The commit stays recoverable; the extra context may be gone.
+
+The comparison is against **the commit being pinned**, not against the repository
+head. Those coincide only when the pin is the head: an explicitly chosen older
+revision differs from a perfectly clean worktree, and a working-tree cleanliness
+check reports `dirty: false` there while the file is not what that commit
+reconstructs — which is precisely the claim the field makes.
+
+`dirty` is **target-local**. It says nothing about the repository as a whole and
+nothing about `git worktree`. For a `symbol` it means the **containing file**
+was modified — proving a diff intersects one symbol's own source range would
+require language parsing and AST mapping, which this protocol MUST NOT require
+for context metadata, so readers MUST NOT read it as a claim about the symbol.
+
+`dirty` is **not part of subject identity**: the same target re-observed against
+a modified worktree is the same subject, and MUST NOT read as fresh activity. It
+is absent when clean, so a clean subject is byte-for-byte what it always was.
 
 A subject that later stops resolving is a stale signpost, and MUST NOT make the
 item unreadable. Backlog is staging, not a referential-integrity database.
 
 `subjects[]` is semantically **unordered**, and exact duplicates are refused so
-that "the same set" has one meaning. No persisted sort order is required.
+that "the same set" has one meaning. Duplicates are judged by the same identity
+that decides equality, so a target that differs only in `dirty` is a duplicate:
+`dirty` is not part of identity, and a comparison that included it would let one
+target sit in a set twice while the rest of the model calls them one subject. No
+persisted sort order is required.
+
+### Mutation preconditions
+
+A prepared Backlog mutation binds the predecessor it was written against, and is
+applied only while that predecessor still holds:
+
+```text
+read the exact predecessor
+-> prepare and review the exact mutation
+-> apply only while the predecessor still matches
+-> otherwise stale: read again and re-prepare
+```
+
+What each mutation binds is exactly what it rests on:
+
+| mutation | binds |
+| --- | --- |
+| create an item | nothing — see below |
+| change the topic | the **complete** parent item |
+| add a Section | the parent topic, and the id the add will **receive** |
+| change or consume a Section | that **whole** Section, and the parent topic |
+| merge Sections | the parent topic, and the **whole** destination and every source |
+
+A predecessor that still holds is not the same as a predecessor for *this*
+mutation, so an implementation MUST also check that the bound predecessor is the
+one the mutation rests on: the same item, and the same Sections. Otherwise a
+caller holding a genuinely valid predecessor for one item can apply it to
+another, or bind §1 and consume §5, and the guarantee fails exactly where it
+looks satisfied. Which is the wrong answer to report first, so the mismatch MUST
+be distinguishable from staleness — "you prepared against something else" is a
+different problem from "what you prepared against moved".
+
+An add binds the id it will **receive**, not merely that some id is absent.
+Another writer can take that id and consume it: the id reads as absent again
+while the allocation counter has advanced permanently, so an absence check
+passes and the add lands on an identity nobody reviewed — under a number the
+first allocation's subjects may already name.
+
+Creating an item binds nothing, and that is settled rather than pending. **engr
+mints the UUIDv7 while performing the create, and a caller MUST NOT supply or
+choose it**, so there is no proposed id whose absence a creation could bind. A
+creation MUST refuse a precondition rather than accept one it cannot honour:
+whatever id a caller prepared against, the item created is a different one, and
+checking the first would authorize the second.
+
+The alternative was letting a caller propose the id so creation would have a
+predecessor like every other mutation. It was declined because pre-authorizing a
+UUID needs reservation or pending state, or a token proving the caller was
+allowed that id — a whole lifecycle bolted on to protect an identity nobody else
+can be racing for. Rule Review still governs the create intent; identity is
+simply engr's to issue.
+
+The scope is the decision. Binding less than the whole Section is what the
+removed `canonical(text, subjects[])` fingerprint did, and it was blind to every
+field outside its list — including fields added later, which nobody would think
+to add to it. Binding more, such as the whole item for a single-Section change,
+would stale a mutation because an unrelated sibling moved, and a staleness
+signal that fires on unrelated work stops being read.
+
+An implementation MAY compare a hash internally. There is **no** protocol-level
+persisted Backlog fingerprint, and no field records one.
+
+That allowance is what makes the model reachable from a command line, which it
+otherwise would not be: an agent cannot hand back a complete Section as an
+argument. So a read surface MAY print a short stand-in for each predecessor and
+a mutation MAY take it back, as long as nothing persists it and the authority
+remains the whole predecessor compared at apply time.
+
+Carrying it is not optional decoration. Review happens before the mutation runs,
+so a command that reads and writes under one lock still leaves the entire
+interval between reviewing and running unguarded — a concurrent edit in that gap
+lands underneath a mutation nobody reviewed against it, and every check inside
+the lock passes, because they compare against what the command itself read
+rather than against what the agent read. **Where a Rule Review was required, the
+mutation MUST carry the predecessor it was reviewed against.** Where no rule
+applies there was no review to anchor, and a predecessor MAY be omitted.
+
+That requirement belongs to the **mutation**, not to whichever interface reached
+it. An implementation that enforces it only at its command line has enforced its
+command line: any other caller reaches the same semantic mutation, and the check
+has to sit where they meet.
+
+Creating an item is the one exception, because engr issues the identity and
+there is nothing for a predecessor to name. Requiring one would make creating an
+unresolved point impossible in exactly the workspaces that have rules about
+unresolved points, and an implementation MUST NOT resolve that by accepting a
+predecessor it will not honour.
+
+Staleness is its own outcome, not a failed mutation and not corrupt data: the
+caller did nothing wrong and the world moved underneath it. The refusal MUST say
+which part moved, so the retry is intelligent rather than reflexive.
 
 ### updated_at
 
@@ -904,8 +1073,8 @@ cannot disagree.
 
 Neither does a write that changes nothing. Rewriting a Section with the wording
 it already had, or with the same `subjects[]` set in a different order, MUST
-leave `updated_at` alone. Order is not content — the resolution basis already
-treats `subjects[]` as unordered — and an idempotent write that manufactures
+leave `updated_at` alone. Order is not content — `subjects[]` is a set — and an idempotent write that
+manufactures
 activity puts an untouched point at the top of the list somebody reads to find
 what was touched.
 
@@ -917,7 +1086,8 @@ fractional seconds and appending `Z` reports a different moment entirely. Read
 surfaces may normalize the offset for display; they may not change the instant,
 and the stored value keeps its own precision and offset.
 
-It is operational metadata and is **not** part of the resolution basis.
+It is operational metadata, not a concurrency token: whether a prepared mutation
+is still applicable is decided by its precondition, never by this timestamp.
 
 ### produced[]
 
@@ -936,68 +1106,66 @@ confirmation so the point can be consumed. An agent resuming work should read
 the text, the subjects and the produced outcomes together before deciding what
 is left — that is what stops it re-solving what an earlier session settled.
 
-A declared outcome asserts that authority exists, so `prepare` MUST refuse one
-that names an Object or Section which will not exist once the candidate is
-admitted. The check is against the **projected** state, not the stored one: the
-usual outcome of working on an unresolved point is the very Object or Section
-the candidate creates, and refusing that would make the field useless for its
-own case. The candidate pins `expected_rev`, so that projection is exact.
+Object admission and this bookkeeping are **two independent operations**.
+Confirming an Object appends nothing here and consumes nothing here; an agent
+that worked from a point updates it afterwards, as an ordinary Backlog mutation.
+engr never infers the link, because an inferred one would eventually consume a
+point nobody meant to resolve.
 
-Existence is checked when the claim is made and never again. Loading backlog
-MUST NOT depend on a recorded outcome still existing: an Object deleted through
-the gate afterwards is history, and history cannot be allowed to make the
-staging around it unreadable.
+A declared outcome asserts that authority exists, so appending one MUST refuse a
+target that does not exist — and MUST refuse one whose persisted integrity no
+longer holds. Existing and sound are different questions: a section edited
+outside the gate loads perfectly and reads as authority, and an entry claiming
+it would launder that edit into a record of what was produced.
 
-### Resolution basis
+Integrity is checked at **the granularity being claimed**. A Section-qualified
+target is judged on that Section's seal. An Object-level target claims the
+Object's own authority — creation, a type or state transition, supersession —
+and nothing seals `title`, `type`, `state` or the revision, so every Section seal
+passing does not establish it. That authority MUST be checked against the
+durable history it was admitted through, and the **complete** rebuilt aggregate
+MUST be compared rather than a chosen set of fields — a Section removed from the
+projection outside the gate is never visited by a per-Section check, and gaps
+below the id counter are what legitimate admitted deletion looks like. Where the
+history cannot rebuild the Object, the claim MUST be refused rather than
+accepted unchecked. **Existence and
+integrity are checked when the claim is made and never again** — which is why
+they MUST be checked where the claim is *written*, under the same lock. Validating first and appending afterwards leaves a gap an
+Object mutation fits through, and the single check this relationship ever gets
+would have been against something that no longer existed when it landed. This
+holds in that direction only: `produced[]` is a record of what happened,
+not a referential-integrity constraint, so it never constrains the Object
+domain. A target may later be superseded, deleted, or absorbed by a merge while
+an entry still names it; the entry becomes an unavailable historical pointer,
+which is not corruption, and it MUST NOT be retargeted to a replacement —
+rewriting it would rewrite what was actually produced.
 
-The transient compare-and-consume token is
+### rule_review
 
-```text
-canonical(text, subjects[])
-```
+Present on a Section only when the wording standing in it was admitted **without
+a passing review** — the attempt had gone past a project rule's ceiling and
+Backlog admitted it anyway. See "How many attempts, and what happens after" for
+why this domain admits rather than refuses, and for the two numbers.
 
-excluding `produced[]`, `updated_at`, the Section id and the parent topic, with
-`subjects[]` canonicalized as an unordered set. It is **not** stored on the
-backlog Section: it is comparison state a candidate pins, not a trust hash.
+Absent is the ordinary case, and it means exactly one thing: this went in
+normally, or no project rule governed it. It MUST NOT be written for a mutation
+that changed nothing, since an idempotent write admitted nothing.
 
-If a produced outcome materially changes what remains unresolved, the agent
-revises `text` or `subjects[]` — which moves the basis, as it should.
+`attempts` MUST be greater than `limit`, and `limit` MUST be at least 1. A
+stored value outside that is not a diagnostic but a claim about a review that
+never happened, and it MUST be refused on read like any other impossible state.
 
-### Candidate-derived outcomes
+A topic rename admits no Section wording, so there is nowhere for this marker to
+go — and an exhausted rename MUST NOT simply proceed unmarked, which would make
+it the one soft-admission nothing records. Marking every Section instead would
+claim of each one something true of none. So an implementation MUST either
+persist the exhaustion in item-level state or **refuse the exhausted rename**.
+What an item-level marker looks like is not settled here, and an implementation
+MUST NOT invent one; refusing is the conforming choice until it is.
 
-A normal record action remains the thing that enters the record. There is no
-`backlog_promoted` event and no second confirmation flow.
-
-A candidate derived from backlog MUST explicitly declare its source Section(s),
-the outcomes produced from each, and whether confirming settles each one. It
-MUST NOT be inferred from the fact that an Object changed. `prepare` pins each
-source's resolution basis and refuses up front if the source does not exist.
-
-Those declarations are covered by candidate integrity and stay out of the event:
-backlog is not part of the authoritative record.
-
-After successful confirmation, per source:
-
-| Basis since prepare | Candidate says | Result |
-| --- | --- | --- |
-| unchanged | still unresolved | declared outcomes appended to `produced[]` |
-| unchanged | resolved | Section consumed; item removed if it was the last |
-| **changed** | either | left untouched, and reported |
-
-The third row is the one that matters. A stale source MUST NOT invalidate
-wording a human already confirmed — the record mutation still admits — and an
-old candidate MUST NOT mutate newer unresolved staging. Failing to reconcile
-because the source moved is an expected outcome, not a failed admission.
-
-A source declared resolved is consumed, so outcomes declared alongside it have
-nowhere to be written and are not: the point is settled, and the outcome is in
-the record, which is where it belongs.
-
-Reconciliation MUST happen inside the same successful confirmation, holding the
-same lock that made the mutation durable, so nothing can edit the source between
-the basis check and the write. It MUST also be idempotent: appending an outcome
-already listed does nothing, and a consumed Section is simply gone, so the retry
-that closes the crash window applies none of it twice.
+It is an ordinary persisted Section field, so it participates in the mutation
+precondition like any other — a mutation prepared against a Section that has
+since been marked is stale.
 
 ### Read surfaces
 
@@ -1673,8 +1841,11 @@ complete applicable set already lives in the review binding. A later successful
 revision clears the marker; a later exhausted admission replaces it.
 
 That soft-admission covers mutations that **preserve** unresolved information.
-Consuming a Backlog Section is destructive, so it requires a review that actually
-passed: an exhausted consume does not happen and the Section stays as it was.
+Removing a Backlog Section destroys it, so removal requires a review that
+actually passed. A Section leaves only two ways, and both are reviewed: a consume,
+or atomically as the source of a merge. Exhausted, neither happens, the Sections
+stay exactly as they were, and **no marker is written** — nothing was admitted for
+a diagnostic to describe.
 
 **Collection and Work have no exhaustion behaviour in v1.** It is refused rather
 than borrowed from another domain, because a composition that answers for a
