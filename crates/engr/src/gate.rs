@@ -615,6 +615,23 @@ fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
 /// Refused up front, like every other precondition at this gate: a candidate
 fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Result<Prepared> {
     store::require_current(root)?;
+    // Here, not in `Payload::validate`: that runs when events are loaded, and a
+    // workspace holding the retained merge shape in its history has to keep
+    // being able to replay it. What it may not do is admit a *new* one — this
+    // build writes the current Event generation, and a record claiming that
+    // generation while carrying the shape it replaced is one no reader accepts,
+    // so the refusal belongs before a human is asked to confirm it rather than
+    // after the Object has been written.
+    if let Action::SectionMerged {
+        merge: crate::model::Merge::Absorbing { .. },
+    } = &payload.action
+    {
+        return Err(Error::new(
+            EXIT_INVARIANT,
+            "a merge names the section that survives it; the shape that consumed every participant is retained history, not something that can be admitted"
+                .to_owned(),
+        ));
+    }
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
     // A title is the line a listing prints, so whitespace around it is never

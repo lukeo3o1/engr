@@ -658,6 +658,17 @@ fn migration_states_the_admission_version_two_only_implied() {
         .expect("json")["version"],
         engr::WORKSPACE_VERSION
     );
+
+    // The retained events were written before any of this and are not rewritten,
+    // so replaying them has to reconstruct exactly the migrated Object. If the
+    // conversion had invented a different instant or a different admission, this
+    // is where the two would stop agreeing.
+    let verified = run_engr(root, &["verify", &id]);
+    assert!(
+        verified.status.success(),
+        "history and the migrated projection must still agree: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
 }
 
 /// The command line has to say which Section survives, because that is the part

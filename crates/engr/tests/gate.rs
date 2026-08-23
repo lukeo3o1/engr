@@ -423,6 +423,36 @@ fn merged_wording_cannot_depend_on_its_own_participants() {
     }
 }
 
+/// The gate writes the current Event generation, so it cannot admit the shape
+/// that generation replaced — the record would claim a version no reader will
+/// accept it under, and it would claim it after the Object had been written.
+#[test]
+fn the_retained_merge_shape_cannot_be_admitted() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "retained shape");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    admit(&root, payload(Action::SectionAdded, &id, "two"));
+
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::SectionMerged {
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
+                },
+            },
+            &id,
+            "together",
+        ),
+    )
+    .expect_err("history is not an input");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        gate::pending(&root).expect("pending").is_empty(),
+        "and nothing was left waiting for a human"
+    );
+}
+
 #[test]
 fn a_merge_needs_a_destination_that_is_not_one_of_its_own_sources() {
     let (_dir, root) = workspace();
