@@ -1474,10 +1474,21 @@ pub fn record_produced(
             // relationship ever gets would have been against something that no
             // longer existed when the relationship landed.
             let projected = crate::ops::effective(root, &object).map_err(|error| {
+                // Absent and unreadable are different answers, and #13 §4 says
+                // so: never downgrade invalid authority to "not found". The
+                // exit code already distinguished them; the wording did not,
+                // and the wording is what a person acts on — "does not exist"
+                // sends someone looking for a missing object when what they
+                // have is a present one whose history will not load.
+                let what = if error.code == EXIT_NOT_FOUND {
+                    "does not exist"
+                } else {
+                    "cannot be read as authority"
+                };
                 Error::new(
                     error.code,
                     format!(
-                        "produced outcome names object {}, which does not exist: {}",
+                        "produced outcome names object {}, which {what}: {}",
                         short(&object),
                         error.message
                     ),

@@ -2503,3 +2503,52 @@ fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate(
     .expect_err("an admitted section is missing from what this claims");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
 }
+
+/// Absent and unreadable are different answers, even in the wording.
+///
+/// #13 §4 is explicit that a trust path must never downgrade invalid authority
+/// to "not found". The exit code already told them apart; the message did not,
+/// and the message is what a person acts on — being told an object does not
+/// exist sends them looking for a missing file when what they have is a present
+/// one whose history will not load.
+///
+/// A non-contiguous event log is the realistic way to reach this: it is what a
+/// Git merge of two branches that each confirmed a mutation from the same base
+/// leaves behind, and it is the exact state #33 records as a concern.
+#[test]
+fn a_produced_target_that_cannot_be_read_is_not_reported_as_missing() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a record");
+    admit(&root, payload(Action::SectionAdded, &object, "first"));
+    let id = item(&root, "topic", "unresolved");
+
+    // Two confirmed mutations claiming the same revision.
+    let path = store::events_path(&root, &object);
+    let text = std::fs::read_to_string(&path).expect("events");
+    let last = text.lines().last().expect("last event").to_owned();
+    std::fs::write(&path, format!("{text}{last}\n")).expect("duplicate the rev");
+
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
+        Produced::object(format!("obj:{}", compact(&object))),
+        &Prepared::first(),
+    )
+    .expect_err("the history does not load");
+    assert_eq!(
+        error.code,
+        engr::EXIT_SCHEMA,
+        "malformed authority is a schema failure, not absence"
+    );
+    assert!(
+        !error.message.contains("does not exist"),
+        "the object is right there; its history is what is broken: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("cannot be read as authority"),
+        "{}",
+        error.message
+    );
+}
