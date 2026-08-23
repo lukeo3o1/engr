@@ -20,6 +20,7 @@
 //! file. Changing one changes what the *next* mutation must be reviewed
 //! against, and nothing already admitted.
 
+use crate::proof::{canonical_bytes, within_safe_integers};
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -209,7 +210,12 @@ pub struct Basis {
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct ResolvedBasis {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always written, `null` where the Rule pinned nothing.
+    ///
+    /// Not omitted when absent, unlike most optional members here. This one
+    /// sits inside a hash contract, and an omitting implementation and a
+    /// spelling-out one would compute different bytes for one review — which is
+    /// the whole failure a shared canonical form exists to prevent.
     pub commit: Option<String>,
     /// The exact content, as text. Part of the review binding, so an edit to a
     /// project file invalidates every attestation that rested on it.
@@ -815,10 +821,6 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
 /// rather than trusting anything it was handed.
 #[derive(Serialize)]
 pub struct ReviewBinding {
-    /// A discriminator, so a hash from this version can never be mistaken for
-    /// one produced under different binding rules.
-    binding: &'static str,
-    version: u32,
     domain: Domain,
     /// The exact semantic mutation, as the domain canonicalizes it.
     mutation: serde_json::Value,
@@ -858,9 +860,6 @@ pub struct BoundRule {
     /// byte is meaning, so it is carried untouched.
     pub body: String,
 }
-
-pub const BINDING: &str = "engr-rule-review";
-pub const BINDING_VERSION: u32 = 1;
 
 /// The compact diagnostic Backlog records when it admits an exhausted mutation.
 ///
@@ -1001,13 +1000,12 @@ impl ReviewBinding {
     /// under today's rules and a mismatch looks like tampering, or relabel it
     /// and claim a guarantee nobody made.
     ///
-    /// Note the version in the persisted scalar is `ReviewDigestContract`, which
-    /// is field-local, while `version` *inside* the hashed payload is
-    /// [`BINDING_VERSION`]. They are both 1 and they are not by construction the
-    /// same number. Whether the in-payload discriminator should remain once the
-    /// contract version travels outside is an open question on #25; nothing is
-    /// persisted yet, so it stays as it is and costs nothing either way until a
-    /// proof is emitted.
+    /// The version lives in the scalar and **only** there. There is no
+    /// discriminator and no version member inside the hashed payload, which the
+    /// prototype this grew from had both of. Two places naming a version is two
+    /// places that can disagree, and the outer one is the one a reader has
+    /// before they have decided how to read the bytes — so it is the one that
+    /// can actually be acted on.
     ///
     /// Deliberately not [`crate::confirmation::fingerprint`], which this used to
     /// delegate to. That primitive canonicalizes through `serde_json`, which is
@@ -1075,102 +1073,6 @@ impl ReviewBinding {
     }
 }
 
-/// Whether this integer is exactly a binary64 value.
-///
-/// An integer is `m · 2^k` with `m` odd; a double holds 53 significant bits, so
-/// it is exact precisely when `m < 2^53`. Computed by shifting off the trailing
-/// zeros — **no float cast anywhere**, because the obvious `(n as f64) as u64 ==
-/// n` is wrong in Rust: that cast saturates, so `u64::MAX` compares equal to
-/// itself and passes.
-///
-/// This is the RFC 8785 domain (§3.1, "expressible as IEEE-754 binary64"), not
-/// the ±(2^53 − 1) safe-integer range — that is a SHOULD for ECMAScript interop,
-/// and the RFC's own Appendix B lists `9007199254740992` as a valid canonical
-/// number. Using the recommendation as the domain refuses values the standard
-/// accepts.
-fn exactly_binary64(magnitude: u64) -> bool {
-    magnitude == 0 || (magnitude >> magnitude.trailing_zeros()) < (1 << 53)
-}
-
-/// Refuse a subject JCS cannot carry without changing it.
-///
-/// Not a formality. `serde_jcs` canonicalizes numbers through `f64`, correctly
-/// and per the standard — which means an integer past the safe range does not
-/// fail, it **quietly becomes a different one**:
-///
-/// ```text
-/// 9007199254740993  ->  {"n":9007199254740992}
-/// 9007199254740992  ->  {"n":9007199254740992}
-/// ```
-///
-/// Two different review subjects, one set of canonical bytes, one hash. For a
-/// value whose entire job is naming an exact subject, that is the worst
-/// available failure: an attestation over one would verify against the other,
-/// and nothing anywhere would report it.
-///
-/// So the input domain is checked before the bytes are computed, and a number
-/// outside it is refused with what to do instead — RFC 8785 says such values
-/// belong in strings. Applied where arbitrary JSON enters, which is `bind`'s two
-/// subject arguments; every other value reaching [`canonical_bytes`] is an
-/// engr-owned struct whose numbers are `u32`.
-///
-/// What this does **not** promise is that the canonical spelling matches the
-/// literal that was written. `2^60` canonicalizes to `1152921504606847000`,
-/// because that is what ECMAScript's shortest round-tripping form is, and it
-/// parses back to exactly `2^60`. The value survives; only its decimal spelling
-/// is the standard's rather than the author's. Anything accepted here is exactly
-/// a double, so two accepted subjects that differ still differ after
-/// canonicalization — which is the property that matters.
-fn within_safe_numbers(value: &serde_json::Value, what: &str) -> Result<()> {
-    match value {
-        serde_json::Value::Number(number) => {
-            let safe = match (number.as_u64(), number.as_i64()) {
-                (Some(unsigned), _) => exactly_binary64(unsigned),
-                (_, Some(signed)) => exactly_binary64(signed.unsigned_abs()),
-                // Already a double, so exact by construction.
-                _ => true,
-            };
-            ensure!(
-                safe,
-                EXIT_USAGE,
-                "{what}: {number} is not exactly a binary64 value, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
-            );
-            Ok(())
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                within_safe_numbers(item, what)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(entries) => {
-            for entry in entries.values() {
-                within_safe_numbers(entry, what)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// The canonical bytes of one value, as **RFC 8785 (JCS)**.
-///
-/// Not `serde_json::to_string`, and the difference is not academic. JCS orders
-/// object members by their **UTF-16** code units, while `serde_json`'s map is
-/// ordered by Rust string comparison, which is UTF-8 order. For keys `U+E000`
-/// and `U+1F600` the two disagree — `U+1F600`'s first UTF-16 unit is `D83D`,
-/// which precedes `E000`, while in UTF-8 `U+E000` sorts first. JCS also fixes
-/// number formatting, which stable serde output does not promise.
-///
-/// The point of naming a standard is that a second implementation, in another
-/// language, computes the same bytes. "Deterministic for us" is a weaker claim
-/// wearing the same word, and a review hash is exactly where the difference
-/// bites: an attestation is meant to be checkable by whoever recomputes it.
-fn canonical_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
-    serde_jcs::to_string(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))
-}
-
 /// Put an unordered collection into the one order the protocol defines.
 ///
 /// Canonicalize each element, sort by the lexicographic order of those canonical
@@ -1217,11 +1119,9 @@ pub fn bind(
 ) -> Result<ReviewBinding> {
     // Before anything is resolved or hashed: the two arguments that are
     // arbitrary caller JSON must be inside what canonical bytes can carry.
-    within_safe_numbers(&mutation, "mutation")?;
-    within_safe_numbers(&precondition, "precondition")?;
+    within_safe_integers(&mutation, "mutation")?;
+    within_safe_integers(&precondition, "precondition")?;
     Ok(ReviewBinding {
-        binding: BINDING,
-        version: BINDING_VERSION,
         domain,
         mutation,
         precondition,

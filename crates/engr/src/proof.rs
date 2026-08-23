@@ -66,7 +66,7 @@ pub fn within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()>
             ensure!(
                 magnitude <= MAX_SAFE_INTEGER,
                 EXIT_USAGE,
-                "{what}: {number} is outside the safe integer range every implementation shares, so canonical JSON would turn it into a different number and two different subjects would hash alike"
+                "{what}: {number} is outside the safe integer range every implementation shares, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
             );
             Ok(())
         }
