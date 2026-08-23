@@ -1290,14 +1290,30 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
 /// Whether the record should relax the same way is #9's and #35's question, not
 /// this slice's, so the refusal stays exactly where it was and only Backlog
 /// moved.
+///
+/// Which means asking the record's own question rather than reusing Backlog's
+/// answer. `backlog::pin` reports whether the file differs from **the commit
+/// being pinned**, which is right for a subject: `dirty` there says the observed
+/// target holds bytes outside its recoverable baseline. Reusing it here quietly
+/// rewrote this refusal — an author naming an explicit historical revision from
+/// a clean worktree got told the file had uncommitted changes, because the file
+/// had legitimately moved on since. What this guard is for is narrower: the
+/// wording claims something is implemented *there*, so what the author read must
+/// be committed somewhere, not identical to the revision they chose.
 fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
-    let (commit, dirty) = backlog::pin(root, path, revision)
+    let (commit, _) = backlog::pin(root, path, revision)
         .map_err(|error| malformed_argument(flag, path, error))?;
-    if dirty {
+    let uncommitted = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            engr::EXIT_INVARIANT,
+            format!("{flag} {path}: could not determine whether it has uncommitted changes"),
+        )
+    })?;
+    if uncommitted {
         return Err(Error::new(
             engr::EXIT_INVARIANT,
             format!(
-                "{flag} {path} has uncommitted changes, so the pinned commit would not describe what was read; commit it first, or choose another committed revision"
+                "{flag} {path} has uncommitted changes, so no commit describes what was read; commit it first, or choose another committed revision"
             ),
         ));
     }

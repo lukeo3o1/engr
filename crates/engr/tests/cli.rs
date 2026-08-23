@@ -4653,3 +4653,104 @@ fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
     );
     assert_eq!(engr::backlog::ids(root).expect("ids").len(), 1);
 }
+
+/// An explicitly named historical snapshot stays admissible for `implemented_by`.
+///
+/// Backlog's `dirty` compares the working file with the commit being pinned,
+/// because a subject's baseline is meant to reconstruct what was read. The
+/// record asks a different question: this wording claims something is
+/// implemented *there*, so what the author read must be committed somewhere —
+/// not identical to the revision they chose. Sharing the first answer here made
+/// engr refuse a perfectly clean worktree, and say the file had uncommitted
+/// changes when it had none.
+#[test]
+fn an_explicit_historical_revision_is_still_a_valid_implemented_by_snapshot() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "test"],
+        vec!["config", "user.email", "test@example.com"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(&args)
+            .status()
+            .expect("git")
+            .success());
+    }
+    let commit = |message: &str| {
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", message]] {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(&args)
+                .status()
+                .expect("git")
+                .success());
+        }
+        engr::git::head(root).expect("HEAD")
+    };
+
+    std::fs::write(root.join("session.rs"), "fn first() {}\n").expect("write");
+    let earlier = commit("first");
+    std::fs::write(root.join("session.rs"), "fn second() {}\n").expect("rewrite");
+    commit("second");
+
+    let object = prepare(root, &["prepare", "--new", "--text", "an assertion"]);
+    confirm(root, &object);
+    let object = object["object"].as_str().expect("object").to_owned();
+
+    // Clean worktree; the file has simply moved on since the chosen commit.
+    let pinned = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &object,
+            "--add",
+            "--text",
+            "this is implemented in the earlier shape",
+            "--implemented-by-file",
+            "session.rs",
+            "--implemented-at",
+            &earlier,
+        ],
+    );
+    confirm(root, &pinned);
+    let stored = engr::ops::effective(root, &object).expect("object");
+    let relation = &stored.section(1).expect("§1").relations[0];
+    match &relation.target {
+        engr::semantics::Target::File { commit, path } => {
+            assert_eq!(commit, &earlier, "the snapshot the author named");
+            assert_eq!(path, "session.rs");
+        }
+        other => panic!("unexpected target {other:?}"),
+    }
+
+    // The guard it does keep: nothing the author read is committed at all.
+    std::fs::write(root.join("session.rs"), "fn uncommitted() {}\n").expect("edit");
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &object,
+            "--add",
+            "--text",
+            "implemented in something unsaved",
+            "--implemented-by-file",
+            "session.rs",
+            "--implemented-at",
+            &earlier,
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("uncommitted changes"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
