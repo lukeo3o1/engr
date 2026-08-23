@@ -2066,3 +2066,56 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
         "the spelling moved, the value did not"
     );
 }
+
+/// Governance and the verdict come from one reading of policy.
+///
+/// A mutation asks two things: is there a rule at all, and what does this
+/// attempt mean under the rules there are. Asked separately they are two reads
+/// of `.engr/rules/`, and nothing stops the rules moving in between — the
+/// workspace lock does not cover a directory people and `git checkout` edit
+/// directly.
+///
+/// The dangerous direction is one-way. A first read seeing no rule and a second
+/// seeing one gives "ungoverned" alongside a verdict composed from the new set;
+/// at an in-limit attempt that verdict is `NotReached`, and a mutation then goes
+/// through without the predecessor a governed one must carry. This pins the
+/// pairing rather than the interleaving — forcing that would need a seam that
+/// exists only for a test — so what it guards is that the two answers cannot be
+/// derived from different sets by construction.
+#[test]
+fn governance_and_the_verdict_are_answered_from_the_same_policy() {
+    let (_dir, root) = workspace();
+
+    let (governed, verdict) =
+        rules::assess(&root, Domain::Backlog, attempt(9)).expect("no rules at all");
+    assert!(!governed, "nothing governs a workspace with no rules");
+    assert_eq!(
+        verdict,
+        rules::Exhaustion::NotReached,
+        "and with nothing applicable there is nothing to exhaust"
+    );
+
+    write_rule(
+        &root,
+        "careful",
+        "---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 2\n---\n\n# Careful\n\nTwo tries.\n",
+    );
+
+    // Both answers move together, because they come from the same set.
+    let (governed, verdict) = rules::assess(&root, Domain::Backlog, attempt(2)).expect("in limit");
+    assert!(governed);
+    assert_eq!(verdict, rules::Exhaustion::NotReached);
+
+    let (governed, verdict) = rules::assess(&root, Domain::Backlog, attempt(3)).expect("past it");
+    assert!(
+        governed,
+        "a verdict composed from a rule cannot be paired with `ungoverned`"
+    );
+    assert_eq!(
+        verdict,
+        rules::Exhaustion::Exhausted(rules::RuleReview {
+            attempts: 3,
+            limit: 2
+        })
+    );
+}

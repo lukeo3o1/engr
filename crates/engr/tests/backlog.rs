@@ -1416,28 +1416,6 @@ fn a_topic_mutation_binds_the_whole_item() {
     assert_eq!(error.code, engr::EXIT_STALE);
 }
 
-/// Creating an item binds only that the id is free.
-#[test]
-fn creating_an_item_binds_only_its_own_absence() {
-    let (_dir, root) = workspace();
-    let existing = item(&root, "unrelated", "unresolved");
-    let fresh = engr::model::new_id();
-    let bound = backlog::Precondition::item_absent(fresh.clone());
-    bound.still_holds(&root).expect("nothing occupies it");
-
-    // Unrelated Backlog activity cannot stale a creation.
-    backlog::add_section(&root, &existing, "more", Vec::new(), &Prepared::first())
-        .expect("add elsewhere");
-    bound
-        .still_holds(&root)
-        .expect("another item is not this one");
-
-    // An item appearing at that id is the one thing that does.
-    let taken = backlog::Precondition::item_absent(existing);
-    let error = taken.still_holds(&root).expect_err("the id is occupied");
-    assert_eq!(error.code, engr::EXIT_STALE);
-}
-
 /// A merge binds the topic and every point it touches — destination included.
 ///
 /// The destination is not a bystander that merely receives: it is being
@@ -2045,15 +2023,18 @@ fn a_merge_precondition_must_cover_exactly_the_destination_and_its_sources() {
 
 /// A creation has no predecessor to bind, so it refuses to pretend it does.
 ///
-/// engr allocates the identity, so whatever id a caller prepared against, the
-/// item created is a different one. Checking the first and creating the second
-/// is not a weaker guarantee than none — it is a false one.
+/// engr mints the identity while creating and a caller cannot choose one, so
+/// whatever a caller prepared against, the item created is a different thing.
+/// Checking the first and creating the second is not a weaker guarantee than
+/// none; it is a false one.
 #[test]
 fn creating_an_item_refuses_a_precondition_it_could_not_honour() {
     let (_dir, root) = workspace();
-    let fresh = engr::model::new_id();
-    let bound = backlog::Precondition::item_absent(fresh);
-    bound.still_holds(&root).expect("nothing occupies it");
+    let elsewhere = item(&root, "unrelated", "unresolved");
+    let bound = backlog::Precondition::topic(&root, &elsewhere).expect("observe");
+    bound
+        .still_holds(&root)
+        .expect("it holds, and it authorizes nothing here");
 
     let error = backlog::create(
         &root,
@@ -2064,8 +2045,9 @@ fn creating_an_item_refuses_a_precondition_it_could_not_honour() {
     )
     .expect_err("the id checked would not be the id created");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(
-        backlog::ids(&root).expect("ids").is_empty(),
+    assert_eq!(
+        backlog::ids(&root).expect("ids"),
+        vec![elsewhere],
         "and nothing was created"
     );
 }

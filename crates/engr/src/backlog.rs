@@ -743,11 +743,6 @@ pub fn pin(root: &Path, path: &str, revision: Option<&str>) -> Result<(String, b
 #[derive(Clone, Serialize, PartialEq, Eq, Debug)]
 #[serde(tag = "precondition", rename_all = "snake_case")]
 pub enum Precondition {
-    /// Creating an item: only that the id is still free.
-    ///
-    /// Nothing else can affect it. Other Backlog activity is irrelevant to
-    /// whether this new item can exist.
-    ItemAbsent { item: String },
     /// Changing the topic: the complete parent item.
     ///
     /// The topic is shared context for every Section under it, so a change to
@@ -785,11 +780,6 @@ pub enum Precondition {
 }
 
 impl Precondition {
-    /// What a new item's creation rests on.
-    pub fn item_absent(item: impl Into<String>) -> Self {
-        Self::ItemAbsent { item: item.into() }
-    }
-
     /// Read the current predecessor for a topic change.
     pub fn topic(root: &Path, item: &str) -> Result<Self> {
         Ok(Self::of_item(&load(root, item)?))
@@ -924,8 +914,7 @@ impl Precondition {
     /// The item this precondition is about.
     pub fn item(&self) -> &str {
         match self {
-            Self::ItemAbsent { item }
-            | Self::SectionAbsent { item, .. }
+            Self::SectionAbsent { item, .. }
             | Self::Section { item, .. }
             | Self::Merge { item, .. } => item,
             Self::Item { item } => &item.id,
@@ -938,11 +927,6 @@ impl Precondition {
     /// would leave open the very gap it exists to close.
     pub fn still_holds(&self, root: &Path) -> Result<()> {
         match self {
-            Self::ItemAbsent { item } => match load(root, item) {
-                Err(error) if error.code == EXIT_NOT_FOUND => Ok(()),
-                Ok(_) => stale("that backlog id"),
-                Err(error) => Err(error),
-            },
             Self::Item { item } => {
                 let current = load(root, &item.id)?;
                 if &current == item {
@@ -1095,8 +1079,11 @@ struct Reviewed {
 
 impl Reviewed {
     fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
-        let governed = crate::rules::governs(root, crate::rules::Domain::Backlog)?;
-        match crate::rules::exhaustion(root, crate::rules::Domain::Backlog, attempt)? {
+        // One read of policy for both answers. Asking twice lets a rule appear
+        // between them and leaves this mutation acting on two pictures at once.
+        let (governed, verdict) =
+            crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
+        match verdict {
             // No applicable rule, or none of them out of attempts. Either way
             // there is no diagnostic to carry.
             crate::rules::Exhaustion::NotReached => Ok(Self {
@@ -1235,7 +1222,6 @@ impl Precondition {
     /// What this predecessor covers, for a refusal to name.
     fn describes(&self) -> String {
         match self {
-            Self::ItemAbsent { .. } => "an item that does not exist yet".to_owned(),
             Self::Item { .. } => "the whole item".to_owned(),
             Self::SectionAbsent { section, .. } => format!("§{section} not existing yet"),
             Self::Section { section, .. } => format!("§{}", section.id),

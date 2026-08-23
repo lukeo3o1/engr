@@ -1279,8 +1279,30 @@ pub fn exhaustion(root: &Path, domain: Domain, attempt: Attempt) -> Result<Exhau
 /// The question every caller that enforces "a reviewed mutation must carry what
 /// it was reviewed against" has to ask first, because with no applicable rule
 /// there is no review for a predecessor to anchor.
+///
+/// For an answer a mutation will act on, use [`assess`] instead: this reads
+/// policy on its own, and two separate reads can disagree.
 pub fn governs(root: &Path, domain: Domain) -> Result<bool> {
     Ok(!applicable(root, domain)?.is_empty())
+}
+
+/// Both questions a mutation asks of policy, from **one** read of it.
+///
+/// Whether a rule governs at all, and what the attempt means under the rules
+/// that do — asked separately, these come from two reads, and nothing stops the
+/// rules changing in between. The workspace lock does not help: `.engr/rules/`
+/// is edited by people and by `git checkout`, not through engr.
+///
+/// The dangerous direction is specific. A first read seeing no rule and a second
+/// seeing one gives `governed = false` with a verdict composed from the new set;
+/// at an in-limit attempt that verdict is `NotReached`, and the mutation then
+/// proceeds without the predecessor a governed mutation must carry — one apply
+/// acting on two contradictory pictures of policy. One snapshot cannot disagree
+/// with itself.
+pub fn assess(root: &Path, domain: Domain, attempt: Attempt) -> Result<(bool, Exhaustion)> {
+    let rules = bound_rules(root, domain)?;
+    let governed = !rules.is_empty();
+    Ok((governed, compose(domain, &rules, attempt)?))
 }
 
 /// Check an attestation against the subject as it stands right now.
