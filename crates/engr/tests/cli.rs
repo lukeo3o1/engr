@@ -658,8 +658,13 @@ fn migration_states_the_admission_version_two_only_implied() {
     // same generation the authority declares.
     assert_migration_is_deferred(root);
     let mut converted = untouched.clone();
-    let moved = store::to_current_object("fixture", store::Generation::at(2), &mut converted)
-        .expect("a version 2 object converts");
+    let moved = store::to_current_object(
+        "fixture",
+        store::Generation::at(2),
+        store::Reading::Repairing,
+        &mut converted,
+    )
+    .expect("a version 2 object converts");
     assert!(moved, "the representation really did move");
     let section = &converted["sections"][0];
     assert_eq!(section["admission"], "human");
@@ -826,6 +831,126 @@ fn a_current_workspace_holding_a_superseded_resource_says_so() {
     );
 }
 
+/// The one representation this generation replaced is the one `engr migrate`
+/// must be able to put right, and it is reached by an ordinary restore: an
+/// Object file from before the transition dropped back into a workspace whose
+/// authority already names the current version.
+///
+/// Reads fail closed, which is right — a file that disagrees with its own
+/// generation is not evidence of anything. But a detector that knows about
+/// fewer superseded representations than the migration can repair reports such
+/// a workspace as current, and then `migrate` declines it as needing nothing.
+#[test]
+fn a_restored_pre_generation_section_is_repairable_by_migrate() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "restored"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording a human confirmed",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json");
+    let admitted_at = before["sections"][0]["admitted_at"].clone();
+
+    // The Object keeps `state`; only its Sections are from before the
+    // transition. The authority is untouched and still names this version.
+    rewrite_object(root, &id, downgrade_sections);
+    assert_eq!(
+        store::validate_format(root).expect("detect"),
+        store::WorkspaceFormat::SupersededResources,
+        "a scan that only knows about the older lifecycle spelling calls this current"
+    );
+    assert_eq!(
+        run_engr(root, &["show", &id]).status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "reading it still fails closed"
+    );
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "the explicit recovery command must be able to repair it: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json");
+    assert_eq!(after["sections"][0]["admission"], "human");
+    assert_eq!(after["sections"][0]["admitted_at"], admitted_at);
+    assert_eq!(
+        store::validate_format(root).expect("detect"),
+        store::WorkspaceFormat::Current
+    );
+    assert!(run_engr(root, &["verify", &id]).status.success());
+}
+
+/// Repair is not a way in. It converts only the exact earlier shape, which
+/// carries no authority claim at all — a Section offering an `admission` beside
+/// `confirmed_at` is offering something no build of that generation could have
+/// written, and is refused whichever door it arrives at.
+#[test]
+fn repair_does_not_accept_an_authority_the_earlier_generation_could_not_write() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "no laundering"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    rewrite_object(root, &id, |object| {
+        downgrade_sections(object);
+        object
+            .get_mut("sections")
+            .and_then(|value| value.as_array_mut())
+            .expect("sections")[0]
+            .as_object_mut()
+            .expect("section")
+            .insert("admission".to_owned(), Value::String("agent".to_owned()));
+    });
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert_eq!(
+        migrated.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "migration must not launder a claimed authority into the current generation"
+    );
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json");
+    assert_eq!(
+        after["sections"][0]["admission"], "agent",
+        "and nothing was rewritten on the way to refusing it"
+    );
+    assert!(after["sections"][0].get("admitted_at").is_none());
+}
+
 /// A file that claims one generation while carrying another generation's fields
 /// is not old data — it is a contradiction, and reading it under whichever
 /// contract its own contents suggest is exactly how a hand edit mints authority.
@@ -891,6 +1016,7 @@ fn a_resource_that_disagrees_with_its_declared_generation_is_refused() {
     let converted = store::to_current_object(
         "fixture",
         store::Generation::at(2),
+        store::Reading::Repairing,
         &mut serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
             .expect("json"),
     );

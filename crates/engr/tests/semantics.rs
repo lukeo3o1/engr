@@ -1108,8 +1108,13 @@ fn a_migrated_workspace_carries_no_invented_classification() {
          back to asserting the migrated outcome"
     );
     let mut planned: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
-    store::to_current_object("fixture", store::LEGACY_GENERATION, &mut planned)
-        .expect("a legacy object converts");
+    store::to_current_object(
+        "fixture",
+        store::LEGACY_GENERATION,
+        store::Reading::Repairing,
+        &mut planned,
+    )
+    .expect("a legacy object converts");
     assert!(planned.get("status").is_none(), "{planned}");
     assert!(
         planned.get("type").is_none(),

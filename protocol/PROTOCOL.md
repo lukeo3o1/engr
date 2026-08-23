@@ -2074,6 +2074,23 @@ a file that lost a required field, not one that predates it.
 Historical snapshots follow the same rule under their own recorded version, so
 what a commit says is read as what it said.
 
+Reading and repairing are different questions and MUST NOT share one rule. A
+reader refuses a resource that disagrees with its own generation. `engr migrate`
+— the one explicit recovery command — MUST be able to put that resource right,
+or the only representation a generation replaced is the one nothing can fix; an
+ordinary restore of a pre-transition file into a workspace already at the new
+version reaches exactly that state.
+
+Repair is narrow, and narrow is what makes it safe. It converts only the exact
+earlier shape, which carries no authority claim at all. A section offering an
+`admission` beside `confirmed_at` is offering something no build of the earlier
+generation could have written, and is refused at every door including this one.
+
+Whatever detects that a workspace needs migrating MUST know about every
+representation the migration can repair. A detector that knows about fewer
+reports the workspace as current, and the recovery command then declines it as
+needing nothing.
+
 ### A generation still being built is never committed to
 
 A coordinated transition may be implemented in stages. While it is unfinished, a
@@ -2084,9 +2101,10 @@ rest of the way afterwards — it would be left declaring a version whose later
 requirements it cannot satisfy, with no way back.
 
 Such a build still reads existing workspaces, and still refuses to write to
-them. A workspace it creates itself is at the new version from the start and is
-a development artifact of an unreleased build. The refusal MUST say that the
-version is unfinished, so it is not read as corruption.
+them. Only a migration that would *change* the declared version is held back: a
+workspace whose authority already names that version is not moved anywhere by
+being repaired, so the recovery route above stays open. The refusal MUST say
+that the version is unfinished, so it is not read as corruption.
 
 ### What the workspace version is for
 

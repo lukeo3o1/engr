@@ -252,19 +252,27 @@ fn detect_legacy(root: &Path) -> Result<bool> {
 fn contains_legacy_objects(root: &Path) -> Result<bool> {
     let mut legacy = false;
     for id in object_ids(root)? {
-        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
+        let path = object_path(root, &id);
+        let Ok(mut value) = read_json::<serde_json::Value>(&path) else {
             continue;
         };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        // A file claiming both spellings cannot say which it means, so it is not
-        // counted as legacy on the strength of the one that happens to be there.
-        // `decode_object` refuses it when it is loaded.
-        if object.contains_key("state") {
-            continue;
-        }
-        legacy |= object.contains_key("status");
+        // The same question migration asks, asked by the same function, so this
+        // scan cannot come to know about fewer superseded representations than
+        // the migration can repair. A scan that knew about only some of them
+        // would report a workspace as current while holding exactly the shape
+        // that `engr migrate` exists to put right — and `migrate` would then
+        // decline it as needing nothing.
+        //
+        // A file that contradicts itself is not counted here on the strength of
+        // one spelling: the conversion refuses it, and `decode_object` refuses
+        // it again the moment something loads that Object.
+        legacy |= to_current_object(
+            &path.display().to_string(),
+            Generation::at(WORKSPACE_VERSION),
+            Reading::Repairing,
+            &mut value,
+        )
+        .unwrap_or(false);
     }
     Ok(legacy)
 }
@@ -323,6 +331,7 @@ struct MigrationEntry {
 pub fn to_current_object(
     label: &str,
     source: Generation,
+    reading: Reading,
     value: &mut serde_json::Value,
 ) -> Result<bool> {
     let object = value.as_object_mut().ok_or_else(|| {
@@ -353,6 +362,32 @@ pub fn to_current_object(
             .as_object_mut()
             .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{label} must be a JSON object")))?;
         if source.admits_mixed_authority() {
+            // A resource restored from before this generation, sitting under an
+            // authority that already names it. Reading it is refused — a file
+            // that disagrees with its own generation is not evidence of anything
+            // — but migration must be able to *repair* it, or the one explicit
+            // recovery command has nothing to say about the one representation
+            // this generation replaced.
+            //
+            // Narrow, and narrow is what makes it safe: only the exact earlier
+            // shape, which carries no authority claim at all. A section offering
+            // an `admission` alongside `confirmed_at` is offering something no
+            // build of the earlier generation could have written, and is refused
+            // here exactly as it is below.
+            if reading == Reading::Repairing
+                && section.contains_key("confirmed_at")
+                && !section.contains_key("admission")
+                && !section.contains_key("admitted_at")
+            {
+                let confirmed_at = section.remove("confirmed_at").expect("checked above");
+                section.insert("admitted_at".to_owned(), confirmed_at);
+                section.insert(
+                    "admission".to_owned(),
+                    serde_json::Value::String(Admission::Human.as_str().to_owned()),
+                );
+                moved = true;
+                continue;
+            }
             // Its own generation's shape, exactly. `admission` is required
             // there, so absence is a file that lost it rather than one that
             // predates it, and reading a lost field as `human` would invent the
@@ -406,6 +441,24 @@ pub fn to_current_object(
         moved = true;
     }
     Ok(moved)
+}
+
+/// Whether this read may repair a superseded representation it finds, or only
+/// report it.
+///
+/// Two different questions, and answering them with one rule was the mistake:
+/// a reader must refuse a resource that disagrees with its own generation,
+/// because such a file is not evidence of anything — while `engr migrate`, the
+/// one explicit recovery command, must be able to put it right. Without the
+/// distinction the only representation this generation replaces is precisely the
+/// one migration cannot fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reading {
+    /// Refuse anything that is not exactly what its generation defines.
+    Strict,
+    /// Additionally convert the earlier generation's shape where it carries no
+    /// claim that generation could not have made.
+    Repairing,
 }
 
 /// The workspace generation a stored representation was written under.
@@ -479,7 +532,12 @@ fn decode_object(
     // Reading an unmigrated workspace is allowed; writing to one is not. So the
     // conversion happens here, on the way in, and `require_current` is what
     // stops anything from being written back through it.
-    to_current_object(&path.display().to_string(), source, &mut value)?;
+    to_current_object(
+        &path.display().to_string(),
+        source,
+        Reading::Strict,
+        &mut value,
+    )?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     object.validate()?;
@@ -502,7 +560,12 @@ fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
     for id in object_ids(root)? {
         let path = object_path(root, &id);
         let mut planned: serde_json::Value = read_json(&path)?;
-        let moved = to_current_object(&path.display().to_string(), source, &mut planned)?;
+        let moved = to_current_object(
+            &path.display().to_string(),
+            source,
+            Reading::Repairing,
+            &mut planned,
+        )?;
         // Deserialize the planned form, not just its converted keys. This
         // catches missing required fields and illegal legacy values before any
         // neighboring file is rewritten.
@@ -539,8 +602,14 @@ pub fn migrate(root: &Path) -> Result<()> {
     // hear it in the same terms it always did, rather than being turned away at
     // the door by an unrelated refusal that hides a real corruption.
     let entries = preflight_migration(root)?;
+    // Only a migration that would *change* the declared version is held back.
+    // Repairing a workspace whose authority already names this version moves it
+    // nowhere: it is already here, and refusing would leave the one explicit
+    // recovery command unable to put right the one representation this version
+    // replaced.
+    let moves_the_version = before != WorkspaceFormat::SupersededResources;
     ensure!(
-        crate::WORKSPACE_VERSION_IS_COMPLETE,
+        crate::WORKSPACE_VERSION_IS_COMPLETE || !moves_the_version,
         EXIT_SCHEMA,
         "this build implements workspace version {WORKSPACE_VERSION}, which is not finished yet, so it will not move a workspace into it. Migration is one way and confirmed history is never rewritten, so a workspace migrated into a shape that is still changing could not be brought the rest of the way afterwards. Use a released build"
     );

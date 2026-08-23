@@ -179,7 +179,12 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<crate::stor
         let Some(id) = name.strip_suffix(".json") else {
             continue;
         };
-        crate::store::to_current_object(path, crate::store::LEGACY_GENERATION, &mut value)?;
+        crate::store::to_current_object(
+            path,
+            crate::store::LEGACY_GENERATION,
+            crate::store::Reading::Strict,
+            &mut value,
+        )?;
         let object: Object = serde_json::from_value(value)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
         object.validate()?;
@@ -217,7 +222,7 @@ pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> 
     // The snapshot's own representation, converted the way migration converts
     // it. Nothing is written back — the commit is immutable and stays as it was
     // — so this is a reading of history rather than an edit to it.
-    crate::store::to_current_object(&path, source, &mut value)?;
+    crate::store::to_current_object(&path, source, crate::store::Reading::Strict, &mut value)?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     object.validate()?;
