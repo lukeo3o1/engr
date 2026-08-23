@@ -951,7 +951,7 @@ fn compose(domain: Domain, rules: &[BoundRule], attempt: Attempt) -> Result<Exha
     // first, so "some rule is past its ceiling" and "the attempt exceeds the
     // smallest ceiling" are the same statement — which is also why this
     // number is the one Backlog records as `limit`.
-    let Some(limit) = rules.iter().map(|rule| rule.review.max_attempts).min() else {
+    let Some(limit) = smallest_ceiling(rules) else {
         return Ok(Exhaustion::NotReached);
     };
     if attempt.get() <= limit {
@@ -1111,6 +1111,40 @@ fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
 /// rule is not a rule that does not apply: admitting under an incomplete set is
 /// the one outcome this mechanism exists to prevent, so the mutation it governs
 /// is blocked until the rule is repaired.
+/// Rebuild a binding from Rule snapshots somebody else already resolved.
+///
+/// The counterpart to [`bind`], which reads the workspace. This one takes what
+/// a candidate stored, so a reader can recompute the review identity **from the
+/// candidate alone** and find out whether the name it gives itself is the name
+/// its own contents produce.
+///
+/// That is a different question from whether the review is still current, and
+/// the difference matters: this catches a candidate edited on disk, while only
+/// re-resolving the workspace catches project policy that has moved since. Both
+/// are asked, at different moments, and neither substitutes for the other.
+pub fn rebind(
+    domain: Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+    rules: Vec<BoundRule>,
+) -> Result<ReviewBinding> {
+    within_safe_integers(&mutation, "mutation")?;
+    within_safe_integers(&precondition, "precondition")?;
+    let mut rules = rules;
+    canonical_order(&mut rules, "rule")?;
+    Ok(ReviewBinding {
+        domain,
+        mutation,
+        precondition,
+        rules,
+    })
+}
+
+/// The smallest ceiling in an applicable set — the one an attempt meets first.
+pub fn smallest_ceiling(rules: &[BoundRule]) -> Option<u32> {
+    rules.iter().map(|rule| rule.review.max_attempts).min()
+}
+
 pub fn bind(
     root: &Path,
     domain: Domain,

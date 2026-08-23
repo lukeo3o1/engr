@@ -21,7 +21,7 @@
 
 use crate::model::{Action, Merge, Object, Payload, Ref, Section};
 use crate::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
-use crate::{ensure, Error, Result, EXIT_SCHEMA, EXIT_USAGE};
+use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA, EXIT_USAGE};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -918,5 +918,303 @@ mod envelope_tests {
             shown.digest().expect("digest"),
             "and so is what the human was shown"
         );
+    }
+}
+
+/// Check a stored Rule Review block against itself.
+///
+/// `integrity_sha256` covering these bytes proves only that nobody edited the
+/// envelope after it was written. It says nothing about whether the block was
+/// *coherent when written*, and a review block that names a review identity its
+/// own contents do not produce is exactly what a human must not be shown as
+/// settled. #25 §14 requires this on load and render, not only at confirmation,
+/// and requires it to fail closed.
+///
+/// This is the half that needs no workspace: everything here is decidable from
+/// the candidate's own bytes. Recomputing the review *identity* additionally
+/// needs the mutation descriptor projection, which is [`check_review_identity`].
+pub fn check_review_report(review: &CandidateReview) -> Result<()> {
+    // Reject attempt 0 through the same type the rest of the crate counts
+    // attempts with, so the candidate cannot carry a number no policy question
+    // has an answer for.
+    let attempt = crate::rules::Attempt::new(review.attempt)?;
+    within_safe_integers(&serde_json::json!(review.attempt), "review attempt")?;
+
+    // `exhausted` is the one outcome that is mechanically decidable, so it is
+    // the one engr checks. `failed` is an Agent's semantic judgement and is
+    // taken as attested — #25 is explicit that engr does not pretend prose
+    // comprehension is decidable.
+    let ceiling = crate::rules::smallest_ceiling(&review.rules);
+    match (review.result, ceiling) {
+        (ReviewResult::Exhausted, Some(limit)) => ensure!(
+            attempt.get() > limit,
+            EXIT_INVARIANT,
+            "attempt {} is exhausted against a ceiling of {limit}, which it has not passed",
+            attempt.get()
+        ),
+        (ReviewResult::Exhausted, None) => {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                "a review with no rules cannot be exhausted".to_owned(),
+            ))
+        }
+        (_, Some(limit)) => ensure!(
+            attempt.get() <= limit,
+            EXIT_INVARIANT,
+            "attempt {} is past the ceiling of {limit} and can only be exhausted, not {}",
+            attempt.get(),
+            serde_json::to_value(review.result)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        ),
+        (_, None) => {}
+    }
+
+    // A human overriding a review is being asked to overrule something, and
+    // must be able to read what. An empty string is the same absence with a
+    // different spelling, so it is refused as one.
+    match (review.result, review.explanation.as_deref()) {
+        (ReviewResult::Passed, None) => {}
+        (ReviewResult::Passed, Some(_)) => {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                "a passed review carries no explanation".to_owned(),
+            ))
+        }
+        (_, Some(text)) if !text.trim().is_empty() => {}
+        _ => {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                "a review offered for override must say what is being overridden".to_owned(),
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Recompute the review identity from the candidate's own Rule snapshots.
+///
+/// The caller supplies the mutation descriptor and predecessor projection,
+/// because *which* projection an Object-domain review binds over is not settled
+/// (see the note on this function's only production caller when one exists).
+/// Everything downstream of that choice lives here.
+///
+/// Failing closed is the point: a candidate whose stored snapshots do not
+/// reproduce the identity it names is not a candidate with a stale review, it
+/// is a candidate making a claim about a review that never happened that way.
+pub fn check_review_identity(
+    review: &CandidateReview,
+    domain: crate::rules::Domain,
+    mutation: serde_json::Value,
+    precondition: serde_json::Value,
+) -> Result<()> {
+    let binding = crate::rules::rebind(domain, mutation, precondition, review.rules.clone())?;
+    let checked = crate::digest::REVIEW.recheck(&review.review_digest, |version| {
+        binding.digest_under(version)
+    })?;
+    ensure!(
+        checked.agrees(),
+        EXIT_INVARIANT,
+        "the candidate names review {} and its own rule snapshots produce {}",
+        checked.attested,
+        checked.expected
+    );
+    Ok(())
+}
+
+/// The agreement #25 §14 requires between a candidate's two identities.
+///
+/// A confirmation over a failed or exhausted review authorizes *that review's
+/// result* as well as the mutation, so the semantic identity has to say which
+/// review — otherwise the same bytes would prove an override of any review that
+/// ever produced this mutation. A pass carries nothing, because a pass adds no
+/// claim the human is being asked to overrule.
+pub fn check_review_agreement(
+    review: Option<&CandidateReview>,
+    subject_review_digest: Option<&str>,
+) -> Result<()> {
+    let expected = match review {
+        None => None,
+        Some(review) => match review.result {
+            ReviewResult::Passed => None,
+            ReviewResult::Failed | ReviewResult::Exhausted => Some(review.review_digest.as_str()),
+        },
+    };
+    ensure!(
+        subject_review_digest == expected,
+        EXIT_INVARIANT,
+        "the candidate subject names {} as the review it depends on, and its review context requires {}",
+        subject_review_digest.unwrap_or("none"),
+        expected.unwrap_or("none")
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod review_context_tests {
+    use super::*;
+    use crate::rules::{BoundRule, Domain, OnExhaustion, Review};
+
+    fn rule(id: &str, max_attempts: u32) -> BoundRule {
+        BoundRule {
+            id: id.to_owned(),
+            domains: vec![Domain::Object],
+            based_on: Vec::new(),
+            review: Review {
+                max_attempts,
+                on_exhaustion: OnExhaustion::Reject,
+            },
+            body: "record what happened, not what is planned".to_owned(),
+        }
+    }
+
+    fn review(result: ReviewResult, attempt: u32, rules: Vec<BoundRule>) -> CandidateReview {
+        CandidateReview {
+            review_digest: format!("1:{}", "a".repeat(64)),
+            attempt,
+            result,
+            rules,
+            explanation: match result {
+                ReviewResult::Passed => None,
+                _ => Some("the wording is a plan, not a record".to_owned()),
+            },
+        }
+    }
+
+    #[test]
+    fn exhaustion_must_agree_with_the_ceilings_it_names() {
+        // Two rules, and the smaller ceiling is the one an attempt meets first.
+        let rules = vec![rule("a", 5), rule("b", 2)];
+        check_review_report(&review(ReviewResult::Exhausted, 3, rules.clone()))
+            .expect("past the smallest ceiling");
+        let claimed = check_review_report(&review(ReviewResult::Exhausted, 2, rules.clone()))
+            .expect_err("attempt 2 has not passed a ceiling of 2");
+        assert!(claimed.to_string().contains("ceiling of 2"), "{claimed}");
+        let overrun = check_review_report(&review(ReviewResult::Failed, 3, rules))
+            .expect_err("attempt 3 is past the ceiling and can only be exhausted");
+        assert!(
+            overrun.to_string().contains("past the ceiling"),
+            "{overrun}"
+        );
+    }
+
+    #[test]
+    fn a_review_with_no_rules_cannot_be_exhausted() {
+        let empty = check_review_report(&review(ReviewResult::Exhausted, 9, Vec::new()))
+            .expect_err("nothing governs this, so nothing can run out");
+        assert!(empty.to_string().contains("no rules"), "{empty}");
+        // An ungoverned mutation still passes, and there is no ceiling to meet.
+        check_review_report(&review(ReviewResult::Passed, 9, Vec::new())).expect("ungoverned");
+    }
+
+    #[test]
+    fn there_is_no_attempt_zero_inside_a_candidate() {
+        let zero = check_review_report(&review(ReviewResult::Passed, 0, vec![rule("a", 5)]))
+            .expect_err("counted from 1");
+        assert!(zero.to_string().contains("attempt 0"), "{zero}");
+    }
+
+    #[test]
+    fn an_override_must_say_what_is_being_overridden() {
+        let mut blank = review(ReviewResult::Failed, 1, vec![rule("a", 5)]);
+        blank.explanation = Some("   ".to_owned());
+        let refused = check_review_report(&blank).expect_err("whitespace is absence respelled");
+        assert!(refused.to_string().contains("must say what"), "{refused}");
+
+        blank.explanation = None;
+        check_review_report(&blank).expect_err("and so is nothing at all");
+
+        let mut chatty = review(ReviewResult::Passed, 1, vec![rule("a", 5)]);
+        chatty.explanation = Some("nothing to overrule".to_owned());
+        check_review_report(&chatty).expect_err("a pass overrules nothing");
+    }
+
+    /// The check that makes the stored snapshots load-bearing rather than
+    /// decorative: edit one, and the identity the candidate names no longer
+    /// follows from it.
+    #[test]
+    fn snapshots_that_do_not_produce_the_named_identity_fail_closed() {
+        let mutation = serde_json::json!({"action": "section_revised"});
+        let precondition = serde_json::json!({"expected_rev": 7});
+        let rules = vec![rule("a", 5)];
+        let binding = crate::rules::rebind(
+            Domain::Object,
+            mutation.clone(),
+            precondition.clone(),
+            rules.clone(),
+        )
+        .expect("rebind");
+        let honest = CandidateReview {
+            review_digest: crate::digest::REVIEW
+                .emit(binding.digest_under(1).expect("digest"))
+                .expect("emit")
+                .to_string(),
+            ..review(ReviewResult::Passed, 1, rules)
+        };
+        check_review_identity(
+            &honest,
+            Domain::Object,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("its own snapshots produce the name it gives itself");
+
+        // Same digest, a ceiling quietly loosened. The review identity covers
+        // the effective policy, so this cannot pass as the same review.
+        let mut edited = honest.clone();
+        edited.rules = vec![rule("a", 50)];
+        let caught = check_review_identity(&edited, Domain::Object, mutation.clone(), precondition)
+            .expect_err("edited on disk");
+        assert!(
+            caught.to_string().contains("rule snapshots produce"),
+            "{caught}"
+        );
+    }
+
+    /// The snapshot list is a set, and a candidate that stored it in another
+    /// order must still reproduce the same identity — otherwise every reader
+    /// would have to preserve an ordering the protocol calls insignificant.
+    #[test]
+    fn the_stored_snapshot_order_is_not_part_of_the_identity() {
+        let mutation = serde_json::json!({"action": "section_revised"});
+        let precondition = serde_json::json!({"expected_rev": 7});
+        let one = crate::rules::rebind(
+            Domain::Object,
+            mutation.clone(),
+            precondition.clone(),
+            vec![rule("a", 5), rule("b", 2)],
+        )
+        .expect("rebind");
+        let other = crate::rules::rebind(
+            Domain::Object,
+            mutation,
+            precondition,
+            vec![rule("b", 2), rule("a", 5)],
+        )
+        .expect("rebind");
+        assert_eq!(
+            one.digest_under(1).expect("digest"),
+            other.digest_under(1).expect("digest")
+        );
+    }
+
+    #[test]
+    fn only_an_override_carries_the_review_into_the_semantic_identity() {
+        let digest = format!("1:{}", "a".repeat(64));
+        let passed = review(ReviewResult::Passed, 1, vec![rule("a", 5)]);
+        let failed = review(ReviewResult::Failed, 1, vec![rule("a", 5)]);
+
+        check_review_agreement(None, None).expect("no review, nothing named");
+        check_review_agreement(None, Some(&digest))
+            .expect_err("named a review that did not happen");
+        check_review_agreement(Some(&passed), None).expect("a pass adds no claim");
+        check_review_agreement(Some(&passed), Some(&digest))
+            .expect_err("a pass is not an override");
+        check_review_agreement(Some(&failed), Some(&digest))
+            .expect("the override names its review");
+        check_review_agreement(Some(&failed), None).expect_err("an override must say which review");
+        check_review_agreement(Some(&failed), Some(&format!("1:{}", "c".repeat(64))))
+            .expect_err("and must name the one it actually overrode");
     }
 }
