@@ -1105,12 +1105,6 @@ fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Freeze what a review of this mutation has to cover.
-///
-/// Fails closed if any applicable rule cannot be fully resolved. An unusable
-/// rule is not a rule that does not apply: admitting under an incomplete set is
-/// the one outcome this mechanism exists to prevent, so the mutation it governs
-/// is blocked until the rule is repaired.
 /// Rebuild a binding from Rule snapshots somebody else already resolved.
 ///
 /// The counterpart to [`bind`], which reads the workspace. This one takes what
@@ -1145,6 +1139,12 @@ pub fn smallest_ceiling(rules: &[BoundRule]) -> Option<u32> {
     rules.iter().map(|rule| rule.review.max_attempts).min()
 }
 
+/// Freeze what a review of this mutation has to cover.
+///
+/// Fails closed if any applicable rule cannot be fully resolved. An unusable
+/// rule is not a rule that does not apply: admitting under an incomplete set is
+/// the one outcome this mechanism exists to prevent, so the mutation it governs
+/// is blocked until the rule is repaired.
 pub fn bind(
     root: &Path,
     domain: Domain,
