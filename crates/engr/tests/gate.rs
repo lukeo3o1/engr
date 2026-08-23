@@ -1936,3 +1936,61 @@ impl NoteErr for engr::Result<()> {
         }
     }
 }
+
+/// Two direct callers, one predecessor. The check that refuses a revision the
+/// next load would reject reads the tail, so a read-then-append with nothing
+/// held between them is both writers agreeing on the same predecessor and both
+/// appending it.
+///
+/// The gate happens to be serialized because `confirm` already holds the writer
+/// lock, which is exactly why the public primitive cannot rely on its callers:
+/// a direct library caller is not inside it.
+#[test]
+fn two_direct_callers_cannot_both_append_the_same_revision() {
+    let (dir, root) = workspace();
+    let id = new_object(&root, "one predecessor");
+    let after = |rev: u64| {
+        let added = payload(Action::SectionAdded, &id, "wording");
+        engr::model::Event {
+            format: engr::model::EVENT_FORMAT.to_owned(),
+            version: engr::EVENT_ENVELOPE_VERSION_V0,
+            event_id: engr::model::new_id(),
+            rev,
+            time: "2026-08-23T00:00:00Z".to_owned(),
+            confirmation: engr::model::Confirmation {
+                challenge: "TEST00".to_owned(),
+                payload_sha256: added.sha256().expect("hash"),
+            },
+            payload: added,
+        }
+    };
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let outcomes: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let root = root.clone();
+                let event = after(2);
+                scope.spawn(move || {
+                    barrier.wait();
+                    store::append_event(&root, &event).is_ok()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .collect()
+    });
+
+    assert_eq!(
+        outcomes.iter().filter(|ok| **ok).count(),
+        1,
+        "exactly one of two writers may take a predecessor"
+    );
+    let events = store::load_events(&root, &id).expect("and the history still loads");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].rev, 2);
+    drop(dir);
+}

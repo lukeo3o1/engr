@@ -1207,7 +1207,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             candidate.context.oversize,
         )?;
     }
-    store::append_event(root, &event)?;
+    store::append_event_locked(root, &event)?;
     store::save_object(root, &object)?;
     discard_locked(root, code)?;
     Ok(Admitted { event, object })

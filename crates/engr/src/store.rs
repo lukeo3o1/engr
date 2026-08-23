@@ -779,7 +779,25 @@ fn check_event_generation(event: &Event) -> Result<()> {
     Ok(())
 }
 
+/// Append one confirmed record, taking the workspace writer lock.
+///
+/// The lock belongs here rather than at the caller because the check this
+/// function performs is about the file it is about to write: it reads the tail
+/// to refuse a revision the next load would reject, and a read-then-append with
+/// nothing held between them is two writers agreeing on the same predecessor and
+/// both appending it. That is the exact durable boundary this path exists to
+/// keep sound, so leaving the serialization to whoever happens to call is
+/// leaving it to chance.
+///
+/// [`append_event_locked`] is the same work for a caller that already holds the
+/// lock — `confirm` does, and taking it again from the same process would wait
+/// on a lock nothing will release.
 pub fn append_event(root: &Path, event: &Event) -> Result<()> {
+    with_lock(root, || append_event_locked(root, event))
+}
+
+/// [`append_event`] for a caller already inside [`with_lock`].
+pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // The durable Event path is part of the workspace-generation boundary, and a
     // direct library caller reaches it without passing the gate. Asked here as
     // well as there, because "this build may write this workspace" is a property
