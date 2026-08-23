@@ -1607,3 +1607,70 @@ fn a_candidate_that_still_declares_backlog_material_is_refused_not_reinterpreted
     let response = format!("CONFIRM {challenge}");
     assert!(gate::confirm(&root, &response).is_err());
 }
+
+/// The durable write boundary is where "implemented but not written" has to
+/// hold. `prepare` refusing is not enough: a candidate is a file, and `confirm`
+/// loads one that is already on disk.
+///
+/// Without this, `append_event` accepts a version 1 record carrying the merge
+/// shape version 1 never defined — and `load_events` then refuses that same
+/// record, so the supported confirmation path writes history its own next read
+/// rejects.
+#[test]
+fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "write boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    admit(&root, payload(Action::SectionAdded, &id, "two"));
+
+    let merged = payload(
+        Action::SectionMerged {
+            merge: Merge::Into {
+                destination: 1,
+                sources: vec![2],
+            },
+        },
+        &id,
+        "together",
+    );
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 4,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: merged.sha256().expect("hash"),
+        },
+        payload: merged,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("a generation may only carry the shapes it defined");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    store::load_events(&root, &id).expect("and the history is still readable");
+}
+
+/// The same boundary for the Object file. `Section.admission` is model state
+/// with no version 2 representation, so serializing it away would turn Agent
+/// knowledge into Human authority the moment the bytes were read back.
+#[test]
+fn the_object_write_boundary_refuses_authority_it_cannot_represent() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "authority boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+
+    let mut object = store::load_object(&root, &id).expect("object");
+    object.sections[0].admission = engr::semantics::Admission::Agent;
+    let error = store::save_object(&root, &object)
+        .expect_err("agent admission has no representation at this version");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    let reloaded = store::load_object(&root, &id).expect("object");
+    assert_eq!(
+        reloaded.sections[0].admission,
+        engr::semantics::Admission::Human,
+        "and nothing on disk changed"
+    );
+}
