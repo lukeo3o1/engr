@@ -1939,6 +1939,75 @@ moves the authority to the current version, and preserves compatible legacy
 markers and confirmed Event envelopes. Unknown or newer workspace versions are
 never mutated and never read.
 
+### What the admitting path may do
+
+Durable knowledge will arrive through two paths — the Human Gate, and Agent Rule
+Review — and a Section records which one admitted its current semantics. The
+model implements that now; the representation becomes durable with the
+coordinated transition described below.
+
+`Object.title` is **non-authoritative navigation and discovery metadata**. It is
+what a listing prints so a reader can find the record; it is not identity, it
+need not be unique, and nothing about what the Object *means* rests on it. Older
+wording naming `title`, `type` and `state` together as human-authoritative does
+not describe the current design: after the protocol-defined neutral
+initialization, the human-only Object metadata is exactly `type` and `state`.
+
+From that, and from a Section's own admission, the whole authority matrix
+follows:
+
+```text
+agent MUST NOT carry a becomes destination
+agent MUST NOT use object_closed, object_reopened,
+              object_classified or object_superseded
+agent MUST NOT delete a section admitted through the Human Gate
+agent MUST NOT reword one either, which would leave assented
+              wording standing as ungated
+agent merge MUST consolidate only agent-admitted sections,
+              whichever shape the merge is written in
+agent sections MUST NOT carry relations[] or role=supersession
+agent MAY create and rename a title
+```
+
+`type` and `state` are human-authoritative, and a field does not become
+agent-writable because it is reached through a different action — which is why a
+destination is admissible on the Human path and refused on the Agent one, on the
+very same action.
+
+**Deletion is decided by the current state, not by the envelope.** Whether
+removing §3 is legal depends on what §3 currently is, which no record carries and
+no schema can express. That rule therefore belongs to the current-state model,
+and a reducer MUST NOT rely on a later envelope layer to make its own state
+transition legal. For the same reason a projection MUST be closed under the
+model's invariants: the Section a transition produces is checked as it is built,
+rather than left for a later write to refuse.
+
+### A generation still being built is never written
+
+A coordinated schema transition may be implemented in stages, and version 3 is
+one: mixed Section authority, the admission timestamp, Section and Object
+integrity, selective Ref digests, and the Event and candidate representation
+changes are one contract, not a list of independent additions.
+
+A version has exactly one canonical interpretation for current resources. So
+while such a transition is unfinished, a build that implements part of it MUST
+NOT create, write or migrate to that version, and MUST NOT emit records claiming
+the Event or candidate generations it defines. Otherwise the version would name
+two shapes — whatever the build has reached, and the finished contract — and a
+workspace moved into the first could never be brought to the second, because
+migration is one way and confirmed history is never rewritten.
+
+Three tempting ways round it are all closed. A build MUST NOT invent a temporary
+development version to write instead; MUST NOT write resources shaped for the new
+version under the old one; and MUST NOT treat "the build is unreleased" as
+licence to let one version mean more than one thing.
+
+What a build in that state may do is implement the model and test it, through
+paths that create no durable artifact. The durable surface stays exactly where it
+was until the whole transition is implemented, and that final step is what makes
+the new version current — enabling normal creation, normal writes, and the
+migration in one move.
+
 ### What the workspace version is for
 
 It governs how **persisted data is interpreted**, including data whose bytes do

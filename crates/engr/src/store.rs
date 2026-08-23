@@ -12,7 +12,7 @@
 //!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
-use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
+use crate::model::{replay_recoverable_tail, Action, Event, Merge, Object, EVENT_FORMAT};
 use crate::{
     ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
@@ -475,6 +475,25 @@ pub fn load_object(root: &Path, id: &str) -> Result<Object> {
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
+    // Model state with no representation at this version fails closed rather
+    // than being serialized away. `Section.admission` is not persisted yet, so
+    // writing an Agent Section would drop the one field that says these words
+    // carry no human authority — and reading the same bytes back would answer
+    // `human`, because at this version the Human Gate is the only door there is.
+    //
+    // That is laundering, not lost presentation: the authority would be
+    // manufactured by a round trip. Nothing in this build produces an Agent
+    // Section yet, which is exactly why the boundary belongs here now, while the
+    // only thing it can refuse is a mistake.
+    for section in &object.sections {
+        ensure!(
+            section.admission == crate::semantics::Admission::Human,
+            EXIT_SCHEMA,
+            "§{}: {} admission has no representation at workspace version {WORKSPACE_VERSION}, and writing it would read back as human",
+            section.id,
+            section.admission.as_str()
+        );
+    }
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -614,7 +633,50 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     }
 }
 
+/// A record may carry only the shapes its own generation defined.
+///
+/// One rule, asked on the way in *and* on the way out, because those two are the
+/// same question and answering it in only one place is how they drift. Asked
+/// only at read, a write path appends history its own next read refuses. Asked
+/// only at write, a file that arrived some other way is replayed under rules it
+/// was never written against.
+///
+/// What it currently excludes is the merge that names the Section surviving it.
+/// That belongs to the Event generation the coordinated Phase-3 transition
+/// targets; the model implements it, and nothing writes it. A record carrying it
+/// under the generation this build does emit would be claiming that version
+/// means something it does not, and replaying it would reconstruct a different
+/// Object from the one that was admitted.
+fn check_event_generation(event: &Event) -> Result<()> {
+    // The generation itself, before anything about its contents. Leaving this to
+    // the read side alone was the same asymmetry one level up: a record naming a
+    // generation this build does not emit could be written and then refused by
+    // the very next read of the log it was written to.
+    ensure!(
+        event.version == EVENT_ENVELOPE_VERSION_V0,
+        EXIT_SCHEMA,
+        "unsupported event version {}",
+        event.version
+    );
+    ensure!(
+        !matches!(
+            &event.payload.action,
+            Action::SectionMerged {
+                merge: Merge::Into { .. }
+            }
+        ),
+        EXIT_SCHEMA,
+        "event version {} does not define a merge that names the section surviving it",
+        event.version
+    );
+    Ok(())
+}
+
 pub fn append_event(root: &Path, event: &Event) -> Result<()> {
+    // Before anything is written, and before the Object is saved — `confirm`
+    // appends here first, so refusing at this point leaves the workspace exactly
+    // as it was rather than advanced past history it could not record.
+    check_event_generation(event)?;
     let path = events_path(root, &event.payload.object);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
@@ -655,16 +717,16 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
             path.display(),
             index + 1
         );
-        // Reconciliation can turn an event back into authority after a crash,
-        // so corrupt recovery data must fail before it reaches the reducer.
-        ensure!(
-            event.version == EVENT_ENVELOPE_VERSION_V0,
-            EXIT_SCHEMA,
-            "{}:{}: unsupported event version {}",
-            path.display(),
-            index + 1,
-            event.version
-        );
+        // Reconciliation can turn an event back into authority after a crash, so
+        // corrupt recovery data must fail before it reaches the reducer — and it
+        // fails against the same rule the write boundary applied, rather than a
+        // second copy of it kept in step by hand.
+        check_event_generation(&event).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {}", path.display(), index + 1, error.message),
+            )
+        })?;
         ensure!(
             event.payload.object == id,
             EXIT_SCHEMA,

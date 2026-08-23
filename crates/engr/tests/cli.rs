@@ -794,6 +794,74 @@ fn runtime_and_migration_reject_the_same_future_event_gap() {
 }
 
 #[test]
+fn the_coordinated_phase_three_generation_is_implemented_and_not_written() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "durable boundary"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    // A version has exactly one canonical interpretation for current resources.
+    // Version 3 is being implemented in slices, so nothing here may claim it:
+    // not the authority, not a resource, not a record.
+    let authority: Value = serde_json::from_slice(
+        &std::fs::read(store::engr_dir(root).join("format.json")).expect("format"),
+    )
+    .expect("json");
+    assert_eq!(authority["version"], Value::from(engr::WORKSPACE_VERSION));
+    assert_ne!(
+        authority["version"],
+        Value::from(engr::PHASE_3_WORKSPACE_VERSION),
+        "an unfinished generation is never what a workspace says it is"
+    );
+
+    let object: Value =
+        serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json");
+    let stored = object["sections"][0].as_object().expect("section");
+    assert!(stored.contains_key("confirmed_at"));
+    for absent in ["admission", "admitted_at", "sha256_object"] {
+        assert!(
+            !stored.contains_key(absent),
+            "{absent} belongs to the coordinated Phase-3 contract, which is not durable yet"
+        );
+    }
+
+    let events = std::fs::read_to_string(store::events_path(root, &id)).expect("events");
+    for line in events.lines() {
+        let event: Value = serde_json::from_str(line).expect("event");
+        assert_eq!(
+            event["version"],
+            Value::from(engr::EVENT_ENVELOPE_VERSION_V0)
+        );
+        assert!(event.get("admission").is_none());
+    }
+
+    // And the model that generation describes is nevertheless here, and works.
+    let loaded = store::load_object(root, &id).expect("object");
+    assert_eq!(
+        loaded.sections[0].admission,
+        engr::semantics::Admission::Human,
+        "at this version the human gate is the only door, so that is what every section came through"
+    );
+    assert!(!loaded.sections[0].admitted_at.is_empty());
+}
+
+#[test]
 fn show_json_uses_state_for_the_object_and_status_for_each_section() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
@@ -1528,7 +1596,26 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
 fn unsupported_event_versions_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
     event.version += 1;
-    assert_event_is_rejected(&root, event);
+    let id = event.payload.object.clone();
+
+    // Refused on the way in, so nothing writes one...
+    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        !store::events_path(&root, &id).exists(),
+        "nothing was written"
+    );
+
+    // ...and refused on the way out, because a file can arrive by other means
+    // than this build writing it.
+    write_event_to(&root, &id, &event);
+    let output = run_engr(&root, &["verify", &id]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

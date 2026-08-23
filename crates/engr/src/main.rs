@@ -1,6 +1,6 @@
 use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use engr::backlog::{self, Subject};
-use engr::model::{self, Action, Payload, Ref};
+use engr::model::{self, Action, Merge, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
 use engr::{collection, gate, git, ops, rules, store, view, work};
 use engr::{ensure, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
@@ -1050,7 +1050,9 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     } else if let Some(section) = command.revise {
         Action::SectionRevised { section }
     } else if let Some(absorbs) = command.merge.clone() {
-        Action::SectionMerged { absorbs }
+        Action::SectionMerged {
+            merge: Merge::Absorbing { absorbs },
+        }
     } else if let Some(section) = command.delete {
         Action::SectionDeleted { section }
     } else if command.close {
@@ -1713,9 +1715,10 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { absorbs } => format!(
+        Action::SectionMerged { merge } => format!(
             " absorbing {}",
-            absorbs
+            merge
+                .consumed()
                 .iter()
                 .map(|section| format!("§{section}"))
                 .collect::<Vec<_>>()

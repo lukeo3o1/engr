@@ -1,6 +1,6 @@
 //! The gate is the only way in. These tests pin that.
 
-use engr::model::{Action, Content, Payload, Ref};
+use engr::model::{Action, Content, Merge, Payload, Ref};
 use engr::semantics::{Relation, Role, State, Supplement};
 use engr::{gate, ops, store};
 use std::collections::BTreeSet;
@@ -265,7 +265,9 @@ fn merging_produces_a_new_id_and_removes_what_it_absorbed() {
         &root,
         payload(
             Action::SectionMerged {
-                absorbs: vec![1, 2],
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
+                },
             },
             &id,
             "one and two together",
@@ -274,6 +276,93 @@ fn merging_produces_a_new_id_and_removes_what_it_absorbed() {
     let ids: Vec<u64> = object.sections.iter().map(|section| section.id).collect();
     assert_eq!(ids, vec![3]);
     assert_eq!(object.sections[0].text, "one and two together");
+}
+
+/// The merge that names its survivor is implemented and not written. The gate
+/// is where that boundary has to hold: admitting one would append a record
+/// claiming the Event generation this build emits while carrying a shape that
+/// generation never defined — and it would do it after a human confirmed it.
+#[test]
+fn the_phase_three_merge_representation_cannot_be_admitted() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "durable boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    admit(&root, payload(Action::SectionAdded, &id, "two"));
+
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::SectionMerged {
+                merge: Merge::Into {
+                    destination: 1,
+                    sources: vec![2],
+                },
+            },
+            &id,
+            "together",
+        ),
+    )
+    .expect_err("that representation is not durable yet");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        gate::pending(&root).expect("pending").is_empty(),
+        "and nothing was left waiting for a human"
+    );
+
+    // The model projects it perfectly well — that is the point of the slice.
+    // What it may not do is reach disk.
+    let object = store::load_object(&root, &id).expect("object");
+    let mut projected = object.clone();
+    let merged = engr::model::merged_admission(&object, &[1, 2], engr::semantics::Admission::Human)
+        .expect("a human merge");
+    assert_eq!(merged, engr::semantics::Admission::Human);
+    projected.sections.retain(|section| section.id != 2);
+    assert_eq!(projected.sections.len(), 1);
+}
+
+/// A consumed Section id is never handed out again, so a reference to one is
+/// pinned to wording that exists nowhere and points at an id that will never
+/// exist. v1 has no redirect and no tombstone, so the merge is refused and
+/// whoever holds the reference decides what it should say now.
+#[test]
+fn a_merge_cannot_consume_a_section_something_still_depends_on() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "target");
+    let source = new_object(&root, "source");
+    admit(&root, payload(Action::SectionAdded, &target, "depended on"));
+    admit(&root, payload(Action::SectionAdded, &target, "the other"));
+    let pinned = store::load_object(&root, &target)
+        .expect("target")
+        .section(1)
+        .expect("section")
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target wording");
+
+    let mut dependent = payload(Action::SectionAdded, &source, "rests on §1");
+    dependent.content.based_on = Some(commit.clone());
+    dependent.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, dependent);
+
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::SectionMerged {
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
+                },
+            },
+            &target,
+            "together",
+        ),
+    )
+    .expect_err("§1 is still depended on");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
 }
 
 #[test]
@@ -1517,4 +1606,167 @@ fn a_candidate_that_still_declares_backlog_material_is_refused_not_reinterpreted
     assert!(gate::pending(&root).is_err() || gate::pending(&root).expect("pending").is_empty());
     let response = format!("CONFIRM {challenge}");
     assert!(gate::confirm(&root, &response).is_err());
+}
+
+/// The durable write boundary is where "implemented but not written" has to
+/// hold. `prepare` refusing is not enough: a candidate is a file, and `confirm`
+/// loads one that is already on disk.
+///
+/// Without this, `append_event` accepts a version 1 record carrying the merge
+/// shape version 1 never defined — and `load_events` then refuses that same
+/// record, so the supported confirmation path writes history its own next read
+/// rejects.
+#[test]
+fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "write boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    admit(&root, payload(Action::SectionAdded, &id, "two"));
+
+    let merged = payload(
+        Action::SectionMerged {
+            merge: Merge::Into {
+                destination: 1,
+                sources: vec![2],
+            },
+        },
+        &id,
+        "together",
+    );
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 4,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: merged.sha256().expect("hash"),
+        },
+        payload: merged,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("a generation may only carry the shapes it defined");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    store::load_events(&root, &id).expect("and the history is still readable");
+}
+
+/// The same boundary for the Object file. `Section.admission` is model state
+/// with no version 2 representation, so serializing it away would turn Agent
+/// knowledge into Human authority the moment the bytes were read back.
+#[test]
+fn the_object_write_boundary_refuses_authority_it_cannot_represent() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "authority boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+
+    let mut object = store::load_object(&root, &id).expect("object");
+    object.sections[0].admission = engr::semantics::Admission::Agent;
+    let error = store::save_object(&root, &object)
+        .expect_err("agent admission has no representation at this version");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    let reloaded = store::load_object(&root, &id).expect("object");
+    assert_eq!(
+        reloaded.sections[0].admission,
+        engr::semantics::Admission::Human,
+        "and nothing on disk changed"
+    );
+}
+
+/// The generation guard has to guard the generation, not only the shapes it
+/// defines. An ordinary payload carrying a version this build does not emit is
+/// the same self-corrupting write one level up: `append_event` writes it and
+/// `load_events` refuses it.
+#[test]
+fn the_event_write_boundary_refuses_a_generation_it_does_not_emit() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "generation boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    let before = std::fs::read(store::events_path(&root, &id)).expect("events");
+
+    let ordinary = payload(Action::SectionAdded, &id, "an ordinary payload");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::PHASE_3_EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: 3,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: ordinary.sha256().expect("hash"),
+        },
+        payload: ordinary,
+    };
+
+    let error =
+        store::append_event(&root, &event).expect_err("this build does not emit that generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(store::events_path(&root, &id)).expect("events"),
+        before,
+        "nothing was written"
+    );
+    store::load_events(&root, &id).expect("and the history is still readable");
+}
+
+/// The read-side counterpart of the Object write boundary. Writes must not drop
+/// P3-only authority state; reads must not silently reinterpret it.
+///
+/// A file carrying `admission` is not a version 2 file. Reconstructing `human`
+/// from it is only exact for the *exact* version 2 representation — for a file
+/// that already carries a field version 2 never defined, it answers a question
+/// the file was trying to answer differently.
+#[test]
+fn a_v2_object_carrying_p3_only_fields_fails_closed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::object_path(&root, &id);
+    let good = std::fs::read(&path).expect("object");
+
+    for injected in ["admission", "admitted_at"] {
+        let mut value: serde_json::Value = serde_json::from_slice(&good).expect("json");
+        value["sections"][0]
+            .as_object_mut()
+            .expect("section")
+            .insert(
+                injected.to_owned(),
+                serde_json::Value::String("agent".to_owned()),
+            );
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
+
+        let error = store::load_object(&root, &id)
+            .expect_err("a field this version never defined is not this version's file");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{injected}");
+        std::fs::write(&path, &good).expect("restore");
+    }
+}
+
+/// The same rule for a snapshot, decoded under the version the snapshot itself
+/// records. Historical reads go through the same struct, so the guarantee has to
+/// hold there or a reference could pin a file nothing would accept today.
+#[test]
+fn a_historical_snapshot_carrying_p3_only_fields_fails_closed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "historical read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::object_path(&root, &id);
+
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    value["sections"][0]
+        .as_object_mut()
+        .expect("section")
+        .insert(
+            "admission".to_owned(),
+            serde_json::Value::String("agent".to_owned()),
+        );
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
+    let commit = commit_all(&root, "a snapshot claiming more than its version defines");
+
+    let error = engr::git::object_at(&root, &commit, &id)
+        .expect_err("a snapshot is read under its own version, and refused when it disagrees");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
 }

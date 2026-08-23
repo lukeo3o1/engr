@@ -357,10 +357,10 @@ pub fn render_show(root: &Path, object: &Object) -> String {
             out.push_str(&format!(
                 "    based_on {}   confirmed {}\n",
                 short(commit),
-                section.confirmed_at
+                section.admitted_at
             ));
         } else {
-            out.push_str(&format!("    confirmed {}\n", section.confirmed_at));
+            out.push_str(&format!("    confirmed {}\n", section.admitted_at));
         }
         for reference in &section.refs {
             out.push_str(&format!(
@@ -376,7 +376,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         if status.tampered {
             out.push_str(&format!(
                 "    !!       content does not match the hash confirmed at {}\n",
-                section.confirmed_at
+                section.admitted_at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
                 Some(commit) => out.push_str(&format!(
@@ -540,7 +540,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 refs: &section.refs,
                 relations: &section.relations,
                 sha256: &section.sha256,
-                confirmed_at: &section.confirmed_at,
+                confirmed_at: &section.admitted_at,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),
