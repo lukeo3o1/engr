@@ -6,7 +6,8 @@
 //! incidental encoding choices that carry no meaning.
 
 use engr::integrity::{
-    check_object_integrity, check_object_seal, check_section_seal, sealed_object, sealed_section,
+    check_mechanical_reseal, check_object_integrity, check_object_seal, check_section_seal, mutate,
+    reseal, sealed_object, sealed_section,
 };
 use engr::model::{Object, Ref, Section};
 use engr::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
@@ -347,4 +348,144 @@ fn the_two_checks_catch_different_lies() {
     let refused =
         check_object_integrity(&object, &over_a_lie).expect_err("the section it covers is not");
     assert!(refused.to_string().contains("section 2"), "{refused}");
+}
+
+/// An integrity-invalid resource does not get quietly normalized on the way
+/// past. The mutation is refused **before** it is applied, so unrelated work
+/// cannot launder an out-of-band edit into a valid-looking seal.
+#[test]
+fn a_mutation_over_invalid_state_is_refused_before_it_runs() {
+    let object = object();
+    let sealed = seal_of(&object);
+
+    // Hand-edit a Section and leave its seal alone: the file still parses and
+    // every schema check passes.
+    let mut tampered = object.clone();
+    tampered.sections[0].text = "quietly rewritten".to_owned();
+
+    let mut ran = false;
+    let refused = mutate(&tampered, &sealed, |object| {
+        ran = true;
+        object.title = "and mutated on top".to_owned();
+        Ok(())
+    })
+    .expect_err("the predecessor does not verify");
+    assert!(!ran, "the mutation must not run at all: {refused}");
+
+    // Same object, same edit, resealing instead of mutating: also refused.
+    reseal(&tampered, &sealed).expect_err("a reseal is not a repair path");
+}
+
+/// The order in #35 §12 is not decoration. Sections are resealed first and the
+/// aggregate is taken over the fresh values — an aggregate computed first would
+/// cover seals that were about to be replaced.
+#[test]
+fn a_mutation_reseals_the_sections_before_the_aggregate() {
+    let object = object();
+    let sealed = seal_of(&object);
+
+    let done = mutate(&object, &sealed, |object| {
+        object.sections[0].text = "revised under the gate".to_owned();
+        object.rev += 1;
+        Ok(())
+    })
+    .expect("authorized");
+
+    check_object_integrity(&done.object, &done.seal).expect("coherent afterwards");
+    assert_ne!(done.seal, sealed, "the object moved");
+    assert_ne!(
+        done.object.sections[0].sha256, object.sections[0].sha256,
+        "and so did the section it changed"
+    );
+    assert_eq!(
+        done.object.sections[1].sha256, object.sections[1].sha256,
+        "the one it did not touch is untouched"
+    );
+}
+
+/// A mutation that fails leaves the caller with nothing to write, and the
+/// predecessor it was given untouched.
+#[test]
+fn a_refused_mutation_produces_no_object_at_all() {
+    let object = object();
+    let sealed = seal_of(&object);
+    let before = object.clone();
+
+    mutate(&object, &sealed, |object| {
+        object.title = "half done".to_owned();
+        Err(engr::Error::new(engr::EXIT_INVARIANT, "no".to_owned()))
+    })
+    .expect_err("the mutation refused itself");
+
+    assert_eq!(object, before, "the predecessor is untouched");
+}
+
+/// Mechanical reseal may recompute seals and nothing else.
+///
+/// The three MUST NOTs of #35 §11 are checked by comparing the projections
+/// either side, not by trusting that some function only assigns to `sha256` —
+/// which is why the check is reachable here at all. `reseal` itself applies no
+/// mutation, so a guard that lived only inside it could never be exercised, and
+/// would go on passing after the edit that broke it.
+#[test]
+fn a_mechanical_reseal_cannot_reach_a_semantic_field() {
+    let object = object();
+    let sealed = seal_of(&object);
+
+    // The honest case: nothing semantic moved, so the seal does not move either.
+    let done = reseal(&object, &sealed).expect("nothing moved");
+    assert_eq!(done.seal, sealed, "and the seal says so");
+    assert_eq!(done.object, object);
+
+    type Forbidden = fn(&mut Object) -> engr::Result<()>;
+    let forbidden: [(&str, Forbidden); 5] = [
+        ("admission", |object| {
+            object.sections[0].admission = Admission::Agent;
+            Ok(())
+        }),
+        ("admitted_at", |object| {
+            object.sections[0].admitted_at = "2026-08-25T00:00:00Z".to_owned();
+            Ok(())
+        }),
+        ("text", |object| {
+            object.sections[0].text = "resealed into something else".to_owned();
+            Ok(())
+        }),
+        ("title", |object| {
+            object.title = "renamed by a reseal".to_owned();
+            Ok(())
+        }),
+        ("a whole section", |object| {
+            object.sections.pop();
+            Ok(())
+        }),
+    ];
+
+    for (what, apply) in forbidden {
+        let done = mutate(&object, &sealed, apply).expect("a real mutation may do this");
+        let refused = check_mechanical_reseal(&object, &done.object)
+            .expect_err("but a mechanical reseal may not");
+        assert!(
+            refused.to_string().contains("mechanical reseal"),
+            "{what}: {refused}"
+        );
+    }
+}
+
+/// Resealing an Object that has legitimately moved is fine; what is refused is
+/// calling that movement mechanical.
+#[test]
+fn a_reseal_after_an_authorized_mutation_is_the_normal_case() {
+    let object = object();
+    let sealed = seal_of(&object);
+
+    let admitted = mutate(&object, &sealed, |object| {
+        object.sections[0].admission = Admission::Agent;
+        object.rev += 1;
+        Ok(())
+    })
+    .expect("the authority path already said yes");
+
+    check_object_integrity(&admitted.object, &admitted.seal).expect("sealed over what it now says");
+    reseal(&admitted.object, &admitted.seal).expect("and reseals to itself unchanged");
 }

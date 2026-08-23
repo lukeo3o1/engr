@@ -254,3 +254,127 @@ pub fn check_object_integrity(object: &Object, expected: &str) -> Result<()> {
     }
     check_object_seal(object, expected)
 }
+
+/// An Object with fresh seals, and the aggregate value that goes with it.
+///
+/// Returned together because they are one result. A caller holding the Object
+/// without the aggregate has the half that cannot be verified, and the write
+/// #35 §12 asks for is atomic over both.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Resealed {
+    pub object: Object,
+    pub seal: String,
+}
+
+/// Recompute every Section seal, then the aggregate over them.
+///
+/// In that order, because the aggregate carries the stored Section seals: an
+/// implementation that computed the aggregate first would seal the Object over
+/// the seals it was about to replace.
+fn seal_in_place(mut object: Object) -> Result<Resealed> {
+    for section in &mut object.sections {
+        section.sha256 = sealed_section(section)?.seal()?;
+    }
+    let seal = sealed_object(&object)?.seal()?;
+    Ok(Resealed { object, seal })
+}
+
+/// The mutation sequence of #35 §12, as one call so the order cannot be got
+/// wrong at a call site.
+///
+/// ```text
+/// verify predecessor integrity
+/// apply the authorized mutation
+/// recompute affected Section seals
+/// recompute Object.sha256
+/// -> caller writes atomically or not at all
+/// ```
+///
+/// Predecessor verification comes first and `apply` does not run without it,
+/// which is #35 §10: an integrity-invalid resource rejects ordinary semantic
+/// mutation rather than being quietly normalized on the way past. Letting
+/// unrelated work reseal invalid state is how an out-of-band edit gets laundered
+/// into apparently valid authority.
+///
+/// **Authority is the caller's.** This verifies that the predecessor is what it
+/// says it is; whether the mutation is allowed at all is the Human Gate's
+/// question or Rule Review's, and resealing afterwards decides nothing about
+/// admission.
+///
+/// The caller is expected to hold its concurrency boundary across this call and
+/// the write that follows. #31 is explicit about the shape that goes wrong:
+/// verify, release, then reseal a file that is no longer the one verified.
+pub fn mutate<F>(object: &Object, expected: &str, apply: F) -> Result<Resealed>
+where
+    F: FnOnce(&mut Object) -> Result<()>,
+{
+    check_object_integrity(object, expected)?;
+    let mut next = object.clone();
+    apply(&mut next)?;
+    seal_in_place(next)
+}
+
+/// Reseal a resource whose *representation* changed, changing nothing it means.
+///
+/// The narrow permission in #35 §11: a representation migration may recompute
+/// seals without creating a new semantic admission. What it may not do is
+/// change `admission`, change `admitted_at`, or manufacture provenance — so
+/// none of those is checked by reading the code, they are checked by comparing
+/// the projections either side. A future edit that reaches a semantic field
+/// through this path fails here rather than shipping a reseal that quietly
+/// admitted something.
+///
+/// Requires the old integrity to be valid, for the same reason [`mutate`] does.
+///
+/// This is the *within-v3* operation. Migrating v2 seals to v3 is P3-E's, and
+/// it cannot use this: the predecessor there verifies under the contract it was
+/// written with, not under this one.
+pub fn reseal(object: &Object, expected: &str) -> Result<Resealed> {
+    let resealed = mutate(object, expected, |_| Ok(()))?;
+    check_mechanical_reseal(object, &resealed.object)?;
+    Ok(resealed)
+}
+
+/// Require two Objects to differ in nothing but their seals.
+///
+/// Public because the migration needs to make exactly this claim: #35 §11
+/// permits a mechanical reseal only where "semantic equivalence is
+/// protocol-defined/provable", and this is the proof. Stating it as a check
+/// over the two values, rather than as a property of whichever function
+/// produced them, is what keeps it true when a later path also reseals.
+pub fn check_mechanical_reseal(before: &Object, after: &Object) -> Result<()> {
+    ensure!(
+        before.sections.len() == after.sections.len(),
+        EXIT_INVARIANT,
+        "a mechanical reseal cannot add or remove a section"
+    );
+    for (before, after) in before.sections.iter().zip(&after.sections) {
+        ensure!(
+            before.admission == after.admission,
+            EXIT_INVARIANT,
+            "a mechanical reseal cannot change how section {} was admitted",
+            before.id
+        );
+        ensure!(
+            before.admitted_at == after.admitted_at,
+            EXIT_INVARIANT,
+            "a mechanical reseal cannot change when section {} was admitted",
+            before.id
+        );
+        ensure!(
+            sealed_section(before)? == sealed_section(after)?,
+            EXIT_INVARIANT,
+            "a mechanical reseal cannot change what section {} says",
+            before.id
+        );
+    }
+    let (before, after) = (sealed_object(before)?, sealed_object(after)?);
+    ensure!(
+        (&before.id, &before.title, before.object_type, before.state)
+            == (&after.id, &after.title, after.object_type, after.state)
+            && (before.rev, before.next_section_id) == (after.rev, after.next_section_id),
+        EXIT_INVARIANT,
+        "a mechanical reseal cannot change the object's own state"
+    );
+    Ok(())
+}
