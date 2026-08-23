@@ -1770,3 +1770,302 @@ fn a_historical_snapshot_carrying_p3_only_fields_fails_closed() {
         .expect_err("a snapshot is read under its own version, and refused when it disagrees");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
+
+/// The EventStore analogue of the Object read boundary. A record carrying
+/// admission provenance is not a record of the generation that had only one
+/// door, and the check has to happen before a typed decode can drop the field
+/// that says so.
+///
+/// Without this, the dropped field leaves the stored `payload_sha256` verifying
+/// — it was never inside the payload — and replay reaches `human` for bytes that
+/// explicitly claimed `agent`. Reconciliation can then make that authoritative.
+#[test]
+fn a_retained_event_carrying_admission_provenance_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "event read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::events_path(&root, &id);
+    let good = std::fs::read_to_string(&path).expect("events");
+
+    let mut lines = Vec::new();
+    for line in good.lines() {
+        let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
+        event.as_object_mut().expect("event").insert(
+            "admission".to_owned(),
+            serde_json::json!({ "kind": "agent" }),
+        );
+        lines.push(serde_json::to_string(&event).expect("event"));
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+    let error = store::load_events(&root, &id)
+        .expect_err("a record claiming an admission this generation never had");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// The durable Event write path is part of the workspace-generation boundary,
+/// and a direct library caller reaches it without going through the gate.
+#[test]
+fn appending_an_event_requires_a_workspace_this_build_may_write() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "append boundary");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let format = store::engr_dir(&root).join("format.json");
+    std::fs::write(&format, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("this build does not write a workspace at that version");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "and the store is byte-for-byte what it was"
+    );
+}
+
+/// A historical record spells an absent basis `"based_on": null`, because that
+/// is what engr emitted before no-basis became an absent field. The generation
+/// guard must tell an unknown field apart from a spelling this generation once
+/// wrote — history is read under its own contract, and the current serializer's
+/// one spelling is not that whole contract.
+#[test]
+fn a_historical_event_spelling_an_absent_basis_as_null_still_reads() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "legacy spelling");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::events_path(&root, &id);
+
+    let mut lines = Vec::new();
+    for line in std::fs::read_to_string(&path).expect("events").lines() {
+        let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
+        let object = event.as_object_mut().expect("event");
+        assert!(
+            !object.contains_key("based_on"),
+            "this build omits it, which is why the older spelling has to be tolerated"
+        );
+        object.insert("based_on".to_owned(), serde_json::Value::Null);
+        lines.push(serde_json::to_string(&event).expect("event"));
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+    let events = store::load_events(&root, &id).expect("history is read under its own contract");
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.payload.content.based_on.is_none()));
+}
+
+/// The durable Event write path must not accept a record its own next read
+/// refuses. The generation is only part of that contract: the rest of what
+/// `load_events` demands has to be demanded here too, or a direct library caller
+/// writes history nothing can load.
+#[test]
+fn appending_an_event_enforces_the_contract_its_own_read_applies() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "append contract");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let sound = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+
+    let mut wrong_format = sound.clone();
+    wrong_format.format = "not-an-engr-event".to_owned();
+    let mut wrong_hash = sound.clone();
+    wrong_hash.confirmation.payload_sha256 = "0".repeat(64);
+    let mut wrong_rev = sound.clone();
+    wrong_rev.rev = 9;
+    let mut wrong_object = sound.clone();
+    wrong_object.payload.object = engr::model::new_id();
+
+    for (what, event) in [
+        ("format", wrong_format),
+        ("confirmation hash", wrong_hash),
+        ("revision continuity", wrong_rev),
+        ("object identity", wrong_object),
+    ] {
+        let error = store::append_event(&root, &event).unwrap_err_or_else_note(what);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert_eq!(
+            std::fs::read(&path).expect("events"),
+            before,
+            "{what}: nothing was written"
+        );
+    }
+
+    store::append_event(&root, &sound).expect("a sound record still appends");
+    store::load_events(&root, &id).expect("and reads back");
+}
+
+trait NoteErr {
+    fn unwrap_err_or_else_note(self, what: &str) -> engr::Error;
+}
+
+impl NoteErr for engr::Result<()> {
+    fn unwrap_err_or_else_note(self, what: &str) -> engr::Error {
+        match self {
+            Ok(()) => panic!("{what}: append accepted a record load_events refuses"),
+            Err(error) => error,
+        }
+    }
+}
+
+/// Two direct callers, one predecessor. The check that refuses a revision the
+/// next load would reject reads the tail, so a read-then-append with nothing
+/// held between them is both writers agreeing on the same predecessor and both
+/// appending it.
+///
+/// The gate happens to be serialized because `confirm` already holds the writer
+/// lock, which is exactly why the public primitive cannot rely on its callers:
+/// a direct library caller is not inside it.
+#[test]
+fn two_direct_callers_cannot_both_append_the_same_revision() {
+    let (dir, root) = workspace();
+    let id = new_object(&root, "one predecessor");
+    let after = |rev: u64| {
+        let added = payload(Action::SectionAdded, &id, "wording");
+        engr::model::Event {
+            format: engr::model::EVENT_FORMAT.to_owned(),
+            version: engr::EVENT_ENVELOPE_VERSION_V0,
+            event_id: engr::model::new_id(),
+            rev,
+            time: "2026-08-23T00:00:00Z".to_owned(),
+            confirmation: engr::model::Confirmation {
+                challenge: "TEST00".to_owned(),
+                payload_sha256: added.sha256().expect("hash"),
+            },
+            payload: added,
+        }
+    };
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let outcomes: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let root = root.clone();
+                let event = after(2);
+                scope.spawn(move || {
+                    barrier.wait();
+                    store::append_event(&root, &event).is_ok()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .collect()
+    });
+
+    assert_eq!(
+        outcomes.iter().filter(|ok| **ok).count(),
+        1,
+        "exactly one of two writers may take a predecessor"
+    );
+    let events = store::load_events(&root, &id).expect("and the history still loads");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].rev, 2);
+    drop(dir);
+}
+
+/// A record can be perfectly well formed, contiguous, and still not something
+/// this history can arrive at. `.engr/events/<id>.jsonl` is append-only and is
+/// never purged, so a record that cannot be replayed is not a mistake somebody
+/// can take back — it durably poisons every read that reconstructs the Object.
+#[test]
+fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "replayability");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    // Structurally valid, contiguous, correct payload hash — and it revises a
+    // Section that does not exist.
+    let absent = payload(Action::SectionRevised { section: 999 }, &id, "wording");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: absent.sha256().expect("hash"),
+        },
+        payload: absent,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("history must be able to arrive at what it records");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "and nothing was written"
+    );
+    engr::ops::effective(&root, &id).expect("the read surface is unpoisoned");
+}
+
+/// The first record of a history has to be one a missing Object can be
+/// reconstructed from. Continuity says nothing here — there is no predecessor to
+/// be contiguous with — so without this an empty history accepts a beginning it
+/// can never replay.
+#[test]
+fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    let path = store::events_path(&root, &id);
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let not_a_beginning = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 1,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+    let mut skipping = not_a_beginning.clone();
+    skipping.rev = 2;
+
+    for (what, event) in [
+        ("an action no object begins with", not_a_beginning),
+        ("a revision nothing precedes", skipping),
+    ] {
+        let error = store::append_event(&root, &event)
+            .expect_err("a history must be able to start where it says it starts");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(!path.exists(), "{what}: no history was created");
+    }
+}
