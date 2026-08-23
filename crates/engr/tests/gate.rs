@@ -1994,3 +1994,78 @@ fn two_direct_callers_cannot_both_append_the_same_revision() {
     assert_eq!(events[1].rev, 2);
     drop(dir);
 }
+
+/// A record can be perfectly well formed, contiguous, and still not something
+/// this history can arrive at. `.engr/events/<id>.jsonl` is append-only and is
+/// never purged, so a record that cannot be replayed is not a mistake somebody
+/// can take back — it durably poisons every read that reconstructs the Object.
+#[test]
+fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "replayability");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    // Structurally valid, contiguous, correct payload hash — and it revises a
+    // Section that does not exist.
+    let absent = payload(Action::SectionRevised { section: 999 }, &id, "wording");
+    let event = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: absent.sha256().expect("hash"),
+        },
+        payload: absent,
+    };
+
+    let error = store::append_event(&root, &event)
+        .expect_err("history must be able to arrive at what it records");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "and nothing was written"
+    );
+    engr::ops::effective(&root, &id).expect("the read surface is unpoisoned");
+}
+
+/// The first record of a history has to be one a missing Object can be
+/// reconstructed from. Continuity says nothing here — there is no predecessor to
+/// be contiguous with — so without this an empty history accepts a beginning it
+/// can never replay.
+#[test]
+fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    let path = store::events_path(&root, &id);
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let not_a_beginning = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 1,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        confirmation: engr::model::Confirmation {
+            challenge: "TEST00".to_owned(),
+            payload_sha256: added.sha256().expect("hash"),
+        },
+        payload: added,
+    };
+    let mut skipping = not_a_beginning.clone();
+    skipping.rev = 2;
+
+    for (what, event) in [
+        ("an action no object begins with", not_a_beginning),
+        ("a revision nothing precedes", skipping),
+    ] {
+        let error = store::append_event(&root, &event)
+            .expect_err("a history must be able to start where it says it starts");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(!path.exists(), "{what}: no history was created");
+    }
+}

@@ -807,12 +807,14 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // appends here first, so refusing at this point leaves the workspace exactly
     // as it was rather than advanced past history it could not record.
     check_event_record(event, &event.payload.object, None)?;
-    let path = events_path(root, &event.payload.object);
+    let id = &event.payload.object;
+    let path = events_path(root, id);
     // Continuity against what is already there, which is the one part of the
     // read contract that is about the file rather than the record. Reading the
     // tail is the cost of not being able to append a revision the next load
     // would refuse.
-    if let Some(last) = load_events(root, &event.payload.object)?.last() {
+    let mut tail = load_events(root, id)?;
+    if let Some(last) = tail.last() {
         ensure!(
             last.rev.checked_add(1) == Some(event.rev),
             EXIT_SCHEMA,
@@ -821,6 +823,24 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
             last.rev
         );
     }
+    // And that the history this produces is one the record can actually be
+    // arrived at through. A record can be well formed, contiguous and still
+    // impossible: revising a Section that does not exist, or beginning a history
+    // with something no Object comes from. `.engr/events` is append-only and is
+    // never purged, so such a record is not a mistake anybody can take back — it
+    // durably breaks every read that reconstructs the Object, and it breaks
+    // crash recovery, which is the one thing this file is for.
+    //
+    // The same check the store already applies to a retained tail, asked before
+    // the tail exists rather than after, and inside the same lock so what is
+    // validated is what gets written.
+    tail.push(event.clone());
+    let object = match load_object(root, id) {
+        Ok(object) => Some(object),
+        Err(error) if error.code == EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
+    validate_recoverable_tail(id, object, &tail)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
