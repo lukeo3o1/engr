@@ -741,6 +741,79 @@ fn merging_from_the_command_line_names_the_survivor() {
     );
 }
 
+/// A workspace whose authority says it is current while one of its files
+/// disagrees is neither of the other two stale cases, and saying "legacy v0"
+/// would send the reader to look for something that is not there.
+#[test]
+fn a_current_workspace_holding_a_superseded_resource_says_so() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "restored file"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    // The authority is left saying the current version, as it would be after a
+    // file is restored from before a migration.
+    mark_workspace_v2(root, &id);
+    std::fs::write(
+        store::engr_dir(root).join("format.json"),
+        format!(
+            r#"{{"format":"engr-workspace","version":{}}}"#,
+            engr::WORKSPACE_VERSION
+        ),
+    )
+    .expect("format");
+    assert_eq!(
+        store::validate_format(root).expect("detect"),
+        store::WorkspaceFormat::SupersededResources
+    );
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "more",
+            "--no-based-on",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_SCHEMA));
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("engr migrate"), "{said}");
+    assert!(
+        !said.contains("legacy v0"),
+        "this workspace states its version perfectly clearly: {said}"
+    );
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        store::validate_format(root).expect("detect"),
+        store::WorkspaceFormat::Current
+    );
+}
+
 /// A Section carrying both spellings cannot say which it means, so no reader
 /// picks one. Refused at the one place a superseded representation is
 /// interpreted, which is every reader.

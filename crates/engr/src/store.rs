@@ -110,15 +110,23 @@ struct Format {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceFormat {
+    /// No `format.json` at all, recognized from the legacy per-resource markers
+    /// every Object still carries. This one predates the workspace authority.
     LegacyV0,
     /// A recognized workspace at an older version of the authority.
     ///
-    /// Distinct from [`Self::LegacyV0`], which predates the authority or still
-    /// spells an Object's lifecycle the old way. This one is well formed and
-    /// says exactly what it is; what it is is not what this build writes. Both
-    /// are read-only until `engr migrate`, and they say different things to
-    /// whoever is reading the error.
+    /// Well formed, and says exactly what it is; what it is is not what this
+    /// build writes.
     OlderVersion(u32),
+    /// The authority names the version this build writes, but a resource still
+    /// uses a representation migration replaces.
+    ///
+    /// Its own case rather than being reported as one of the two above, because
+    /// the reader's next question — what is stale about mine — has a different
+    /// answer here: the workspace says it is current and one of its files
+    /// disagrees. A hand edit reaches this, and so does a file restored from
+    /// before a migration.
+    SupersededResources,
     Current,
 }
 
@@ -203,7 +211,7 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         return Ok(WorkspaceFormat::OlderVersion(format.version));
     }
     if contains_legacy_objects(root)? {
-        return Ok(WorkspaceFormat::LegacyV0);
+        return Ok(WorkspaceFormat::SupersededResources);
     }
     Ok(WorkspaceFormat::Current)
 }
@@ -266,6 +274,12 @@ pub fn require_current(root: &Path) -> Result<()> {
         WorkspaceFormat::LegacyV0 => Err(Error::new(
             EXIT_SCHEMA,
             "legacy v0 workspace is read-only; run `engr migrate` before mutation".to_owned(),
+        )),
+        WorkspaceFormat::SupersededResources => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "this workspace says version {WORKSPACE_VERSION}, but a resource still uses a representation that version replaced; it is read-only until `engr migrate` states what those files mean"
+            ),
         )),
         WorkspaceFormat::OlderVersion(version) => Err(Error::new(
             EXIT_SCHEMA,
