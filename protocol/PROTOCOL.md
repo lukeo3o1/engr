@@ -1095,7 +1095,15 @@ A declared outcome asserts that authority exists, so appending one MUST refuse a
 target that does not exist — and MUST refuse one whose persisted integrity no
 longer holds. Existing and sound are different questions: a section edited
 outside the gate loads perfectly and reads as authority, and an entry claiming
-it would launder that edit into a record of what was produced. **Existence and
+it would launder that edit into a record of what was produced.
+
+Integrity is checked at **the granularity being claimed**. A Section-qualified
+target is judged on that Section's seal. An Object-level target claims the
+Object's own authority — creation, a type or state transition, supersession —
+and nothing seals `title`, `type`, `state` or the revision, so every Section seal
+passing does not establish it. That authority MUST be checked against the
+durable history it was admitted through; where the history cannot rebuild the
+Object, the claim MUST be refused rather than accepted unchecked. **Existence and
 integrity are checked when the claim is made and never again** — which is why
 they MUST be checked where the claim is *written*, under the same lock. Validating first and appending afterwards leaves a gap an
 Object mutation fits through, and the single check this relationship ever gets

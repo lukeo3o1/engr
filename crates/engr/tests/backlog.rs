@@ -2409,3 +2409,67 @@ fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() 
         );
     }
 }
+
+/// Every Section seal passing is not the same claim as the Object being intact.
+///
+/// `title`, `type`, `state` and the revision are admitted facts with nothing
+/// sealing them, so an edit from `open` to `closed` with every Section byte
+/// untouched loads perfectly and satisfies every per-Section check. An
+/// Object-level outcome claims exactly that authority — creation, a type or
+/// state transition, supersession — so it is the claim that must not accept it.
+#[test]
+fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a record");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &object, "confirmed wording"),
+    );
+    let id = item(&root, "topic", "unresolved");
+    let compact = compact(&object);
+
+    // Not a byte of any Section moves; only the Object's own lifecycle does.
+    let mut tampered = store::load_object(&root, &object).expect("object");
+    tampered.state = engr::semantics::State::Closed;
+    store::save_object(&root, &tampered).expect("tamper");
+    for section in &tampered.sections {
+        assert_eq!(
+            section.recomputed_sha256().expect("recompute"),
+            section.sha256,
+            "the seals still pass, which is what makes this the interesting case"
+        );
+    }
+
+    let before = backlog::load(&root, &id).expect("load");
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
+        Produced::object(format!("obj:{compact}")),
+        &Prepared::first(),
+    )
+    .expect_err("that object-level authority was not admitted");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("state"),
+        "the refusal names what moved: {}",
+        error.message
+    );
+    assert_eq!(
+        backlog::load(&root, &id).expect("load"),
+        before,
+        "a refused claim writes nothing"
+    );
+
+    // Put it back, and the same claim is admissible.
+    tampered.state = engr::semantics::State::Open;
+    store::save_object(&root, &tampered).expect("restore");
+    assert!(backlog::record_produced(
+        &root,
+        &id,
+        1,
+        Produced::object(format!("obj:{compact}")),
+        &Prepared::first(),
+    )
+    .expect("intact authority"));
+}

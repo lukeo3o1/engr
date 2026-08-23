@@ -55,7 +55,7 @@ pub fn effective_section(root: &Path, id: &str, section: u64) -> Result<Section>
 /// what was confirmed, and only recomputing establishes what the target says
 /// now. `section` narrows it to one; without it the whole Object is judged,
 /// because an Object-level claim is a claim about all of it.
-pub fn sound(object: &Object, section: Option<u64>) -> Result<()> {
+pub fn sound(root: &Path, object: &Object, section: Option<u64>) -> Result<()> {
     let sections = match section {
         Some(id) => vec![object.section(id)?],
         None => object.sections.iter().collect(),
@@ -67,6 +67,59 @@ pub fn sound(object: &Object, section: Option<u64>) -> Result<()> {
             "{} §{} does not match its own confirmed hash; its wording was changed outside the gate",
             object.id,
             section.id
+        );
+    }
+    if section.is_none() {
+        object_level_authority(root, object)?;
+    }
+    Ok(())
+}
+
+/// The Object's own authority, which no Section seal covers.
+///
+/// `title`, `type`, `state`, `rev` and the id counter are admitted facts with
+/// nothing sealing them, so "every Section seal passes" is not the same claim as
+/// "this Object is intact". An edit from `open` to `closed` with every Section
+/// byte untouched loads perfectly and satisfies every per-Section check.
+///
+/// So the events decide instead. They are append-only and never pruned, which
+/// makes them the durable record the projection is derived *from* — rebuilt from
+/// rev 0 the log yields what admission actually produced, and any disagreement
+/// is a change that did not come through the gate.
+///
+/// Fails closed when the log cannot rebuild the Object at all — a gap or a
+/// missing beginning means there is nothing to check the projection against,
+/// which is a reason to refuse the claim rather than to wave it through.
+fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
+    let events = store::load_events(root, &object.id)?;
+    let (admitted, _) = crate::model::replay_recoverable_tail(
+        Object::new(object.id.clone(), String::new())?,
+        &events,
+    )
+    .map_err(|error| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "{}: its history cannot be rebuilt, so there is nothing to check it against: {}",
+                object.id, error.message
+            ),
+        )
+    })?;
+    for (what, agrees) in [
+        ("title", admitted.title == object.title),
+        ("type", admitted.object_type == object.object_type),
+        ("state", admitted.state == object.state),
+        ("revision", admitted.rev == object.rev),
+        (
+            "section id counter",
+            admitted.next_section_id == object.next_section_id,
+        ),
+    ] {
+        ensure!(
+            agrees,
+            EXIT_INVARIANT,
+            "{}: its {what} is not what was admitted; it was changed outside the gate",
+            object.id
         );
     }
     Ok(())

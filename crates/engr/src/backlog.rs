@@ -1508,7 +1508,7 @@ pub fn record_produced(
             // changed outside the gate is exactly what that assertion must not
             // be allowed to launder — the claim gets made once and is never
             // re-examined, so the one check it gets has to be the real one.
-            crate::ops::sound(&projected, target_section).map_err(|error| {
+            crate::ops::sound(root, &projected, target_section).map_err(|error| {
                 Error::new(
                     error.code,
                     format!(
