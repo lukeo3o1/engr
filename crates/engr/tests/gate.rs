@@ -1710,3 +1710,63 @@ fn the_event_write_boundary_refuses_a_generation_it_does_not_emit() {
     );
     store::load_events(&root, &id).expect("and the history is still readable");
 }
+
+/// The read-side counterpart of the Object write boundary. Writes must not drop
+/// P3-only authority state; reads must not silently reinterpret it.
+///
+/// A file carrying `admission` is not a version 2 file. Reconstructing `human`
+/// from it is only exact for the *exact* version 2 representation — for a file
+/// that already carries a field version 2 never defined, it answers a question
+/// the file was trying to answer differently.
+#[test]
+fn a_v2_object_carrying_p3_only_fields_fails_closed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::object_path(&root, &id);
+    let good = std::fs::read(&path).expect("object");
+
+    for injected in ["admission", "admitted_at"] {
+        let mut value: serde_json::Value = serde_json::from_slice(&good).expect("json");
+        value["sections"][0]
+            .as_object_mut()
+            .expect("section")
+            .insert(
+                injected.to_owned(),
+                serde_json::Value::String("agent".to_owned()),
+            );
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
+
+        let error = store::load_object(&root, &id)
+            .expect_err("a field this version never defined is not this version's file");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{injected}");
+        std::fs::write(&path, &good).expect("restore");
+    }
+}
+
+/// The same rule for a snapshot, decoded under the version the snapshot itself
+/// records. Historical reads go through the same struct, so the guarantee has to
+/// hold there or a reference could pin a file nothing would accept today.
+#[test]
+fn a_historical_snapshot_carrying_p3_only_fields_fails_closed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "historical read boundary");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let path = store::object_path(&root, &id);
+
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    value["sections"][0]
+        .as_object_mut()
+        .expect("section")
+        .insert(
+            "admission".to_owned(),
+            serde_json::Value::String("agent".to_owned()),
+        );
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
+    let commit = commit_all(&root, "a snapshot claiming more than its version defines");
+
+    let error = engr::git::object_at(&root, &commit, &id)
+        .expect_err("a snapshot is read under its own version, and refused when it disagrees");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}

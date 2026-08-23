@@ -73,7 +73,14 @@ pub const CANDIDATE_FORMAT: &str = "engr-candidate";
 /// A reference to one section, pinned to what it said and the
 /// commit it said it at. `sha256` makes "my basis changed" computable locally;
 /// `commit` makes the old wording recoverable with `git show`.
+/// Schema-exact, like everything else a persisted Object is made of.
+///
+/// `Relation`, `Supplement` and `Target` already were; this was the one part
+/// that was not, and it is the part the selective-reference work adds fields to.
+/// A schema-exact Section whose `refs[]` elements are not would have the hole in
+/// exactly the place the next slice widens.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Ref {
     pub object: String,
     pub section: u64,
@@ -194,7 +201,23 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
     crate::confirmation::fingerprint(value)
 }
 
+/// Schema-exact, and that is a trust boundary rather than strictness for its own
+/// sake.
+///
+/// A current resource carries exactly the fields its version defines, and an
+/// unknown one fails closed. Without that, [`Section::admission`] being absent
+/// from the persisted shape would mean a file could *carry* it and be read as
+/// though it did not: serde would ignore the field, this build would reconstruct
+/// `human` — and the reconstruction is only exact for the exact representation
+/// this version defines, never for a file already answering the question
+/// differently.
+///
+/// It is the read-side counterpart of the write boundary in
+/// [`crate::store::save_object`]. Writes must not drop authority state they
+/// cannot represent; reads must not silently reinterpret authority state they
+/// were not expecting.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Section {
     pub id: u64,
     /// Which door these exact semantics came through.
@@ -298,7 +321,11 @@ impl Section {
     }
 }
 
+/// Schema-exact for the same reason [`Section`] is: a resource that carries a
+/// field this version never defined is not a file of this version, whatever else
+/// about it reads correctly.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Object {
     /// Retained when a migrated v0 object carried redundant resource schema
     /// markers. New objects rely only on the workspace authority.
