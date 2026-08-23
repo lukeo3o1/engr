@@ -1102,8 +1102,12 @@ target is judged on that Section's seal. An Object-level target claims the
 Object's own authority — creation, a type or state transition, supersession —
 and nothing seals `title`, `type`, `state` or the revision, so every Section seal
 passing does not establish it. That authority MUST be checked against the
-durable history it was admitted through; where the history cannot rebuild the
-Object, the claim MUST be refused rather than accepted unchecked. **Existence and
+durable history it was admitted through, and the **complete** rebuilt aggregate
+MUST be compared rather than a chosen set of fields — a Section removed from the
+projection outside the gate is never visited by a per-Section check, and gaps
+below the id counter are what legitimate admitted deletion looks like. Where the
+history cannot rebuild the Object, the claim MUST be refused rather than
+accepted unchecked. **Existence and
 integrity are checked when the claim is made and never again** — which is why
 they MUST be checked where the claim is *written*, under the same lock. Validating first and appending afterwards leaves a gap an
 Object mutation fits through, and the single check this relationship ever gets

@@ -105,6 +105,13 @@ fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
             ),
         )
     })?;
+    // The whole aggregate, not a sample of it. Naming five scalars would leave
+    // the rest unexamined, and the gap that hides in is not hypothetical: the
+    // seal loop above walks the Sections the *projection* holds, so one deleted
+    // outside the gate is never visited, every remaining seal passes, and the
+    // counters do not move — gaps below `next_section_id` are what legitimate
+    // admitted deletion looks like. Comparing what the history rebuilt is the
+    // only form of this check that covers what was not looked at.
     for (what, agrees) in [
         ("title", admitted.title == object.title),
         ("type", admitted.object_type == object.object_type),
@@ -114,6 +121,7 @@ fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
             "section id counter",
             admitted.next_section_id == object.next_section_id,
         ),
+        ("sections", admitted.sections == object.sections),
     ] {
         ensure!(
             agrees,

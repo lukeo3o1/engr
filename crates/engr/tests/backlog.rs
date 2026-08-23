@@ -2473,3 +2473,51 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     )
     .expect("intact authority"));
 }
+
+/// The reconstruction has to be compared, not merely performed.
+///
+/// Section seals are recomputed over the Sections the *projection* holds, so one
+/// removed outside the gate is simply never visited — every remaining seal
+/// passes, and the counters do not move because gaps below `next_section_id` are
+/// what legitimate admitted deletion looks like. Replaying the history
+/// reconstructs the missing Section; the check is only worth anything if that
+/// difference is looked at.
+#[test]
+fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a record");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &object, "first confirmed wording"),
+    );
+    admit(
+        &root,
+        payload(Action::SectionAdded, &object, "second confirmed wording"),
+    );
+    let id = item(&root, "topic", "unresolved");
+    let compact = compact(&object);
+
+    // Take §1 out of the projection and leave every counter where it was.
+    let mut tampered = store::load_object(&root, &object).expect("object");
+    let (rev, next) = (tampered.rev, tampered.next_section_id);
+    tampered.sections.retain(|section| section.id != 1);
+    assert_eq!((tampered.rev, tampered.next_section_id), (rev, next));
+    store::save_object(&root, &tampered).expect("tamper");
+    for section in &tampered.sections {
+        assert_eq!(
+            section.recomputed_sha256().expect("recompute"),
+            section.sha256,
+            "every seal that is still there still passes"
+        );
+    }
+
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
+        Produced::object(format!("obj:{compact}")),
+        &Prepared::first(),
+    )
+    .expect_err("an admitted section is missing from what this claims");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+}
