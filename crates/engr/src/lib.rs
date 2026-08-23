@@ -21,14 +21,22 @@ pub mod work;
 
 /// Schema version of `.engr/format.json`, the workspace-level authority.
 ///
-/// Version 2 is the first to define `review.max_attempts` and
+/// Version 2 was the first to define `review.max_attempts` and
 /// `review.on_exhaustion` on a project Rule, including their effective
 /// defaults. That is a *semantic* change over unchanged bytes: a rule file with
-/// no `review:` block means one thing here and another to a version 1 build, and
-/// an explicit block is an unknown field there. The workspace version is what
-/// stops the two from silently disagreeing — a build that does not know a
-/// version refuses the workspace rather than reading it under its own rules.
-pub const WORKSPACE_VERSION: u32 = 2;
+/// no `review:` block means one thing there and another to a version 1 build,
+/// and an explicit block is an unknown field there.
+///
+/// Version 3 is the mixed-authority representation. A Section now says which
+/// door it came through, and the timestamp says when it was admitted rather
+/// than that a human confirmed it — because under version 3 the Human Gate is
+/// no longer the only way in. A version 2 build reading a version 3 Section
+/// would see an unknown `admission` field and a missing `confirmed_at`; a
+/// version 3 build reading version 2 bytes would have to guess at authority.
+/// The workspace version is what stops either from happening silently — a build
+/// that does not know a version refuses the workspace rather than reading it
+/// under its own rules.
+pub const WORKSPACE_VERSION: u32 = 3;
 /// Older workspace versions this build recognizes and can migrate forward.
 ///
 /// Recognized is not the same as current: a workspace at one of these is read
@@ -37,11 +45,22 @@ pub const WORKSPACE_VERSION: u32 = 2;
 /// predating the migration carries the version that was current when it was
 /// made, and refusing it would make every reference pinned before the migration
 /// unresolvable.
-pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1];
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
+/// The Event envelope this build writes.
+///
+/// Version 2 is the mixed-authority generation. A merge now names the Section
+/// that survives it instead of listing everything it consumed, which is a
+/// different statement about what the record contains afterwards — so it is a
+/// different generation rather than an addition to the old one.
+pub const EVENT_ENVELOPE_VERSION: u32 = 2;
 /// Version carried by confirmed Event envelopes that remain readable unchanged.
-pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
+///
+/// Retained rather than rewritten. History is evidence of what was admitted at
+/// the time, under the contract that was current at the time; normalizing it to
+/// the newest shape would produce a record of an admission that never happened.
+pub const EVENT_ENVELOPE_VERSION_V1: u32 = 1;
 /// The candidate envelope this build mints and admits.
 ///
 /// Version 1 stored its binding and its revision-presentation metadata outside

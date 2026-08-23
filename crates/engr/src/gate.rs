@@ -10,7 +10,7 @@ use crate::model::{
 use crate::semantics::{self, Relation, RelationType, Role, Supplement, Target};
 use crate::{
     ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION,
-    CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND,
+    CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION, EXIT_INVARIANT, EXIT_NOT_FOUND,
     EXIT_SCHEMA, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
@@ -475,18 +475,22 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Admission::Normal)
+    prepare_admitting(root, payload, Allowance::Normal)
 }
 
 /// Prepare a proposal that broke a normal size threshold, after a first attempt
 /// was already refused.
 pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Admission::Oversize)
+    prepare_admitting(root, payload, Allowance::Oversize)
 }
 
 /// How much this proposal is allowed to be.
+///
+/// Not to be confused with [`crate::semantics::Admission`], which says which
+/// door a Section came through. This one is about size, and about one proposal
+/// rather than about the record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Admission {
+pub enum Allowance {
     /// Normal thresholds apply, and breaking one is refused.
     Normal,
     /// The explicit retry of a refusal, admitting this one proposal past a
@@ -500,11 +504,11 @@ pub enum Admission {
 /// admission and Backlog bookkeeping are two independent operations, so a
 /// candidate carries no declared source and confirming one settles nothing in
 /// staging by itself.
-pub fn prepare_admitting(root: &Path, payload: Payload, admission: Admission) -> Result<Prepared> {
+pub fn prepare_admitting(root: &Path, payload: Payload, allowance: Allowance) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
-    store::with_lock(root, move || prepare_locked(root, payload, admission))
+    store::with_lock(root, move || prepare_locked(root, payload, allowance))
 }
 
 /// Which proposals engr has refused for size, so an explicit retry can prove it
@@ -528,7 +532,7 @@ struct Refusals {
 
 const REFUSALS_REMEMBERED: usize = 32;
 
-/// The two-stage admission enforced, rather than described.
+/// The two-stage size allowance enforced, rather than described.
 ///
 /// #14 says the first `prepare` above a normal threshold MUST refuse and only an
 /// explicit retry may ask for the exception. A flag cannot carry that on its
@@ -537,8 +541,8 @@ const REFUSALS_REMEMBERED: usize = 32;
 /// proposal, byte for byte. The payload is already canonical here, so the same
 /// wording written against a different basis is a different proposal and earns
 /// its own refusal first.
-fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Result<()> {
-    let oversize = admission == Admission::Oversize;
+fn check_allowance(root: &Path, payload: &Payload, allowance: Allowance) -> Result<()> {
+    let oversize = allowance == Allowance::Oversize;
     let breaches = semantics::exceeded(&payload.content.text, &payload.content.content);
     let hard = breaches.iter().any(|item| item.hard);
 
@@ -609,7 +613,7 @@ fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
 /// Resolve each declared source and pin what it currently says.
 ///
 /// Refused up front, like every other precondition at this gate: a candidate
-fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Result<Prepared> {
+fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Result<Prepared> {
     store::require_current(root)?;
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
@@ -657,13 +661,13 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
     // workspace holding a Section admitted under an exception has to keep being
     // able to replay its own history.
     if payload.action.carries_content() && !payload.action.carries_title() {
-        check_admission(root, &payload, admission)?;
+        check_allowance(root, &payload, allowance)?;
     } else {
         // Nothing here is measured against a Section threshold, so an exception
         // would be one the candidate claims and no refusal ever granted — a
         // screen saying engr already refused this when it never did.
         ensure!(
-            admission == Admission::Normal,
+            allowance == Allowance::Normal,
             EXIT_USAGE,
             "{} carries no Section content, so there is no size exception to make",
             payload.action.label()
@@ -709,10 +713,13 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         (Action::SectionDeleted { section }, Some(object)) => {
             Some(object.section(*section)?.text.clone())
         }
-        (Action::SectionMerged { absorbs }, Some(object)) => {
+        (Action::SectionMerged { merge }, Some(object)) => {
+            // Every participant, survivor first, because the survivor's own
+            // wording is being replaced too. Showing only what is consumed
+            // would present a merge as if the destination were untouched.
             let mut parts = Vec::new();
-            for id in absorbs {
-                parts.push(format!("§{id}: {}", object.section(*id)?.text.trim_end()));
+            for id in merge.participants() {
+                parts.push(format!("§{id}: {}", object.section(id)?.text.trim_end()));
             }
             Some(parts.join("\n"))
         }
@@ -747,7 +754,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         };
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
-            version: EVENT_ENVELOPE_VERSION_V0,
+            version: EVENT_ENVELOPE_VERSION,
             event_id: String::new(),
             rev: trial.rev + 1,
             time: now(),
@@ -774,7 +781,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         previous_content: previous.content,
         previous_relations: previous.relations,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
-        oversize: admission == Admission::Oversize,
+        oversize: allowance == Allowance::Oversize,
         object_title: object
             .as_ref()
             .map(|object| object.title.clone())
@@ -813,7 +820,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         &store::candidate_path(root, &candidate.challenge)?,
         &candidate,
     )?;
-    if admission == Admission::Oversize {
+    if allowance == Allowance::Oversize {
         spend_refusal(root, &candidate.payload_sha256)?;
     }
 
@@ -1073,7 +1080,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             });
         }
         CandidateState::Stale { current_rev } => {
-            crate::confirmation::admission(
+            crate::confirmation::classify_retry(
                 &candidate.binding.expected_rev,
                 &current_rev,
                 false,
@@ -1089,7 +1096,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             Err(error) => return Err(error),
         },
     };
-    crate::confirmation::admission(
+    crate::confirmation::classify_retry(
         &candidate.binding.expected_rev,
         &object.rev,
         false,
@@ -1102,7 +1109,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
 
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: EVENT_ENVELOPE_VERSION_V0,
+        version: EVENT_ENVELOPE_VERSION,
         event_id: crate::model::new_id(),
         rev: object.rev + 1,
         time: now(),

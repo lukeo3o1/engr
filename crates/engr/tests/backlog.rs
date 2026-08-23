@@ -493,7 +493,14 @@ fn backlog_keeps_no_event_log_and_needs_no_confirmation() {
     assert_eq!(section.text, "reworded without asking anyone");
     let raw: serde_json::Value = store::read_json(&backlog::item_path(&root, &id)).expect("stored");
     let raw = raw["sections"][0].as_object().expect("section");
-    for absent in ["sha256", "confirmed_at", "based_on", "status"] {
+    for absent in [
+        "sha256",
+        "admission",
+        "admitted_at",
+        "confirmed_at",
+        "based_on",
+        "status",
+    ] {
         assert!(
             !raw.contains_key(absent),
             "backlog must not borrow the record's {absent} merely for symmetry"

@@ -12,10 +12,11 @@
 //!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
-use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
+use crate::model::{replay_recoverable_tail, Action, Event, Merge, Object, EVENT_FORMAT};
+use crate::semantics::Admission;
 use crate::{
-    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
-    EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
+    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION, EVENT_ENVELOPE_VERSION_V1,
+    EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
 };
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -224,7 +225,7 @@ fn detect_legacy(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Does any Object here still use the legacy `status` spelling?
+/// Does any Object here still use a representation migration replaces?
 ///
 /// Asked of every command, in every domain, because the answer decides whether
 /// the workspace may be mutated at all. That reach is why it must not fail on a
@@ -243,19 +244,15 @@ fn detect_legacy(root: &Path) -> Result<bool> {
 fn contains_legacy_objects(root: &Path) -> Result<bool> {
     let mut legacy = false;
     for id in object_ids(root)? {
-        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
+        let Ok(mut value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
             continue;
         };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        // A file claiming both spellings cannot say which it means, so it is not
-        // counted as legacy on the strength of the one that happens to be there.
-        // `decode_object` refuses it when it is loaded.
-        if object.contains_key("state") {
-            continue;
-        }
-        legacy |= object.contains_key("status");
+        // The same question migration asks, asked by the same function, so the
+        // scan and the conversion cannot drift apart. A file that contradicts
+        // itself is not counted as legacy on the strength of one spelling:
+        // `decode_object` refuses it the moment it is loaded.
+        legacy |= to_current_object(&object_path(root, &id).display().to_string(), &mut value)
+            .unwrap_or(false);
     }
     Ok(legacy)
 }
@@ -286,25 +283,90 @@ struct MigrationEntry {
     migrated: Option<serde_json::Value>,
 }
 
-fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
-    // The two spellings of one lifecycle field are checked here rather than in
-    // the workspace scan, because this is where the answer matters: a file
-    // claiming both cannot say which it means, and `status` is read as an alias
-    // for `state`, so serde would silently take one and call it authority.
-    if let Some(object) = value.as_object() {
-        ensure!(
-            !(object.contains_key("status") && object.contains_key("state")),
+/// Rewrite one stored Object into the representation this build understands,
+/// in place, reporting whether anything moved.
+///
+/// The one place a superseded representation is interpreted. Everything that
+/// reads an Object — the load path, migration, and the historical reader in
+/// [`crate::git`] — goes through here first, so a shape that predates a field
+/// means exactly one thing no matter who reads it, and a shape that contradicts
+/// itself is refused everywhere rather than wherever somebody remembered to
+/// check.
+///
+/// The alternative was a serde `alias` and a `default`, and it is worse in a way
+/// that matters: serde would answer both questions silently, at every read, with
+/// no way to distinguish a file that predates a field from one that lost it. A
+/// file claiming both spellings cannot say which it means, and is refused here
+/// rather than resolved by whichever one serde happened to take.
+///
+/// Every conversion restates a guarantee the old protocol had already made. No
+/// authority is invented: a Section written before [`Admission`] existed was
+/// admitted through the Human Gate, because that was the only door there was.
+pub fn to_current_object(label: &str, value: &mut serde_json::Value) -> Result<bool> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        Error::new(
             EXIT_SCHEMA,
-            "{}: contains both legacy status and canonical state",
-            path.display()
-        );
-        ensure!(
-            object.contains_key("status") || object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: object has neither status nor state",
-            path.display()
-        );
+            format!("{label}: object must be a JSON object"),
+        )
+    })?;
+    let mut moved = false;
+    if let Some(status) = take_superseded(object, "status", "state", label)? {
+        object.insert("state".to_owned(), status);
+        moved = true;
     }
+    ensure!(
+        object.contains_key("state"),
+        EXIT_SCHEMA,
+        "{label}: object has neither status nor state"
+    );
+    let Some(sections) = object
+        .get_mut("sections")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(moved);
+    };
+    for (index, section) in sections.iter_mut().enumerate() {
+        let label = format!("{label}: section {index}");
+        let section = section
+            .as_object_mut()
+            .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{label} must be a JSON object")))?;
+        if let Some(confirmed_at) = take_superseded(section, "confirmed_at", "admitted_at", &label)?
+        {
+            section.insert("admitted_at".to_owned(), confirmed_at);
+            // Absent admission and a `confirmed_at` timestamp are one fact, not
+            // two: this Section was written when the Human Gate was the only way
+            // in. Filling it in without that evidence would be manufacturing
+            // authority from a missing field, so the two move together.
+            section
+                .entry("admission")
+                .or_insert_with(|| serde_json::Value::String(Admission::Human.as_str().to_owned()));
+            moved = true;
+        }
+    }
+    Ok(moved)
+}
+
+/// Take the value of a field whose spelling was replaced, refusing a record that
+/// carries both spellings.
+fn take_superseded(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+    superseded: &str,
+    current: &str,
+    label: &str,
+) -> Result<Option<serde_json::Value>> {
+    ensure!(
+        !(value.contains_key(superseded) && value.contains_key(current)),
+        EXIT_SCHEMA,
+        "{label}: contains both legacy {superseded} and canonical {current}, so it cannot say which it means"
+    );
+    Ok(value.remove(superseded))
+}
+
+fn decode_object(path: &Path, id: &str, mut value: serde_json::Value) -> Result<Object> {
+    // Reading an unmigrated workspace is allowed; writing to one is not. So the
+    // conversion happens here, on the way in, and `require_current` is what
+    // stops anything from being written back through it.
+    to_current_object(&path.display().to_string(), &mut value)?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     object.validate()?;
@@ -325,55 +387,17 @@ fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
     let mut entries = Vec::new();
     for id in object_ids(root)? {
         let path = object_path(root, &id);
-        let value: serde_json::Value = read_json(&path)?;
-        let object = value.as_object().ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}: object must be a JSON object", path.display()),
-            )
-        })?;
-        ensure!(
-            !(object.contains_key("status") && object.contains_key("state")),
-            EXIT_SCHEMA,
-            "{}: contains both legacy status and canonical state",
-            path.display()
-        );
-        ensure!(
-            object.contains_key("status") || object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: legacy object has neither status nor state",
-            path.display()
-        );
-
-        // Deserialize the stored form, not just its lifecycle key. This catches
-        // missing required fields and illegal legacy status values before any
+        let mut planned: serde_json::Value = read_json(&path)?;
+        let moved = to_current_object(&path.display().to_string(), &mut planned)?;
+        // Deserialize the planned form, not just its converted keys. This
+        // catches missing required fields and illegal legacy values before any
         // neighboring file is rewritten.
-        let stored = decode_object(&path, &id, value.clone())?;
-        let needs_state_conversion = object.contains_key("status");
-        let (object, migrated) = if needs_state_conversion {
-            let mut planned = value;
-            let planned_object = planned.as_object_mut().ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{}: object must be a JSON object", path.display()),
-                )
-            })?;
-            let status = planned_object.remove("status").ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{}: legacy object has no status", path.display()),
-                )
-            })?;
-            planned_object.insert("state".to_owned(), status);
-            (decode_object(&path, &id, planned.clone())?, Some(planned))
-        } else {
-            (stored, None)
-        };
+        let object = decode_object(&path, &id, planned.clone())?;
         entries.push(MigrationEntry {
             id,
             path,
             object,
-            migrated,
+            migrated: moved.then_some(planned),
         });
     }
     let objects = entries
@@ -658,13 +682,33 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         // Reconciliation can turn an event back into authority after a crash,
         // so corrupt recovery data must fail before it reaches the reducer.
         ensure!(
-            event.version == EVENT_ENVELOPE_VERSION_V0,
+            event.version == EVENT_ENVELOPE_VERSION || event.version == EVENT_ENVELOPE_VERSION_V1,
             EXIT_SCHEMA,
             "{}:{}: unsupported event version {}",
             path.display(),
             index + 1,
             event.version
         );
+        // A generation is a statement about what its payloads mean, so a record
+        // may only carry the shapes its own generation defined. Without this the
+        // two merge shapes would be interchangeable in either direction: a v1
+        // record could name a survivor the v1 contract never had, and a v2
+        // record could consume every participant and allocate a fresh id — which
+        // is exactly the behaviour version 2 exists to have replaced.
+        if let Action::SectionMerged { merge } = &event.payload.action {
+            let expected = match merge {
+                Merge::Into { .. } => EVENT_ENVELOPE_VERSION,
+                Merge::Absorbing { .. } => EVENT_ENVELOPE_VERSION_V1,
+            };
+            ensure!(
+                event.version == expected,
+                EXIT_SCHEMA,
+                "{}:{}: event version {} does not use this merge representation",
+                path.display(),
+                index + 1,
+                event.version
+            );
+        }
         ensure!(
             event.payload.object == id,
             EXIT_SCHEMA,

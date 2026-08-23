@@ -6,7 +6,8 @@
 //! [`crate::git`].
 
 use crate::semantics::{
-    needs_attention, validate_state, ObjectType, Relation, RelationType, Role, State, Supplement,
+    needs_attention, validate_state, Admission, ObjectType, Relation, RelationType, Role, State,
+    Supplement,
 };
 use crate::LEGACY_OBJECT_VERSION_V0;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
@@ -195,6 +196,16 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Section {
     pub id: u64,
+    /// Which door these exact semantics came through.
+    ///
+    /// Required, with no default. A Section whose admission is unknown is not a
+    /// thing that exists, and a default here would quietly answer the one
+    /// question this field was added to stop anybody guessing at. Representations
+    /// written before the field existed are converted where every other
+    /// representation change is — see [`crate::store::to_current_object`] — so
+    /// exactly one place decides what they meant, rather than serde deciding it
+    /// silently at every read.
+    pub admission: Admission,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub text: String,
@@ -210,7 +221,14 @@ pub struct Section {
     /// `based_on`, `refs` and `relations` together, not text alone. Repointing a
     /// ref, or retyping a relation, would otherwise pass `verify`.
     pub sha256: String,
-    pub confirmed_at: String,
+    /// When these semantics were admitted, by whichever path admitted them.
+    ///
+    /// Spelled `confirmed_at` before the Human Gate stopped being the only door.
+    /// The instant is the same one; what changed is that a name saying
+    /// *confirmed* would now be claiming a human read every Section that has
+    /// one. The old spelling is converted, not aliased — see
+    /// [`Section::admission`].
+    pub admitted_at: String,
 }
 
 impl Section {
@@ -443,6 +461,105 @@ fn check_supersession(object: &Object, code: i32) -> Result<()> {
     }
 }
 
+/// Which sections a merge consolidates, and which one comes out the other side.
+///
+/// Two shapes, because the answer to "which id survives" changed and the events
+/// that gave the old answer are still on disk. Untagged, and unambiguously so:
+/// the two shapes share no field, so a record decodes as exactly one of them.
+/// Serializing is the same story in reverse — a retained event re-serializes to
+/// the bytes it was written with, which is what keeps its `payload_sha256`
+/// verifiable rather than needing an exemption.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(untagged)]
+pub enum Merge {
+    /// The current shape. An explicit Section survives, keeping its id and
+    /// taking the merged wording; the sources are consumed and their ids are
+    /// never handed out again. Nothing is allocated.
+    Into { destination: u64, sources: Vec<u64> },
+    /// Retained history only.
+    ///
+    /// The Phase 0 merge consumed every listed Section and allocated a fresh id
+    /// for the result, so a reference to any of them pointed at a Section that
+    /// no longer existed and there was nothing to forward the reader to. It is
+    /// still projected exactly as it was written — history is evidence, and
+    /// replaying it under today's rule would reconstruct an Object that never
+    /// existed — but it is not a shape this build ever writes.
+    Absorbing { absorbs: Vec<u64> },
+}
+
+impl Merge {
+    /// Every Section this merge reads, survivor included.
+    pub fn participants(&self) -> Vec<u64> {
+        match self {
+            Merge::Into {
+                destination,
+                sources,
+            } => {
+                let mut all = vec![*destination];
+                all.extend(sources.iter().copied());
+                all
+            }
+            Merge::Absorbing { absorbs } => absorbs.clone(),
+        }
+    }
+
+    /// The Sections this merge removes.
+    pub fn consumed(&self) -> &[u64] {
+        match self {
+            Merge::Into { sources, .. } => sources,
+            Merge::Absorbing { absorbs } => absorbs,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Merge::Into {
+                destination,
+                sources,
+            } => {
+                ensure!(
+                    !sources.is_empty(),
+                    EXIT_INVARIANT,
+                    "a merge needs at least one section to consume"
+                );
+                ensure!(
+                    !sources.contains(destination),
+                    EXIT_INVARIANT,
+                    "§{destination} survives the merge, so it cannot also be consumed by it"
+                );
+                // Ascending and unique, checked as one pass over the persisted
+                // order rather than over a sorted copy: `sources` is a set, and
+                // a set has one canonical spelling. Two events that consume the
+                // same sections in different orders would otherwise be two
+                // different payloads saying one thing.
+                for (index, source) in sources.iter().enumerate() {
+                    ensure!(
+                        index == 0 || sources[index - 1] < *source,
+                        EXIT_INVARIANT,
+                        "the sections a merge consumes are listed once each, in ascending order"
+                    );
+                }
+            }
+            Merge::Absorbing { absorbs } => {
+                ensure!(
+                    absorbs.len() >= 2,
+                    EXIT_INVARIANT,
+                    "a merge must absorb at least two sections"
+                );
+                let mut unique = absorbs.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                ensure!(
+                    unique.len() == absorbs.len(),
+                    EXIT_INVARIANT,
+                    "a merge cannot absorb the same section twice"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
@@ -453,7 +570,8 @@ pub enum Action {
         section: u64,
     },
     SectionMerged {
-        absorbs: Vec<u64>,
+        #[serde(flatten)]
+        merge: Merge,
     },
     SectionDeleted {
         section: u64,
@@ -532,11 +650,16 @@ impl Action {
 
     /// Actions that add wording as a new Section rather than replacing existing
     /// wording or a label.
+    ///
+    /// A current merge is not one of them: it revises the destination in place.
+    /// Only the retained Phase 0 shape allocated an id, and it is here because
+    /// history still has to project correctly, not because anything writes it.
     pub fn adds_section(&self) -> bool {
-        matches!(
-            self,
-            Action::SectionAdded | Action::SectionMerged { .. } | Action::ObjectSuperseded
-        )
+        match self {
+            Action::SectionAdded | Action::ObjectSuperseded => true,
+            Action::SectionMerged { merge } => matches!(merge, Merge::Absorbing { .. }),
+            _ => false,
+        }
     }
 
     /// Actions whose content is the object's title rather than a section's
@@ -651,20 +774,8 @@ impl Payload {
                 "a superseded_by relation only enters through object.superseded, which confirms the state, the replacement and the reason together"
             );
         }
-        if let Action::SectionMerged { absorbs } = &self.action {
-            ensure!(
-                absorbs.len() >= 2,
-                EXIT_INVARIANT,
-                "a merge must absorb at least two sections"
-            );
-            let mut unique = absorbs.clone();
-            unique.sort_unstable();
-            unique.dedup();
-            ensure!(
-                unique.len() == absorbs.len(),
-                EXIT_INVARIANT,
-                "a merge cannot absorb the same section twice"
-            );
+        if let Action::SectionMerged { merge } = &self.action {
+            merge.validate()?;
         }
         Ok(())
     }
@@ -748,6 +859,7 @@ pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(
 /// event.
 pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     let content = &event.payload.content;
+    let admitted_by = admitting_path(event);
     // Applied before the action, so the attention guard below sees the state
     // this confirmation *arrives at* rather than the one it left.
     //
@@ -815,12 +927,12 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         Action::SectionAdded => {
             object.require_attention("section.added")?;
             let id = take_id(object)?;
-            object.sections.push(section_from(id, event)?);
+            object.sections.push(section_from(id, admitted_by, event)?);
         }
         Action::SectionRevised { section } => {
             object.require_attention("section.revised")?;
-            object.section(*section)?;
-            let replacement = section_from(*section, event)?;
+            let admission = revised_admission(object.section(*section)?, admitted_by)?;
+            let replacement = section_from(*section, admission, event)?;
             let slot = object
                 .sections
                 .iter_mut()
@@ -828,16 +940,40 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                 .expect("section presence checked above");
             *slot = replacement;
         }
-        Action::SectionMerged { absorbs } => {
+        Action::SectionMerged { merge } => {
             object.require_attention("section.merged")?;
-            for id in absorbs {
-                object.section(*id)?;
+            // Every participant is resolved before anything moves, survivor
+            // included. A merge is one judgement about several Sections, so
+            // consuming two of three and then discovering the third is not there
+            // would leave the Object in a state nobody confirmed.
+            for id in merge.participants() {
+                object.section(id)?;
             }
-            let id = take_id(object)?;
-            object
-                .sections
-                .retain(|section| !absorbs.contains(&section.id));
-            object.sections.push(section_from(id, event)?);
+            match merge {
+                Merge::Into {
+                    destination,
+                    sources,
+                } => {
+                    let admission = merged_admission(object, *destination, sources, admitted_by)?;
+                    let replacement = section_from(*destination, admission, event)?;
+                    object.sections.retain(|section| {
+                        section.id == *destination || !sources.contains(&section.id)
+                    });
+                    let slot = object
+                        .sections
+                        .iter_mut()
+                        .find(|section| section.id == *destination)
+                        .expect("destination presence checked above");
+                    *slot = replacement;
+                }
+                Merge::Absorbing { absorbs } => {
+                    let id = take_id(object)?;
+                    object
+                        .sections
+                        .retain(|section| !absorbs.contains(&section.id));
+                    object.sections.push(section_from(id, admitted_by, event)?);
+                }
+            }
         }
         Action::SectionDeleted { section } => {
             object.require_attention("section.deleted")?;
@@ -890,7 +1026,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             // invented lifecycle.
             validate_state(EXIT_INVARIANT, object.object_type, State::Superseded)?;
             let id = take_id(object)?;
-            object.sections.push(section_from(id, event)?);
+            object.sections.push(section_from(id, admitted_by, event)?);
             object.state = State::Superseded;
         }
     }
@@ -898,6 +1034,72 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     object.rev = event.rev;
     check_supersession(object, EXIT_INVARIANT)?;
     Ok(())
+}
+
+/// Which door this event came through, and therefore what the Sections it
+/// admits are worth.
+///
+/// One seam, deliberately, rather than an [`Admission`] threaded through every
+/// arm of the reducer. Every event this build writes and every event on disk
+/// carries a spent Human challenge, so the answer is `human` for all of them —
+/// the Agent path has no envelope to be admitted through yet. When the tagged
+/// admission provenance lands, exactly one function changes and every rule that
+/// depends on the answer already reads it from here.
+fn admitting_path(_event: &Event) -> Admission {
+    Admission::Human
+}
+
+/// What a revised Section is admitted as.
+///
+/// Human wins in both directions, and that is the whole rule. A human who reads
+/// new wording for a Section an agent wrote has now assented to those exact
+/// words, so the Section becomes Human — the promotion is the point, not a side
+/// effect. The other direction has no reading behind it at all: an agent
+/// rewording a Human Section would replace words a human assented to with words
+/// nobody did, while the Section went on claiming Human authority or quietly
+/// stopped claiming it. Neither is a thing engr may decide, so it is refused.
+fn revised_admission(section: &Section, admitted_by: Admission) -> Result<Admission> {
+    ensure!(
+        admitted_by == Admission::Human || section.admission == Admission::Agent,
+        EXIT_INVARIANT,
+        "§{} was admitted through the human gate, so its wording is changed there too",
+        section.id
+    );
+    Ok(admitted_by)
+}
+
+/// What the surviving Section of a merge is admitted as.
+///
+/// The two paths are not symmetric, and the asymmetry is the rule rather than
+/// an accident of implementation. A human who reads the merged wording and
+/// assents to it has authorized exactly those words, whatever the parts were
+/// admitted as before — so a Human merge may consume Agent Sections and what
+/// comes out is Human. An Agent merge has no such reading behind it: it may
+/// consolidate only knowledge that was already Agent-admitted, because
+/// absorbing a Human Section into an Agent one would take words a human
+/// assented to and leave them standing under no human's authority.
+///
+/// That is the same one-way ordering [`Admission`] states, applied where it
+/// would otherwise be possible to launder: not by demoting a Section, but by
+/// consuming it into one that was never Human.
+pub fn merged_admission(
+    object: &Object,
+    destination: u64,
+    sources: &[u64],
+    admitted_by: Admission,
+) -> Result<Admission> {
+    if admitted_by == Admission::Human {
+        return Ok(Admission::Human);
+    }
+    for id in std::iter::once(destination).chain(sources.iter().copied()) {
+        let section = object.section(id)?;
+        ensure!(
+            section.admission == Admission::Agent,
+            EXIT_INVARIANT,
+            "§{id} was admitted through the human gate, so an agent merge cannot consume it; the merge itself has to be confirmed"
+        );
+    }
+    Ok(Admission::Agent)
 }
 
 fn take_id(object: &mut Object) -> Result<u64> {
@@ -911,10 +1113,11 @@ fn take_id(object: &mut Object) -> Result<u64> {
     Ok(id)
 }
 
-fn section_from(id: u64, event: &Event) -> Result<Section> {
+fn section_from(id: u64, admission: Admission, event: &Event) -> Result<Section> {
     let content = event.payload.content.clone();
     Ok(Section {
         id,
+        admission,
         sha256: content.sha256()?,
         role: content.role,
         text: content.text,
@@ -922,7 +1125,10 @@ fn section_from(id: u64, event: &Event) -> Result<Section> {
         based_on: content.based_on,
         refs: content.refs,
         relations: content.relations,
-        confirmed_at: event.time.clone(),
+        // The event's own time, not the clock. Replaying history has to
+        // reconstruct the Section that was admitted, and a reducer that read a
+        // clock would produce a different Object every time it ran.
+        admitted_at: event.time.clone(),
     })
 }
 
@@ -942,7 +1148,7 @@ mod tests {
         };
         Event {
             format: EVENT_FORMAT.to_owned(),
-            version: crate::EVENT_ENVELOPE_VERSION_V0,
+            version: crate::EVENT_ENVELOPE_VERSION_V1,
             event_id: new_id(),
             rev,
             time: "2026-08-17T00:00:00Z".to_owned(),

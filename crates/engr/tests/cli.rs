@@ -98,6 +98,26 @@ fn mark_legacy(root: &Path, id: &str) {
     });
 }
 
+/// Put one Object back into the workspace-version-2 Section representation:
+/// `confirmed_at` where the current one says `admitted_at`, and no `admission`
+/// at all, because under version 2 the Human Gate was the only door.
+fn mark_workspace_v2(root: &Path, id: &str) {
+    rewrite_object(root, id, |object| {
+        for section in object
+            .get_mut("sections")
+            .and_then(|value| value.as_array_mut())
+            .expect("sections")
+        {
+            let section = section.as_object_mut().expect("section");
+            let admitted_at = section.remove("admitted_at").expect("admitted_at");
+            section.insert("confirmed_at".to_owned(), admitted_at);
+            section.remove("admission");
+        }
+    });
+    let path = store::engr_dir(root).join("format.json");
+    std::fs::write(&path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
+}
+
 fn assert_migration_preflight_refuses(corrupt: impl FnOnce(&Path, &str, &str)) {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
@@ -233,7 +253,7 @@ fn reference_admission_uses_the_effective_target_projection() {
     .expect("prepare revision");
     let revision_event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        version: engr::EVENT_ENVELOPE_VERSION_V1,
         event_id: engr::model::new_id(),
         rev: revision.candidate.binding.expected_rev + 1,
         time: "2026-08-17T00:00:00Z".to_owned(),
@@ -551,6 +571,139 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         engr::WORKSPACE_VERSION,
         "and the workspace authority now names the version this build writes"
     );
+}
+
+/// The version 2 Section representation moves forward as one conversion: the
+/// timestamp is renamed and the admission it always implied is written down.
+///
+/// Nothing is inferred. Every Section written under version 2 went through the
+/// Human Gate, because that was the only way in, so `human` restates a guarantee
+/// the old protocol had already made rather than manufacturing authority out of
+/// a field that was never there.
+#[test]
+fn migration_states_the_admission_version_two_only_implied() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "mixed authority"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording a human confirmed",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+    let path = store::object_path(root, &id);
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    let confirmed_at = before["sections"][0]["admitted_at"].clone();
+    mark_workspace_v2(root, &id);
+
+    let shown = run_engr(root, &["show", &id]);
+    assert!(
+        shown.status.success(),
+        "an unmigrated workspace is still readable: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "more",
+            "--no-based-on",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "and read-only until it is migrated"
+    );
+    let untouched: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    assert!(untouched["sections"][0].get("admission").is_none());
+
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("object")).expect("json");
+    assert_eq!(after["sections"][0]["admission"], "human");
+    assert_eq!(
+        after["sections"][0]["admitted_at"], confirmed_at,
+        "the same instant, under the name that no longer claims a human read it"
+    );
+    assert!(
+        after["sections"][0].get("confirmed_at").is_none(),
+        "two spellings of one fact is how they start disagreeing"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &std::fs::read(store::engr_dir(root).join("format.json")).expect("format")
+        )
+        .expect("json")["version"],
+        engr::WORKSPACE_VERSION
+    );
+}
+
+/// A Section carrying both spellings cannot say which it means, so no reader
+/// picks one. Refused at the one place a superseded representation is
+/// interpreted, which is every reader.
+#[test]
+fn a_section_claiming_both_timestamp_spellings_is_refused() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "contradiction"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+    rewrite_object(root, &id, |object| {
+        let section = object
+            .get_mut("sections")
+            .and_then(|value| value.as_array_mut())
+            .expect("sections")[0]
+            .as_object_mut()
+            .expect("section");
+        let admitted_at = section["admitted_at"].clone();
+        section.insert("confirmed_at".to_owned(), admitted_at);
+    });
+
+    for command in [vec!["show", &id], vec!["verify", &id]] {
+        let output = run_engr(root, &command);
+        assert_eq!(
+            output.status.code(),
+            Some(engr::EXIT_SCHEMA),
+            "{command:?} read a self-contradicting section: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -1255,7 +1408,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let payload_sha256 = payload.sha256().expect("payload hash");
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        version: engr::EVENT_ENVELOPE_VERSION_V1,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -1473,7 +1626,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
-            version: engr::EVENT_ENVELOPE_VERSION_V0,
+            version: engr::EVENT_ENVELOPE_VERSION_V1,
             event_id: engr::model::new_id(),
             rev: 2,
             time: "2026-08-13T00:00:00Z".to_owned(),
@@ -1527,8 +1680,44 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
 #[test]
 fn unsupported_event_versions_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
-    event.version += 1;
+    event.version = engr::EVENT_ENVELOPE_VERSION + 1;
     assert_event_is_rejected(&root, event);
+}
+
+/// History is evidence of what was admitted under the contract that was current
+/// at the time. Refusing the older generation, or rewriting it into the newer
+/// one, would both replace that evidence with a claim about it.
+#[test]
+fn the_retained_event_generation_is_still_read() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "retained history"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+
+    let path = store::events_path(root, &id);
+    let stored = std::fs::read_to_string(&path).expect("events");
+    let mut lines = Vec::new();
+    for line in stored.lines() {
+        let mut event: Value = serde_json::from_str(line).expect("event");
+        assert_eq!(
+            event["version"],
+            Value::from(engr::EVENT_ENVELOPE_VERSION),
+            "this build writes the current generation"
+        );
+        event["version"] = Value::from(engr::EVENT_ENVELOPE_VERSION_V1);
+        lines.push(serde_json::to_string(&event).expect("event"));
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("rewrite events");
+
+    let output = run_engr(root, &["verify", &id]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a retained older generation is still readable: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

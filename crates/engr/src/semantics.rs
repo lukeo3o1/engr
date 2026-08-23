@@ -167,6 +167,42 @@ pub fn needs_attention(object_type: Option<ObjectType>, state: State) -> bool {
     }
 }
 
+/// Which path admitted a Section's current semantics, and therefore how much
+/// authority those semantics carry.
+///
+/// This is the field that makes mixed authority readable rather than inferred.
+/// Durable engineering knowledge now arrives through two doors, and a reader who
+/// cannot tell which one a Section came through cannot tell whether a human ever
+/// assented to it — so the answer is persisted on the Section itself rather than
+/// reconstructed from history, which is evidence and may be purged.
+///
+/// There is deliberately no `Object.admission`. An Object is an aggregate, and
+/// an aggregate of one Human Section and one Agent Section has no single honest
+/// answer; asking the question of the Section is the only place it has one.
+///
+/// The ordering is one-way. A Human-Gated semantic mutation of a surviving Agent
+/// Section yields [`Admission::Human`], because a human read those exact words
+/// and assented to them. Nothing demotes Human to Agent: that would be engr
+/// deciding a human's assent had expired.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Admission {
+    /// Admitted through Agent Rule Review. Durable engineering knowledge, and
+    /// explicitly **not** Human-authoritative.
+    Agent,
+    /// Admitted through the Human Gate. Human-authoritative.
+    Human,
+}
+
+impl Admission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Admission::Agent => "agent",
+            Admission::Human => "human",
+        }
+    }
+}
+
 /// What semantic role a confirmed Section plays.
 ///
 /// Optional, and independent of the Object's type: an untyped Object may hold a
