@@ -833,7 +833,7 @@ pub struct ReviewBinding {
 }
 
 /// One rule as it stood, with everything it rests on resolved.
-#[derive(Serialize)]
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct BoundRule {
     pub id: String,
     /// Sorted, because the set is semantically order-insensitive.

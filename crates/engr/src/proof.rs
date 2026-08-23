@@ -763,3 +763,160 @@ mod table_tests {
         );
     }
 }
+
+/// What Rule Review produced, as the candidate shows it to a human.
+///
+/// A presentation record with teeth: the exact Rule snapshots are here so the
+/// human sees what was reviewed against, and so a reader can recompute the
+/// review identity from the candidate alone rather than trusting the name it
+/// gives itself.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct CandidateReview {
+    pub review_digest: String,
+    pub attempt: u32,
+    pub result: ReviewResult,
+    pub rules: Vec<crate::rules::BoundRule>,
+    /// Null for a pass. A failed or exhausted review reaching a human for
+    /// override carries the exact wording the agent offered for it, because the
+    /// human is being asked to overrule something and must read what.
+    pub explanation: Option<String>,
+}
+
+/// How a review ended, as the candidate reports it.
+///
+/// Wider than what an Event records: `failed` and `exhausted` never become
+/// durable provenance, because neither produces an admission on its own. They
+/// exist here because a human may be shown one and choose to override it.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewResult {
+    Passed,
+    Failed,
+    Exhausted,
+}
+
+/// The concurrency predecessor a candidate is bound to.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct Binding {
+    pub expected_rev: u64,
+}
+
+/// Everything a human is shown beside the mutation itself.
+///
+/// Every member is present, filled with its canonical null, empty or false even
+/// where the stored envelope omits it. The envelope omits for economy; this
+/// projection cannot, for the same reason none of the others can — two
+/// implementations that disagree about whether an absent member is written
+/// produce different bytes for one candidate.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct PresentedContext {
+    pub previous_text: Option<String>,
+    pub previous_based_on: Option<String>,
+    pub previous_refs: Vec<Ref>,
+    pub previous_role: Option<Role>,
+    pub previous_content: Vec<Supplement>,
+    pub previous_relations: Vec<Relation>,
+    pub previous_semantics_recorded: bool,
+    pub oversize: bool,
+    pub object_title: Option<String>,
+    pub rule_review: Option<CandidateReview>,
+}
+
+/// Exactly what a candidate envelope's integrity value is taken of.
+///
+/// **Not** a second semantic identity. `candidate_digest` names the transition
+/// that was authorized; this protects the envelope a human is looking at from
+/// being edited on disk into something self-consistent but different.
+///
+/// The mutation payload is deliberately absent: the loader recomputes
+/// `candidate_digest` from that payload and its predecessor separately, so
+/// duplicating it here would mean two values covering one thing and a future
+/// where they can disagree.
+///
+/// `created_at`, `format` and the envelope version are absent for the opposite
+/// reason — they are operational ordering and schema selection, not the subject
+/// a human authorized.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct EnvelopeIntegrity {
+    pub challenge: String,
+    pub candidate_digest: String,
+    pub binding: Binding,
+    pub context: PresentedContext,
+}
+
+impl EnvelopeIntegrity {
+    /// The bare hex this envelope's integrity field carries.
+    ///
+    /// Bare rather than versioned, and that is not an oversight: the envelope's
+    /// own version selects this calculation, so a field-local contract version
+    /// would be a second answer to a question already answered one level up.
+    pub fn digest(&self) -> Result<String> {
+        Ok(sha256_of(&canonical_bytes(self, "candidate envelope")?))
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    /// The exact bytes, for the shape where every optional member is at its
+    /// default. This is the case an envelope most often stores as omissions, so
+    /// it is the one where an implementation is most likely to disagree.
+    #[test]
+    fn the_integrity_projection_writes_every_default_out() {
+        let integrity = EnvelopeIntegrity {
+            challenge: "ABC234".to_owned(),
+            candidate_digest: format!("1:{}", "a".repeat(64)),
+            binding: Binding { expected_rev: 7 },
+            context: PresentedContext::default(),
+        };
+        assert_eq!(
+            canonical_bytes(&integrity, "envelope").expect("bytes"),
+            concat!(
+                r#"{"binding":{"expected_rev":7},"#,
+                r#""candidate_digest":"1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","#,
+                r#""challenge":"ABC234","#,
+                r#""context":{"object_title":null,"oversize":false,"previous_based_on":null,"#,
+                r#""previous_content":[],"previous_refs":[],"previous_relations":[],"#,
+                r#""previous_role":null,"previous_semantics_recorded":false,"previous_text":null,"#,
+                r#""rule_review":null}}"#
+            )
+        );
+        let digest = integrity.digest().expect("digest");
+        assert_eq!(
+            digest.len(),
+            64,
+            "bare hex, because the envelope version selects the calculation"
+        );
+        assert!(!digest.contains(':'));
+    }
+
+    /// The mutation is not in here, so two candidates differing only in their
+    /// mutation share an integrity value — which is correct, because the
+    /// loader recomputes `candidate_digest` from the mutation separately and
+    /// duplicating it would be two values covering one thing.
+    #[test]
+    fn integrity_covers_the_envelope_and_the_digest_covers_the_mutation() {
+        let one = EnvelopeIntegrity {
+            challenge: "ABC234".to_owned(),
+            candidate_digest: format!("1:{}", "a".repeat(64)),
+            binding: Binding { expected_rev: 7 },
+            context: PresentedContext::default(),
+        };
+        let mut moved = one.clone();
+        moved.binding.expected_rev = 8;
+        assert_ne!(
+            one.digest().expect("digest"),
+            moved.digest().expect("digest"),
+            "the predecessor it is bound to is part of the envelope"
+        );
+
+        let mut shown = one.clone();
+        shown.context.previous_text = Some("what it said before".to_owned());
+        assert_ne!(
+            one.digest().expect("digest"),
+            shown.digest().expect("digest"),
+            "and so is what the human was shown"
+        );
+    }
+}
