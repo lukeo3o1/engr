@@ -902,9 +902,155 @@ fn canonical_sha256_with_basis<T: Serialize>(value: &T) -> Result<String> {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Confirmation {
     pub challenge: String,
     pub payload_sha256: String,
+}
+
+/// What a Human typed, under the mixed-authority generation.
+///
+/// The challenge is still a random token a human hands back — that mechanism is
+/// unchanged, and a human never types a digest. What changed is the second
+/// member: `payload_sha256` identified the bytes of one mutation, while
+/// `candidate_digest` names the semantic transition that was authorized, so the
+/// same assent stays recognizable across a representation change.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct HumanConfirmation {
+    pub challenge: String,
+    pub candidate_digest: String,
+}
+
+/// What Rule Review concluded, as durable provenance.
+///
+/// Minimal on purpose: an outcome and an identity. #25 is explicit that the
+/// EventStore does not keep a ReviewSeries, per-Rule counters, or the Agent's
+/// natural-language reasoning — those belong to the moment, not to the record.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewProvenance {
+    pub outcome: ReviewOutcome,
+    pub review_digest: String,
+}
+
+/// How a reviewed mutation ended up admitted.
+///
+/// There is no `failed` here, and that is the point: a failed review does not
+/// produce an Event. `overridden` records that a human looked at a failed or
+/// exhausted review and admitted the mutation anyway — which is a thing only a
+/// human can do, and a thing the record must not lose.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOutcome {
+    Passed,
+    Overridden,
+}
+
+/// The one tagged admission structure of the mixed-authority Event generation.
+///
+/// One structure rather than a scattering of optional fields, because "which
+/// door" is a single fact and a reader must not have to infer it from which
+/// members happen to be present.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TaggedAdmission {
+    pub kind: Admission,
+    /// Present exactly when `kind = human`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<HumanConfirmation>,
+    /// Absent when no Rule Review applied — never a null placeholder, because
+    /// "no rule governed this" and "a rule governed it and said nothing" are
+    /// different facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_review: Option<ReviewProvenance>,
+}
+
+/// How an Event says what admitted it.
+///
+/// Two shapes, because the answer changed generation and the records that gave
+/// the old answer are still on disk. Untagged and unambiguous: the two share no
+/// member, so a record decodes as exactly one of them, and a retained record
+/// re-serializes to the bytes it was written with — which is what keeps its
+/// `payload_sha256` verifiable rather than needing an exemption.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(untagged)]
+pub enum Provenance {
+    /// The retained generation: a spent challenge and the hash of the mutation
+    /// it was typed against.
+    Confirmed { confirmation: Confirmation },
+    /// The mixed-authority generation, where the Human Gate is one door of two.
+    Tagged { admission: TaggedAdmission },
+}
+
+impl Provenance {
+    /// The retained generation's shape, for a caller building one.
+    pub fn confirmed(challenge: impl Into<String>, payload_sha256: impl Into<String>) -> Self {
+        Provenance::Confirmed {
+            confirmation: Confirmation {
+                challenge: challenge.into(),
+                payload_sha256: payload_sha256.into(),
+            },
+        }
+    }
+
+    /// Which door this record came through.
+    ///
+    /// The retained generation has only one answer available, and it is the
+    /// right one rather than a fallback: while it was the current generation the
+    /// Human Gate was the only way in, so every record written under it went
+    /// through it.
+    pub fn admitting_path(&self) -> Admission {
+        match self {
+            Provenance::Confirmed { .. } => Admission::Human,
+            Provenance::Tagged { admission } => admission.kind,
+        }
+    }
+
+    /// The structural rules of the tagged generation.
+    ///
+    /// Structural, not authoritative: what an Agent-admitted mutation may *do*
+    /// is decided by [`check_admitting_authority`] against current state, and it
+    /// has to be, because deletion depends on what the target currently is.
+    /// These are the rules a record must satisfy to be well formed at all —
+    /// a shape that says `agent` while carrying a human's confirmation is not a
+    /// record whose authority is wrong, it is a record that contradicts itself.
+    pub fn validate(&self) -> Result<()> {
+        let Provenance::Tagged { admission } = self else {
+            return Ok(());
+        };
+        match admission.kind {
+            Admission::Human => {
+                ensure!(
+                    admission.confirmation.is_some(),
+                    EXIT_SCHEMA,
+                    "a human admission records the confirmation it was admitted by"
+                );
+            }
+            Admission::Agent => {
+                ensure!(
+                    admission.confirmation.is_none(),
+                    EXIT_SCHEMA,
+                    "an agent admission passes through no human gate, so it carries no confirmation"
+                );
+                ensure!(
+                    !admission
+                        .rule_review
+                        .as_ref()
+                        .is_some_and(|review| review.outcome == ReviewOutcome::Overridden),
+                    EXIT_SCHEMA,
+                    "overriding a failed review is a human act, so an agent admission cannot record one"
+                );
+            }
+        }
+        if let Some(confirmation) = &admission.confirmation {
+            crate::digest::CANDIDATE.verify(&confirmation.candidate_digest)?;
+        }
+        if let Some(review) = &admission.rule_review {
+            crate::digest::REVIEW.verify(&review.review_digest)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -916,7 +1062,22 @@ pub struct Event {
     pub time: String,
     #[serde(flatten)]
     pub payload: Payload,
-    pub confirmation: Confirmation,
+    #[serde(flatten)]
+    pub provenance: Provenance,
+}
+
+impl Event {
+    /// The retained generation's confirmation, where there is one.
+    ///
+    /// A named accessor rather than a field, because provenance is one fact
+    /// with two shapes and a caller that reaches past that has to say which
+    /// shape it is assuming.
+    pub fn confirmation(&self) -> Option<&Confirmation> {
+        match &self.provenance {
+            Provenance::Confirmed { confirmation } => Some(confirmation),
+            Provenance::Tagged { .. } => None,
+        }
+    }
 }
 
 /// Apply only the event suffix newer than the persisted projection.
@@ -1158,13 +1319,11 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
 /// admits are worth.
 ///
 /// One seam, deliberately, rather than an [`Admission`] threaded through every
-/// arm of the reducer. Every event this build writes and every event on disk
-/// carries a spent Human challenge, so the answer is `human` for all of them —
-/// the Agent path has no envelope to be admitted through yet. When the tagged
-/// admission provenance lands, exactly one function changes and every rule that
-/// depends on the answer already reads it from here.
-fn admitting_path(_event: &Event) -> Admission {
-    Admission::Human
+/// arm of the reducer. It now reads the record's own provenance: the retained
+/// generation answers `human` because while it was current the Human Gate was
+/// the only way in, and the tagged generation says so outright.
+fn admitting_path(event: &Event) -> Admission {
+    event.provenance.admitting_path()
 }
 
 /// What the admitting path is allowed to do at all.
@@ -1365,10 +1524,10 @@ mod tests {
             event_id: new_id(),
             rev,
             time: "2026-08-17T00:00:00Z".to_owned(),
-            confirmation: Confirmation {
-                challenge: "TEST00".to_owned(),
-                payload_sha256: payload.sha256().expect("payload hash"),
-            },
+            provenance: Provenance::confirmed(
+                "TEST00".to_owned(),
+                payload.sha256().expect("payload hash"),
+            ),
             payload,
         }
     }
@@ -1583,10 +1742,10 @@ mod tests {
                 event_id: new_id(),
                 rev: 1,
                 time: "2026-08-23T00:00:00Z".to_owned(),
-                confirmation: Confirmation {
-                    challenge: "TEST00".to_owned(),
-                    payload_sha256: payload.sha256().expect("hash"),
-                },
+                provenance: Provenance::confirmed(
+                    "TEST00".to_owned(),
+                    payload.sha256().expect("hash"),
+                ),
                 payload,
             }
         };
@@ -1630,10 +1789,7 @@ mod tests {
             event_id: new_id(),
             rev: 2,
             time: "2026-08-23T00:00:00Z".to_owned(),
-            confirmation: Confirmation {
-                challenge: "TEST00".to_owned(),
-                payload_sha256: payload.sha256().expect("hash"),
-            },
+            provenance: Provenance::confirmed("TEST00".to_owned(), payload.sha256().expect("hash")),
             payload,
         };
 
@@ -1770,5 +1926,123 @@ mod tests {
             .is_err(),
             "the future tail must remain contiguous"
         );
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use crate::semantics::Admission;
+
+    fn tagged(kind: Admission) -> TaggedAdmission {
+        TaggedAdmission {
+            kind,
+            confirmation: None,
+            rule_review: None,
+        }
+    }
+
+    fn confirmation() -> HumanConfirmation {
+        HumanConfirmation {
+            challenge: "ABC234".to_owned(),
+            candidate_digest: format!("1:{}", "a".repeat(64)),
+        }
+    }
+
+    fn review(outcome: ReviewOutcome) -> ReviewProvenance {
+        ReviewProvenance {
+            outcome,
+            review_digest: format!("1:{}", "b".repeat(64)),
+        }
+    }
+
+    /// The retained generation has one door available, and it is the right
+    /// answer rather than a fallback: while it was current the Human Gate was
+    /// the only way in.
+    #[test]
+    fn the_admitting_path_is_read_from_the_record_itself() {
+        assert_eq!(
+            Provenance::confirmed("ABC234", "0".repeat(64)).admitting_path(),
+            Admission::Human
+        );
+        for kind in [Admission::Agent, Admission::Human] {
+            let mut admission = tagged(kind);
+            admission.confirmation = (kind == Admission::Human).then(confirmation);
+            assert_eq!(
+                Provenance::Tagged { admission }.admitting_path(),
+                kind,
+                "the tagged generation says which door outright"
+            );
+        }
+    }
+
+    /// Structural rules, not authority ones: a record that says `agent` while
+    /// carrying a human's confirmation is not a record whose authority is
+    /// wrong, it is a record that contradicts itself.
+    #[test]
+    fn a_tagged_admission_cannot_contradict_itself() {
+        let mut human = tagged(Admission::Human);
+        assert!(
+            Provenance::Tagged {
+                admission: human.clone()
+            }
+            .validate()
+            .is_err(),
+            "a human admission records the confirmation it was admitted by"
+        );
+        human.confirmation = Some(confirmation());
+        assert!(Provenance::Tagged { admission: human }.validate().is_ok());
+
+        let mut agent = tagged(Admission::Agent);
+        assert!(Provenance::Tagged {
+            admission: agent.clone()
+        }
+        .validate()
+        .is_ok());
+        agent.confirmation = Some(confirmation());
+        assert!(
+            Provenance::Tagged {
+                admission: agent.clone()
+            }
+            .validate()
+            .is_err(),
+            "an agent admission passes through no human gate"
+        );
+
+        let mut overriding = tagged(Admission::Agent);
+        overriding.rule_review = Some(review(ReviewOutcome::Overridden));
+        assert!(
+            Provenance::Tagged {
+                admission: overriding.clone()
+            }
+            .validate()
+            .is_err(),
+            "overriding a failed review is a human act"
+        );
+        overriding.rule_review = Some(review(ReviewOutcome::Passed));
+        assert!(Provenance::Tagged {
+            admission: overriding
+        }
+        .validate()
+        .is_ok());
+    }
+
+    /// A digest scalar in the record is checked against its own contract family
+    /// rather than taken as text.
+    #[test]
+    fn provenance_digests_are_checked_against_their_contracts() {
+        let mut admission = tagged(Admission::Human);
+        admission.confirmation = Some(HumanConfirmation {
+            challenge: "ABC234".to_owned(),
+            candidate_digest: "not-a-versioned-digest".to_owned(),
+        });
+        assert!(Provenance::Tagged { admission }.validate().is_err());
+
+        let mut admission = tagged(Admission::Agent);
+        admission.rule_review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            review_digest: "1:short".to_owned(),
+        });
+        assert!(Provenance::Tagged { admission }.validate().is_err());
     }
 }

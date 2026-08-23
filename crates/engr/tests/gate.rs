@@ -1,6 +1,6 @@
 //! The gate is the only way in. These tests pin that.
 
-use engr::model::{Action, Content, Merge, Payload, Ref};
+use engr::model::{Action, Content, Merge, Payload, Provenance, Ref};
 use engr::semantics::{Relation, Role, State, Supplement};
 use engr::{gate, ops, store};
 use std::collections::BTreeSet;
@@ -1407,10 +1407,10 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
         rev: first.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: first.candidate.payload.clone(),
-        confirmation: engr::model::Confirmation {
-            challenge: first.candidate.challenge.clone(),
-            payload_sha256: first.candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            first.candidate.challenge.clone(),
+            first.candidate.payload_sha256.clone(),
+        ),
     };
     store::append_event(&root, &event).expect("append before the crash");
 
@@ -1446,10 +1446,7 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
         rev: prepared.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: prepared.candidate.payload.clone(),
-        confirmation: engr::model::Confirmation {
-            challenge: code.clone(),
-            payload_sha256: prepared.candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(code.clone(), prepared.candidate.payload_sha256.clone()),
     };
     store::append_event(&root, &event).expect("append before the crash");
 
@@ -1479,10 +1476,10 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload: prepared.candidate.payload.clone(),
-        confirmation: engr::model::Confirmation {
-            challenge: prepared.candidate.challenge.clone(),
-            payload_sha256: prepared.candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            prepared.candidate.challenge.clone(),
+            prepared.candidate.payload_sha256.clone(),
+        ),
     };
     store::append_event(&root, &event).expect("append before the crash");
 
@@ -1639,10 +1636,7 @@ fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
         event_id: engr::model::new_id(),
         rev: 4,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: merged.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), merged.sha256().expect("hash")),
         payload: merged,
     };
 
@@ -1693,10 +1687,7 @@ fn the_event_write_boundary_refuses_a_generation_it_does_not_emit() {
         event_id: engr::model::new_id(),
         rev: 3,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: ordinary.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), ordinary.sha256().expect("hash")),
         payload: ordinary,
     };
 
@@ -1822,10 +1813,7 @@ fn appending_an_event_requires_a_workspace_this_build_may_write() {
         event_id: engr::model::new_id(),
         rev: 2,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: added.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), added.sha256().expect("hash")),
         payload: added,
     };
 
@@ -1889,17 +1877,14 @@ fn appending_an_event_enforces_the_contract_its_own_read_applies() {
         event_id: engr::model::new_id(),
         rev: 2,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: added.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), added.sha256().expect("hash")),
         payload: added,
     };
 
     let mut wrong_format = sound.clone();
     wrong_format.format = "not-an-engr-event".to_owned();
     let mut wrong_hash = sound.clone();
-    wrong_hash.confirmation.payload_sha256 = "0".repeat(64);
+    wrong_hash.provenance = engr::model::Provenance::confirmed("TEST00", "0".repeat(64));
     let mut wrong_rev = sound.clone();
     wrong_rev.rev = 9;
     let mut wrong_object = sound.clone();
@@ -1957,10 +1942,7 @@ fn two_direct_callers_cannot_both_append_the_same_revision() {
             event_id: engr::model::new_id(),
             rev,
             time: "2026-08-23T00:00:00Z".to_owned(),
-            confirmation: engr::model::Confirmation {
-                challenge: "TEST00".to_owned(),
-                payload_sha256: added.sha256().expect("hash"),
-            },
+            provenance: Provenance::confirmed("TEST00".to_owned(), added.sha256().expect("hash")),
             payload: added,
         }
     };
@@ -2015,10 +1997,7 @@ fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
         event_id: engr::model::new_id(),
         rev: 2,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: absent.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), absent.sha256().expect("hash")),
         payload: absent,
     };
 
@@ -2050,10 +2029,7 @@ fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-23T00:00:00Z".to_owned(),
-        confirmation: engr::model::Confirmation {
-            challenge: "TEST00".to_owned(),
-            payload_sha256: added.sha256().expect("hash"),
-        },
+        provenance: Provenance::confirmed("TEST00".to_owned(), added.sha256().expect("hash")),
         payload: added,
     };
     let mut skipping = not_a_beginning.clone();
@@ -2068,4 +2044,48 @@ fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
         assert!(!path.exists(), "{what}: no history was created");
     }
+}
+
+/// The tagged admission structure is implemented and not written, the same way
+/// the merge that names its survivor is. Both belong to the generation the
+/// coordinated transition targets, and a record carrying either under the
+/// generation this build emits would say this version means something it does
+/// not.
+#[test]
+fn tagged_admission_provenance_cannot_be_written_or_read_yet() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "provenance boundary");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let added = payload(Action::SectionAdded, &id, "wording");
+    let tagged = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-23T00:00:00Z".to_owned(),
+        provenance: Provenance::Tagged {
+            admission: engr::model::TaggedAdmission {
+                kind: engr::semantics::Admission::Agent,
+                confirmation: None,
+                rule_review: None,
+            },
+        },
+        payload: added,
+    };
+
+    let error = store::append_event(&root, &tagged)
+        .expect_err("that provenance belongs to a generation this build does not emit");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(std::fs::read(&path).expect("events"), before);
+
+    // And refused on the way back in, because a record can arrive by other means.
+    let line = serde_json::to_string(&tagged).expect("event");
+    let mut history = String::from_utf8(before).expect("utf8");
+    history.push_str(&line);
+    history.push('\n');
+    std::fs::write(&path, history).expect("write");
+    let error = store::load_events(&root, &id).expect_err("nor read under this generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
