@@ -27,7 +27,6 @@ object
 ├── next_section_id           monotonic, never reset
 └── sections[]
     ├── id                    integer, never reused, never renumbered
-    ├── admission             agent | human — which door these semantics came through
     ├── role?                 decision | risk | supersession | acceptance_criterion
     ├── text                  always the current wording
     ├── content[]?            bounded literal excerpts, ordered
@@ -35,65 +34,12 @@ object
     ├── refs[]                { object, section, sha256, commit }
     ├── relations[]?          { type, target }
     ├── sha256                hash of role + text + content + based_on + refs + relations
-    └── admitted_at
+    └── confirmed_at
 ```
 
 A section's `text` is always its current wording, because wording only changes
-through the action that admitted it. Readers never have to ask which of two
-fields is authoritative — there is only one.
-
-### Admission: which door a section came through
-
-Durable engineering knowledge arrives through two paths, and a section says
-which one admitted its current semantics:
-
-```text
-human    admitted through the Human Gate. Human-authoritative.
-agent    admitted through Agent Rule Review. Durable knowledge, and
-         explicitly not Human-authoritative.
-```
-
-There is deliberately **no `object.admission`**. An object is an aggregate, and
-an aggregate holding one human section and one agent section has no single
-honest answer; the section is the only place the question has one.
-
-`admission` records **which door**, and only that. `human` means the wording was
-put through the Human Gate and is therefore treated as Human-authoritative. It
-is **not** evidence that a human was present, and no field here can be — see
-[what v0 does not solve](#what-v0-does-not-solve), which is explicit that
-nothing prevents an agent confirming its own proposal. Every rule below rests on
-the door, never on the presence.
-
-The ordering is one-way, and it is enforced rather than described:
-
-- A Human-Gated semantic mutation of a surviving agent section yields
-  `admission=human`. Those exact words went through the door where a human is
-  asked, so the promotion is the point rather than a side effect.
-- Nothing demotes human to agent. An agent rewording a human section would
-  replace gated wording with ungated wording, and is refused.
-- An agent merge may consolidate only agent sections. Absorbing a human section
-  into an agent one would take gated wording and leave it standing as ungated —
-  the same rule, applied where it would otherwise be possible to launder.
-
-Two pieces of the semantic surface are human-authoritative in themselves, so an
-agent section MUST NOT carry them: `relations[]`, and `role=supersession`. A
-relation is a claim the record then acts on rather than wording a reader can
-check, and `role=supersession` is the reason an object was retired.
-
-`admitted_at` is the time those semantics were admitted, by whichever path
-admitted them. It was called `confirmed_at` while the Human Gate was the only
-way in; the instant is the same one, but a name saying *confirmed* would now be
-saying something untrue of half the sections that have one.
-
-Integrity is not authority. A legitimate mechanical reseal does not promote
-agent knowledge to human authority.
-
-An agent-authorized operation MUST NOT reach the object's lifecycle, directly or
-indirectly. `object_closed`, `object_reopened`, `object_classified` and
-`object_superseded` are human-only after the neutral initialization, and an
-agent-admitted action MUST NOT carry a `becomes` destination. This is not an
-extra rule bolted on: `type` and `state` are human-authoritative, and a field
-does not become agent-writable merely because it is embedded in another action.
+through a confirmed action. Readers never have to ask which of two fields is
+authoritative — there is only one.
 
 Every optional field above is **absent when it carries nothing**. An empty
 `content[]`, an empty `relations[]` and a null `role` are not stored, so a
@@ -139,7 +85,7 @@ Ten. All of them gated.
 | `object_renamed` | — | Replaces the title |
 | `section_added` | — | Appends a section, id from the counter |
 | `section_revised` | `section` | Replaces that section's content; id unchanged |
-| `section_merged` | `destination`, `sources[]` | The destination survives with the merged wording; the sources are removed |
+| `section_merged` | `absorbs[]` | New id carrying the confirmed wording; absorbed sections removed |
 | `section_deleted` | `section` | Removes the section |
 | `object_closed` | — | `state` → `closed`; untyped objects only |
 | `object_reopened` | — | `state` → `open`; untyped objects only |
@@ -214,36 +160,7 @@ defines none.
 Sections have no `state` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
 
-### Merging names the section that survives
-
-A merge names one **destination** and at least one **source**. The destination
-survives, keeps its id and takes the merged wording; the sources are removed and
-their ids are never handed out again. **A merge allocates nothing.**
-
-The earlier design consumed every participant and allocated a fresh id for the
-result. That left anybody holding a reference to any of them pointing at a
-section that no longer existed, with nothing to forward them to — and v1 has no
-redirect, no tombstone and no automatic rewrite of an inbound reference, so
-there was nothing to recover with.
-
-The rules follow from that:
-
-- `sources[]` is a set: non-empty, listed once each in ascending order, and it
-  MUST NOT contain the destination. Two events consuming the same sections in a
-  different order would otherwise be two payloads saying one thing, and
-  therefore two confirmation identities for one act.
-- Every participant is resolved before anything moves. A merge is one judgement
-  about several sections; consuming two of three and then finding the third
-  missing would leave the object in a state nobody confirmed.
-- A merge that would consume a section something still depends on is **refused**.
-  A consumed id is never reused, so the alternative is a reference pinned to
-  wording that exists nowhere, pointing at an id that will never exist again.
-  Whoever holds the reference decides what it should say now.
-- The merged wording may not depend on any participant, the destination
-  included: after the merge, the destination *is* that wording.
-- The surviving admission follows the path that authorized the merge. A human
-  merge may consume agent and human sections and yields `human`; an agent merge
-  requires every participant to be agent and yields `agent`.
+A merge must absorb at least two distinct sections.
 
 ## Type and state
 
@@ -586,13 +503,6 @@ There is **one live candidate per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.
 
 ### The title
-
-An object's title is **non-authoritative navigation and discovery metadata**. It
-is what a listing prints so a reader can find the record; it is not identity, it
-need not be unique, and nothing about what the object *means* rests on it. Older
-wording naming `title`, `type` and `state` together as human-authoritative does
-not describe the current design: after the protocol-defined neutral
-initialization, the human-only object metadata is exactly `type` and `state`.
 
 An object's title is a label, not a body. Every action that sets a title —
 `object_created` and `object_renamed` — MUST refuse one that spans lines or
@@ -1582,8 +1492,8 @@ changes are agent-managed with no such rule.
 `prepare` prints the challenge code where the agent can read it, and the agent
 runs `confirm`. **Nothing stops an agent confirming its own proposal.**
 
-Treat `admitted_at`, `admission=human` and a matching hash as evidence about the
-*content*, never as evidence that a human was present. Making the gate a mechanism needs the
+Treat `confirmed_at` and a matching hash as evidence about the *content*, never
+as evidence that a human was present. Making the gate a mechanism needs the
 challenge to travel where the agent cannot read it, or `confirm` to run in a
 different process. That is not v0.
 
@@ -2018,99 +1928,42 @@ validates.
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
-workspace, and this build writes **version 3**. New resource files do not repeat
-those fields. Workspaces at versions 1 and 2 are recognized and migratable;
-workspaces without the authority may also be recognized from their legacy
-resource markers; a Phase 0 workspace is transitional while any Object uses
-`status`. Every one of those forms remains read-only until `engr migrate` is
-explicitly run, and each says which of them it is rather than being reported as
-one thing. Migration changes only incompatible representation, moves the
-authority to the current version, and preserves compatible legacy markers and
-confirmed Event envelopes. Unknown or newer workspace versions are never mutated
-and never read.
+workspace, and this build writes **version 2**. New resource files do not repeat
+those fields. Workspaces at version 1 are recognized and migratable; workspaces
+without the authority may also be recognized from their legacy resource markers;
+a Phase 0 workspace is transitional while any Object uses `status`. Every one of
+those forms remains read-only until `engr migrate` is explicitly run, and each
+says which of them it is rather than being reported as one thing. Migration
+changes only incompatible representation (`Object.status` to `Object.state`),
+moves the authority to the current version, and preserves compatible legacy
+markers and confirmed Event envelopes. Unknown or newer workspace versions are
+never mutated and never read.
 
-The representations migration converts are:
+### A generation still being built is never written
 
-```text
-Object.status         -> Object.state
-Section.confirmed_at  -> Section.admitted_at, same instant
-absent admission      -> Section.admission = human
-```
+A coordinated schema transition may be implemented in stages, and version 3 is
+one: mixed Section authority, the admission timestamp, Section and Object
+integrity, selective Ref digests, and the Event and candidate representation
+changes are one contract, not a list of independent additions.
 
-Nothing is inferred. Every section written before `admission` existed went
-through the Human Gate, because that was the only door the protocol had, so
-`human` restates a guarantee already made rather than manufacturing authority
-out of a field that was never there.
+A version has exactly one canonical interpretation for current resources. So
+while such a transition is unfinished, a build that implements part of it MUST
+NOT create, write or migrate to that version, and MUST NOT emit records claiming
+the Event or candidate generations it defines. Otherwise the version would name
+two shapes — whatever the build has reached, and the finished contract — and a
+workspace moved into the first could never be brought to the second, because
+migration is one way and confirmed history is never rewritten.
 
-One function performs every one of those conversions, and **every** reader goes
-through it — the load path, migration, and the historical reader. A shape that
-predates a field therefore means the same thing to every reader, and a shape
-that contradicts itself is refused everywhere rather than wherever somebody
-remembered to check. An object carrying both `status` and `state` cannot say
-which it means and is refused.
+Three tempting ways round it are all closed. A build MUST NOT invent a temporary
+development version to write instead; MUST NOT write resources shaped for the new
+version under the old one; and MUST NOT treat "the build is unreleased" as
+licence to let one version mean more than one thing.
 
-### A representation is read under the generation that wrote it
-
-The conversion is told which workspace generation the bytes came from. It is
-never inferred from the bytes, and that is the whole point: inferred, a file
-would be read under whichever contract its own contents suggest, and a field
-nobody could legitimately have written would become the evidence that writing it
-was legitimate.
-
-So a resource MUST match the generation its authority declares:
-
-```text
-before the mixed-authority generation
-  confirmed_at required
-  admission and admitted_at are refused outright
-
-the mixed-authority generation
-  admission and admitted_at required
-  confirmed_at is refused outright
-```
-
-The asymmetry matters most in one direction. `agent` is an authority no earlier
-generation had any path to produce, so a section from one of those generations
-claiming it was not written by that generation — and treating the claim as data
-would let a hand edit mint an authority no human ever gave. It fails closed
-instead. Reading `admission` as `human` when the field is simply *missing* from
-a current-generation file would be the same mistake from the other side: that is
-a file that lost a required field, not one that predates it.
-
-Historical snapshots follow the same rule under their own recorded version, so
-what a commit says is read as what it said.
-
-Reading and repairing are different questions and MUST NOT share one rule. A
-reader refuses a resource that disagrees with its own generation. `engr migrate`
-— the one explicit recovery command — MUST be able to put that resource right,
-or the only representation a generation replaced is the one nothing can fix; an
-ordinary restore of a pre-transition file into a workspace already at the new
-version reaches exactly that state.
-
-Repair is narrow, and narrow is what makes it safe. It converts only the exact
-earlier shape, which carries no authority claim at all. A section offering an
-`admission` beside `confirmed_at` is offering something no build of the earlier
-generation could have written, and is refused at every door including this one.
-
-Whatever detects that a workspace needs migrating MUST know about every
-representation the migration can repair. A detector that knows about fewer
-reports the workspace as current, and the recovery command then declines it as
-needing nothing.
-
-### A generation still being built is never committed to
-
-A coordinated transition may be implemented in stages. While it is unfinished, a
-build that implements part of it MUST NOT move an existing workspace into the
-new version. Migration is one way and confirmed history is never rewritten, so a
-workspace moved into a shape that is still changing could not be brought the
-rest of the way afterwards — it would be left declaring a version whose later
-requirements it cannot satisfy, with no way back.
-
-Such a build still reads existing workspaces, and still refuses to write to
-them. Only a migration that would *change* the declared version is held back: a
-workspace whose authority already names that version is not moved anywhere by
-being repaired, so the recovery route above stays open. The refusal MUST say
-that the version is unfinished, so it is not read as corruption.
+What a build in that state may do is implement the model and test it, through
+paths that create no durable artifact. The durable surface stays exactly where it
+was until the whole transition is implemented, and that final step is what makes
+the new version current — enabling normal creation, normal writes, and the
+migration in one move.
 
 ### What the workspace version is for
 
@@ -2122,13 +1975,6 @@ no `review:` block means one thing to a version 2 build and another to a version
 accepting one workspace and disagreeing about what its policy says is the failure
 this authority exists to prevent, so a build that does not know a version refuses
 the workspace instead of reading it under its own rules.
-
-Version 3 exists because a section now says which door it came through. A
-version 2 build reading a version 3 section would see an unknown `admission`
-field and a missing `confirmed_at`; a version 3 build reading version 2 bytes
-would have to guess at authority. This is the first version to change how a
-*resource* is represented rather than only how policy is read, which is why the
-historical rule below now applies rather than being a note about the future.
 
 This is distinct from the review binding's own version, which identifies the
 deterministic binding contract and changes when *that* contract changes. A Rule
@@ -2142,24 +1988,20 @@ A **historical** snapshot carries the version that was current when it was taken
 and is readable at any version this build recognizes. Refusing an older snapshot
 would make every reference pinned before a migration unresolvable — moving the
 workspace forward would retroactively break provenance that was correct when it
-was recorded.
-
-A snapshot is decoded through the same conversion migration uses, **under the
-version the snapshot itself records**, so it is read as what it said rather than
-as what today's build would have written. Nothing is written back: the commit is
-immutable and stays exactly as it is. Reading history is not rewriting it.
+was recorded. This is safe only while the recognized versions represent the
+resource identically, which is true of 1 and 2: version 2 changes how a Rule is
+read, and no Rule is read out of a historical snapshot. A future version that
+changes a resource representation must decode a snapshot under the snapshot's own
+version rather than widening that check again.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain
 enough to infer one and a guessed classification is an engineering judgement
 nobody made. Classifying an existing object later is an authoritative change like
 any other, and passes the gate with a state valid for the type it is given.
-Adding the optional semantic fields — `role`, `content[]`, `relations[]` — did
-not move the workspace version: they are absent when empty, so a workspace that
-uses none of them is byte-for-byte, and hash for hash, what it was. `admission`
-is the opposite case, and that is why it moved the version: it is required, it
-is present on every section, and its absence cannot be read as "this section
-does not use it".
+Adding the Phase 3 fields did not move the workspace version: they are absent
+when empty, so a workspace that uses none of them is byte-for-byte — and hash for
+hash — what it was.
 
 ### Event versions are semantic compatibility generations
 
@@ -2182,23 +2024,10 @@ could both succeed on one Event and disagree about it.
 `becomes` is additive and optional. Its absence preserves the previous meaning
 exactly, and an older reader confronted with one fails closed on the
 confirmation hash rather than replaying a revision while missing the
-classification that made it legal. It therefore stayed within Event version 1.
-
-**Version 2** is the mixed-authority generation, and merge is what forced it.
-Version 1 `section_merged` listed `absorbs[]` and meant "consume all of these
-and allocate a new id"; version 2 names `destination` and `sources[]` and means
-"this one survives". Two readers could both accept one Event and produce
-different objects from it, which is exactly the test above.
-
-Each generation may carry only the merge shape it defined, in **both**
-directions: a version 1 record naming a survivor is refused, and so is a version
-2 record listing `absorbs[]`. Otherwise the two shapes would be interchangeable
-and the generation would say nothing.
+classification that made it legal. It therefore stays within Event version 1.
 
 Confirmed history is never rewritten to normalize versions. An Event says what
-it said when a human confirmed it, and version 1 records stay readable exactly
-as written — normalizing them would produce a record of an admission that never
-happened.
+it said when a human confirmed it.
 
 ```text
 .engr/

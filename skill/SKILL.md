@@ -458,7 +458,7 @@ makes sense.
 | --- | --- |
 | Something new to record | `--add` |
 | The same point, worded differently or corrected | `--revise <n>` |
-| Two sections saying one thing | `--merge <survivor> --sources <a>,<b>` |
+| Two sections saying one thing | `--merge <a>,<b>` |
 | No longer belongs | `--delete <n>` |
 | The object's title no longer describes it | `--rename --text "..."` |
 | An untyped object has settled | `--close` |
@@ -478,27 +478,6 @@ that the work changed shape: that belongs in a section, where it can say why.
 Prefer `--revise` over delete-then-add. A revision keeps the section's id, so
 every reference to it stays meaningful; delete-then-add breaks them, and the id
 is never reused.
-
-`--merge` names the section that survives, and it survives with its id: the
-sources are removed, and merging allocates nothing. Say which one you mean —
-usually the one other sections already point at, because a merge that would
-consume a section something still depends on is refused rather than silently
-leaving that dependency pointing at an id nothing will ever have again.
-
-Every section says which door it came through:
-
-```text
-human    admitted through the Human Gate, and treated as human-authoritative
-agent    admitted through Rule Review, and not human-authoritative
-```
-
-`engr show` prints it beside the timestamp, and `--format json` carries it as
-`admission`. It records **which door**, and only that. Do not read
-`admission=human` as proof a human was present: `prepare` prints the challenge
-where the agent can read it, so nothing stops an agent confirming its own
-proposal, and going through the gate is the whole of what the record can
-honestly claim. A gated revision or merge of an agent section makes the result
-`human`; nothing goes the other way.
 
 ## Type, state and attention
 

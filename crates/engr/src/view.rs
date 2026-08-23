@@ -355,17 +355,12 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         render_relations(&mut out, &section.relations);
         if let Some(commit) = &section.based_on {
             out.push_str(&format!(
-                "    based_on {}   {} admitted {}\n",
+                "    based_on {}   confirmed {}\n",
                 short(commit),
-                section.admission.as_str(),
                 section.admitted_at
             ));
         } else {
-            out.push_str(&format!(
-                "    {} admitted {}\n",
-                section.admission.as_str(),
-                section.admitted_at
-            ));
+            out.push_str(&format!("    confirmed {}\n", section.admitted_at));
         }
         for reference in &section.refs {
             out.push_str(&format!(
@@ -380,7 +375,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // pointed at it in the moment they learn something is wrong.
         if status.tampered {
             out.push_str(&format!(
-                "    !!       content does not match the hash admitted at {}\n",
+                "    !!       content does not match the hash confirmed at {}\n",
                 section.admitted_at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
@@ -482,8 +477,7 @@ struct JsonSection<'a> {
     #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
     relations: &'a [Relation],
     sha256: &'a str,
-    admission: &'static str,
-    admitted_at: &'a str,
+    confirmed_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     basis_commits_behind: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -546,8 +540,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 refs: &section.refs,
                 relations: &section.relations,
                 sha256: &section.sha256,
-                admission: section.admission.as_str(),
-                admitted_at: &section.admitted_at,
+                confirmed_at: &section.admitted_at,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),

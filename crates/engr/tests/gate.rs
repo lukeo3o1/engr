@@ -255,12 +255,8 @@ fn section_ids_are_never_reused() {
     assert_eq!(ids, vec![1, 3]);
 }
 
-/// A merge names the Section that survives it, and everything else follows from
-/// that. The Phase 0 merge consumed every participant and allocated a fresh id,
-/// so anybody holding a reference to any of them was left pointing at a Section
-/// that no longer existed with nothing to forward them to.
 #[test]
-fn merging_keeps_the_destination_and_allocates_nothing() {
+fn merging_produces_a_new_id_and_removes_what_it_absorbed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "merging");
     admit(&root, payload(Action::SectionAdded, &id, "one"));
@@ -269,9 +265,8 @@ fn merging_keeps_the_destination_and_allocates_nothing() {
         &root,
         payload(
             Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
                 },
             },
             &id,
@@ -279,24 +274,22 @@ fn merging_keeps_the_destination_and_allocates_nothing() {
         ),
     );
     let ids: Vec<u64> = object.sections.iter().map(|section| section.id).collect();
-    assert_eq!(ids, vec![1], "the destination survives, keeping its id");
+    assert_eq!(ids, vec![3]);
     assert_eq!(object.sections[0].text, "one and two together");
-    assert_eq!(
-        object.next_section_id, 3,
-        "a merge allocates nothing, so the counter has not moved"
-    );
 }
 
-/// The consumed ids are gone for good, and the counter is what guarantees it.
-/// Deriving the next id from the sections still present would hand §2 straight
-/// back out to unrelated wording.
+/// The merge that names its survivor is implemented and not written. The gate
+/// is where that boundary has to hold: admitting one would append a record
+/// claiming the Event generation this build emits while carrying a shape that
+/// generation never defined — and it would do it after a human confirmed it.
 #[test]
-fn a_consumed_section_id_is_never_handed_out_again() {
+fn the_phase_three_merge_representation_cannot_be_admitted() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "consumed");
+    let id = new_object(&root, "durable boundary");
     admit(&root, payload(Action::SectionAdded, &id, "one"));
     admit(&root, payload(Action::SectionAdded, &id, "two"));
-    admit(
+
+    let error = gate::prepare(
         &root,
         payload(
             Action::SectionMerged {
@@ -308,14 +301,27 @@ fn a_consumed_section_id_is_never_handed_out_again() {
             &id,
             "together",
         ),
+    )
+    .expect_err("that representation is not durable yet");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        gate::pending(&root).expect("pending").is_empty(),
+        "and nothing was left waiting for a human"
     );
-    let object = admit(&root, payload(Action::SectionAdded, &id, "later"));
-    let ids: Vec<u64> = object.sections.iter().map(|section| section.id).collect();
-    assert_eq!(ids, vec![1, 3]);
+
+    // The model projects it perfectly well — that is the point of the slice.
+    // What it may not do is reach disk.
+    let object = store::load_object(&root, &id).expect("object");
+    let mut projected = object.clone();
+    let merged = engr::model::merged_admission(&object, 1, &[2], engr::semantics::Admission::Human)
+        .expect("a human merge");
+    assert_eq!(merged, engr::semantics::Admission::Human);
+    projected.sections.retain(|section| section.id != 2);
+    assert_eq!(projected.sections.len(), 1);
 }
 
-/// A consumed id is never handed out again, so a reference to one would be
-/// pinned to wording that exists nowhere and point at an id that will never
+/// A consumed Section id is never handed out again, so a reference to one is
+/// pinned to wording that exists nowhere and points at an id that will never
 /// exist. v1 has no redirect and no tombstone, so the merge is refused and
 /// whoever holds the reference decides what it should say now.
 #[test]
@@ -324,10 +330,7 @@ fn a_merge_cannot_consume_a_section_something_still_depends_on() {
     let target = new_object(&root, "target");
     let source = new_object(&root, "source");
     admit(&root, payload(Action::SectionAdded, &target, "depended on"));
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, "the survivor"),
-    );
+    admit(&root, payload(Action::SectionAdded, &target, "the other"));
     let pinned = store::load_object(&root, &target)
         .expect("target")
         .section(1)
@@ -350,9 +353,8 @@ fn a_merge_cannot_consume_a_section_something_still_depends_on() {
         &root,
         payload(
             Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 2,
-                    sources: vec![1],
+                merge: Merge::Absorbing {
+                    absorbs: vec![1, 2],
                 },
             },
             &target,
@@ -361,166 +363,6 @@ fn a_merge_cannot_consume_a_section_something_still_depends_on() {
     )
     .expect_err("§1 is still depended on");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-
-    // The other direction is admissible: the destination survives, so a
-    // reference to it keeps pointing at a Section that exists.
-    admit(
-        &root,
-        payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
-                },
-            },
-            &target,
-            "together",
-        ),
-    );
-}
-
-/// The merged wording cannot rest on what the merge removes, and cannot rest on
-/// the destination either — after the merge, the destination *is* this wording.
-#[test]
-fn merged_wording_cannot_depend_on_its_own_participants() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "self dependency");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
-    let pinned: Vec<String> = (1..=2)
-        .map(|section| {
-            store::load_object(&root, &id)
-                .expect("object")
-                .section(section)
-                .expect("section")
-                .sha256
-                .clone()
-        })
-        .collect();
-    let commit = commit_all(&root, "record wording");
-
-    for section in [1, 2] {
-        let mut merged = payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
-                },
-            },
-            &id,
-            "together",
-        );
-        merged.content.based_on = Some(commit.clone());
-        merged.content.refs = vec![Ref {
-            object: id.clone(),
-            section,
-            sha256: pinned[section as usize - 1].clone(),
-            commit: commit.clone(),
-        }];
-        let error = gate::prepare(&root, merged)
-            .expect_err("merged wording cannot depend on a participant");
-        assert_eq!(error.code, engr::EXIT_INVARIANT, "§{section}");
-    }
-}
-
-/// The gate writes the current Event generation, so it cannot admit the shape
-/// that generation replaced — the record would claim a version no reader will
-/// accept it under, and it would claim it after the Object had been written.
-#[test]
-fn the_retained_merge_shape_cannot_be_admitted() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "retained shape");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
-
-    let error = gate::prepare(
-        &root,
-        payload(
-            Action::SectionMerged {
-                merge: Merge::Absorbing {
-                    absorbs: vec![1, 2],
-                },
-            },
-            &id,
-            "together",
-        ),
-    )
-    .expect_err("history is not an input");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(
-        gate::pending(&root).expect("pending").is_empty(),
-        "and nothing was left waiting for a human"
-    );
-}
-
-#[test]
-fn a_merge_needs_a_destination_that_is_not_one_of_its_own_sources() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "self merge");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
-
-    let error = gate::prepare(
-        &root,
-        payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![1, 2],
-                },
-            },
-            &id,
-            "together",
-        ),
-    )
-    .expect_err("the survivor cannot also be consumed");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-
-    let error = gate::prepare(
-        &root,
-        payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: Vec::new(),
-                },
-            },
-            &id,
-            "together",
-        ),
-    )
-    .expect_err("a merge that consumes nothing is a revision");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-}
-
-/// `sources` is a set, so it has one spelling. Two events that consume the same
-/// Sections in different orders would otherwise be two different payloads — and
-/// therefore two different confirmation identities — saying one thing.
-#[test]
-fn the_sources_a_merge_consumes_are_canonically_ordered() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "ordering");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
-    admit(&root, payload(Action::SectionAdded, &id, "three"));
-
-    for sources in [vec![3, 2], vec![2, 2]] {
-        let error = gate::prepare(
-            &root,
-            payload(
-                Action::SectionMerged {
-                    merge: Merge::Into {
-                        destination: 1,
-                        sources,
-                    },
-                },
-                &id,
-                "together",
-            ),
-        )
-        .expect_err("sources are listed once each, ascending");
-        assert_eq!(error.code, engr::EXIT_INVARIANT);
-    }
 }
 
 #[test]
@@ -910,18 +752,6 @@ fn historical_references_decode_the_snapshot_workspace_format() {
             .remove("state")
             .expect("state");
         object["status"] = state;
-        // The Sections too. A snapshot claiming the generation that predates the
-        // workspace authority, while carrying fields no build of that generation
-        // could have written, is a contradiction rather than history — and is
-        // now read as one.
-        if let Some(sections) = object["sections"].as_array_mut() {
-            for section in sections {
-                let section = section.as_object_mut().expect("section");
-                let admitted_at = section.remove("admitted_at").expect("admitted_at");
-                section.insert("confirmed_at".to_owned(), admitted_at);
-                section.remove("admission");
-            }
-        }
         std::fs::write(path, serde_json::to_vec_pretty(&object).expect("json"))
             .expect("legacy object");
     }
@@ -1572,7 +1402,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V1,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: first.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -1611,7 +1441,7 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     let code = prepared.candidate.challenge.clone();
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V1,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: prepared.candidate.binding.expected_rev + 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
@@ -1644,7 +1474,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
     let event = engr::model::Event {
         format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V1,
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
         event_id: engr::model::new_id(),
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),

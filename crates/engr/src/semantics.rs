@@ -190,13 +190,20 @@ pub fn needs_attention(object_type: Option<ObjectType>, state: State) -> bool {
 /// present, and nothing here can be — see the threat model in `PROTOCOL.md`,
 /// which is explicit that nothing stops an agent confirming its own proposal.
 /// Every rule below rests on the door, never on the presence.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Admission {
     /// Admitted through Agent Rule Review. Durable engineering knowledge, and
     /// explicitly **not** Human-authoritative.
     Agent,
     /// Admitted through the Human Gate. Human-authoritative.
+    ///
+    /// The default, and only while the Agent path has no envelope to be
+    /// admitted through. Until the coordinated Phase-3 contract is activated the
+    /// Human Gate is the only door there is, so this is what every stored
+    /// Section came through — a fact about the current protocol rather than an
+    /// assumption about a missing field. See [`crate::model::Section::admission`].
+    #[default]
     Human,
 }
 

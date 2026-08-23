@@ -1534,21 +1534,11 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
         "check",
     );
 
-    // Those same doors open on a workspace that is at the version this build
-    // writes. Restored directly rather than migrated: the coordinated migration
-    // into the current generation is deferred while that generation is still
-    // being built, and what this test is about is the version boundary, not the
-    // route a workspace took to cross it.
-    std::fs::write(
-        store::engr_dir(&root).join("format.json"),
-        format!(
-            r#"{{"format":"engr-workspace","version":{}}}"#,
-            engr::WORKSPACE_VERSION
-        ),
-    )
-    .expect("format");
+    // And the explicit migration is what makes the newer semantics available,
+    // through those same doors.
+    store::migrate(&root).expect("migrate");
     let rule = rules::load_all(&root)
-        .expect("load_all at the current version")
+        .expect("load_all after migrating")
         .remove(0);
     assert_eq!(rule.review, rules::Review::default());
     let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");

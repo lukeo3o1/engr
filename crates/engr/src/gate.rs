@@ -10,7 +10,7 @@ use crate::model::{
 use crate::semantics::{self, Relation, RelationType, Role, Supplement, Target};
 use crate::{
     ensure, git, ops, store, tool_error, Error, Result, CANDIDATE_ENVELOPE_VERSION,
-    CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION, EXIT_INVARIANT, EXIT_NOT_FOUND,
+    CANDIDATE_ENVELOPE_VERSION_V0, EVENT_ENVELOPE_VERSION_V0, EXIT_INVARIANT, EXIT_NOT_FOUND,
     EXIT_SCHEMA, EXIT_USAGE,
 };
 use serde::{Deserialize, Serialize};
@@ -615,20 +615,20 @@ fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
 /// Refused up front, like every other precondition at this gate: a candidate
 fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Result<Prepared> {
     store::require_current(root)?;
-    // Here, not in `Payload::validate`: that runs when events are loaded, and a
-    // workspace holding the retained merge shape in its history has to keep
-    // being able to replay it. What it may not do is admit a *new* one — this
-    // build writes the current Event generation, and a record claiming that
-    // generation while carrying the shape it replaced is one no reader accepts,
-    // so the refusal belongs before a human is asked to confirm it rather than
-    // after the Object has been written.
+    // Here, not in `Payload::validate`: that runs when events are loaded, and
+    // the model has to keep being able to project a merge that names its
+    // survivor. What it may not do is *admit* one — that representation belongs
+    // to the Event generation the coordinated Phase-3 transition targets, and
+    // nothing writes that generation yet. Admitting one here would append a
+    // record claiming version 1 while carrying a shape version 1 never defined,
+    // and it would do it after a human had confirmed it.
     if let Action::SectionMerged {
-        merge: crate::model::Merge::Absorbing { .. },
+        merge: crate::model::Merge::Into { .. },
     } = &payload.action
     {
         return Err(Error::new(
             EXIT_INVARIANT,
-            "a merge names the section that survives it; the shape that consumed every participant is retained history, not something that can be admitted"
+            "a merge that names the section surviving it belongs to the coordinated Phase-3 Event generation, which is implemented but not yet written"
                 .to_owned(),
         ));
     }
@@ -771,7 +771,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Re
         };
         let probe = Event {
             format: EVENT_FORMAT.to_owned(),
-            version: EVENT_ENVELOPE_VERSION,
+            version: EVENT_ENVELOPE_VERSION_V0,
             event_id: String::new(),
             rev: trial.rev + 1,
             time: now(),
@@ -1182,7 +1182,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
 
     let event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: EVENT_ENVELOPE_VERSION,
+        version: EVENT_ENVELOPE_VERSION_V0,
         event_id: crate::model::new_id(),
         rev: object.rev + 1,
         time: now(),

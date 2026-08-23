@@ -271,7 +271,7 @@ fn show_marks_a_section_whose_content_does_not_match_its_hash() {
         "the header asserted the section was fine: {rendered}"
     );
     assert!(
-        rendered.contains("content does not match the hash admitted at"),
+        rendered.contains("content does not match the hash confirmed at"),
         "{rendered}"
     );
 }

@@ -1072,21 +1072,13 @@ fn a_migrated_workspace_carries_no_invented_classification() {
         payload(Action::ObjectClosed, &id, Content::default()),
     );
 
-    // Put it back into the v0 shape a Phase 0 workspace really had — the
-    // Sections included. A file claiming that generation while carrying fields
-    // no build of it could have written is a contradiction, not old data.
+    // Put it back into the v0 shape a Phase 0 workspace really had.
     rewrite(&root, &id, |value| {
         let object = value.as_object_mut().expect("object");
         object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
         object.insert("version".to_owned(), Value::from(1));
         let state = object.remove("state").expect("state");
         object.insert("status".to_owned(), state);
-        for section in object["sections"].as_array_mut().expect("sections") {
-            let section = section.as_object_mut().expect("section");
-            let admitted_at = section.remove("admitted_at").expect("admitted_at");
-            section.insert("confirmed_at".to_owned(), admitted_at);
-            section.remove("admission");
-        }
     });
     std::fs::remove_file(store::engr_dir(&root).join("format.json")).expect("format");
 
@@ -1099,38 +1091,25 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(before.state, State::Closed);
     assert_eq!(before.object_type, None);
 
-    // Committing that move is deferred while the generation it lands in is
-    // still being built, so what it *produces* is asserted on the conversion
-    // itself — the same function migration and every reader go through.
-    assert!(
-        store::with_lock(&root, || store::migrate(&root)).is_err(),
-        "migration succeeded, so the generation is finished and this test must go \
-         back to asserting the migrated outcome"
-    );
-    let mut planned: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
-    store::to_current_object(
-        "fixture",
-        store::LEGACY_GENERATION,
-        store::Reading::Repairing,
-        &mut planned,
-    )
-    .expect("a legacy object converts");
-    assert!(planned.get("status").is_none(), "{planned}");
-    assert!(
-        planned.get("type").is_none(),
+    store::with_lock(&root, || store::migrate(&root)).expect("migrate");
+    let after = store::load_object(&root, &id).expect("migrated");
+    assert_eq!(after.state, State::Closed);
+    assert_eq!(
+        after.object_type, None,
         "migration classifies nothing: the old record does not say what kind of thing it is"
     );
-    assert_eq!(planned["state"], Value::String("closed".to_owned()));
-    assert_eq!(
-        planned["sections"][0]["admission"],
-        Value::String("human".to_owned()),
-        "and the one authority that generation could produce is the one it gets"
-    );
+    let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
+    assert!(raw.get("status").is_none(), "{raw}");
+    assert!(raw.get("type").is_none(), "{raw}");
+    assert_eq!(raw["state"], Value::String("closed".to_owned()));
 
     // And the old vocabulary still works on it, because that is what its own
     // confirmed history is written in.
-    let effective = ops::effective(&root, &id).expect("legacy read");
-    assert_eq!(effective.state, State::Closed);
+    let object = admit(
+        &root,
+        payload(Action::ObjectReopened, &id, Content::default()),
+    );
+    assert_eq!(object.state, State::Open);
 }
 
 /// A Section written before `refs[]` was declared a set keeps the order its

@@ -199,13 +199,24 @@ pub struct Section {
     pub id: u64,
     /// Which door these exact semantics came through.
     ///
-    /// Required, with no default. A Section whose admission is unknown is not a
-    /// thing that exists, and a default here would quietly answer the one
-    /// question this field was added to stop anybody guessing at. Representations
-    /// written before the field existed are converted where every other
-    /// representation change is — see [`crate::store::to_current_object`] — so
-    /// exactly one place decides what they meant, rather than serde deciding it
-    /// silently at every read.
+    /// **Not persisted yet.** It is part of the coordinated Phase-3 contract,
+    /// and that contract becomes durable in one piece — see
+    /// [`crate::PHASE_3_WORKSPACE_VERSION`]. Writing it now would put a version
+    /// 3 field in a version 2 resource, which is the one thing a version number
+    /// exists to prevent.
+    ///
+    /// So it is reconstructed on load rather than read, and reconstruction is
+    /// exact rather than a guess: at workspace version 2 the Human Gate is the
+    /// only door there is, so every Section this build loads came through it.
+    /// The Agent path has no envelope to be admitted through until the same
+    /// activation, which is what makes the one value the only value.
+    ///
+    /// It is a real field of the model regardless. Every rule that turns on
+    /// admission — promotion, the refusal to demote, what an Agent merge may
+    /// consume, what an Agent Section may carry — is implemented and tested
+    /// against it here, so activation wires an existing model to a new
+    /// representation rather than inventing both at once.
+    #[serde(skip)]
     pub admission: Admission,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
@@ -224,11 +235,15 @@ pub struct Section {
     pub sha256: String,
     /// When these semantics were admitted, by whichever path admitted them.
     ///
-    /// Spelled `confirmed_at` before the Human Gate stopped being the only door.
-    /// The instant is the same one; what changed is that a name saying
-    /// *confirmed* would now be claiming a human read every Section that has
-    /// one. The old spelling is converted, not aliased — see
-    /// [`Section::admission`].
+    /// Persisted as `confirmed_at`, because the rename is part of the same
+    /// coordinated Phase-3 contract and none of it is durable yet. The instant
+    /// is the same either way; what the new name stops claiming is that a human
+    /// read every Section that has one, which becomes untrue the moment the
+    /// Agent path opens.
+    ///
+    /// Named `admitted_at` in the model so every rule reads the word that will
+    /// be true, and so activation moves a spelling rather than a meaning.
+    #[serde(rename = "confirmed_at")]
     pub admitted_at: String,
 }
 
@@ -1214,7 +1229,7 @@ mod tests {
         };
         Event {
             format: EVENT_FORMAT.to_owned(),
-            version: crate::EVENT_ENVELOPE_VERSION_V1,
+            version: crate::EVENT_ENVELOPE_VERSION_V0,
             event_id: new_id(),
             rev,
             time: "2026-08-17T00:00:00Z".to_owned(),

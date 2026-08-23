@@ -503,19 +503,9 @@ struct Prepare {
     /// Replace the wording of a section
     #[arg(long, value_name = "SECTION")]
     revise: Option<u64>,
-    /// Consolidate sections into this one. It survives, keeps its id, and takes
-    /// the merged wording
-    #[arg(long, value_name = "DESTINATION", requires = "sources")]
-    merge: Option<u64>,
-    /// The sections merged into the destination. They are removed, and their
-    /// ids are never reused
-    #[arg(
-        long,
-        value_name = "SECTIONS",
-        value_delimiter = ',',
-        requires = "merge"
-    )]
-    sources: Option<Vec<u64>>,
+    /// Consolidate sections into one
+    #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
+    merge: Option<Vec<u64>>,
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
@@ -1050,14 +1040,6 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
     }
 }
 
-/// A list of section ids, spelled the way the record spells them.
-fn sections(ids: &[u64]) -> String {
-    ids.iter()
-        .map(|section| format!("§{section}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn prepare(root: &Path, command: Prepare) -> Result<()> {
     let action = if command.new {
         Action::ObjectCreated
@@ -1067,19 +1049,9 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         Action::SectionAdded
     } else if let Some(section) = command.revise {
         Action::SectionRevised { section }
-    } else if let Some(destination) = command.merge {
-        // Sorted here rather than refused, because the order somebody types two
-        // section numbers in is not a statement about anything. What is persisted
-        // is a set, and a set has one spelling — so the canonical form is made,
-        // once, at the edge, and everything downstream compares like with like.
-        let mut sources = command.sources.clone().unwrap_or_default();
-        sources.sort_unstable();
-        sources.dedup();
+    } else if let Some(absorbs) = command.merge.clone() {
         Action::SectionMerged {
-            merge: Merge::Into {
-                destination,
-                sources,
-            },
+            merge: Merge::Absorbing { absorbs },
         }
     } else if let Some(section) = command.delete {
         Action::SectionDeleted { section }
@@ -1743,17 +1715,15 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
         }
-        // Named as what it does to the record: one Section survives with new
-        // wording and the others stop existing. "absorbing §4, §7" said which
-        // Sections were involved without saying which of them the reader would
-        // still be able to find afterwards.
-        Action::SectionMerged { merge } => match merge {
-            Merge::Into {
-                destination,
-                sources,
-            } => format!(" §{destination}, consuming {}", sections(sources)),
-            Merge::Absorbing { absorbs } => format!(" absorbing {}", sections(absorbs)),
-        },
+        Action::SectionMerged { merge } => format!(
+            " absorbing {}",
+            merge
+                .consumed()
+                .iter()
+                .map(|section| format!("§{section}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         _ => String::new(),
     };
     let title = candidate

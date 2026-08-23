@@ -21,41 +21,35 @@ pub mod work;
 
 /// Schema version of `.engr/format.json`, the workspace-level authority.
 ///
-/// Version 2 was the first to define `review.max_attempts` and
+/// Version 2 is the first to define `review.max_attempts` and
 /// `review.on_exhaustion` on a project Rule, including their effective
 /// defaults. That is a *semantic* change over unchanged bytes: a rule file with
-/// no `review:` block means one thing there and another to a version 1 build,
-/// and an explicit block is an unknown field there.
+/// no `review:` block means one thing here and another to a version 1 build, and
+/// an explicit block is an unknown field there. The workspace version is what
+/// stops the two from silently disagreeing — a build that does not know a
+/// version refuses the workspace rather than reading it under its own rules.
 ///
-/// Version 3 is the mixed-authority representation. A Section now says which
-/// door it came through, and the timestamp says when it was admitted rather
-/// than that a human confirmed it — because under version 3 the Human Gate is
-/// no longer the only way in. A version 2 build reading a version 3 Section
-/// would see an unknown `admission` field and a missing `confirmed_at`; a
-/// version 3 build reading version 2 bytes would have to guess at authority.
-/// The workspace version is what stops either from happening silently — a build
-/// that does not know a version refuses the workspace rather than reading it
-/// under its own rules.
-pub const WORKSPACE_VERSION: u32 = 3;
-/// Whether the generation [`WORKSPACE_VERSION`] names is finished.
+/// This is the version this build **creates, writes and migrates to**. It is
+/// deliberately not [`PHASE_3_WORKSPACE_VERSION`]: see that constant.
+pub const WORKSPACE_VERSION: u32 = 2;
+/// The workspace version the coordinated Phase-3 transition targets.
 ///
-/// Version 3 is one coordinated transition, and it is being built in slices. A
-/// build partway through implements a shape that is still moving: some of what
-/// version 3 will require is not written yet, and none of it can be added
-/// afterwards to a workspace that has already been migrated, because migration
-/// is one-way and confirmed history is never rewritten.
+/// Named here, and named as *not yet durable*. Version 3 is one coordinated
+/// contract — mixed Section authority, the admission timestamp, Section and
+/// Object integrity, selective Ref digests, the Event and candidate
+/// representation changes — and it is being implemented in slices. A version
+/// has exactly one canonical interpretation for current resources, so a build
+/// partway through must not create, write or migrate to it: a workspace moved
+/// into a shape that is still changing could not be brought the rest of the way
+/// afterwards, because migration is one way and confirmed history is never
+/// rewritten.
 ///
-/// So while this is false, this build **will not move an existing workspace
-/// into version 3**. It can read one, and it refuses to write to one, which
-/// leaves every record that existed before this work exactly as it was. A
-/// workspace this build creates is version 3 from the start and is a
-/// development artifact of an unreleased build — nothing that already exists
-/// can be dragged into the unfinished shape and stranded there.
-///
-/// The last slice of the transition sets this true. It is not a feature flag
-/// and nothing reads it to choose behaviour: it says whether the version this
-/// build writes is the version it claims to be.
-pub const WORKSPACE_VERSION_IS_COMPLETE: bool = false;
+/// So the intermediate slices implement and test the model, and the durable
+/// surface stays at [`WORKSPACE_VERSION`] exactly as it was. Nothing here
+/// writes a version 3 resource, nothing reads one, and no workspace anywhere
+/// can be dragged into a half-built generation. The final slice of the
+/// transition is what makes this the current version.
+pub const PHASE_3_WORKSPACE_VERSION: u32 = 3;
 /// Older workspace versions this build recognizes and can migrate forward.
 ///
 /// Recognized is not the same as current: a workspace at one of these is read
@@ -64,30 +58,25 @@ pub const WORKSPACE_VERSION_IS_COMPLETE: bool = false;
 /// predating the migration carries the version that was current when it was
 /// made, and refusing it would make every reference pinned before the migration
 /// unresolvable.
-pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
-/// The Event envelope this build writes.
+/// Version carried by confirmed Event envelopes this build writes and reads.
+pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
+/// The Event envelope generation the coordinated Phase-3 transition targets.
 ///
-/// Version 2 is the mixed-authority generation. A merge now names the Section
-/// that survives it instead of listing everything it consumed, which is a
-/// different statement about what the record contains afterwards — so it is a
-/// different generation rather than an addition to the old one.
+/// Version 2 is the mixed-authority generation: a merge names the Section that
+/// survives it rather than listing everything it consumed, and admission
+/// provenance becomes one tagged structure. Both are different statements about
+/// what a record means, so it is a generation rather than an addition.
 ///
-/// It is **not finished**: the tagged admission provenance that completes it
-/// lands with the rest of the mixed-authority Event work, and until it does a
-/// version 2 record here carries the version 1 confirmation envelope. That
-/// would be a durable record claiming a generation whose contract it does not
-/// meet — which is why [`WORKSPACE_VERSION_IS_COMPLETE`] exists and is false.
-/// A build in this state cannot write to any workspace that predates it, so no
-/// existing record acquires one.
-pub const EVENT_ENVELOPE_VERSION: u32 = 2;
-/// Version carried by confirmed Event envelopes that remain readable unchanged.
-///
-/// Retained rather than rewritten. History is evidence of what was admitted at
-/// the time, under the contract that was current at the time; normalizing it to
-/// the newest shape would produce a record of an admission that never happened.
-pub const EVENT_ENVELOPE_VERSION_V1: u32 = 1;
+/// Not emitted, for the same reason [`PHASE_3_WORKSPACE_VERSION`] is not
+/// written. Its envelope is not finished — the tagged provenance that completes
+/// it lands with the rest of the mixed-authority Event work — and a record
+/// claiming a generation whose contract it does not meet is a record a later
+/// build could only accept by silently redefining that generation. History is
+/// never rewritten, so there would be no way back.
+pub const PHASE_3_EVENT_ENVELOPE_VERSION: u32 = 2;
 /// The candidate envelope this build mints and admits.
 ///
 /// Version 1 stored its binding and its revision-presentation metadata outside
