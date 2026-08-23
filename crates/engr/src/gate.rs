@@ -952,13 +952,69 @@ fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a merge that would consume a Section something still points at.
+///
+/// v1 has no redirect, no tombstone and no automatic rewrite of an inbound Ref,
+/// and adding one would be inventing a forwarding semantics nobody agreed to —
+/// so the only honest answer is to refuse the merge and let whoever holds the
+/// reference decide what it should say now. A consumed id is never reused, so
+/// the alternative is a reference pinned to wording that no longer exists
+/// anywhere, pointing at an id that will never exist again.
+///
+/// The merge's own participants are excluded, and precisely: the sources are
+/// removed by this same operation, and the destination's content is replaced
+/// wholesale by the wording being confirmed. Their current references do not
+/// survive it, so counting them would refuse merges that leave nothing dangling.
+/// What the destination's *new* wording may point at is checked below, with the
+/// self-reference rule it is a case of.
+fn check_consumed_sections_are_unreferenced(root: &Path, payload: &Payload) -> Result<()> {
+    let Action::SectionMerged { merge } = &payload.action else {
+        return Ok(());
+    };
+    let consumed = merge.consumed();
+    let participants = merge.participants();
+    for id in store::object_ids(root)? {
+        let object = ops::effective(root, &id)?;
+        for section in &object.sections {
+            if object.id == payload.object && participants.contains(&section.id) {
+                continue;
+            }
+            for reference in &section.refs {
+                ensure!(
+                    reference.object != payload.object
+                        || !consumed.contains(&reference.section),
+                    EXIT_INVARIANT,
+                    "§{} of {} depends on §{}, which this merge would consume; a consumed id is never reused, so revise that reference first",
+                    section.id,
+                    object.id,
+                    reference.section
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
+    check_consumed_sections_are_unreferenced(root, payload)?;
     for reference in &payload.content.refs {
         if let Action::SectionRevised { section } = payload.action {
             ensure!(
                 reference.object != payload.object || reference.section != section,
                 EXIT_INVARIANT,
                 "section §{section} cannot directly reference itself"
+            );
+        }
+        // The same rule, for the wording a merge produces. A Section cannot rest
+        // on something this very operation is about to remove — including the
+        // destination itself, which after the merge is what this wording *is*.
+        if let Action::SectionMerged { merge } = &payload.action {
+            ensure!(
+                reference.object != payload.object
+                    || !merge.participants().contains(&reference.section),
+                EXIT_INVARIANT,
+                "the merged wording cannot depend on §{}, which this merge consumes or replaces",
+                reference.section
             );
         }
         let section = ops::effective_section(root, &reference.object, reference.section).map_err(

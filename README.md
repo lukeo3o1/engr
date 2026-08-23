@@ -113,7 +113,7 @@ engr confirm 'CONFIRM <code>'                # the only way in
 engr prepare --object <id> --rename --text "a better title"
 engr prepare --object <id> --add  --text-file f.txt
 engr prepare --object <id> --revise 3 --text-file f.txt
-engr prepare --object <id> --merge 1,2 --text-file f.txt
+engr prepare --object <id> --merge 1 --sources 2 --text-file f.txt
 engr prepare --object <id> --delete 3
 engr prepare --object <id> --close
 engr prepare --object <id> --classify --type decision --state accepted

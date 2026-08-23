@@ -314,6 +314,115 @@ fn a_consumed_section_id_is_never_handed_out_again() {
     assert_eq!(ids, vec![1, 3]);
 }
 
+/// A consumed id is never handed out again, so a reference to one would be
+/// pinned to wording that exists nowhere and point at an id that will never
+/// exist. v1 has no redirect and no tombstone, so the merge is refused and
+/// whoever holds the reference decides what it should say now.
+#[test]
+fn a_merge_cannot_consume_a_section_something_still_depends_on() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "target");
+    let source = new_object(&root, "source");
+    admit(&root, payload(Action::SectionAdded, &target, "depended on"));
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "the survivor"),
+    );
+    let pinned = store::load_object(&root, &target)
+        .expect("target")
+        .section(1)
+        .expect("section")
+        .sha256
+        .clone();
+    let commit = commit_all(&root, "record target wording");
+
+    let mut dependent = payload(Action::SectionAdded, &source, "rests on §1");
+    dependent.content.based_on = Some(commit.clone());
+    dependent.content.refs = vec![Ref {
+        object: target.clone(),
+        section: 1,
+        sha256: pinned,
+        commit,
+    }];
+    admit(&root, dependent);
+
+    let error = gate::prepare(
+        &root,
+        payload(
+            Action::SectionMerged {
+                merge: Merge::Into {
+                    destination: 2,
+                    sources: vec![1],
+                },
+            },
+            &target,
+            "together",
+        ),
+    )
+    .expect_err("§1 is still depended on");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    // The other direction is admissible: the destination survives, so a
+    // reference to it keeps pointing at a Section that exists.
+    admit(
+        &root,
+        payload(
+            Action::SectionMerged {
+                merge: Merge::Into {
+                    destination: 1,
+                    sources: vec![2],
+                },
+            },
+            &target,
+            "together",
+        ),
+    );
+}
+
+/// The merged wording cannot rest on what the merge removes, and cannot rest on
+/// the destination either — after the merge, the destination *is* this wording.
+#[test]
+fn merged_wording_cannot_depend_on_its_own_participants() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "self dependency");
+    admit(&root, payload(Action::SectionAdded, &id, "one"));
+    admit(&root, payload(Action::SectionAdded, &id, "two"));
+    let pinned: Vec<String> = (1..=2)
+        .map(|section| {
+            store::load_object(&root, &id)
+                .expect("object")
+                .section(section)
+                .expect("section")
+                .sha256
+                .clone()
+        })
+        .collect();
+    let commit = commit_all(&root, "record wording");
+
+    for section in [1, 2] {
+        let mut merged = payload(
+            Action::SectionMerged {
+                merge: Merge::Into {
+                    destination: 1,
+                    sources: vec![2],
+                },
+            },
+            &id,
+            "together",
+        );
+        merged.content.based_on = Some(commit.clone());
+        merged.content.refs = vec![Ref {
+            object: id.clone(),
+            section,
+            sha256: pinned[section as usize - 1].clone(),
+            commit: commit.clone(),
+        }];
+        let error = gate::prepare(&root, merged)
+            .expect_err("merged wording cannot depend on a participant");
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "§{section}");
+    }
+}
+
 #[test]
 fn a_merge_needs_a_destination_that_is_not_one_of_its_own_sources() {
     let (_dir, root) = workspace();

@@ -250,6 +250,34 @@ impl Section {
 
     fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
+        // Two pieces of the semantic surface are Human-authoritative in
+        // themselves, so an Agent Section may not carry them at all.
+        //
+        // A relation is a claim about the Object's own standing — `superseded_by`
+        // is half of the supersession invariant, and `implemented_by` asserts
+        // that a repository artifact realizes confirmed knowledge. Neither is
+        // wording somebody can read and check; both are statements the record
+        // then acts on. `role=supersession` is the other half of the same act:
+        // it is the human-readable reason an Object was retired, and retiring an
+        // Object is not something an agent does.
+        //
+        // Checked on the stored Section rather than only on the way in, because
+        // a rule the write path alone enforces is one hand-edit away from being
+        // untrue of the record.
+        if self.admission == Admission::Agent {
+            ensure!(
+                self.relations.is_empty(),
+                EXIT_SCHEMA,
+                "§{}: relations are human-authoritative, so an agent-admitted section does not carry them",
+                self.id
+            );
+            ensure!(
+                self.role != Some(Role::Supersession),
+                EXIT_SCHEMA,
+                "§{}: role=supersession is the reason an object was retired, which is a human admission",
+                self.id
+            );
+        }
         self.content().validate()
     }
 }
@@ -1135,6 +1163,7 @@ fn section_from(id: u64, admission: Admission, event: &Event) -> Result<Section>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantics::Target;
 
     fn section_added(id: &str, rev: u64, text: &str) -> Event {
         let payload = Payload {
@@ -1158,6 +1187,116 @@ mod tests {
             },
             payload,
         }
+    }
+
+    fn section(id: u64, admission: Admission) -> Section {
+        let content = Content {
+            text: format!("section {id}"),
+            ..Content::default()
+        };
+        Section {
+            id,
+            admission,
+            sha256: content.sha256().expect("hash"),
+            role: None,
+            text: content.text,
+            content: Vec::new(),
+            based_on: None,
+            refs: Vec::new(),
+            relations: Vec::new(),
+            admitted_at: "2026-08-23T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn holding(sections: Vec<Section>) -> Object {
+        let mut object = Object::new(new_id(), "mixed".to_owned()).expect("object");
+        object.next_section_id = sections.iter().map(|section| section.id).max().unwrap_or(0) + 1;
+        object.sections = sections;
+        object
+    }
+
+    /// Reached only through the Agent path, which has no envelope to arrive
+    /// through yet — so the rules are stated against the model directly rather
+    /// than left unexercised until something can reach them.
+    #[test]
+    fn admission_never_goes_backwards() {
+        let human = section(1, Admission::Human);
+        let agent = section(2, Admission::Agent);
+
+        assert_eq!(
+            revised_admission(&human, Admission::Human).expect("human revises human"),
+            Admission::Human
+        );
+        assert_eq!(
+            revised_admission(&agent, Admission::Human).expect("human revises agent"),
+            Admission::Human,
+            "a human who reads the new wording has assented to those exact words"
+        );
+        assert_eq!(
+            revised_admission(&agent, Admission::Agent).expect("agent revises agent"),
+            Admission::Agent
+        );
+        assert!(
+            revised_admission(&human, Admission::Agent).is_err(),
+            "an agent rewording human-assented wording would leave it claiming an authority nobody gave it"
+        );
+    }
+
+    #[test]
+    fn an_agent_merge_may_consolidate_only_agent_knowledge() {
+        let object = holding(vec![
+            section(1, Admission::Agent),
+            section(2, Admission::Agent),
+            section(3, Admission::Human),
+        ]);
+
+        assert_eq!(
+            merged_admission(&object, 1, &[2], Admission::Agent).expect("all agent"),
+            Admission::Agent
+        );
+        assert!(
+            merged_admission(&object, 1, &[3], Admission::Agent).is_err(),
+            "consuming a human section into an agent one launders away the assent"
+        );
+        assert!(
+            merged_admission(&object, 3, &[1], Admission::Agent).is_err(),
+            "and so does merging agent wording into a human destination"
+        );
+        assert_eq!(
+            merged_admission(&object, 3, &[1, 2], Admission::Human).expect("human merge"),
+            Admission::Human,
+            "a human merge may consume either, because a human read the result"
+        );
+        assert_eq!(
+            merged_admission(&object, 1, &[2], Admission::Human).expect("human merge"),
+            Admission::Human,
+            "and what comes out of a human merge is human, whatever went in"
+        );
+    }
+
+    #[test]
+    fn an_agent_section_carries_no_human_authoritative_semantics() {
+        let mut relation = section(1, Admission::Agent);
+        relation.relations = vec![Relation {
+            relation: RelationType::ImplementedBy,
+            target: Target::File {
+                path: "src/lib.rs".to_owned(),
+                commit: "0".repeat(40),
+            },
+        }];
+        assert!(
+            holding(vec![relation.clone()]).validate().is_err(),
+            "a relation is a claim the record acts on, not wording anybody can check"
+        );
+        relation.admission = Admission::Human;
+        assert!(holding(vec![relation]).validate().is_ok());
+
+        let mut supersession = section(1, Admission::Agent);
+        supersession.role = Some(Role::Supersession);
+        assert!(
+            holding(vec![supersession]).validate().is_err(),
+            "retiring an object is a human admission, reason included"
+        );
     }
 
     #[test]

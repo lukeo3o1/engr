@@ -660,6 +660,87 @@ fn migration_states_the_admission_version_two_only_implied() {
     );
 }
 
+/// The command line has to say which Section survives, because that is the part
+/// of a merge nobody can infer. `--merge 1,2` could not say it at all.
+#[test]
+fn merging_from_the_command_line_names_the_survivor() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "consolidation"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    for text in ["first point", "second point"] {
+        let section = prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--text",
+                text,
+                "--no-based-on",
+            ],
+        );
+        confirm(root, &section);
+    }
+
+    let orphaned = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--merge",
+            "1",
+            "--text",
+            "both points",
+            "--no-based-on",
+        ],
+    );
+    assert_eq!(
+        orphaned.status.code(),
+        Some(engr::EXIT_USAGE),
+        "a destination with nothing to consume is a revision, and the parser says so"
+    );
+
+    let merged = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--merge",
+            "2",
+            "--sources",
+            "1",
+            "--text",
+            "both points",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &merged);
+
+    let shown = run_engr(root, &["show", &id, "--format", "json"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("show JSON");
+    let sections = shown["sections"].as_array().expect("sections");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0]["id"], 2, "the named destination survived");
+    assert_eq!(sections[0]["text"], "both points");
+    assert_eq!(sections[0]["admission"], "human");
+
+    let event = std::fs::read_to_string(store::events_path(root, &id)).expect("events");
+    let last: Value = serde_json::from_str(event.lines().last().expect("event")).expect("json");
+    assert_eq!(last["action"], "section_merged");
+    assert_eq!(last["destination"], 2);
+    assert_eq!(last["sources"], Value::from(vec![1]));
+    assert!(
+        last.get("absorbs").is_none(),
+        "the retained shape is history, not something this build writes"
+    );
+}
+
 /// A Section carrying both spellings cannot say which it means, so no reader
 /// picks one. Refused at the one place a superseded representation is
 /// interpreted, which is every reader.
