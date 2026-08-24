@@ -646,3 +646,71 @@ fn reordered_sections_are_the_same_object_to_the_equivalence_guard() {
     duplicated.sections[1] = duplicated.sections[0].clone();
     check_mechanical_reseal(&forward, &duplicated).expect_err("section 2 is gone");
 }
+
+/// The canonical v3 Section writes every schema-defined member, absent or not.
+///
+/// Frozen by the #35 ruling `5392551560` (Option A): an absent optional is an
+/// explicit `null` and an empty collection is an explicit `[]`, never an
+/// omission. This is now a permanent byte contract, so it is pinned as bytes.
+///
+/// The failure it exists to catch is a member quietly gaining
+/// `skip_serializing_if` — a change that reads as tidy, breaks nothing locally,
+/// and silently gives every Section with an empty `relations` a different seal
+/// from the one another implementation computes.
+#[test]
+fn every_schema_defined_member_is_written_even_when_it_is_empty() {
+    let bare = section(1);
+    assert!(bare.role.is_some(), "the fixture carries a role by default");
+
+    let mut empty = bare.clone();
+    empty.role = None;
+    empty.based_on = None;
+    empty.content = Vec::new();
+    empty.refs = Vec::new();
+    empty.relations = Vec::new();
+
+    let projected = serde_json::to_value(sealed_section(&empty).expect("project")).expect("value");
+    let members = projected.as_object().expect("object");
+    for absent in ["role", "based_on"] {
+        assert_eq!(
+            members.get(absent),
+            Some(&serde_json::Value::Null),
+            "{absent} is present and null, not omitted: {members:?}"
+        );
+    }
+    for empty_collection in ["content", "refs", "relations"] {
+        assert_eq!(
+            members.get(empty_collection),
+            Some(&serde_json::json!([])),
+            "{empty_collection} is present and empty, not omitted: {members:?}"
+        );
+    }
+    assert_eq!(
+        members.len(),
+        9,
+        "nine schema-defined members, none of them optional to write: {members:?}"
+    );
+
+    // The bytes themselves, because the contract is bytes.
+    assert_eq!(
+        engr::proof::canonical_bytes(&projected, "section").expect("canonical"),
+        r#"{"admission":"human","admitted_at":"2026-08-24T00:00:00Z","based_on":null,"content":[],"id":1,"refs":[],"relations":[],"role":null,"text":"the store appends under a lock"}"#
+    );
+}
+
+/// And the nested representation inside the aggregate says the same, since it
+/// is the same projection plus the seal.
+#[test]
+fn the_nested_representation_writes_the_empty_members_too() {
+    let mut empty = section(1);
+    empty.role = None;
+    empty.based_on = None;
+    empty.sha256 = seal_of_section(&empty);
+    let mut object = object();
+    object.sections = vec![empty];
+
+    let nested = sealed_object(&object).expect("project").sections[0].clone();
+    let members = nested.as_object().expect("object");
+    assert_eq!(members.get("role"), Some(&serde_json::Value::Null));
+    assert_eq!(members.get("relations"), Some(&serde_json::json!([])));
+}

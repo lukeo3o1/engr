@@ -39,16 +39,21 @@ use std::collections::BTreeMap;
 
 /// The canonical persisted Section representation, minus its own seal.
 ///
-/// Every member is present. The alternative — omitting an absent `role` or an
-/// empty `relations`, the way the v2 persisted shape does for some members and
-/// not others — needs the schema to say which of two equivalent encodings is
-/// *the* encoding, and to say it identically in every implementation. Writing
-/// each protected field into the bytes leaves nothing for two readers to
-/// disagree about.
+/// **Every member is present.** An absent `role` or `based_on` is an explicit
+/// `null`; an empty `content`, `refs` or `relations` is an explicit `[]`.
+/// Nothing here is omitted for being empty, and nothing may become so: the
+/// canonical v3 shape is one representation, and a member that sometimes
+/// disappears is two.
 ///
-/// This is a decision with permanent byte consequences and it is not one #31 or
-/// #35 makes for us; it is raised on #35 with the alternatives. Nothing is
-/// emitted, so it costs a test vector to change.
+/// Ruled on #35 (`5392551560`) after being raised there as open. It needed a
+/// ruling because v2 has no single convention to inherit — `refs` is always
+/// written while `relations`, `content`, `role` and `based_on` are omitted when
+/// empty — so "keep doing what v2 does" was never an available answer.
+///
+/// The bytes are pinned in `tests/integrity.rs`, because a member quietly
+/// gaining `skip_serializing_if` is a tidy-looking change that would give every
+/// Section with an empty collection a different seal from the one another
+/// implementation computes.
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct SealedSection {
     pub id: u64,
