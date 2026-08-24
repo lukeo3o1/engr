@@ -764,6 +764,122 @@ mod table_tests {
     }
 }
 
+/// The Object-domain ReviewDigest `mutation`, exactly as #25 §4 freezes it.
+///
+/// Three members and no others. The operation descriptor and target are the
+/// *same* projection CandidateDigest uses — not a parallel one that resembles
+/// it — so that two implementations describing one operation reach one shape.
+/// That sharing is enforced by construction in [`object_review_mutation`],
+/// which reads them off the candidate subject rather than rebuilding them.
+///
+/// `before` is deliberately absent. The two contracts answer different
+/// questions: CandidateDigest's `before`/`after` say what transition a human is
+/// authorizing, while the review's predecessor is a concurrency fact and lives
+/// in [`ReviewPrecondition`].
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct ReviewMutation {
+    pub operation: Operation,
+    pub target: String,
+    /// The after projection **under the admission path that actually ran**.
+    ///
+    /// Not normalized to Human semantics: an Agent-reviewed Section projects
+    /// `admission=agent`, and a Human candidate projects the Human-authorized
+    /// result including promotion where that applies. Forcing one of them would
+    /// make an Agent review and a Human confirmation of the same wording share
+    /// a proof, which is the one thing mixed authority must not do.
+    pub after: serde_json::Value,
+}
+
+/// The Object-domain ReviewDigest `precondition` (#25 §4): one member.
+///
+/// `expected_rev = 0` is the creation predecessor. Creation additionally
+/// revalidates target absence and history emptiness at admission — those are
+/// apply-time checks and are deliberately not folded in here, for the same
+/// reason Ref soundness is not: a precondition that quietly stood for several
+/// invariants would let one of them be dropped without the digest noticing.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReviewPrecondition {
+    pub expected_rev: u64,
+}
+
+/// Build the frozen Object-domain review mutation from the states either side.
+///
+/// Takes the same arguments as [`candidate_subject`] and reads its result,
+/// which is what makes "the projection schema is shared with CandidateDigest"
+/// a fact about the build rather than a promise in a comment. Change the frozen
+/// operation table and both digests move together, because there is one table.
+pub fn object_review_mutation(
+    before: &Object,
+    after: &Object,
+    payload: &Payload,
+) -> Result<ReviewMutation> {
+    let subject = candidate_subject(before, after, payload, None)?;
+    Ok(ReviewMutation {
+        operation: subject.operation,
+        target: subject.target,
+        after: subject.after,
+    })
+}
+
+/// The member names an Object-domain review binds over, and exactly those.
+const OBJECT_MUTATION_MEMBERS: &[&str] = &["after", "operation", "target"];
+const OBJECT_PRECONDITION_MEMBERS: &[&str] = &["expected_rev"];
+
+/// Refuse an Object-domain binding whose descriptor is not the frozen shape.
+///
+/// `bind` and `rebind` take caller JSON because the Backlog domain describes its
+/// mutations differently. That generality is correct and it is also how a
+/// descriptor the protocol no longer permits would get a perfectly ordinary
+/// review digest — one that verifies against itself and against nothing anyone
+/// else computes. So the Object domain is checked at the boundary rather than
+/// trusted to arrive canonical.
+pub fn check_object_review_shape(
+    mutation: &serde_json::Value,
+    precondition: &serde_json::Value,
+) -> Result<()> {
+    check_members(mutation, OBJECT_MUTATION_MEMBERS, "review mutation")?;
+    check_members(
+        precondition,
+        OBJECT_PRECONDITION_MEMBERS,
+        "review precondition",
+    )?;
+    ensure!(
+        mutation["operation"].is_object() && mutation["operation"]["name"].is_string(),
+        EXIT_SCHEMA,
+        "an object review mutation names the operation it reviewed"
+    );
+    ensure!(
+        mutation["target"].is_string(),
+        EXIT_SCHEMA,
+        "an object review mutation names the target it reviewed"
+    );
+    ensure!(
+        precondition["expected_rev"].as_u64().is_some(),
+        EXIT_SCHEMA,
+        "an object review binds the exact revision it was reviewed against"
+    );
+    Ok(())
+}
+
+fn check_members(value: &serde_json::Value, expected: &[&str], what: &str) -> Result<()> {
+    let members = value
+        .as_object()
+        .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("an object {what} is a JSON object")))?;
+    let mut found: Vec<&str> = members.keys().map(String::as_str).collect();
+    found.sort_unstable();
+    ensure!(
+        found == expected,
+        EXIT_SCHEMA,
+        "an object {what} carries exactly {}, and this one carries {}",
+        expected.join(", "),
+        if found.is_empty() {
+            "nothing".to_owned()
+        } else {
+            found.join(", ")
+        }
+    );
+    Ok(())
+}
 /// What Rule Review produced, as the candidate shows it to a human.
 ///
 /// A presentation record with teeth: the exact Rule snapshots are here so the
@@ -995,10 +1111,13 @@ pub fn check_review_report(review: &CandidateReview) -> Result<()> {
 
 /// Recompute the review identity from the candidate's own Rule snapshots.
 ///
-/// The caller supplies the mutation descriptor and predecessor projection,
-/// because *which* projection an Object-domain review binds over is not settled
-/// (see the note on this function's only production caller when one exists).
-/// Everything downstream of that choice lives here.
+/// The descriptor is passed in because domains describe their mutations
+/// differently — Object under #25 §4, Backlog under #8. It is not passed in
+/// because the shape is open: for the Object domain it is frozen, and
+/// [`check_object_review_identity`] is the entry point that builds it, so a
+/// caller cannot reach this one with an Object descriptor of its own devising.
+/// `rules::bind` and `rules::rebind` refuse a non-canonical Object shape
+/// regardless of which entry point got there.
 ///
 /// Failing closed is the point: a candidate whose stored snapshots do not
 /// reproduce the identity it names is not a candidate with a stale review, it
@@ -1023,6 +1142,24 @@ pub fn check_review_identity(
     Ok(())
 }
 
+/// Check a candidate's review identity against the frozen Object-domain
+/// binding, built from the mutation and the exact revision it was reviewed at.
+///
+/// The typed entry point exists so an Object review cannot be checked against a
+/// descriptor somebody assembled by hand. Build the mutation with
+/// [`object_review_mutation`], which reads the same projection CandidateDigest
+/// uses, and the two contracts cannot describe one operation differently.
+pub fn check_object_review_identity(
+    review: &CandidateReview,
+    mutation: &ReviewMutation,
+    expected_rev: u64,
+) -> Result<()> {
+    let mutation = serde_json::to_value(mutation)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?;
+    let precondition = serde_json::to_value(ReviewPrecondition { expected_rev })
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review precondition: {error}")))?;
+    check_review_identity(review, crate::rules::Domain::Object, mutation, precondition)
+}
 /// The agreement #25 §14 requires between a candidate's two identities.
 ///
 /// A confirmation over a failed or exhausted review authorizes *that review's
@@ -1069,6 +1206,24 @@ mod review_context_tests {
         }
     }
 
+    /// The frozen Object-domain descriptor of #25 §4, built the way a caller
+    /// must build it. An ad-hoc mutation is refused at the binding boundary now
+    /// — which is the point, and which is why these fixtures cannot be a
+    /// convenient blob.
+    fn binding_inputs() -> (serde_json::Value, serde_json::Value) {
+        let mutation = ReviewMutation {
+            operation: Operation {
+                name: "section_revised".to_owned(),
+                parameters: serde_json::json!({"section": 1}),
+            },
+            target: "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1".to_owned(),
+            after: serde_json::json!({"admission": "human", "text": "revised"}),
+        };
+        (
+            serde_json::to_value(mutation).expect("mutation"),
+            serde_json::to_value(ReviewPrecondition { expected_rev: 7 }).expect("precondition"),
+        )
+    }
     fn review(result: ReviewResult, attempt: u32, rules: Vec<BoundRule>) -> CandidateReview {
         CandidateReview {
             review_digest: format!("1:{}", "a".repeat(64)),
@@ -1135,8 +1290,7 @@ mod review_context_tests {
     /// follows from it.
     #[test]
     fn snapshots_that_do_not_produce_the_named_identity_fail_closed() {
-        let mutation = serde_json::json!({"action": "section_revised"});
-        let precondition = serde_json::json!({"expected_rev": 7});
+        let (mutation, precondition) = binding_inputs();
         let rules = vec![rule("a", 5)];
         let binding = crate::rules::rebind(
             Domain::Object,
@@ -1177,8 +1331,7 @@ mod review_context_tests {
     /// would have to preserve an ordering the protocol calls insignificant.
     #[test]
     fn the_stored_snapshot_order_is_not_part_of_the_identity() {
-        let mutation = serde_json::json!({"action": "section_revised"});
-        let precondition = serde_json::json!({"expected_rev": 7});
+        let (mutation, precondition) = binding_inputs();
         let one = crate::rules::rebind(
             Domain::Object,
             mutation.clone(),
@@ -1216,5 +1369,210 @@ mod review_context_tests {
         check_review_agreement(Some(&failed), None).expect_err("an override must say which review");
         check_review_agreement(Some(&failed), Some(&format!("1:{}", "c".repeat(64))))
             .expect_err("and must name the one it actually overrode");
+    }
+}
+
+#[cfg(test)]
+mod object_binding_tests {
+    use super::*;
+    use crate::model::{Content, Payload};
+
+    fn object_id() -> String {
+        "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f".to_owned()
+    }
+
+    fn section(id: u64, admission: Admission, text: &str) -> Section {
+        Section {
+            id,
+            admission,
+            role: None,
+            text: text.to_owned(),
+            content: Vec::new(),
+            based_on: None,
+            refs: Vec::new(),
+            relations: Vec::new(),
+            sha256: String::new(),
+            admitted_at: "2026-08-24T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn revised(admission: Admission) -> (Object, Object, Payload) {
+        let mut before =
+            Object::new(object_id(), "the append boundary".to_owned()).expect("object");
+        before.rev = 7;
+        before.next_section_id = 2;
+        before.sections = vec![section(1, admission, "as first written")];
+        let mut after = before.clone();
+        after.rev = 8;
+        after.sections[0].text = "as revised".to_owned();
+        let payload = Payload {
+            action: Action::SectionRevised { section: 1 },
+            object: object_id(),
+            becomes: None,
+            content: Content {
+                text: "as revised".to_owned(),
+                ..Content::default()
+            },
+        };
+        (before, after, payload)
+    }
+
+    /// The review mutation is the candidate's own operation, target and after —
+    /// read off the same projection rather than rebuilt beside it.
+    #[test]
+    fn the_review_mutation_is_the_candidates_projection_without_its_before() {
+        let (before, after, mut payload) = revised(Admission::Human);
+        payload.content.text = "as revised".to_owned();
+        let subject = candidate_subject(&before, &after, &payload, None).expect("subject");
+        let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
+
+        assert_eq!(mutation.operation, subject.operation);
+        assert_eq!(mutation.target, subject.target);
+        assert_eq!(mutation.after, subject.after);
+
+        let members = serde_json::to_value(&mutation).expect("value");
+        let members = members.as_object().expect("object");
+        assert_eq!(members.len(), 3, "three members and no before: {members:?}");
+        assert!(!members.contains_key("before"));
+    }
+
+    /// #25 §4: the values are not forced to Human semantics. An Agent-reviewed
+    /// Section projects `admission=agent`, so the two admission paths cannot
+    /// share one review proof over the same wording.
+    #[test]
+    fn the_after_projection_follows_the_path_that_actually_admitted_it() {
+        let (before, after, payload) = revised(Admission::Human);
+        let human = object_review_mutation(&before, &after, &payload).expect("mutation");
+        let (before, after, payload) = revised(Admission::Agent);
+        let agent = object_review_mutation(&before, &after, &payload).expect("mutation");
+
+        assert_ne!(
+            human.after, agent.after,
+            "the same wording admitted two ways is not the same review subject"
+        );
+        assert_eq!(human.operation, agent.operation, "and the same operation");
+    }
+
+    /// The exact bytes, pinned. Two implementations that agree on the operation,
+    /// target, after projection, predecessor and Rule set must reach this
+    /// scalar; anything else is a private agreement between one build and its
+    /// own tests.
+    #[test]
+    fn the_object_binding_hashes_to_its_pinned_contract_bytes() {
+        let (before, after, payload) = revised(Admission::Human);
+        let mutation = serde_json::to_value(
+            object_review_mutation(&before, &after, &payload).expect("mutation"),
+        )
+        .expect("value");
+        let precondition = serde_json::to_value(ReviewPrecondition {
+            expected_rev: before.rev,
+        })
+        .expect("value");
+
+        let binding = crate::rules::rebind(
+            crate::rules::Domain::Object,
+            mutation.clone(),
+            precondition.clone(),
+            Vec::new(),
+        )
+        .expect("rebind");
+
+        let canonical = canonical_bytes(&binding, "review binding").expect("canonical");
+        assert_eq!(
+            canonical,
+            r#"{"domain":"object","mutation":{"after":{"lifecycle":{"state":"open","type":null},"section":{"admission":"human","based_on":null,"content":[],"refs":[],"relations":[],"role":null,"text":"as revised"}},"operation":{"name":"section.revised","parameters":{"becomes":null}},"target":"obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1"},"precondition":{"expected_rev":7},"rules":[]}"#,
+            "the frozen JCS bytes of an object review binding"
+        );
+        assert_eq!(
+            binding.digest().expect("digest").to_string(),
+            "1:9b42b2b35dfab7b55ba90a625bd886a3946e9eec89d22797c9484590cf271eae"
+        );
+    }
+
+    /// A descriptor the protocol no longer permits is refused where it is
+    /// bound, not accepted into a digest that verifies against itself and
+    /// against nothing anyone else computes.
+    #[test]
+    fn a_non_canonical_object_descriptor_is_refused_at_the_boundary() {
+        let (before, after, payload) = revised(Admission::Human);
+        let good = serde_json::to_value(
+            object_review_mutation(&before, &after, &payload).expect("mutation"),
+        )
+        .expect("value");
+        let precondition = serde_json::json!({"expected_rev": 7});
+
+        // The pre-freeze prototype shape.
+        let refused = crate::rules::rebind(
+            crate::rules::Domain::Object,
+            serde_json::json!({"action": "section_revised"}),
+            precondition.clone(),
+            Vec::new(),
+        )
+        .expect_err("not the frozen descriptor");
+        assert!(refused.to_string().contains("exactly"), "{refused}");
+
+        // CandidateDigest's own subject, which carries one member too many.
+        let mut with_before = good.as_object().expect("object").clone();
+        with_before.insert("before".to_owned(), serde_json::Value::Null);
+        crate::rules::rebind(
+            crate::rules::Domain::Object,
+            serde_json::Value::Object(with_before),
+            precondition.clone(),
+            Vec::new(),
+        )
+        .expect_err("the review predecessor is not the candidate's before");
+
+        // A precondition standing for more than the revision.
+        crate::rules::rebind(
+            crate::rules::Domain::Object,
+            good.clone(),
+            serde_json::json!({"expected_rev": 7, "refs_are_sound": true}),
+            Vec::new(),
+        )
+        .expect_err("apply-time invariants are not folded into expected_rev");
+
+        // A revision that is not a revision.
+        crate::rules::rebind(
+            crate::rules::Domain::Object,
+            good,
+            serde_json::json!({"expected_rev": "7"}),
+            Vec::new(),
+        )
+        .expect_err("expected_rev is the exact revision, not a spelling of it");
+    }
+
+    /// Creation binds `expected_rev = 0`, which is a predecessor rather than a
+    /// missing one, so it must survive the boundary rather than read as absent.
+    #[test]
+    fn creation_binds_the_zero_predecessor() {
+        let mutation = serde_json::to_value(ReviewMutation {
+            operation: Operation {
+                name: "object_created".to_owned(),
+                parameters: serde_json::json!({}),
+            },
+            target: format!("obj:{}", object_id()),
+            after: serde_json::json!({"state": "open"}),
+        })
+        .expect("value");
+        crate::rules::rebind(
+            crate::rules::Domain::Object,
+            mutation,
+            serde_json::to_value(ReviewPrecondition { expected_rev: 0 }).expect("value"),
+            Vec::new(),
+        )
+        .expect("zero is the creation predecessor");
+    }
+
+    /// Backlog describes its mutations under #8 and is not held to the Object
+    /// shape — the gate is per-domain, not a single shape imposed on every one.
+    #[test]
+    fn another_domain_keeps_its_own_descriptor() {
+        crate::rules::rebind(
+            crate::rules::Domain::Backlog,
+            serde_json::json!({"action": "item_opened"}),
+            serde_json::json!({"predecessor": "none"}),
+            Vec::new(),
+        )
+        .expect("backlog is not an object");
     }
 }

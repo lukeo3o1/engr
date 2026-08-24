@@ -819,7 +819,7 @@ fn split_front_matter(rest: &str) -> Option<(&str, &str)> {
 /// object, no nonce, no session: a process that restarts recomputes the same
 /// value from the same inputs, and admission recomputes it from current state
 /// rather than trusting anything it was handed.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ReviewBinding {
     domain: Domain,
     /// The exact semantic mutation, as the domain canonicalizes it.
@@ -1105,6 +1105,24 @@ fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hold a binding's two caller-supplied arguments to the shape its domain
+/// froze, where the domain has frozen one.
+///
+/// Only the Object domain has, in #25 §4. Backlog describes its mutations under
+/// #8 and is not held to the Object shape here; Collection and Work have no v1
+/// review semantics at all, and inventing a descriptor for them would be
+/// exactly the guess with a persisted representation that the contract refuses.
+fn check_domain_shape(
+    domain: Domain,
+    mutation: &serde_json::Value,
+    precondition: &serde_json::Value,
+) -> Result<()> {
+    match domain {
+        Domain::Object => crate::proof::check_object_review_shape(mutation, precondition),
+        Domain::Backlog | Domain::Collection | Domain::Work => Ok(()),
+    }
+}
+
 /// Rebuild a binding from Rule snapshots somebody else already resolved.
 ///
 /// The counterpart to [`bind`], which reads the workspace. This one takes what
@@ -1122,6 +1140,7 @@ pub fn rebind(
     precondition: serde_json::Value,
     rules: Vec<BoundRule>,
 ) -> Result<ReviewBinding> {
+    check_domain_shape(domain, &mutation, &precondition)?;
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
     let mut rules = rules;
@@ -1152,7 +1171,9 @@ pub fn bind(
     precondition: serde_json::Value,
 ) -> Result<ReviewBinding> {
     // Before anything is resolved or hashed: the two arguments that are
-    // arbitrary caller JSON must be inside what canonical bytes can carry.
+    // arbitrary caller JSON must be the shape their domain freezes, and inside
+    // what canonical bytes can carry.
+    check_domain_shape(domain, &mutation, &precondition)?;
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
     Ok(ReviewBinding {

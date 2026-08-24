@@ -1100,6 +1100,23 @@ fn subject() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
+/// The Object domain's own descriptor, frozen by #25 §4 as exactly
+/// `{operation, target, after}` over `{expected_rev}`.
+///
+/// Separate from [`subject`] because the domains describe their mutations
+/// differently and the binding boundary now holds each to its own shape —
+/// which is the point of having a shape at all.
+fn object_subject() -> (serde_json::Value, serde_json::Value) {
+    (
+        serde_json::json!({
+            "operation": {"name": "section.revised", "parameters": {"becomes": null}},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": {"section": {"text": "still unresolved"}}
+        }),
+        serde_json::json!({"expected_rev": 2}),
+    )
+}
+
 /// The hash is the identity of an exact review subject.
 ///
 /// Same subject, same value — across processes, because nothing about it is
@@ -1664,7 +1681,7 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
 #[test]
 fn an_exhausted_object_review_stops_and_may_call_a_human() {
     let (_dir, root) = workspace();
-    let (mutation, precondition) = subject();
+    let (mutation, precondition) = object_subject();
     let bind = |root: &Path| {
         rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
     };
@@ -2038,8 +2055,7 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
         serde_json::json!({"a": (1u64 << 60) + 1}),
     ] {
         rules::bind(&root, Domain::Backlog, buried, ok.clone())
-            .err()
-            .expect("refused wherever it is buried");
+            .expect_err("refused wherever it is buried");
     }
 
     // The domain is the shared safe-integer range, not RFC 8785's wider
@@ -2054,8 +2070,7 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
         serde_json::json!({"n": -(1i64 << 60)}),
     ] {
         rules::bind(&root, Domain::Backlog, outside, ok.clone())
-            .err()
-            .expect("past the shared range, whatever binary64 could hold");
+            .expect_err("past the shared range, whatever binary64 could hold");
     }
 
     for fine in [
