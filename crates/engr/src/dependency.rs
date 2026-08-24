@@ -696,8 +696,15 @@ pub fn admit(
     let target = crate::proof::section_target(&current.id, section);
     // 1 + 2. The whole aggregate, not just the Section being referenced: a
     // Section is only as trustworthy as the Object that says it belongs there.
-    let now = section_of(current, section)?;
+    //
+    // Integrity **before** the existence lookup, for the reason `evaluate`
+    // gives: the aggregate seal covers `sections[]`, so a Section deleted out
+    // of band breaks it. Looking it up first answered NOT_FOUND and returned
+    // before the aggregate was ever checked — reporting tampered authority as a
+    // merely missing target, and #13 keeps invalid distinct from absent
+    // precisely so that cannot happen.
     crate::integrity::check_object_integrity(current, current_seal)?;
+    let now = section_of(current, section)?;
     // 3.
     let fields = canonical_fields(fields)?;
     // 4 + 5.

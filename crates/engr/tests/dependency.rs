@@ -1187,6 +1187,58 @@ mod against_a_workspace {
         );
     }
 
+    /// Admission answers the same question in the same order that reading does.
+    ///
+    /// The mirror of `a_section_deleted_by_hand_is_not_reported_as_a_removal`,
+    /// through the authoring API. A Section deleted out of band while the old
+    /// aggregate seal is retained used to be refused as NOT_FOUND, because the
+    /// existence lookup came first and returned before the aggregate was ever
+    /// checked. #13 keeps invalid authority distinct from absent authority, and
+    /// a trust-sensitive path that reports the first as the second has told the
+    /// caller the wrong thing about why it failed.
+    ///
+    /// The existing integrity test does not cover this: it edits a Section's
+    /// text, so the Section is still there and the lookup succeeds.
+    #[test]
+    fn admission_reports_tampering_as_tampering_and_not_as_a_missing_target() {
+        let (_dir, root, object, commit) = workspace();
+        let (current, seal) = phase_three_seals(&object);
+
+        // Deleted out of band: the old aggregate seal is kept.
+        let mut tampered = current.clone();
+        tampered.sections.clear();
+        let refused = admit(&root, &tampered, &seal, 1, &[SemanticField::Text], &commit)
+            .expect_err("refused");
+        assert_eq!(
+            refused.code,
+            engr::EXIT_INVARIANT,
+            "integrity, not NOT_FOUND: {}",
+            refused.message
+        );
+
+        // The same removal done properly is still refused, but as what it is:
+        // there is genuinely no such Section to reference.
+        let mut removed = current.clone();
+        removed.sections.clear();
+        removed.rev += 1;
+        let (removed, resealed) = phase_three_seals(&removed);
+        let refused = admit(
+            &root,
+            &removed,
+            &resealed,
+            1,
+            &[SemanticField::Text],
+            &commit,
+        )
+        .expect_err("nothing to reference");
+        assert_eq!(
+            refused.code,
+            engr::EXIT_NOT_FOUND,
+            "absent, not tampered: {}",
+            refused.message
+        );
+    }
+
     #[test]
     fn a_target_must_be_a_canonical_section_identity() {
         parse_target(&target()).expect("canonical");
