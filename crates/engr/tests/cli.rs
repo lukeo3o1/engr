@@ -2,7 +2,7 @@
 
 use engr::{
     gate,
-    model::{Action, Confirmation, Content, Event, Object, Payload, EVENT_FORMAT},
+    model::{Action, Content, Event, Object, Payload, Provenance, EVENT_FORMAT},
     ops, store,
 };
 use serde_json::Value;
@@ -238,10 +238,10 @@ fn reference_admission_uses_the_effective_target_projection() {
         rev: revision.candidate.binding.expected_rev + 1,
         time: "2026-08-17T00:00:00Z".to_owned(),
         payload: revision.candidate.payload.clone(),
-        confirmation: Confirmation {
-            challenge: revision.candidate.challenge.clone(),
-            payload_sha256: revision.candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            revision.candidate.challenge.clone(),
+            revision.candidate.payload_sha256.clone(),
+        ),
     };
     store::append_event(root, &revision_event).expect("append without projection");
     let effective = ops::effective_section(root, &target, 1).expect("effective target section");
@@ -651,7 +651,8 @@ fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewri
             refs: Vec::new(),
             ..Content::default()
         };
-        event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+        event.provenance =
+            Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
         std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
     });
 }
@@ -1328,10 +1329,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload,
-        confirmation: Confirmation {
-            challenge: "234567".to_owned(),
-            payload_sha256,
-        },
+        provenance: Provenance::confirmed("234567", payload_sha256),
     };
     (workspace, root, event)
 }
@@ -1560,10 +1558,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             rev: 2,
             time: "2026-08-13T00:00:00Z".to_owned(),
             payload,
-            confirmation: Confirmation {
-                challenge: "234567".to_owned(),
-                payload_sha256,
-            },
+            provenance: Provenance::confirmed("234567", payload_sha256),
         },
     )
     .expect("append unprojected event");
@@ -1637,7 +1632,8 @@ fn events_must_belong_to_their_object_file() {
     let (_workspace, root, mut event) = event_workspace();
     let path_id = event.payload.object.clone();
     event.payload.object = engr::model::new_id();
-    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    event.provenance =
+        Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
     write_event_to(&root, &path_id, &event);
     let output = run_engr(&root, &["verify", &path_id]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
@@ -1647,14 +1643,15 @@ fn events_must_belong_to_their_object_file() {
 fn invalid_event_payloads_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
     event.payload.content.text.clear();
-    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    event.provenance =
+        Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
     assert_event_is_rejected(&root, event);
 }
 
 #[test]
 fn event_confirmation_hashes_are_verified() {
     let (_workspace, root, mut event) = event_workspace();
-    event.confirmation.payload_sha256 = "0".repeat(64);
+    event.provenance = Provenance::confirmed("234567", "0".repeat(64));
     assert_event_is_rejected(&root, event);
 }
 

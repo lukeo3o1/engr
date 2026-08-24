@@ -12,6 +12,7 @@ pub mod gate;
 pub mod git;
 pub mod model;
 pub mod ops;
+pub mod proof;
 pub mod reference;
 pub mod rules;
 pub mod semantics;

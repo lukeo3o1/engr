@@ -1100,6 +1100,23 @@ fn subject() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
+/// The Object domain's own descriptor, frozen by #25 §4 as exactly
+/// `{operation, target, after}` over `{expected_rev}`.
+///
+/// Separate from [`subject`] because the domains describe their mutations
+/// differently and the binding boundary now holds each to its own shape —
+/// which is the point of having a shape at all.
+fn object_subject() -> (serde_json::Value, serde_json::Value) {
+    (
+        serde_json::json!({
+            "operation": {"name": "section.revised", "parameters": {"becomes": null}},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": {"section": {"text": "still unresolved"}}
+        }),
+        serde_json::json!({"expected_rev": 2}),
+    )
+}
+
 /// The hash is the identity of an exact review subject.
 ///
 /// Same subject, same value — across processes, because nothing about it is
@@ -1664,7 +1681,7 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
 #[test]
 fn an_exhausted_object_review_stops_and_may_call_a_human() {
     let (_dir, root) = workspace();
-    let (mutation, precondition) = subject();
+    let (mutation, precondition) = object_subject();
     let bind = |root: &Path| {
         rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
     };
@@ -1942,6 +1959,11 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     // The case genuinely separates the two orderings; if this ever stops being
     // true, the digest below is no longer proving what it claims and the case
     // needs sharpening rather than the assertion relaxing.
+    //
+    // The pinned value moved when the discriminator and inner version left the
+    // hashed payload, which is what the frozen contract asks for and what makes
+    // every review digest a different number than the prototype produced.
+    // Nothing had been emitted, so nothing needed migrating.
     assert_ne!(
         serde_json::to_string(&mutation).expect("serde"),
         serde_jcs::to_string(&mutation).expect("jcs"),
@@ -1957,7 +1979,7 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     .expect("bind");
     assert_eq!(
         bound.digest().expect("digest").to_string(),
-        "1:47eb5a407a4d4769325129310bd877e50a30e0584377c761cab3ed3c88eebd5d",
+        "1:cf7558a1363c141ad5ea2ce69e744b92852b5dfe4a53f11aaf6fe97050fd701c",
         "the review binding digest is ReviewDigestContract 1 over its RFC 8785 bytes"
     );
 
@@ -2033,38 +2055,32 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
         serde_json::json!({"a": (1u64 << 60) + 1}),
     ] {
         rules::bind(&root, Domain::Backlog, buried, ok.clone())
-            .err()
-            .expect("refused wherever it is buried");
+            .expect_err("refused wherever it is buried");
     }
 
-    // The domain is RFC 8785's -- exactly a binary64 value -- not the
-    // +-(2^53-1) safe-integer recommendation. The RFC's own Appendix B lists
-    // 9007199254740992 as a valid canonical number, and 2^60 is exact too:
-    // using the recommendation as the domain would refuse both.
-    for fine in [
-        serde_json::json!({"n": 9007199254740991u64}),
-        serde_json::json!({"n": 9007199254740992u64}), // 2^53, exact
+    // The domain is the shared safe-integer range, not RFC 8785's wider
+    // "exactly a binary64 value". That is narrower than the standard allows,
+    // deliberately: the coordinated Phase-3 contract fixes one domain every
+    // implementation can carry, and a value a conforming reader in another
+    // language cannot hold is a value two readers disagree about. 2^53 and 2^60
+    // are exact binary64 values and are refused here for that reason.
+    for outside in [
+        serde_json::json!({"n": 9007199254740992u64}), // 2^53, exact but past the range
         serde_json::json!({"n": 1u64 << 60}),
         serde_json::json!({"n": -(1i64 << 60)}),
+    ] {
+        rules::bind(&root, Domain::Backlog, outside, ok.clone())
+            .expect_err("past the shared range, whatever binary64 could hold");
+    }
+
+    for fine in [
+        serde_json::json!({"n": 9007199254740991u64}), // the bound itself
+        serde_json::json!({"n": -9007199254740991i64}),
         serde_json::json!({"n": 1.5}),
         serde_json::json!({"n": 0}),
     ] {
-        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("exactly a binary64 value");
+        rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("inside the shared range");
     }
-
-    // One accepted value whose canonical *spelling* is not its literal, to pin
-    // that this is deliberate: 2^60 renders as ECMAScript's shortest
-    // round-tripping form, which parses back to exactly 2^60. The value
-    // survives; only the decimal is the standard's rather than the author's.
-    let big = serde_json::json!({"n": 1u64 << 60});
-    let canonical = serde_jcs::to_string(&big).expect("jcs");
-    assert_eq!(canonical, "{\"n\":1152921504606847000}");
-    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("parse");
-    assert_eq!(
-        parsed["n"].as_f64().expect("number"),
-        (1u64 << 60) as f64,
-        "the spelling moved, the value did not"
-    );
 }
 
 /// Governance and the verdict come from one reading of policy.

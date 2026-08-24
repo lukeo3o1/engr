@@ -12,7 +12,9 @@
 //!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
-use crate::model::{replay_recoverable_tail, Action, Event, Merge, Object, EVENT_FORMAT};
+use crate::model::{
+    replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
+};
 use crate::{
     ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
@@ -746,11 +748,17 @@ fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value
             format!("invalid event payload: {}", error.message),
         )
     })?;
-    ensure!(
-        event.confirmation.payload_sha256 == payload_sha256,
-        EXIT_SCHEMA,
-        "confirmation does not match the event payload"
-    );
+    // The retained generation identifies its mutation by hashing it. The
+    // mixed-authority generation names the semantic transition instead, so this
+    // is asked of the shape that has it rather than of every record.
+    if let Some(confirmation) = event.confirmation() {
+        ensure!(
+            confirmation.payload_sha256 == payload_sha256,
+            EXIT_SCHEMA,
+            "confirmation does not match the event payload"
+        );
+    }
+    event.provenance.validate()?;
     Ok(())
 }
 
@@ -774,6 +782,16 @@ fn check_event_generation(event: &Event) -> Result<()> {
         ),
         EXIT_SCHEMA,
         "event version {} does not define a merge that names the section surviving it",
+        event.version
+    );
+    // The tagged admission structure belongs to the same generation the merge
+    // shape does, and for the same reason it is implemented and not written: a
+    // record carrying it under the generation this build emits would be saying
+    // this version means something it does not.
+    ensure!(
+        !matches!(event.provenance, Provenance::Tagged { .. }),
+        EXIT_SCHEMA,
+        "event version {} does not define tagged admission provenance",
         event.version
     );
     Ok(())

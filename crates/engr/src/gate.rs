@@ -4,7 +4,7 @@
 //! against the exact response. There is no unconfirmed write path.
 
 use crate::model::{
-    canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
+    canonical_object_id, project, Action, Content, Event, Object, Payload, Provenance,
     CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::semantics::{self, Relation, RelationType, Role, Supplement, Target};
@@ -278,7 +278,9 @@ pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateSt
                     .into_iter()
                     .find(|event| {
                         event.rev == applied_rev
-                            && event.confirmation.payload_sha256 == candidate.payload_sha256
+                            && event.confirmation().is_some_and(|confirmation| {
+                                confirmation.payload_sha256 == candidate.payload_sha256
+                            })
                     })
                 {
                     return Ok(CandidateState::AlreadyApplied(Box::new(event)));
@@ -776,10 +778,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Re
             rev: trial.rev + 1,
             time: now(),
             payload: payload.clone(),
-            confirmation: Confirmation {
-                challenge: String::new(),
-                payload_sha256: String::new(),
-            },
+            provenance: Provenance::confirmed(String::new(), String::new()),
         };
         project(&mut trial, &probe)?;
         trial
@@ -1187,10 +1186,10 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         rev: object.rev + 1,
         time: now(),
         payload: candidate.payload.clone(),
-        confirmation: Confirmation {
-            challenge: candidate.challenge.clone(),
-            payload_sha256: candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            candidate.challenge.clone(),
+            candidate.payload_sha256.clone(),
+        ),
     };
 
     project(&mut object, &event)?;
