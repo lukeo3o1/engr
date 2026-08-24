@@ -102,7 +102,7 @@ fn historical_path(commit: &str, path: &str) -> String {
     format!("{commit}:{path}")
 }
 
-fn validate_historical_format(path: &str, text: &str) -> Result<()> {
+fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
     let format: HistoricalWorkspaceFormat = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     ensure!(
@@ -130,7 +130,7 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
-    Ok(())
+    Ok(format.version)
 }
 
 /// A format-less snapshot predates the workspace authority. It is readable only
@@ -203,24 +203,21 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
 /// own workspace authority decides which representation may be decoded.
 pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> {
     let format_path = format!("{}/format.json", crate::store::DIR);
-    match run(root, &["show", &historical_path(commit, &format_path)]) {
+    let version = match run(root, &["show", &historical_path(commit, &format_path)]) {
         Some(text) => validate_historical_format(&format_path, &text)?,
-        None => validate_legacy_workspace_at(root, commit)?,
-    }
+        None => {
+            validate_legacy_workspace_at(root, commit)?;
+            0
+        }
+    };
 
     let path = format!("{}/objects/{id}.json", crate::store::DIR);
     let Some(text) = run(root, &["show", &historical_path(commit, &path)]) else {
         return Ok(None);
     };
-    let object: Object = serde_json::from_str(&text)
+    let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
-    object.validate()?;
-    ensure!(
-        object.id == id,
-        EXIT_SCHEMA,
-        "{path}: object id {:?} does not match its filename",
-        object.id
-    );
+    let object = crate::store::decode_object_for_version(Path::new(&path), id, value, version)?;
     Ok(Some(object))
 }
 

@@ -18,6 +18,17 @@ fn workspace() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+fn overwrite_object(root: &Path, object: &engr::model::Object) {
+    std::fs::write(
+        store::object_path(root, &object.id),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(object).expect("object json")
+        ),
+    )
+    .expect("overwrite object outside the gate");
+}
+
 fn git(root: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -757,12 +768,12 @@ fn the_record_still_cannot_depend_on_unconfirmed_staging() {
     // resolves to no Object, which is the only answer that keeps a confirmed
     // section from standing on wording nobody read.
     let mut proposal = payload(Action::SectionAdded, &object, "stands on something");
-    proposal.content.refs = vec![Ref {
-        object: staging.clone(),
-        section: 1,
-        sha256: "0".repeat(64),
-        commit: engr::git::head(&root).expect("HEAD"),
-    }];
+    proposal.content.refs = vec![Ref::legacy(
+        staging.clone(),
+        1,
+        "0".repeat(64),
+        engr::git::head(&root).expect("HEAD"),
+    )];
     let error = gate::prepare(&root, proposal).expect_err("a record ref cannot target backlog");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
     assert!(error.message.contains("does not exist"));
@@ -2345,7 +2356,7 @@ fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() 
     // structurally a record — which is exactly the trap.
     let mut tampered = store::load_object(&root, &moved).expect("object");
     "edited outside the gate".clone_into(&mut tampered.sections[0].text);
-    store::save_object(&root, &tampered).expect("tamper");
+    overwrite_object(&root, &tampered);
 
     let before = backlog::load(&root, &id).expect("load");
     for target in [
@@ -2413,13 +2424,10 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     // Not a byte of any Section moves; only the Object's own lifecycle does.
     let mut tampered = store::load_object(&root, &object).expect("object");
     tampered.state = engr::semantics::State::Closed;
-    store::save_object(&root, &tampered).expect("tamper");
+    overwrite_object(&root, &tampered);
     for section in &tampered.sections {
-        assert_eq!(
-            section.recomputed_sha256().expect("recompute"),
-            section.sha256,
-            "the seals still pass, which is what makes this the interesting case"
-        );
+        engr::integrity::check_section_seal(section, &section.sha256)
+            .expect("the Section seals still pass");
     }
 
     let before = backlog::load(&root, &id).expect("load");
@@ -2433,8 +2441,8 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     .expect_err("that object-level authority was not admitted");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
-        error.message.contains("state"),
-        "the refusal names what moved: {}",
+        error.message.contains("sealed as") && error.message.contains("current contents seal"),
+        "the refusal identifies the aggregate integrity failure: {}",
         error.message
     );
     assert_eq!(
@@ -2484,13 +2492,10 @@ fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate(
     let (rev, next) = (tampered.rev, tampered.next_section_id);
     tampered.sections.retain(|section| section.id != 1);
     assert_eq!((tampered.rev, tampered.next_section_id), (rev, next));
-    store::save_object(&root, &tampered).expect("tamper");
+    overwrite_object(&root, &tampered);
     for section in &tampered.sections {
-        assert_eq!(
-            section.recomputed_sha256().expect("recompute"),
-            section.sha256,
-            "every seal that is still there still passes"
-        );
+        engr::integrity::check_section_seal(section, &section.sha256)
+            .expect("every remaining Section seal still passes");
     }
 
     let error = backlog::record_produced(

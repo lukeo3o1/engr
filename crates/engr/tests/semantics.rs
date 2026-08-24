@@ -83,6 +83,21 @@ fn new_object(root: &Path, title: &str) -> String {
     id
 }
 
+fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
+    let target = ops::effective(root, object).expect("reference target");
+    Ref::selective(
+        engr::dependency::admit(
+            root,
+            &target,
+            target.sha256.as_deref().expect("aggregate seal"),
+            section,
+            &[engr::dependency::SemanticField::Text],
+            commit,
+        )
+        .expect("admit selective reference"),
+    )
+}
+
 fn classify(object_type: Option<ObjectType>, state: State) -> Action {
     Action::ObjectClassified { object_type, state }
 }
@@ -238,8 +253,8 @@ fn changing_type_carries_an_explicit_destination_state_and_never_a_mapped_one() 
     let stored = store::load_object(&root, &id).expect("stored");
     let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
     assert!(
-        raw.get("type").is_none(),
-        "an untyped object stores no type at all: {raw}"
+        raw["type"].is_null(),
+        "an untyped object stores type=null: {raw}"
     );
     assert!(
         raw.get("status").is_none(),
@@ -362,14 +377,7 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
         ],
     );
     let commit = engr::git::head(&root).unwrap_or(commit);
-    let pin = |section: u64| Ref {
-        object: target.clone(),
-        section,
-        sha256: ops::effective_section(&root, &target, section)
-            .expect("section")
-            .sha256,
-        commit: commit.clone(),
-    };
+    let pin = |section: u64| text_ref(&root, &target, section, &commit);
     let implemented = |symbol: &str| Relation {
         relation: RelationType::ImplementedBy,
         target: Target::Symbol {
@@ -395,15 +403,17 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
         ),
     );
     let stored = object.section(1).expect("section").clone();
+    let mut canonical = Content {
+        refs: vec![pin(1), pin(2)],
+        relations: vec![implemented("check"), implemented("verify")],
+        ..Content::default()
+    };
+    canonical.canonicalize_order().expect("canonical set order");
     assert_eq!(
-        stored.refs,
-        vec![pin(1), pin(2)],
+        stored.refs, canonical.refs,
         "the gate puts a set in one order before it is hashed"
     );
-    assert_eq!(
-        stored.relations,
-        vec![implemented("check"), implemented("verify")]
-    );
+    assert_eq!(stored.relations, canonical.relations);
 
     // The same members written the other way round are the same assertion, so
     // there is nothing to confirm and the gate says exactly that.
@@ -897,14 +907,14 @@ fn every_new_semantic_field_is_inside_what_the_human_confirmed() {
     let plain = gate::prepare(&root, payload(Action::SectionAdded, &id, base.clone()))
         .expect("prepare")
         .candidate
-        .payload_sha256
+        .candidate_digest
         .clone();
     for variant in variants {
         let candidate = gate::prepare(&root, payload(Action::SectionAdded, &id, variant))
             .expect("prepare")
             .candidate;
         assert_ne!(
-            candidate.payload_sha256, plain,
+            candidate.candidate_digest, plain,
             "a semantic field outside the payload hash is one a human never assented to"
         );
         // And inside the section hash, so `verify` can see it move.
@@ -1073,13 +1083,43 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     );
 
     // Put it back into the v0 shape a Phase 0 workspace really had.
+    let current = store::load_object(&root, &id).expect("current object");
     rewrite(&root, &id, |value| {
         let object = value.as_object_mut().expect("object");
+        object.remove("sha256");
         object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
         object.insert("version".to_owned(), Value::from(1));
         let state = object.remove("state").expect("state");
         object.insert("status".to_owned(), state);
+        for stored in object["sections"].as_array_mut().expect("sections") {
+            let stored = stored.as_object_mut().expect("section");
+            let section_id = stored["id"].as_u64().expect("section id");
+            let section = current.section(section_id).expect("current section");
+            stored.remove("admission");
+            let admitted_at = stored.remove("admitted_at").expect("admitted_at");
+            stored.insert("confirmed_at".to_owned(), admitted_at);
+            stored.insert(
+                "sha256".to_owned(),
+                Value::String(section.recomputed_sha256().expect("legacy Section seal")),
+            );
+        }
     });
+    let events_path = store::events_path(&root, &id);
+    let mut retained = String::new();
+    for line in std::fs::read_to_string(&events_path)
+        .expect("events")
+        .lines()
+    {
+        let mut event: engr::model::Event = serde_json::from_str(line).expect("event");
+        event.version = engr::EVENT_ENVELOPE_VERSION_V0;
+        event.provenance = engr::model::Provenance::confirmed(
+            "TEST00",
+            event.payload.sha256().expect("payload hash"),
+        );
+        retained.push_str(&serde_json::to_string(&event).expect("event"));
+        retained.push('\n');
+    }
+    std::fs::write(events_path, retained).expect("retained events");
     std::fs::remove_file(store::engr_dir(&root).join("format.json")).expect("format");
 
     assert_eq!(
@@ -1091,7 +1131,7 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(before.state, State::Closed);
     assert_eq!(before.object_type, None);
 
-    store::with_lock(&root, || store::migrate(&root)).expect("migrate");
+    store::migrate(&root).expect("migrate");
     let after = store::load_object(&root, &id).expect("migrated");
     assert_eq!(after.state, State::Closed);
     assert_eq!(
@@ -1100,7 +1140,7 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     );
     let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
     assert!(raw.get("status").is_none(), "{raw}");
-    assert!(raw.get("type").is_none(), "{raw}");
+    assert!(raw["type"].is_null(), "{raw}");
     assert_eq!(raw["state"], Value::String("closed".to_owned()));
 
     // And the old vocabulary still works on it, because that is what its own
@@ -1112,17 +1152,15 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(object.state, State::Open);
 }
 
-/// A Section written before `refs[]` was declared a set keeps the order its
-/// gate happened to write, and re-proposing the same members is still not a
-/// change.
+/// A Section with an incidental noncanonical Ref order remains the same
+/// assertion, and re-proposing the same members is still not a change.
 ///
 /// Canonicalization is done to the proposal. If the "nothing to confirm" check
 /// did not do the same to the stored value only for the comparison, every
 /// Section stored before this rule holding two refs the other way round would
 /// accept one confirmation and one Event that changed nothing but an array's
 /// order — the exact thing declaring it a set was supposed to rule out. The
-/// stored Section is not tidied either: its hash covers the order it was
-/// written in.
+/// stored Section is not tidied either: set order is outside integrity meaning.
 #[test]
 fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
     let (_dir, root) = workspace();
@@ -1150,14 +1188,7 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
         ],
     );
     let commit = engr::git::head(&root).unwrap_or(commit);
-    let pin = |section: u64| Ref {
-        object: target.clone(),
-        section,
-        sha256: ops::effective_section(&root, &target, section)
-            .expect("section")
-            .sha256,
-        commit: commit.clone(),
-    };
+    let pin = |section: u64| text_ref(&root, &target, section, &commit);
 
     let id = new_object(&root, "the source");
     let object = admit(
@@ -1174,23 +1205,18 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
         ),
     );
 
-    // Seed what an older gate would have left: the same two refs the other way
-    // round, with the hash that order really produces. It is valid stored
-    // authority, not corruption — `verify` recomputes it and agrees.
+    // Seed the same two refs the other way round. The v3 seal canonicalizes
+    // sets, so neither the Section seal nor Object aggregate changes.
     let mut legacy = object.section(1).expect("section").content();
     legacy.refs.reverse();
-    let legacy_sha256 = legacy.sha256().expect("hash");
+    let stored_sha256 = object.section(1).expect("section").sha256.clone();
     rewrite(&root, &id, |value| {
         let section = &mut value["sections"][0];
         section["refs"].as_array_mut().expect("refs").reverse();
-        section["sha256"] = Value::String(legacy_sha256.clone());
     });
     let seeded = store::load_object(&root, &id).expect("an unsorted set is valid stored authority");
-    assert_eq!(
-        seeded.sections[0].recomputed_sha256().expect("recomputed"),
-        legacy_sha256,
-        "the seeded Section verifies against the order it is stored in"
-    );
+    engr::integrity::check_stored_object_integrity(&seeded)
+        .expect("set order does not change either resource seal");
 
     // Both spellings of the same membership are the same assertion.
     for refs in [vec![pin(1), pin(2)], vec![pin(2), pin(1)]] {
@@ -1214,7 +1240,7 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
 
     let after = store::load_object(&root, &id).expect("load");
     assert_eq!(
-        after.sections[0].sha256, legacy_sha256,
+        after.sections[0].sha256, stored_sha256,
         "and nothing sorted the stored Section behind its own hash"
     );
     assert_eq!(after.sections[0].refs, legacy.refs);

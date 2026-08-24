@@ -1018,7 +1018,8 @@ fn check_members(value: &serde_json::Value, expected: &[&str], what: &str) -> Re
 /// human sees what was reviewed against, and so a reader can recompute the
 /// review identity from the candidate alone rather than trusting the name it
 /// gives itself.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateReview {
     pub review_digest: String,
     pub attempt: u32,
@@ -1035,7 +1036,7 @@ pub struct CandidateReview {
 /// Wider than what an Event records: `failed` and `exhausted` never become
 /// durable provenance, because neither produces an admission on its own. They
 /// exist here because a human may be shown one and choose to override it.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewResult {
     Passed,
@@ -1044,7 +1045,8 @@ pub enum ReviewResult {
 }
 
 /// The concurrency predecessor a candidate is bound to.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub expected_rev: u64,
 }

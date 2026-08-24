@@ -42,7 +42,7 @@ pub fn dir(root: &Path) -> PathBuf {
 /// action, type, state, role, field and path selectors until real use shows
 /// domain-wide application causing recurring friction. A narrower selector
 /// invented now would be a guess with a persisted representation.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Domain {
     Object,
@@ -85,7 +85,7 @@ impl Domain {
 /// happen; and Collection and Work have no v1 answer at all. Even `Reject` on an
 /// Object stops the *autonomous* path rather than forbidding the mutation — a
 /// human may initiate the same one and override the result through the gate.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExhaustion {
     Reject,
@@ -163,7 +163,7 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// point: the effective semantics participate in review identity, and YAML
 /// spelling does not. Two rules that mean the same thing must not hash
 /// differently because one author was explicit.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Review {
     pub max_attempts: u32,
     pub on_exhaustion: OnExhaustion,
@@ -305,7 +305,8 @@ pub struct Basis {
 }
 
 /// A basis resolved to the bytes an agent is required to have read.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedBasis {
     pub path: String,
     /// The exact commit whose content **is** the material that was reviewed,
@@ -615,6 +616,13 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     // point. It deliberately does not touch the historical snapshot decoder,
     // which answers a different question about a different workspace.
     store::require_current(root)?;
+    load_all_for_migration(root)
+}
+
+/// Parse the complete Rule set while a recognized older workspace is inside
+/// the explicit migration preflight. The caller has already selected the
+/// source schema; ordinary semantic paths must use [`load_all`] instead.
+pub(crate) fn load_all_for_migration(root: &Path) -> Result<Vec<Rule>> {
     let dir = dir(root);
     // `exists()` follows links, so a dangling `rules` symlink answered "no" and
     // took the empty-set path — reporting that a workspace has no policy when
@@ -967,7 +975,8 @@ pub struct ReviewBinding {
 }
 
 /// One rule as it stood, with everything it rests on resolved.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct BoundRule {
     pub id: String,
     /// Sorted, because the set is semantically order-insensitive.

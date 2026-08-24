@@ -2,13 +2,13 @@
 name: engr
 description: >-
   Use engr in a repository that has adopted `.engr/` to keep engineering records
-  whose every word a human confirmed. Propose sections through the gate and wait
-  for the human's challenge code, re-render a pending candidate instead of
-  re-preparing it, read current wording and staleness with `engr show`, act on a
-  section whose git basis or referenced section has moved, park work that is
-  still unresolved in `engr backlog` rather than the record, and keep the
-  shortest useful execution handoff for an Object in `engr work`, and group work
-  into plans with `engr collection`. Not for application
+  with explicit Human or reviewed Agent authority. Use the Human challenge flow
+  when asking a person to admit a change and never confirm your own candidate;
+  use direct Agent admission only after reviewing every applicable project Rule
+  against the surfaced ReviewDigest. Re-render rather than replace pending
+  candidates, inspect current wording, integrity, and drift with `engr show`, put
+  unresolved work in `engr backlog`, keep short execution handoffs in `engr
+  work`, and group work with `engr collection`. Not for application
   event-sourcing architecture, EventStoreDB or Kafka work, ordinary logs,
   personal journals, private session checkpoints, or writing decision documents
   outside an adopted project.
@@ -48,18 +48,19 @@ commands. Embedded targets use `kind: engr` with a namespace-relative `ref`;
 shared syntax does not make different reference-bearing fields semantically
 equivalent.
 
-**You propose. A human admits.**
+**Use the authority path that actually happened.**
 
-`engr prepare` puts a change up and prints a challenge code. That code exists so
-a *human* can hand it back after reading the change. Nothing in the tool stops
-you typing it yourself, which is exactly why this is on you:
+Plain `engr prepare` puts a Human change up and prints a challenge code. That
+code exists so a *human* can hand it back after reading the change. Nothing in
+the tool stops you typing it yourself, which is exactly why this is on you:
 
 > **Never run `engr confirm` with a code the human did not give you in this
 > conversation.** Not to finish a task, not to unblock yourself, not because the
 > change is obviously right.
 
-If you confirm your own proposal, every guarantee the record makes becomes a
-lie — and it is a lie no later reader can detect.
+If you confirm your own proposal, its `admission: human` becomes a lie no later
+reader can detect. Use `--agent` for autonomous work; do not impersonate the
+Human path to avoid Rule Review.
 
 ## The loop
 
@@ -80,6 +81,44 @@ Pass the response through **verbatim**. If they write `CONFIRM ABC123 but tighte
 the second line`, send that whole string. engr will refuse it and discard the
 candidate, which is correct — that was a qualified yes, and deciding it counted
 as a yes is not your call.
+
+## Agent admission
+
+An Agent semantic mutation needs at least one applicable, usable Object Rule and
+a passing review. Start with the exact intended command plus `--agent`. engr
+does not write it yet: it surfaces the ReviewDigest and every Rule id governing
+that exact predecessor and result.
+
+```bash
+engr prepare --object <id> --add --text-file draft.txt --agent
+engr rules show <rule-id>
+```
+
+Read every surfaced Rule and every file it rests on, then review the exact
+mutation. If it passes, repeat the unchanged command with the complete
+attestation:
+
+```bash
+engr prepare --object <id> --add --text-file draft.txt --agent \
+  --review <digest> --reviewed-rule <rule-id> \
+  --review-attempt 1 --review-result passed
+```
+
+Repeat `--reviewed-rule` for the whole surfaced set. engr recomputes the
+ReviewDigest while holding the writer lock; if the Object, Rule bytes, or any
+reviewed basis moved, read and review again rather than copying the new digest.
+A passing Agent admission writes immediately and returns no challenge.
+
+If review fails, fix the proposed work and count the next review attempt
+honestly. Once the applicable ceiling is exceeded, report `exhausted`. A Rule
+whose exhaustion policy is `human_confirmation` may then produce a Human
+candidate only when the attestation includes the exact explanation the human is
+being asked to override. A `reject` policy ends the autonomous path; do not
+route around it through an ordinary Human candidate.
+
+Creating or renaming a title is the only Agent operation allowed without an
+applicable Rule, because the title is navigation metadata. All Section semantics
+still need governed Agent admission.
 
 ## Coming back later
 
@@ -195,9 +234,9 @@ reference wants — `--ref`, `--subject`, `work depend --on`,
 `collection add --target` — so read it from there rather than trying to build
 one. `engr backlog show` prints its item's the same way.
 
-`show` puts the confirmed wording and its trustworthiness on the same screen.
+`show` puts the admitted wording and its trustworthiness on the same screen.
 There is no second command to fetch the authoritative text — what you see is what
-was confirmed.
+was admitted.
 
 Objects are addressed by unique id prefix, like a git commit. A uuidv7 prefix is
 a timestamp, so objects created close together need more characters; engr widens
@@ -209,11 +248,11 @@ the abbreviation for you.
 
 | Marking | What happened |
 | --- | --- |
-| `TAMPERED` / `tampered` | This section's wording does not match the hash confirmed with it |
-| `REF TAMPERED` / `ref_tampered` | A section this one stands on does not match *its* hash |
+| `TAMPERED` / `tampered` | This Section or its Object aggregate does not match its stored integrity seal |
+| `REF TAMPERED` / `ref_tampered` | A current or historical dependency fails integrity; the detail names the side |
 | `REF UNREADABLE` / `ref_unreadable` | A section this one stands on will not load at all — malformed authority, not a missing one |
 | `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
-| `refs moved` / `stale_refs` | A section this one references was rewritten through the gate |
+| `refs moved` / `stale_refs` | One or more selected dependency fields moved through an admission path |
 
 The first three are a different kind of problem from the last two, and they are
 not something to work around. **Stop and tell the human.** Someone edited the
@@ -279,8 +318,8 @@ or raise the ceiling.
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can
-assert, propose it through the gate like anything else — the wording a human
-confirms is usually not the wording you staged.
+assert, admit it through the appropriate Human or Agent path — reviewed record
+wording is usually not the wording you staged.
 
 **Admitting the Object does not touch the point it came from.** They are two
 separate operations, and the second is yours to remember: once the record has
@@ -331,7 +370,8 @@ engr work rm <object>                    # when there is nothing left to hand of
 No confirmation, no challenge code — you write this directly, like backlog. What
 makes that safe is that **finishing it settles nothing**. You can mark every item
 done and the Object has not moved. If something you learned is stable knowledge,
-propose it through the gate; if it is still an open question, put it in backlog.
+admit it through the appropriate Human or Agent path; if it is still an open
+question, put it in backlog.
 
 Start by reading it, not by writing it. `engr work ls` is the first thing to run
 when resuming: it says which Objects have execution memory, which are blocked and
@@ -408,7 +448,7 @@ engr collection delete <id>              # only on explicit human direction
 
 No confirmation, no challenge code — you edit this directly, like backlog and
 work. **Grouping something changes nothing about it.** An Object in a plan means
-exactly what its confirmed sections say; moving it, ranking it, or calling the
+exactly what its admitted Sections say; moving it, ranking it, or calling the
 plan complete is planning activity and nothing more.
 
 Members are whole Objects or whole backlog items, given as
@@ -458,7 +498,7 @@ makes sense.
 | --- | --- |
 | Something new to record | `--add` |
 | The same point, worded differently or corrected | `--revise <n>` |
-| Two sections saying one thing | `--merge <a>,<b>` |
+| Several sections saying one thing | `--merge <destination> --sources <a>,<b>` |
 | No longer belongs | `--delete <n>` |
 | The object's title no longer describes it | `--rename --text "..."` |
 | An untyped object has settled | `--close` |
@@ -574,7 +614,7 @@ with `--oversize`.
 
 `--implemented-by-file <path>` and `--implemented-by-symbol <path> <symbol>`
 record where an assertion is implemented, pinned to a real commit. Unlike
-`--ref`, they carry no wording dependency and never go stale.
+`--ref`, they carry no semantic dependency and never go stale.
 
 Superseding is one command and one confirmation, and it needs a reason:
 
@@ -596,23 +636,22 @@ commit. With clean source files it defaults to HEAD. If source outside `.engr/`
 is dirty, engr refuses an omitted choice: select a committed basis, or use
 `--no-based-on` only when the assertion genuinely has no repository basis.
 
-Use `--ref <object>:<section>` when this wording depends on another section's
-wording, including a sibling section in the same object. Commit the target
-wording first: the reference's commit must actually contain its pinned hash.
-That is what makes drift detectable later — without it, nothing notices when the
-thing you relied on changes. A section cannot directly reference itself.
+Use `--ref <object>:<section> <fields>` when this wording depends on selected
+semantics of another Section, including a sibling in the same Object. `fields`
+is a comma-separated set such as `text,role`; select only what the source really
+relies on. Commit the target first: the reference's commit must contain the same
+selected values. A Section cannot directly reference itself.
 
 ## Committing
 
-Objects and confirmed history live in the repository. **Remind the human to
-commit `.engr/objects`, `.engr/events`, `.engr/backlog`, `.engr/work` and
-`.engr/collections`.**
+Objects and admitted history live in the repository. **Remind the human to
+commit `.engr/objects`, `.engr/events`, `.engr/rules`, `.engr/backlog`,
+`.engr/work` and `.engr/collections`.**
 
-All five, not the first three. Work and Collections are non-authoritative, but
-git is the only history they have — an uncommitted plan or handoff is simply
-lost, and losing it silently is worse than never writing it. `.engr/candidates`
-is the one directory that must never be committed, and `.gitignore` already
-excludes it.
+All six. Rules, Work and Collections are non-authoritative, but git is the only
+history they have — an uncommitted policy, plan or handoff is simply lost, and
+losing it silently is worse than never writing it. `.engr/candidates` is the one
+directory that must never be committed, and `.gitignore` already excludes it.
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and
@@ -630,9 +669,10 @@ it to everyone with repository access.
 
 ## What not to do
 
-- Do not look for a way to write without confirmation. There isn't one, and the
-  absence is the point. The backlog is not one either — it is outside the record,
-  and putting an assertion there does not make it recorded.
+- Do not use Human confirmation for autonomous work or Agent admission to claim
+  human assent. Each path is recorded, and Rule Review is not optional for
+  semantic Agent mutations. Backlog is outside the record; putting an assertion
+  there does not make it admitted.
 - Do not put a decision's reasoning in a commit message instead of a section. The
   record is where it belongs; the commit message is not addressable and cannot be
   referenced.

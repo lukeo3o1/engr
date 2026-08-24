@@ -48,7 +48,7 @@ pub fn validate_object_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Git resolves selectors such as `HEAD` for input, but confirmed records pin
+/// Git resolves selectors such as `HEAD` for input, but admitted records pin
 /// the immutable object id it produced. Accept SHA-1 and SHA-256 repositories.
 pub fn is_canonical_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
@@ -70,39 +70,143 @@ pub const OBJECT_FORMAT: &str = "engr-object";
 pub const EVENT_FORMAT: &str = "engr-event";
 pub const CANDIDATE_FORMAT: &str = "engr-candidate";
 
-/// A reference to one section, pinned to what it said and the
-/// commit it said it at. `sha256` makes "my basis changed" computable locally;
-/// `commit` makes the old wording recoverable with `git show`.
-/// Schema-exact, like everything else a persisted Object is made of.
-///
-/// `Relation`, `Supplement` and `Target` already were; this was the one part
-/// that was not, and it is the part the selective-reference work adds fields to.
-/// A schema-exact Section whose `refs[]` elements are not would have the hole in
-/// exactly the place the next slice widens.
+/// The retained whole-content reference written by predecessor workspaces and
+/// Event v1. Current v3 Sections use [`crate::dependency::SelectiveRef`]; this
+/// exact legacy shape remains so historical provenance can still be decoded and
+/// migrated without reinterpretation.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct Ref {
+pub struct LegacyRef {
     pub object: String,
     pub section: u64,
     pub sha256: String,
     pub commit: String,
 }
 
-impl Ref {
+impl LegacyRef {
     fn validate(&self) -> Result<()> {
         validate_object_id(&self.object)?;
         validate_git_oid("reference commit", &self.commit)
     }
 }
 
+/// A Section dependency under either persisted compatibility generation.
+///
+/// Current workspace-v3 resources use [`Ref::Selective`]. [`Ref::Legacy`]
+/// remains only so immutable Event-v1 and Git history can still be decoded
+/// under the contract that wrote them. The shapes share no member names except
+/// `commit`, so the untagged representation is unambiguous.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[serde(untagged)]
+pub enum Ref {
+    Selective(crate::dependency::SelectiveRef),
+    Legacy(LegacyRef),
+}
+
+impl<'de> Deserialize<'de> for Ref {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("a reference must be a JSON object"))?;
+        if object.contains_key("target") {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct StoredSelective {
+                target: String,
+                fields: Vec<crate::dependency::SemanticField>,
+                commit: String,
+                digest: String,
+            }
+            let stored: StoredSelective =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            crate::dependency::SelectiveRef::stored(
+                stored.target,
+                stored.fields,
+                stored.commit,
+                stored.digest,
+            )
+            .map(Ref::Selective)
+            .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Ref::Legacy)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl Ref {
+    pub fn legacy(
+        object: impl Into<String>,
+        section: u64,
+        sha256: impl Into<String>,
+        commit: impl Into<String>,
+    ) -> Self {
+        Self::Legacy(LegacyRef {
+            object: object.into(),
+            section,
+            sha256: sha256.into(),
+            commit: commit.into(),
+        })
+    }
+
+    pub fn selective(reference: crate::dependency::SelectiveRef) -> Self {
+        Self::Selective(reference)
+    }
+
+    pub fn as_legacy(&self) -> Option<&LegacyRef> {
+        match self {
+            Self::Legacy(reference) => Some(reference),
+            Self::Selective(_) => None,
+        }
+    }
+
+    pub fn as_selective(&self) -> Option<&crate::dependency::SelectiveRef> {
+        match self {
+            Self::Selective(reference) => Some(reference),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    pub fn commit(&self) -> &str {
+        match self {
+            Self::Selective(reference) => reference.commit(),
+            Self::Legacy(reference) => &reference.commit,
+        }
+    }
+
+    pub fn target_identity(&self) -> Result<(String, u64)> {
+        match self {
+            Self::Selective(reference) => crate::dependency::parse_target(reference.target()),
+            Self::Legacy(reference) => Ok((reference.object.clone(), reference.section)),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Selective(reference) => crate::dependency::SelectiveRef::stored(
+                reference.target(),
+                reference.fields().to_vec(),
+                reference.commit(),
+                reference.digest(),
+            )
+            .map(|_| ()),
+            Self::Legacy(reference) => reference.validate(),
+        }
+    }
+}
+
 /// The part of a section that is put through admission — the wording a human is
 /// shown at the gate, and the wording Rule Review is run against.
 ///
-/// Every semantic field a Section carries lives here, and only here, because
-/// this is what the section hash covers. A field held outside it would be
-/// authoritative meaning that `verify` cannot see and a ref cannot pin — which
-/// is exactly how `role` or a relation could be changed after the fact without
-/// anything reporting it.
+/// Every selectable semantic field a Section carries lives here, and only here.
+/// The v3 Section seal additionally covers identity and provenance, while a Ref
+/// can select only these semantics. A semantic field held outside this value
+/// would be authoritative meaning a Ref cannot pin.
 ///
 /// The new fields are all skipped when empty, so a Section that carries none of
 /// them serializes and hashes byte for byte as it did before they existed.
@@ -146,9 +250,10 @@ impl Content {
     /// makes the trailing whitespace a *presentation* obligation instead: see
     /// `render_supplement_bodies`, which says how a body ends when the way it
     /// ends would otherwise be invisible.
-    pub fn canonicalize_order(&mut self) {
-        self.refs.sort();
-        self.relations.sort();
+    pub fn canonicalize_order(&mut self) -> Result<()> {
+        crate::proof::canonical_set(&mut self.refs, "reference")?;
+        crate::proof::canonical_set(&mut self.relations, "relation")?;
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -222,52 +327,36 @@ pub struct Section {
     pub id: u64,
     /// Which door these exact semantics came through.
     ///
-    /// **Not persisted yet.** It is part of the coordinated Phase-3 contract,
-    /// and that contract becomes durable in one piece — see
-    /// [`crate::PHASE_3_WORKSPACE_VERSION`]. Writing it now would put a version
-    /// 3 field in a version 2 resource, which is the one thing a version number
-    /// exists to prevent.
-    ///
-    /// So it is reconstructed on load rather than read, and reconstruction is
-    /// exact rather than a guess: at workspace version 2 the Human Gate is the
-    /// only door there is, so every Section this build loads came through it.
-    /// The Agent path has no envelope to be admitted through until the same
-    /// activation, which is what makes the one value the only value.
-    ///
-    /// It is a real field of the model regardless. Every rule that turns on
-    /// admission — promotion, the refusal to demote, what an Agent merge may
-    /// consume, what an Agent Section may carry — is implemented and tested
-    /// against it here, so activation wires an existing model to a new
-    /// representation rather than inventing both at once.
-    #[serde(skip)]
+    /// Legacy workspaces omit this member and are decoded under their own
+    /// generation as Human. Current workspace-v3 Sections persist it.
+    #[serde(default = "human_admission")]
     pub admission: Admission,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub role: Option<Role>,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub content: Vec<Supplement>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub based_on: Option<String>,
     #[serde(default)]
     pub refs: Vec<Ref>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub relations: Vec<Relation>,
-    /// Hash of the confirmed content — role, text, supplementary content,
-    /// `based_on`, `refs` and `relations` together, not text alone. Repointing a
-    /// ref, or retyping a relation, would otherwise pass `verify`.
+    /// Integrity seal under the owning workspace generation. Predecessor
+    /// workspaces seal semantic content; v3 seals every other Section member,
+    /// including identity, admission and timestamp.
     pub sha256: String,
     /// When these semantics were admitted, by whichever path admitted them.
     ///
-    /// Persisted as `confirmed_at`, because the rename is part of the same
-    /// coordinated Phase-3 contract and none of it is durable yet. The instant
-    /// is the same either way; what the new name stops claiming is that a human
-    /// read every Section that has one, which becomes untrue the moment the
-    /// Agent path opens.
-    ///
-    /// Named `admitted_at` in the model so every rule reads the word that will
-    /// be true, and so activation moves a spelling rather than a meaning.
-    #[serde(rename = "confirmed_at")]
+    /// Legacy workspaces spell this `confirmed_at`; the migration retains the
+    /// instant and current workspace-v3 resources spell the authority-neutral
+    /// name.
+    #[serde(alias = "confirmed_at")]
     pub admitted_at: String,
+}
+
+fn human_admission() -> Admission {
+    Admission::Human
 }
 
 impl Section {
@@ -294,7 +383,7 @@ impl Section {
         //
         // A relation is a claim about the Object's own standing — `superseded_by`
         // is half of the supersession invariant, and `implemented_by` asserts
-        // that a repository artifact realizes confirmed knowledge. Neither is
+        // that a repository artifact realizes admitted knowledge. Neither is
         // wording somebody can read and check; both are statements the record
         // then acts on. `role=supersession` is the other half of the same act:
         // it is the human-readable reason an Object was retired, and retiring an
@@ -336,15 +425,16 @@ pub struct Object {
     pub id: String,
     pub title: String,
     /// Optional, and absent is a first-class answer rather than a missing one.
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type", default)]
     pub object_type: Option<ObjectType>,
     /// The one lifecycle field. `status` is read as an alias so a workspace
     /// migrated from v0 keeps loading, and is never written back under that
     /// name: two spellings of one truth is how they start disagreeing.
     #[serde(alias = "status")]
     pub state: State,
-    /// Increments on every confirmed action. Candidates pin it, so one prepared
-    /// against an older state cannot be confirmed after the object moved.
+    /// Increments on every admitted action. Candidates and reviews pin it, so
+    /// one prepared against an older state cannot be admitted after the Object
+    /// moved.
     pub rev: u64,
     /// Monotonic and never reset. Section ids are never reused, so this cannot
     /// be derived as `max(existing) + 1`: that would hand out the id of a section
@@ -352,6 +442,13 @@ pub struct Object {
     /// at different content.
     pub next_section_id: u64,
     pub sections: Vec<Section>,
+    /// Aggregate integrity over the canonical Object representation.
+    ///
+    /// Optional in the in-memory compatibility model so historical v1/v2
+    /// Objects can still be decoded. A current workspace-v3 Object is accepted
+    /// by the store only when this is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl Object {
@@ -366,6 +463,7 @@ impl Object {
             rev: 0,
             next_section_id: 1,
             sections: Vec::new(),
+            sha256: None,
         };
         object.validate()?;
         Ok(object)
@@ -393,7 +491,7 @@ impl Object {
             .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("section §{id} does not exist")))
     }
 
-    /// Confirmed content is not revised while nobody is looking at it.
+    /// Admitted content is not revised while nobody is looking at it.
     ///
     /// This is the old "reopen first" rule stated in the terms Phase 3 gives it.
     /// For an untyped Object attention is exactly `open`, so nothing about the
@@ -403,7 +501,7 @@ impl Object {
     /// rather than happening out of sight of everyone who reads the default
     /// listing.
     ///
-    /// The rule is about *renewed* engineering work: wording that was confirmed
+    /// The rule is about *renewed* engineering work: wording that was admitted
     /// once being changed again while nobody is looking.
     ///
     /// It does **not** mean two confirmations are required. The guard reads the
@@ -490,6 +588,17 @@ impl Object {
                 self.id,
                 self.next_section_id,
                 section.id
+            );
+        }
+        if let Some(seal) = &self.sha256 {
+            ensure!(
+                seal.len() == 64
+                    && seal
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                EXIT_SCHEMA,
+                "{}: object sha256 must be 64 lowercase hexadecimal characters",
+                self.id
             );
         }
         Ok(())
@@ -1078,6 +1187,16 @@ impl Event {
             Provenance::Tagged { .. } => None,
         }
     }
+
+    /// The Human-Gate proof carried by Event generation 2, where there is one.
+    pub fn human_confirmation(&self) -> Option<&HumanConfirmation> {
+        match &self.provenance {
+            Provenance::Tagged { admission } if admission.kind == Admission::Human => {
+                admission.confirmation.as_ref()
+            }
+            Provenance::Confirmed { .. } | Provenance::Tagged { .. } => None,
+        }
+    }
 }
 
 /// Apply only the event suffix newer than the persisted projection.
@@ -1122,7 +1241,7 @@ pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(
     Ok((object, true))
 }
 
-/// Apply a confirmed event to an object. Deterministic by construction: no
+/// Apply an admitted Event to an Object. Deterministic by construction: no
 /// clocks, no git, no interpretation of prose. Everything it needs is in the
 /// event.
 pub fn project(object: &mut Object, event: &Event) -> Result<()> {
@@ -1139,7 +1258,7 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     // This is what makes the rule reachable: a no-attention Object may be
     // revised in one confirmed operation **only if** that same operation
     // atomically moves it to a state that needs attention. The guard is
-    // unchanged — it still refuses to let confirmed wording change while nobody
+    // unchanged — it still refuses to let admitted wording change while nobody
     // is looking — but the object is no longer out of sight by the time the
     // section mutation applies, so no artificial intermediate state has to be
     // confirmed first.

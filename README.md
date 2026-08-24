@@ -1,28 +1,30 @@
 # engr
 
-**Engineering records whose every word a human confirmed.**
+**Engineering records with explicit Human or reviewed Agent authority.**
 
 An object holds sections. Each section carries text, the commit it was written
-against, and references to the sections of other objects it depends on. Adding,
-revising, merging, deleting, closing — all of it goes through one gate: an agent
-proposes, a human reads the change, and types a challenge code. There is no other
-way in.
+against, selective references to the sections it depends on, and whether its
+current semantics were admitted by a human or an agent. Human changes go through
+the challenge gate. Semantic Agent changes are admitted directly only after a
+passing review of every applicable project Rule against the exact mutation.
 
 Work that is still unresolved goes in the **backlog** instead, which is
-git-tracked, freely agent-editable, and confirmed by nobody. That is what lets
+git-tracked, freely agent-editable, and admitted by nobody. That is what lets
 the record stay strict: exploratory material has somewhere to live that does not
 cost a confirmation or dilute what a recorded section means.
 
 Current workspaces use `.engr/format.json` as their sole schema authority.
-Legacy v0 workspaces without it remain readable; run `engr migrate` explicitly
-before changing them. engr refuses to mutate unknown or newer versions.
+Legacy v0 and version 1/2 workspaces remain read-only; run `engr migrate`
+explicitly to perform the whole-workspace v3 transition before changing them.
+engr refuses to mutate unknown or newer versions.
 
 Canonical Object references are `engr:obj:<compact-id>`. The compact ID is the
 UUID's exact 128 bits encoded as 26 lowercase Crockford Base32 characters;
 stored identity and filenames remain standard UUID strings. `show`, `verify`,
 and `--object` select the current workspace Object with that form only. `--ref`
-may additionally carry `:<section>` and `@<commit>` to pin wording in a new
-section; it does not make `show` a historical-object lookup.
+takes an Object Section plus a comma-separated semantic field set, and may carry
+`@<commit>` in canonical `engr:` form. It pins only those selected values; it
+does not make `show` a historical-object lookup.
 
 An abbreviated or symbolic `@<commit>` is accepted only as input. Canonical
 reference output resolves it to the full Git object ID.
@@ -56,18 +58,18 @@ to be reading:
   how far HEAD has since travelled is a computation. Changes to the record's own
   files do not count — `confirm` asks you to commit them, and a signal its own
   instructions switch on permanently is a signal nobody reads.
-- **A dependency changed.** A reference pins the hash of the section it depends
-  on, so the target being rewritten is a computation too — and it pins the commit
-  as well, so `git show` recovers what it used to say.
+- **A dependency changed.** A reference pins a digest of the semantic fields the
+  source actually relies on, so an unrelated target change does not create
+  drift. It pins the commit as well, so `git show` recovers what it used to say.
 
 The case worth interrupting for is an object **nobody is looking at** whose basis
 moved — a closed one, an accepted design, a mitigated risk. Out of the default
 listing is exactly where drift goes unnoticed.
 
-Reading is also checking. `show` recomputes every section's hash before printing
-it, and the hash of every section it stands on, because the default way in is the
-one worth lying to: a record whose selling point is that a human agreed to each
-word must not print `ok` over words nobody agreed to.
+Reading is also checking. `show` verifies the Object aggregate, every Section
+seal, and both sides of every selective dependency before printing it. An
+integrity failure says whether the current or historical side failed; it is not
+quietly presented as ordinary drift.
 
 ## Status
 
@@ -97,23 +99,25 @@ no commit at all.
 
 v0 is a deliberate rewrite. The previous design was event-sourced with 48 event
 types, of which **35 never fired once** on the only day it was genuinely used. v0
-keeps the part that worked — the gate — and delegates history to git. It grows
-only when a recorded use demands it; see the growth rule in the protocol.
+keeps the part that worked — explicit admission — and delegates look-back to
+git. It grows only when a recorded use demands it; see the growth rule in the
+protocol.
 
-One thing it does **not** solve: `prepare` prints the challenge code where the
-agent can read it, so nothing stops an agent confirming its own proposal. The
-gate is a convention, not yet a mechanism.
+One thing Human admission does **not** prove: `prepare` prints the challenge code
+where the agent can read it, so nothing stops an agent claiming Human admission
+by confirming its own proposal. The Human gate is a convention, not an identity
+mechanism. Agent admission is separately and explicitly recorded.
 
 ## Using it
 
 ```bash
 engr init                                    # in a git repository
 engr prepare --new --text "the title"        # propose an object
-engr confirm 'CONFIRM <code>'                # the only way in
+engr confirm 'CONFIRM <code>'                # admit a Human candidate
 engr prepare --object <id> --rename --text "a better title"
 engr prepare --object <id> --add  --text-file f.txt
 engr prepare --object <id> --revise 3 --text-file f.txt
-engr prepare --object <id> --merge 1,2 --text-file f.txt
+engr prepare --object <id> --merge 1 --sources 2,3 --text-file f.txt
 engr prepare --object <id> --delete 3
 engr prepare --object <id> --close
 engr prepare --object <id> --classify --type decision --state accepted
@@ -125,9 +129,17 @@ engr ls --stale                              # sections whose basis or refs move
 engr ls --all --sections | grep <term>       # one line per section, greppable
 engr show <id>                               # sections, and how far each can be trusted
 engr show <id> --format json                 # the same, for an agent
-engr verify                                  # recompute section hashes, and those they stand on
+engr verify                                  # verify Object, Sections, and dependencies
+engr rules ls --domain object                # policy governing Agent mutations
 engr protocol                                # the spec this binary implements
 ```
+
+For an Agent mutation, first run the intended command with `--agent`. If a Rule
+applies, engr refuses without writing and surfaces the ReviewDigest and Rule ids.
+After reviewing that exact material, repeat the command with `--agent`,
+`--review <digest>`, one `--reviewed-rule <id>` per Rule, and
+`--review-result passed`. The digest is recomputed under the mutation lock, so a
+changed Object or Rule cannot slip beneath the review.
 
 Objects are addressed by unique id prefix, like a git commit.
 
@@ -169,7 +181,7 @@ engr collection ls                           # plans, and what still needs atten
 ```
 
 Grouping something changes nothing about it. An object in a plan means exactly
-what its confirmed sections say, and calling a plan complete is a declaration
+what its admitted Sections say, and calling a plan complete is a declaration
 about the plan rather than a claim about its members.
 
 Work is deliberately weak. Finishing every item settles nothing: the object is
@@ -178,9 +190,9 @@ signal that belongs to the human rather than the agent — and engr cannot tell
 them apart, so it enforces none of it. What it does instead is say what happened:
 deleting paused work reports that a human's stop signal went with it.
 
-**Commit `.engr/objects`, `.engr/events`, `.engr/backlog`, `.engr/work` and
-`.engr/collections`.** Confirmed events are append-only
-history and audit evidence; sections remain the authority for current wording.
+**Commit `.engr/objects`, `.engr/events`, `.engr/rules`, `.engr/backlog`, `.engr/work` and
+`.engr/collections`.** Admitted events are append-only
+history and audit evidence; Sections remain the authority for current wording.
 This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —
 committed history is what actually anchors the wording, and `git show` is the
@@ -243,9 +255,8 @@ failure.
 ## The Skill
 
 [skill/SKILL.md](skill/SKILL.md) is the runtime guide for an agent working in a
-project that has adopted `.engr/`. Since the gate is a convention rather than a
-mechanism, that document is what actually holds it up — most of it is about
-proposing and then waiting.
+project that has adopted `.engr/`. It explains both the Human candidate flow and
+the Agent Rule Review flow, including when the agent must stop and wait.
 
 ## Build
 

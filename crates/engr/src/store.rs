@@ -5,24 +5,24 @@
 //!   format.json              what version wrote this workspace
 //!   lock                     one writer at a time
 //!   objects/<uuid>.json      the authority
-//!   events/<uuid>.jsonl      append-only confirmed history
+//!   events/<uuid>.jsonl      append-only admitted history
 //!   candidates/<CODE>.json   awaiting a human
-//!   backlog/<uuid>.json      unresolved staging, confirmed by nobody
-//!   work/objects/<uuid>.json execution memory, owned by an object, confirmed by nobody
-//!   collections/<id>.json    planning metadata, confirmed by nobody
+//!   rules/*.md               project review policy
+//!   backlog/<uuid>.json      unresolved staging, admitted by nobody
+//!   work/objects/<uuid>.json execution memory, owned by an object, admitted by nobody
+//!   collections/<id>.json    planning metadata, admitted by nobody
 //! ```
 
 use crate::model::{
     replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
 };
 use crate::{
-    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
-    EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
+    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION, EVENT_ENVELOPE_VERSION_V0,
+    EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
 };
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -130,7 +130,7 @@ pub enum WorkspaceFormat {
 /// comes back. Telling people not to do that in a README does not stop `-A`.
 const GITIGNORE: &str = "\
 # The record lives in objects/ — commit that; it is where earlier wording is
-# recovered from. events/ is safe to commit too: the challenge codes in it have
+# recovered from. events/ is safe to commit too: any challenge codes in it have
 # already been spent, and a spent code resolves to nothing.
 #
 # These two are local only:
@@ -171,8 +171,15 @@ pub fn init(root: &Path) -> Result<PathBuf> {
 }
 
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
-    let path = engr_dir(root).join("format.json");
-    if !path.exists() {
+    let migration = engr_dir(root).join("migration-v3");
+    ensure!(
+        !migration.exists(),
+        EXIT_SCHEMA,
+        "{} marks an incomplete coordinated migration; run `engr migrate` to resume it",
+        migration.display()
+    );
+    let declared = declared_workspace_version(root)?;
+    if declared.is_none() {
         ensure!(
             detect_legacy(root)?,
             EXIT_SCHEMA,
@@ -181,6 +188,36 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         );
         return Ok(WorkspaceFormat::LegacyV0);
     }
+    let version = declared.expect("checked above");
+    if version != WORKSPACE_VERSION {
+        // Recognized-but-older is reported, not refused, because the workspace
+        // is intact and one explicit command moves it forward. Anything else —
+        // a version this build has never heard of, including a newer one — is
+        // refused outright: reading it under this build's rules is precisely
+        // the silent reinterpretation the version exists to prevent.
+        ensure!(
+            crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version),
+            EXIT_SCHEMA,
+            "workspace version {} is not supported by engr {}",
+            version,
+            crate::IMPLEMENTATION_VERSION
+        );
+        return Ok(WorkspaceFormat::OlderVersion(version));
+    }
+    if contains_legacy_objects(root)? {
+        return Ok(WorkspaceFormat::LegacyV0);
+    }
+    Ok(WorkspaceFormat::Current)
+}
+
+/// Read only the declared authority while a coordinated migration stage may
+/// exist. Missing means the legacy generation; callers that are not already
+/// holding a validated migration plan must use [`validate_format`] instead.
+pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
+    let path = engr_dir(root).join("format.json");
+    if !path.exists() {
+        return Ok(None);
+    }
     let format: Format = read_json(&path)?;
     ensure!(
         format.format == WORKSPACE_FORMAT,
@@ -188,25 +225,7 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         "{}: not an engr workspace",
         path.display()
     );
-    if format.version != WORKSPACE_VERSION {
-        // Recognized-but-older is reported, not refused, because the workspace
-        // is intact and one explicit command moves it forward. Anything else —
-        // a version this build has never heard of, including a newer one — is
-        // refused outright: reading it under this build's rules is precisely
-        // the silent reinterpretation the version exists to prevent.
-        ensure!(
-            crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&format.version),
-            EXIT_SCHEMA,
-            "workspace version {} is not supported by engr {}",
-            format.version,
-            crate::IMPLEMENTATION_VERSION
-        );
-        return Ok(WorkspaceFormat::OlderVersion(format.version));
-    }
-    if contains_legacy_objects(root)? {
-        return Ok(WorkspaceFormat::LegacyV0);
-    }
-    Ok(WorkspaceFormat::Current)
+    Ok(Some(format.version))
 }
 
 fn detect_legacy(root: &Path) -> Result<bool> {
@@ -281,14 +300,7 @@ pub fn require_current(root: &Path) -> Result<()> {
     }
 }
 
-struct MigrationEntry {
-    id: String,
-    path: PathBuf,
-    object: Object,
-    migrated: Option<serde_json::Value>,
-}
-
-fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
+pub(crate) fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
     // The two spellings of one lifecycle field are checked here rather than in
     // the workspace scan, because this is where the answer matters: a file
     // claiming both cannot say which it means, and `status` is read as an alias
@@ -320,110 +332,220 @@ fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Obje
     Ok(object)
 }
 
-/// Validate every retained representation before moving any one Object. A
-/// malformed legacy workspace must remain exactly legacy rather than becoming a
-/// mixture of old and new files because a later entry was invalid.
-fn preflight_migration(root: &Path) -> Result<Vec<MigrationEntry>> {
-    let mut entries = Vec::new();
-    for id in object_ids(root)? {
-        let path = object_path(root, &id);
-        let value: serde_json::Value = read_json(&path)?;
-        let object = value.as_object().ok_or_else(|| {
+/// Decode an Object under the workspace generation that owns its bytes.
+/// Compatibility fields in the in-memory model must never make a current
+/// resource's missing member look like a valid legacy default.
+pub(crate) fn decode_object_for_version(
+    path: &Path,
+    id: &str,
+    value: serde_json::Value,
+    version: u32,
+) -> Result<Object> {
+    if version >= 3 {
+        crate::proof::within_safe_integers(&value, &path.display().to_string())?;
+        check_current_object_shape(path, &value)?;
+    } else {
+        check_predecessor_object_shape(path, version, &value)?;
+    }
+    let object = decode_object(path, id, value)?;
+    if version >= 3 {
+        ensure!(
+            object.legacy_format.is_none() && object.legacy_version.is_none(),
+            EXIT_SCHEMA,
+            "{}: a current Object carries no per-resource format markers",
+            path.display()
+        );
+        for section in &object.sections {
+            ensure!(
+                section
+                    .refs
+                    .iter()
+                    .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
+                EXIT_SCHEMA,
+                "{}: a current Object cannot carry a legacy reference",
+                path.display()
+            );
+        }
+    }
+    Ok(object)
+}
+
+fn exact_members(
+    path: &Path,
+    what: &str,
+    value: &serde_json::Map<String, serde_json::Value>,
+    expected: &[&str],
+) -> Result<()> {
+    let found: std::collections::BTreeSet<&str> = value.keys().map(String::as_str).collect();
+    let expected: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+    ensure!(
+        found == expected,
+        EXIT_SCHEMA,
+        "{}: {what} members are {:?}, expected {:?}",
+        path.display(),
+        found,
+        expected
+    );
+    Ok(())
+}
+
+fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{}: object must be a JSON object", path.display()),
+        )
+    })?;
+    exact_members(
+        path,
+        "Object",
+        object,
+        &[
+            "id",
+            "title",
+            "type",
+            "state",
+            "rev",
+            "next_section_id",
+            "sections",
+            "sha256",
+        ],
+    )?;
+    let sections = object
+        .get("sections")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
             Error::new(
                 EXIT_SCHEMA,
-                format!("{}: object must be a JSON object", path.display()),
+                format!("{}: sections must be an array", path.display()),
+            )
+        })?;
+    let mut previous = None;
+    for section in sections {
+        let section = section.as_object().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: a section must be a JSON object", path.display()),
+            )
+        })?;
+        exact_members(
+            path,
+            "Section",
+            section,
+            &[
+                "id",
+                "admission",
+                "role",
+                "text",
+                "content",
+                "based_on",
+                "refs",
+                "relations",
+                "sha256",
+                "admitted_at",
+            ],
+        )?;
+        let id = section
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{}: section id must be an integer", path.display()),
+                )
+            })?;
+        ensure!(
+            previous.map_or(true, |previous| previous < id),
+            EXIT_SCHEMA,
+            "{}: current Sections are stored in increasing id order",
+            path.display()
+        );
+        previous = Some(id);
+    }
+    Ok(())
+}
+
+pub(crate) fn check_predecessor_object_shape(
+    path: &Path,
+    source_version: u32,
+    value: &serde_json::Value,
+) -> Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{}: object must be a JSON object", path.display()),
+        )
+    })?;
+    ensure!(
+        !object.contains_key("sha256"),
+        EXIT_SCHEMA,
+        "{}: predecessor Object cannot already carry a v3 aggregate seal",
+        path.display()
+    );
+    if source_version == 0 {
+        ensure!(
+            object.get("format").and_then(serde_json::Value::as_str)
+                == Some(crate::model::OBJECT_FORMAT)
+                && object.get("version").and_then(serde_json::Value::as_u64)
+                    == Some(crate::LEGACY_OBJECT_VERSION_V0.into())
+                && object.contains_key("status")
+                && !object.contains_key("state"),
+            EXIT_SCHEMA,
+            "{}: not a recognized legacy v0 Object",
+            path.display()
+        );
+    } else {
+        ensure!(
+            !object.contains_key("format")
+                && !object.contains_key("version")
+                && object.contains_key("state")
+                && !object.contains_key("status"),
+            EXIT_SCHEMA,
+            "{}: workspace-v{} Object does not have its generation's canonical envelope",
+            path.display(),
+            source_version
+        );
+    }
+    let sections = object
+        .get("sections")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: sections must be an array", path.display()),
+            )
+        })?;
+    for section in sections {
+        let section = section.as_object().ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}: a section must be a JSON object", path.display()),
             )
         })?;
         ensure!(
-            !(object.contains_key("status") && object.contains_key("state")),
+            section.contains_key("confirmed_at")
+                && !section.contains_key("admitted_at")
+                && !section.contains_key("admission"),
             EXIT_SCHEMA,
-            "{}: contains both legacy status and canonical state",
+            "{}: predecessor Sections use confirmed_at and carry no admission member",
             path.display()
         );
-        ensure!(
-            object.contains_key("status") || object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: legacy object has neither status nor state",
-            path.display()
-        );
-
-        // Deserialize the stored form, not just its lifecycle key. This catches
-        // missing required fields and illegal legacy status values before any
-        // neighboring file is rewritten.
-        let stored = decode_object(&path, &id, value.clone())?;
-        let needs_state_conversion = object.contains_key("status");
-        let (object, migrated) = if needs_state_conversion {
-            let mut planned = value;
-            let planned_object = planned.as_object_mut().ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{}: object must be a JSON object", path.display()),
-                )
-            })?;
-            let status = planned_object.remove("status").ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{}: legacy object has no status", path.display()),
-                )
-            })?;
-            planned_object.insert("state".to_owned(), status);
-            (decode_object(&path, &id, planned.clone())?, Some(planned))
-        } else {
-            (stored, None)
-        };
-        entries.push(MigrationEntry {
-            id,
-            path,
-            object,
-            migrated,
-        });
     }
-    let objects = entries
-        .iter()
-        .map(|entry| (entry.id.clone(), entry.object.clone()))
-        .collect();
-    validate_retained_events(root, &objects)?;
-    Ok(entries)
+    Ok(())
 }
 
 pub fn migrate(root: &Path) -> Result<()> {
-    let before = validate_format(root)?;
-    ensure!(
-        before != WorkspaceFormat::Current,
-        EXIT_SCHEMA,
-        "workspace does not require migration"
-    );
-    let entries = preflight_migration(root)?;
-    for entry in entries {
-        if let Some(value) = entry.migrated {
-            write_json(&entry.path, &value)?;
-        }
-    }
-    let format_path = engr_dir(root).join("format.json");
-    // Rewritten when it is absent *or* when it names an older version. A
-    // workspace already at the current version keeps its file byte for byte:
-    // migration exists to move representation, not to touch what is already
-    // right.
-    if !format_path.exists() || matches!(before, WorkspaceFormat::OlderVersion(_)) {
-        write_json(
-            &format_path,
-            &Format {
-                format: WORKSPACE_FORMAT.to_owned(),
-                version: WORKSPACE_VERSION,
-            },
-        )?;
-    }
-    ensure!(
-        validate_format(root)? == WorkspaceFormat::Current,
-        EXIT_SCHEMA,
-        "workspace migration did not produce the current format"
-    );
-    let mut objects = BTreeMap::new();
-    for id in object_ids(root)? {
-        objects.insert(id.clone(), load_object(root, &id)?);
-    }
-    validate_retained_events(root, &objects)?;
-    Ok(())
+    with_lock(root, || crate::migration::run(root))
+}
+
+pub(crate) fn write_workspace_format(root: &Path, version: u32) -> Result<()> {
+    write_json(
+        &engr_dir(root).join("format.json"),
+        &Format {
+            format: WORKSPACE_FORMAT.to_owned(),
+            version,
+        },
+    )
 }
 
 /// Hold the workspace write lock for the duration of `body`.
@@ -471,31 +593,40 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     let path = object_path(root, id);
     let value: serde_json::Value = read_json(&path)?;
-    decode_object(&path, id, value)
+    let version = match validate_format(root)? {
+        WorkspaceFormat::LegacyV0 => 0,
+        WorkspaceFormat::OlderVersion(version) => version,
+        WorkspaceFormat::Current => WORKSPACE_VERSION,
+    };
+    decode_object_for_version(&path, id, value, version)
 }
 
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
-    // Model state with no representation at this version fails closed rather
-    // than being serialized away. `Section.admission` is not persisted yet, so
-    // writing an Agent Section would drop the one field that says these words
-    // carry no human authority — and reading the same bytes back would answer
-    // `human`, because at this version the Human Gate is the only door there is.
-    //
-    // That is laundering, not lost presentation: the authority would be
-    // manufactured by a round trip. Nothing in this build produces an Agent
-    // Section yet, which is exactly why the boundary belongs here now, while the
-    // only thing it can refuse is a mistake.
+    ensure!(
+        object.legacy_format.is_none() && object.legacy_version.is_none(),
+        EXIT_SCHEMA,
+        "a current Object carries no per-resource format markers"
+    );
+    ensure!(
+        object.sha256.is_some(),
+        EXIT_SCHEMA,
+        "object {} has no aggregate integrity seal",
+        object.id
+    );
     for section in &object.sections {
         ensure!(
-            section.admission == crate::semantics::Admission::Human,
+            section
+                .refs
+                .iter()
+                .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
             EXIT_SCHEMA,
-            "§{}: {} admission has no representation at workspace version {WORKSPACE_VERSION}, and writing it would read back as human",
-            section.id,
-            section.admission.as_str()
+            "§{}: a current Object cannot carry a legacy reference",
+            section.id
         );
     }
+    crate::integrity::check_stored_object_integrity(object)?;
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -516,7 +647,7 @@ pub fn object_ids(root: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-fn event_ids(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn event_ids(root: &Path) -> Result<Vec<String>> {
     let dir = events_dir(root);
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -562,16 +693,6 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
                 format!("{id}: event tail cannot reconcile: {}", error.message),
             )
         })
-}
-
-/// Retained events can be replayed after a crash. Check that relationship
-/// before migration commits the only representation change it makes.
-fn validate_retained_events(root: &Path, objects: &BTreeMap<String, Object>) -> Result<()> {
-    for id in event_ids(root)? {
-        let events = load_events(root, &id)?;
-        validate_recoverable_tail(&id, objects.get(&id).cloned(), &events)?;
-    }
-    Ok(())
 }
 
 /// Shortest prefix length at which every id is distinct, floored at 8.
@@ -643,12 +764,10 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
 /// only at write, a file that arrived some other way is replayed under rules it
 /// was never written against.
 ///
-/// What it currently excludes is the merge that names the Section surviving it.
-/// That belongs to the Event generation the coordinated Phase-3 transition
-/// targets; the model implements it, and nothing writes it. A record carrying it
-/// under the generation this build does emit would be claiming that version
-/// means something it does not, and replaying it would reconstruct a different
-/// Object from the one that was admitted.
+/// Event generation 1 excludes the merge that names the Section surviving it;
+/// generation 2 defines and writes that shape. Accepting it under generation 1
+/// would silently redefine retained history and replay a different Object from
+/// the one that was admitted.
 /// Members this generation's writers have legitimately omitted, at one time or
 /// another, without the record meaning anything different.
 ///
@@ -759,45 +878,99 @@ fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value
         );
     }
     event.provenance.validate()?;
+    if let Provenance::Tagged { admission } = &event.provenance {
+        if admission.kind == crate::semantics::Admission::Agent
+            && !matches!(
+                event.payload.action,
+                Action::ObjectCreated | Action::ObjectRenamed
+            )
+        {
+            ensure!(
+                admission.rule_review.is_some(),
+                EXIT_SCHEMA,
+                "an Agent semantic Object event records the passing Rule Review that admitted it"
+            );
+        }
+    }
     Ok(())
 }
 
 fn check_event_generation(event: &Event) -> Result<()> {
     // The generation itself, before anything about its contents. Leaving this to
     // the read side alone was the same asymmetry one level up: a record naming a
-    // generation this build does not emit could be written and then refused by
-    // the very next read of the log it was written to.
-    ensure!(
-        event.version == EVENT_ENVELOPE_VERSION_V0,
-        EXIT_SCHEMA,
-        "unsupported event version {}",
-        event.version
-    );
-    ensure!(
-        !matches!(
-            &event.payload.action,
-            Action::SectionMerged {
-                merge: Merge::Into { .. }
-            }
-        ),
-        EXIT_SCHEMA,
-        "event version {} does not define a merge that names the section surviving it",
-        event.version
-    );
-    // The tagged admission structure belongs to the same generation the merge
-    // shape does, and for the same reason it is implemented and not written: a
-    // record carrying it under the generation this build emits would be saying
-    // this version means something it does not.
-    ensure!(
-        !matches!(event.provenance, Provenance::Tagged { .. }),
-        EXIT_SCHEMA,
-        "event version {} does not define tagged admission provenance",
-        event.version
-    );
-    Ok(())
+    // generation this build does not support could be written and then refused
+    // by the very next read of the log it was written to.
+    match event.version {
+        EVENT_ENVELOPE_VERSION_V0 => {
+            ensure!(
+                !matches!(
+                    &event.payload.action,
+                    Action::SectionMerged {
+                        merge: Merge::Into { .. }
+                    }
+                ),
+                EXIT_SCHEMA,
+                "event version {} does not define a merge that names the section surviving it",
+                event.version
+            );
+            ensure!(
+                matches!(event.provenance, Provenance::Confirmed { .. }),
+                EXIT_SCHEMA,
+                "event version {} carries retained confirmation provenance",
+                event.version
+            );
+            ensure!(
+                event
+                    .payload
+                    .content
+                    .refs
+                    .iter()
+                    .all(|reference| matches!(reference, crate::model::Ref::Legacy(_))),
+                EXIT_SCHEMA,
+                "event version {} cannot carry selective references",
+                event.version
+            );
+            Ok(())
+        }
+        EVENT_ENVELOPE_VERSION => {
+            ensure!(
+                !matches!(
+                    &event.payload.action,
+                    Action::SectionMerged {
+                        merge: Merge::Absorbing { .. }
+                    }
+                ),
+                EXIT_SCHEMA,
+                "event version {} does not define the retained allocating merge",
+                event.version
+            );
+            ensure!(
+                matches!(event.provenance, Provenance::Tagged { .. }),
+                EXIT_SCHEMA,
+                "event version {} carries tagged admission provenance",
+                event.version
+            );
+            ensure!(
+                event
+                    .payload
+                    .content
+                    .refs
+                    .iter()
+                    .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
+                EXIT_SCHEMA,
+                "event version {} cannot carry legacy references",
+                event.version
+            );
+            Ok(())
+        }
+        _ => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("unsupported event version {}", event.version),
+        )),
+    }
 }
 
-/// Append one confirmed record, taking the workspace writer lock.
+/// Append one admitted Event, taking the workspace writer lock.
 ///
 /// The lock belongs here rather than at the caller because the check this
 /// function performs is about the file it is about to write: it reads the tail
@@ -821,6 +994,12 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // well as there, because "this build may write this workspace" is a property
     // of the workspace rather than of the route taken to it.
     require_current(root)?;
+    ensure!(
+        event.version == EVENT_ENVELOPE_VERSION,
+        EXIT_SCHEMA,
+        "current workspaces append Event generation {EVENT_ENVELOPE_VERSION}, not {}",
+        event.version
+    );
     // Before anything is written, and before the Object is saved — `confirm`
     // appends here first, so refusing at this point leaves the workspace exactly
     // as it was rather than advanced past history it could not record.

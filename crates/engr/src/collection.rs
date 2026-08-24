@@ -7,7 +7,7 @@
 //!
 //! It changes nothing about what it contains. Moving an Object between
 //! collections, ranking it, or calling a plan complete is planning activity —
-//! the Object means exactly what its confirmed sections say either way. That is
+//! the Object means exactly what its admitted Sections say either way. That is
 //! the whole trust boundary, and every rule here exists to keep it: membership
 //! carries no authority, priority belongs to the membership rather than to the
 //! target, and completing a plan is a declaration rather than a proof.

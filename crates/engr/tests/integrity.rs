@@ -39,6 +39,7 @@ fn object() -> Object {
     object.rev = 3;
     object.next_section_id = 3;
     object.sections = vec![sealed(section(1)), sealed(section(2))];
+    object.sha256 = Some(seal_of(&object));
     object
 }
 
@@ -170,12 +171,7 @@ fn each_protected_section_field_moves_the_seal() {
 }
 
 fn reference(section: u64) -> Ref {
-    Ref {
-        object: object_id(),
-        section,
-        sha256: "c".repeat(64),
-        commit: "d".repeat(40),
-    }
+    Ref::legacy(object_id(), section, "c".repeat(64), "d".repeat(40))
 }
 
 /// Sets are ordered by their elements' canonical bytes, and sections by id.
