@@ -111,43 +111,48 @@ pub const ALL: &[SemanticField] = &[
 /// nowhere to omit it *to*: `values` must carry exactly the selected keys, so
 /// "absent" has to be a value.
 pub fn semantic_value(section: &Section, field: SemanticField) -> Result<Value> {
-    let value = match field {
-        SemanticField::Admission => serde_json::to_value(section.admission),
-        SemanticField::BasedOn => serde_json::to_value(&section.based_on),
-        SemanticField::Content => serde_json::to_value(&section.content),
-        SemanticField::Refs => {
-            let mut refs = section.refs.clone();
-            canonical_set(&mut refs, "reference")?;
-            serde_json::to_value(refs)
-        }
-        SemanticField::Relations => {
-            let mut relations = section.relations.clone();
-            canonical_set(&mut relations, "relation")?;
-            serde_json::to_value(relations)
-        }
-        SemanticField::Role => serde_json::to_value(section.role),
-        SemanticField::Text => serde_json::to_value(&section.text),
-    };
-    value.map_err(|error| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("semantic value for {}: {error}", field.as_str()),
-        )
-    })
+    semantic_projection(section)?
+        .remove(field.as_str())
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "the canonical section projection carries no {}",
+                    field.as_str()
+                ),
+            )
+        })
 }
 
 /// The complete canonical Section semantic projection (#35 §3).
+///
+/// **Read from [`crate::proof::SectionSemantic`] rather than rebuilt here.**
+/// #35 says there is one canonical projection, shared by dependency selection,
+/// admission and Rule Review semantics, and drift. Writing it twice made that
+/// sentence a claim two definitions had to keep agreeing on — and they did not:
+/// the proof projection copied `refs` and `relations` verbatim while this one
+/// canonicalized them, so one Section hashed one way through a candidate proof
+/// and another way through dependency semantics.
+///
+/// [`SemanticField`] is therefore a vocabulary *over* that projection, not a
+/// second copy of it. `the_vocabulary_is_exactly_the_canonical_projection`
+/// pins the two to the same member names, so a field added to one and not the
+/// other fails rather than diverges quietly.
 ///
 /// A view, and only a view. #35 lists "a second persisted semantic/content
 /// digest such as `semantic_sha256`" among its non-goals, so this deliberately
 /// has no `digest()`: the only thing that hashes a semantic selection is a Ref,
 /// over the fields that Ref declares.
 pub fn semantic_projection(section: &Section) -> Result<Map<String, Value>> {
-    let mut projected = Map::new();
-    for field in ALL {
-        projected.insert(field.as_str().to_owned(), semantic_value(section, *field)?);
+    let projected = serde_json::to_value(crate::proof::SectionSemantic::of(section)?)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("section projection: {error}")))?;
+    match projected {
+        Value::Object(members) => Ok(members),
+        _ => Err(Error::new(
+            EXIT_SCHEMA,
+            "a section projects to a JSON object".to_owned(),
+        )),
     }
-    Ok(projected)
 }
 
 /// A Ref's declared dependency, as Phase 3 persists it (#35 §4).
@@ -667,11 +672,18 @@ pub fn evaluate(
         Historical::Found(section) => section,
         Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),
         Historical::SchemaMismatch => return Ok(Dependency::SchemaMismatch),
-        // §9 names this outcome by what it is — integrity invalid — rather than
-        // by which side of the comparison it was found on. Reporting it as
-        // drift would be worse than imprecise: it would tell a reader their
-        // dependency moved, when what happened is that the record it was
-        // pinned to was rewritten.
+        // Ruled on #35 (`5395192931`): one coarse machine state covers
+        // integrity failure of either the current target material or the
+        // historically pinned material. Reporting it as drift would be worse
+        // than imprecise — it would tell a reader their dependency moved, when
+        // what happened is that the record it was pinned to was rewritten.
+        //
+        // The same ruling says diagnostics SHOULD still say **which** side
+        // failed, and this return value cannot: it is one variant with no
+        // payload, deliberately. That obligation therefore falls on the read
+        // surfaces, which do not exist yet — nothing calls `evaluate`. It is
+        // recorded here rather than in a plan, so whoever writes those surfaces
+        // finds it at the line that would otherwise lose the distinction.
         Historical::IntegrityFailure => return Ok(Dependency::TargetIntegrityFailure),
     };
     let snapshot = ref_snapshot(

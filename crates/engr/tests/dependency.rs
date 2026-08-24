@@ -384,6 +384,112 @@ fn a_sha256_repository_object_id_is_a_full_object_id() {
     ref_snapshot(target(), &[SemanticField::Text], &section(), "a".repeat(64))
         .expect("native full form, whichever algorithm the repository uses");
 }
+
+/// Two Sections differing only by the stored order of a set are one Section, to
+/// every projection that hashes them.
+///
+/// The two refs below are chosen so the orders actually disagree. `derive(Ord)`
+/// on `Ref` compares `object`, then `section`, then `sha256`, then `commit`;
+/// the protocol set rule compares canonical JCS bytes, which begin with
+/// `commit`. Before this was one shared projection, the candidate proof copied
+/// the array verbatim and produced different bytes for these two orderings,
+/// while dependency semantics produced the same — one Section with two answers
+/// depending on which contract asked.
+#[test]
+fn incidental_set_order_reaches_no_projection_that_hashes_it() {
+    let low_section_late_commit = Ref {
+        object: object_id(),
+        section: 1,
+        sha256: "a".repeat(64),
+        commit: "f".repeat(40),
+    };
+    let high_section_early_commit = Ref {
+        object: object_id(),
+        section: 2,
+        sha256: "a".repeat(64),
+        commit: "0".repeat(40),
+    };
+    assert!(
+        low_section_late_commit < high_section_early_commit,
+        "derive(Ord) puts these one way round"
+    );
+
+    let mut one = section();
+    one.refs = vec![
+        low_section_late_commit.clone(),
+        high_section_early_commit.clone(),
+    ];
+    let mut other = section();
+    other.refs = vec![high_section_early_commit, low_section_late_commit];
+
+    // The dependency view.
+    assert_eq!(
+        semantic_value(&one, SemanticField::Refs).expect("one"),
+        semantic_value(&other, SemanticField::Refs).expect("other")
+    );
+
+    // The proof projection, which is now the same projection.
+    let projected = |section: &Section| {
+        engr::proof::canonical_bytes(
+            &engr::proof::SectionSemantic::of(section).expect("project"),
+            "section",
+        )
+        .expect("canonical")
+    };
+    assert_eq!(projected(&one), projected(&other), "one canonical form");
+
+    // And the candidate subject built over them, which is what actually gets
+    // hashed into a proof somebody keeps.
+    let subject = |section: &Section| {
+        let mut before =
+            engr::model::Object::new(object_id(), "ordering".to_owned()).expect("object");
+        before.rev = 1;
+        before.next_section_id = 2;
+        before.sections = vec![section.clone()];
+        let mut after = before.clone();
+        after.rev = 2;
+        after.sections[0].text = "revised".to_owned();
+        let payload = engr::model::Payload {
+            action: engr::model::Action::SectionRevised { section: 1 },
+            object: object_id(),
+            becomes: None,
+            content: engr::model::Content {
+                text: "revised".to_owned(),
+                ..engr::model::Content::default()
+            },
+        };
+        engr::proof::candidate_subject(&before, &after, &payload, None)
+            .expect("subject")
+            .digest()
+            .expect("digest")
+    };
+    assert_eq!(
+        subject(&one),
+        subject(&other),
+        "a candidate proof cannot depend on which order the array was stored in"
+    );
+}
+
+/// The selectable vocabulary and the canonical projection are the same set of
+/// names, checked rather than asserted.
+///
+/// They are two views of one thing now, but they are still declared in two
+/// places — an enum and a struct. This is what makes adding a field to one and
+/// forgetting the other a failure instead of a silent divergence.
+#[test]
+fn the_vocabulary_is_exactly_the_canonical_projection() {
+    let projected = semantic_projection(&section()).expect("project");
+    let mut names: Vec<&str> = projected.keys().map(String::as_str).collect();
+    names.sort_unstable();
+
+    let mut vocabulary: Vec<&str> = engr::dependency::ALL
+        .iter()
+        .map(|field| field.as_str())
+        .collect();
+    vocabulary.sort_unstable();
+
+    assert_eq!(names, vocabulary);
+}
 mod against_a_workspace {
     use super::*;
     use engr::dependency::{admit, evaluate, parse_target, SelectiveRef};
