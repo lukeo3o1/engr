@@ -415,6 +415,19 @@ pub enum Dependency {
     Drifted { fields: Vec<SemanticField> },
     /// The current parent Object or target Section fails its own integrity.
     TargetIntegrityFailure,
+    /// The current target Section is gone, after a transition the Object's own
+    /// integrity still vouches for.
+    ///
+    /// Deliberately narrower than a name like `TargetUnavailable`: absence must
+    /// not collapse with unreadable, schema-invalid or integrity-invalid
+    /// authority. NOT_FOUND stays distinct from malformed, and the distinction
+    /// survives as a machine state rather than escaping through a generic
+    /// error.
+    ///
+    /// It says nothing about the Ref's proof, which may still verify against
+    /// its recorded commit. What it says is that there is no current value left
+    /// to compare that proof against.
+    TargetMissing,
     /// The recorded commit is unavailable, or the target is absent there.
     ProvenanceUnavailable,
     /// A selected field cannot be interpreted under the applicable contract.
@@ -758,12 +771,29 @@ pub fn evaluate(
         "reference names object {id} and was evaluated against {}",
         current.id
     );
-    let Ok(now) = section_of(current, section) else {
-        return Ok(Dependency::TargetIntegrityFailure);
-    };
+    // Integrity **before** absence, which is not the order the ruling's table
+    // lists but is what it means. The table's integrity row says "present but
+    // ... integrity fails", leaving absent-and-tampered unstated — and the
+    // aggregate seal covers `sections[]`, so a Section deleted by hand breaks
+    // it. Asking about absence first would report that hand-deletion as
+    // `TargetMissing`, which reads as a legitimate removal and is the one
+    // answer a tampered Object must not be able to produce.
+    //
+    // Taken in this order, each state means what the ruling says: an Object
+    // that still verifies has genuinely had the Section removed through a
+    // supported transition and resealed, and one that does not verify is
+    // reported as what it is.
     if crate::integrity::check_object_integrity(current, current_seal).is_err() {
         return Ok(Dependency::TargetIntegrityFailure);
     }
+    // Ruled on #35 (`5395844059`): the current target being gone is its own
+    // state. It is not integrity failure, not drift, and not a raw NOT_FOUND
+    // escaping the classification — the Ref's historical proof may still be
+    // perfectly valid, and what a reader needs to know is that there is nothing
+    // current left to compare it against.
+    let Ok(now) = section_of(current, section) else {
+        return Ok(Dependency::TargetMissing);
+    };
     // A stored `commit` that is not a commit id is malformed Ref data, not a
     // dependency outcome — the same treatment a malformed target already gets
     // above. Reporting it as one of §9's states would put a verdict on a

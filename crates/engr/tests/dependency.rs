@@ -1127,6 +1127,66 @@ mod against_a_workspace {
             .expect_err("no implicit full reference");
     }
 
+    /// A Ref whose proof is still good, pointing at a target that is gone.
+    ///
+    /// Ruled on #35 (`5395844059`): current absence is its own state. Not
+    /// integrity failure — the Object still verifies, because the removal went
+    /// through a supported transition and resealed. Not drift — nothing was
+    /// compared. Not provenance unavailable — the recorded commit is right
+    /// there and still holds the target. And not a raw NOT_FOUND escaping the
+    /// classification, which is what it used to be.
+    #[test]
+    fn a_target_removed_through_a_supported_transition_is_missing_not_broken() {
+        let (_dir, root, object, commit) = workspace();
+        let (current, seal) = phase_three_seals(&object);
+        let reference =
+            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+
+        // The history the Ref pins is untouched and still verifies.
+        assert_eq!(
+            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+            Dependency::Unchanged
+        );
+
+        // Remove the Section and reseal, the way a supported transition would.
+        let mut without = current.clone();
+        without.sections.clear();
+        without.rev += 1;
+        let (without, resealed) = phase_three_seals(&without);
+        engr::integrity::check_object_integrity(&without, &resealed)
+            .expect("the object still vouches for itself");
+
+        assert_eq!(
+            evaluate(&root, &without, &resealed, &reference).expect("evaluate"),
+            Dependency::TargetMissing
+        );
+    }
+
+    /// A Section deleted by hand is not a removal, and must not be able to
+    /// present itself as one.
+    ///
+    /// The aggregate seal covers `sections[]`, so deleting one breaks it. That
+    /// is why integrity is asked before absence: reversing the order would let
+    /// a hand-edited Object report `TargetMissing`, which reads as a legitimate
+    /// removal and is the one answer tampering must not be able to produce.
+    #[test]
+    fn a_section_deleted_by_hand_is_not_reported_as_a_removal() {
+        let (_dir, root, object, commit) = workspace();
+        let (current, seal) = phase_three_seals(&object);
+        let reference =
+            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+
+        // Same deletion, but the old seal is kept rather than recomputed.
+        let mut tampered = current.clone();
+        tampered.sections.clear();
+
+        assert_eq!(
+            evaluate(&root, &tampered, &seal, &reference).expect("evaluate"),
+            Dependency::TargetIntegrityFailure,
+            "the aggregate no longer follows from what the object holds"
+        );
+    }
+
     #[test]
     fn a_target_must_be_a_canonical_section_identity() {
         parse_target(&target()).expect("canonical");
