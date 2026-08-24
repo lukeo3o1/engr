@@ -1811,28 +1811,34 @@ fn a_review_attempt_is_counted_from_one_and_zero_is_not_a_value() {
 ///
 /// `based_on` was sorted by `path`, which is deterministic, stable, and still
 /// wrong: canonical JSON sorts keys, so a basis's canonical bytes begin with
-/// `commit`, and a pinned basis therefore precedes a floating one whatever the
-/// paths say. Two conforming implementations — one sorting by path, one by
-/// canonical bytes — would hash the same rule differently, which is exactly what
-/// a shared hash contract cannot allow.
+/// `commit`, and that decides the comparison before either path is examined.
+/// Two conforming implementations — one sorting by path, one by canonical
+/// bytes — would hash the same rule differently, which is exactly what a shared
+/// hash contract cannot allow.
 ///
 /// The case is built so the two orders disagree by construction rather than by
-/// luck: `"commit"` sorts before `"content"`, so the pinned basis wins the
-/// comparison before either path is ever examined.
+/// luck. One basis is committed and one is not, so their `commit` values are a
+/// string and `null`; `"` sorts before `n`, so the committed basis wins however
+/// the paths read. The committed one is deliberately given the *later* path.
+///
+/// The earlier version of this test pinned one basis and left the other
+/// floating, on the reasoning that only the pinned one carried a commit. Ruling
+/// `5396557633` retired that reasoning: an unpinned basis whose material *is*
+/// committed now records the commit that holds it, so both sides carried a
+/// string and the case stopped separating the two orderings at all.
 #[test]
 fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
     let (_dir, root) = workspace();
     git(&root, &["init", "-q"]);
-    std::fs::write(root.join("a-floating.md"), "current material\n").expect("floating");
-    std::fs::write(root.join("z-pinned.md"), "pinned material\n").expect("pinned");
-    let commit = commit_all(&root, "bases");
+    std::fs::write(root.join("z-committed.md"), "committed material\n").expect("committed");
+    commit_all(&root, "bases");
+    // Never committed, so no commit holds it and it binds as dirty.
+    std::fs::write(root.join("a-uncommitted.md"), "uncommitted material\n").expect("uncommitted");
 
     write_rule(
         &root,
         "ordering",
-        &format!(
-            "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-floating.md\n  - path: z-pinned.md\n    commit: {commit}\n---\n\n# Ordering\n\nBoth bases matter.\n"
-        ),
+        "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-uncommitted.md\n  - path: z-committed.md\n---\n\n# Ordering\n\nBoth bases matter.\n",
     );
 
     // Read order stays human-friendly: by path.
@@ -1842,11 +1848,12 @@ fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
             .iter()
             .map(|basis| basis.path.as_str())
             .collect::<Vec<_>>(),
-        vec!["a-floating.md", "z-pinned.md"],
+        vec!["a-uncommitted.md", "z-committed.md"],
     );
 
-    // Hashed order is canonical: the pinned basis carries a `commit` key, and
-    // `"commit"` precedes `"content"`, so it sorts first despite its path.
+    // Hashed order is canonical: the committed basis carries a string `commit`
+    // and the uncommitted one carries `null`, so it sorts first despite its
+    // path.
     let (mutation, precondition) = subject();
     let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
     assert_eq!(
@@ -1855,7 +1862,7 @@ fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
             .iter()
             .map(|basis| basis.path.as_str())
             .collect::<Vec<_>>(),
-        vec!["z-pinned.md", "a-floating.md"],
+        vec!["z-committed.md", "a-uncommitted.md"],
         "the hashed set is in canonical-bytes order, not path order"
     );
 }
@@ -1960,10 +1967,16 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     // true, the digest below is no longer proving what it claims and the case
     // needs sharpening rather than the assertion relaxing.
     //
-    // The pinned value moved when the discriminator and inner version left the
-    // hashed payload, which is what the frozen contract asks for and what makes
-    // every review digest a different number than the prototype produced.
-    // Nothing had been emitted, so nothing needed migrating.
+    // The pinned value has moved twice, both times because the hashed payload
+    // changed shape and never because the hashing did. First when the
+    // discriminator and inner version left it, per the frozen contract; then
+    // when ruling `5396557633` added exact provenance for the reviewed material
+    // — this rule file is not in Git, so it binds `commit: null`, `dirty: true`
+    // and a `content_sha256`.
+    //
+    // Verified outside the build both times: sha256sum over the 416 canonical
+    // bytes gives this value. Nothing has been emitted, so nothing needed
+    // migrating on either move.
     assert_ne!(
         serde_json::to_string(&mutation).expect("serde"),
         serde_jcs::to_string(&mutation).expect("jcs"),
@@ -1979,7 +1992,7 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     .expect("bind");
     assert_eq!(
         bound.digest().expect("digest").to_string(),
-        "1:cf7558a1363c141ad5ea2ce69e744b92852b5dfe4a53f11aaf6fe97050fd701c",
+        "1:801cb51c588b12cbfe6fefb1c72f986875cd9ed53ed88ef3a370fb0d0e6ef0a7",
         "the review binding digest is ReviewDigestContract 1 over its RFC 8785 bytes"
     );
 
@@ -2134,4 +2147,214 @@ fn governance_and_the_verdict_are_answered_from_the_same_policy() {
             limit: 2
         })
     );
+}
+
+/// `commit` names the commit whose content *is* the reviewed material, and
+/// nothing else claims to.
+///
+/// Ruling `5396557633`. The failure it closes is quiet: recording the nearest
+/// committed baseline makes a proof say the reviewed material is at a commit
+/// that does not contain it, and a later verifier reconstructing from there
+/// gets different bytes and no warning.
+#[test]
+fn a_recorded_commit_is_the_one_that_holds_the_reviewed_material() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    let committed = commit_all(&root, "policy");
+
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    // Clean: the material is exactly what that commit holds, so it is bound.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(basis.commit.as_deref(), Some(committed.as_str()));
+    assert!(!basis.dirty);
+    assert_eq!(basis.content_sha256, None);
+
+    // Now edit the working tree without committing. The reviewed material is no
+    // longer what any commit holds, so the commit that *used* to hold it must
+    // not be recorded — HEAD gets no special treatment for being HEAD.
+    std::fs::write(root.join("policy.md"), "edited but not committed\n").expect("write");
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(
+        basis.commit, None,
+        "the parent of dirty content is not its commit"
+    );
+    assert!(basis.dirty);
+    assert_eq!(
+        basis.content_sha256.as_deref(),
+        Some(sha256_hex("edited but not committed\n").as_str()),
+        "identified by the exact material actually reviewed"
+    );
+    assert_eq!(
+        basis.content, "edited but not committed\n",
+        "and the live review is still bound to the exact bytes"
+    );
+
+    // Committing those exact bytes makes them locatable again.
+    let now = commit_all(&root, "policy again");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(basis.commit.as_deref(), Some(now.as_str()));
+    assert!(!basis.dirty);
+    assert_ne!(now, committed);
+}
+
+/// An unrelated commit does not move a review digest.
+///
+/// The recorded commit is the last one that touched the path, not `HEAD`. Both
+/// are exact; only one is stable. Binding `HEAD` would re-provenance every
+/// reviewed file on every commit, so a change elsewhere in the repository would
+/// invalidate proofs about material nobody touched.
+#[test]
+fn a_commit_that_touched_nothing_relevant_changes_no_review_identity() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+    // Both the rule and its basis are committed first, so the later commit is
+    // genuinely unrelated rather than the one that first records them.
+    commit_all(&root, "policy and rule");
+
+    let (mutation, precondition) = subject();
+    let before = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind")
+    .digest()
+    .expect("digest")
+    .to_string();
+
+    std::fs::write(root.join("unrelated.md"), "nothing to do with the rule\n").expect("write");
+    commit_all(&root, "unrelated");
+
+    let after = rules::bind(&root, Domain::Backlog, mutation, precondition)
+        .expect("bind")
+        .digest()
+        .expect("digest")
+        .to_string();
+    assert_eq!(
+        before, after,
+        "a commit that did not touch the path changes nothing"
+    );
+}
+
+/// The boundary is closed on both sides: the Rule's own material carries the
+/// same provenance as the material it rests on.
+///
+/// #25 says not to close it on one side only. A binding that placed every
+/// `based_on` exactly while saying nothing about the Rule file would leave the
+/// normative text — the part that decides the outcome — as the one input nobody
+/// could later locate.
+#[test]
+fn the_rule_file_carries_the_same_provenance_as_its_bases() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    // Nothing committed yet: both the rule and its basis are dirty.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.dirty, "the rule file is not in git");
+    assert_eq!(rule.commit, None);
+    assert!(rule.content_sha256.is_some());
+    assert!(rule.based_on[0].dirty, "and neither is its basis");
+
+    // Commit both, and both become locatable.
+    let commit = commit_all(&root, "rule and basis");
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert_eq!(rule.commit.as_deref(), Some(commit.as_str()));
+    assert!(!rule.dirty);
+    assert_eq!(rule.content_sha256, None);
+    assert_eq!(rule.based_on[0].commit.as_deref(), Some(commit.as_str()));
+
+    // Edit only the rule: it goes dirty, its basis does not.
+    let source = rules::dir(&root).join("provenance.md");
+    let text = std::fs::read_to_string(&source).expect("read");
+    std::fs::write(&source, format!("{text}\nOne more line.\n")).expect("write");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.dirty, "the rule moved");
+    assert!(!rule.based_on[0].dirty, "the basis did not");
+}
+
+/// Dirty material is identified, never copied somewhere durable to make the
+/// proof replayable.
+///
+/// #25 is explicit, and the consequence is meant to be visible rather than
+/// papered over: once the material is gone, verification says so instead of
+/// reconstructing from a nearby commit.
+#[test]
+fn dirty_material_is_identified_and_not_copied() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "never committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+
+    assert_eq!(
+        basis.content_sha256.as_deref(),
+        Some(sha256_hex("never committed\n").as_str()),
+        "the identity of the exact material"
+    );
+    // The only place the content itself appears is the live binding input,
+    // which is what the review is computed over. Nothing else retains it.
+    assert_eq!(basis.content, "never committed\n");
+    assert_eq!(basis.commit, None);
+}
+
+fn sha256_hex(text: &str) -> String {
+    engr::proof::sha256_of(text)
 }

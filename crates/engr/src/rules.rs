@@ -190,6 +190,92 @@ impl Review {
     }
 }
 
+/// Where the exact material that was reviewed lives, if anywhere.
+///
+/// Ruled on #25 (`5396557633`). `commit` means one thing: the exact full Git
+/// commit OID whose file content **is** the material that was actually
+/// reviewed. It may not be recorded because it was `HEAD`, because it was the
+/// nearest committed baseline, or because it was the parent of dirty
+/// working-tree content.
+///
+/// Material that is not in Git is said to be so, rather than attributed to a
+/// commit that does not contain it:
+///
+/// ```text
+/// reviewed bytes are what HEAD holds  -> commit = that oid, dirty omitted
+/// reviewed bytes are anything else    -> commit = null, dirty = true,
+///                                        content_sha256 = their identity
+/// ```
+///
+/// **`HEAD` gets no special treatment**, which is the part worth stating twice:
+/// it qualifies only when its content equals the reviewed content, and then it
+/// qualifies because of that equality, not because of what it is called.
+///
+/// The commit looked at is the **last one that touched this path**, not `HEAD`.
+///
+/// Both are deterministic, and only one of them is stable. Binding `HEAD` would
+/// change the recorded provenance of every reviewed file on every commit,
+/// including commits that touched nothing this Rule rests on — so an unrelated
+/// change elsewhere in the repository would move every review digest. The last
+/// commit to touch the path moves only when the path does, which is the same
+/// principle the pinned case already follows: *"a repository commit that did
+/// not touch this path has changed nothing this Rule depends on."*
+///
+/// Searching history for any older commit that happens to hold identical bytes
+/// is deliberately not done. Several could match, and a provenance value that
+/// depends on which one an implementation found first is not an identity two
+/// readers can agree on.
+struct Provenance {
+    commit: Option<String>,
+    dirty: bool,
+    content_sha256: Option<String>,
+}
+
+impl Provenance {
+    fn of(root: &Path, path: &str, reviewed: &str) -> Self {
+        let committed = git::last_commit_for(root, Path::new(path))
+            .filter(|commit| git::blob_at(root, commit, path).as_deref() == Some(reviewed));
+        match committed {
+            Some(commit) => Self {
+                commit: Some(commit),
+                dirty: false,
+                content_sha256: None,
+            },
+            None => Self::dirty(reviewed),
+        }
+    }
+}
+
+impl Provenance {
+    /// Material no commit holds, identified rather than attributed.
+    fn dirty(reviewed: &str) -> Self {
+        Self {
+            commit: None,
+            dirty: true,
+            content_sha256: Some(crate::proof::sha256_of(reviewed)),
+        }
+    }
+}
+
+/// A rule file's path as Git names it, or `None` if it is outside the
+/// repository.
+///
+/// `git show <commit>:<path>` only understands repository-relative paths, so a
+/// rule found outside the working tree has no path to compare and therefore no
+/// commit that could hold it.
+fn rule_relative_path(root: &Path, source: &Path) -> Option<String> {
+    let repository = git::repo_root(root)?;
+    let source = std::fs::canonicalize(source).ok()?;
+    let repository = std::fs::canonicalize(repository).ok()?;
+    let relative = source.strip_prefix(&repository).ok()?;
+    Some(
+        relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
 /// One project file a Rule rests on, and which version of it.
 ///
 /// `commit` absent means the current content, whatever it is now: the Rule
@@ -210,13 +296,44 @@ pub struct Basis {
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct ResolvedBasis {
     pub path: String,
-    /// Always written, `null` where the Rule pinned nothing.
+    /// The exact commit whose content **is** the material that was reviewed,
+    /// or `null` when no commit holds it.
     ///
-    /// Not omitted when absent, unlike most optional members here. This one
-    /// sits inside a hash contract, and an omitting implementation and a
-    /// spelling-out one would compute different bytes for one review — which is
-    /// the whole failure a shared canonical form exists to prevent.
+    /// Ruled on #25 (`5396557633`): `commit` is an exact provenance claim, not
+    /// a best-effort baseline marker. It may not be recorded merely because it
+    /// was `HEAD`, the nearest committed baseline, or the parent of dirty
+    /// working-tree content. If the reviewed bytes are not what that commit
+    /// holds, then that commit is not the commit of the reviewed material.
+    ///
+    /// Always written, `null` where there is none. Not omitted when absent,
+    /// unlike most optional members here. This one sits inside a hash contract,
+    /// and an omitting implementation and a spelling-out one would compute
+    /// different bytes for one review — which is the whole failure a shared
+    /// canonical form exists to prevent.
     pub commit: Option<String>,
+    /// True when the reviewed material is not in Git at all.
+    ///
+    /// Omitted when false, which is the shape the ruling writes out. It is the
+    /// honest alternative to naming a nearby commit: a proof that says "this
+    /// material was never committed" can be read correctly later, while one
+    /// that names the parent of the edit claims something untrue about content
+    /// nobody can now recover.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dirty: bool,
+    /// The identity of the exact material reviewed, when no commit holds it.
+    ///
+    /// Provenance for non-committed material, not a replacement for `content`:
+    /// the live review still binds the exact bytes. What this adds is a way for
+    /// a later verifier to say *which* material the proof was over, once the
+    /// working tree has moved on and the bytes themselves are gone.
+    ///
+    /// The full content is deliberately **not** copied anywhere durable to make
+    /// the proof replayable. #25 says so directly, and the consequence is
+    /// stated rather than hidden: when dirty material is no longer available,
+    /// verification reports the material unavailable instead of pretending it
+    /// can be reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     /// The exact content, as text. Part of the review binding, so an edit to a
     /// project file invalidates every attestation that rested on it.
     pub content: String,
@@ -234,9 +351,15 @@ impl Basis {
     pub fn resolve(&self, root: &Path, rule: &str) -> Result<ResolvedBasis> {
         let current = self.current(root, rule)?;
         let Some(commit) = &self.commit else {
+            // Unpinned. The Rule follows the project material, so what was
+            // reviewed is whatever the file says now — and the question the
+            // ruling asks is whether Git actually holds those exact bytes.
+            let provenance = Provenance::of(root, &self.path, &current);
             return Ok(ResolvedBasis {
                 path: self.path.clone(),
-                commit: None,
+                commit: provenance.commit,
+                dirty: provenance.dirty,
+                content_sha256: provenance.content_sha256,
                 content: current,
             });
         };
@@ -304,9 +427,14 @@ impl Basis {
             "rule {rule}: based_on {} was reviewed at {commit} and the current file no longer matches it; review the rule against the current material and update its based_on commit",
             self.path
         );
+        // The pin is honest by the check just above: `pinned == current` means
+        // this commit really does hold the reviewed bytes, which is exactly
+        // what the ruling requires of a recorded commit.
         Ok(ResolvedBasis {
             path: self.path.clone(),
             commit: Some(commit.clone()),
+            dirty: false,
+            content_sha256: None,
             content: current,
         })
     }
@@ -859,6 +987,26 @@ pub struct BoundRule {
     /// not invalidate an attestation. The body is the one part where every
     /// byte is meaning, so it is carried untouched.
     pub body: String,
+    /// The exact commit whose content is the Rule file that was reviewed, or
+    /// `null` when no commit holds it.
+    ///
+    /// The ruling says this boundary must not be closed on one side, and the
+    /// Rule's own material is the other side. A review binding that recorded
+    /// exact provenance for everything a Rule *rests on* while saying nothing
+    /// about the Rule *itself* would leave the normative text — the part that
+    /// decides the outcome — as the one input nobody could later place.
+    pub commit: Option<String>,
+    /// True when the Rule file itself is not in Git.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dirty: bool,
+    /// The identity of the Rule file as reviewed, when no commit holds it.
+    ///
+    /// Over the file's exact bytes, matching what the same member means for a
+    /// basis. One member with one meaning in both places is the point: this is
+    /// provenance for *the artifact that was read*, and `body` remains the
+    /// semantic input the review is actually bound to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
 }
 
 /// The compact diagnostic Backlog records when it admits an exhausted mutation.
@@ -1173,12 +1321,35 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
         canonical_set(&mut domains, "domain")?;
+        // The Rule's own provenance, by the same rule as its bases. Read from
+        // the file that was actually loaded, so a Rule edited in the working
+        // tree says it is dirty rather than borrowing the commit its last
+        // version was in.
+        let provenance = match rule_relative_path(root, &rule.source) {
+            Some(path) => match std::fs::read_to_string(&rule.source) {
+                Ok(text) => Provenance::of(root, &path, &text),
+                Err(error) => {
+                    return Err(Error::new(
+                        EXIT_NOT_FOUND,
+                        format!("rule {}: {} could not be read: {error}", rule.id, path),
+                    ))
+                }
+            },
+            // Outside the repository entirely, so no commit can hold it. Not a
+            // refusal: a Rule read from outside a Git working tree is still a
+            // Rule, and saying "no commit has this" is the true answer rather
+            // than an evasion.
+            None => Provenance::dirty(&rule.body),
+        };
         bound.push(BoundRule {
             id: rule.id,
             domains,
             based_on,
             review: rule.review,
             body: rule.body,
+            commit: provenance.commit,
+            dirty: provenance.dirty,
+            content_sha256: provenance.content_sha256,
         });
     }
     canonical_set(&mut bound, "applicable rule")?;

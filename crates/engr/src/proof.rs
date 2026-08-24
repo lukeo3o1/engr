@@ -139,7 +139,11 @@ pub fn canonical_set<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()>
     items.extend(keyed.into_iter().map(|(_, item)| item));
     Ok(())
 }
-pub(crate) fn sha256_of(bytes: &str) -> String {
+/// SHA-256 of some text, lowercase hex.
+///
+/// The crate has one of these on purpose: a second spelling is a second place
+/// for a digest contract to be computed slightly differently.
+pub fn sha256_of(bytes: &str) -> String {
     format!("{:x}", Sha256::digest(bytes.as_bytes()))
 }
 
@@ -1259,6 +1263,9 @@ mod review_context_tests {
                 on_exhaustion: OnExhaustion::Reject,
             },
             body: "record what happened, not what is planned".to_owned(),
+            commit: None,
+            dirty: true,
+            content_sha256: Some("e".repeat(64)),
         }
     }
 
