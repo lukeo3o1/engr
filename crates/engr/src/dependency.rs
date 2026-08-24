@@ -110,49 +110,79 @@ pub const ALL: &[SemanticField] = &[
 /// An absent optional projects JSON `null` rather than being omitted. There is
 /// nowhere to omit it *to*: `values` must carry exactly the selected keys, so
 /// "absent" has to be a value.
+///
+/// **One field, and only that field.** Selecting `[text]` must not look at
+/// `refs` at all.
+///
+/// This projects per field rather than materializing all seven, and the reason
+/// is historical compatibility rather than economy. A retained v2 Section can
+/// be entirely valid history while holding a legacy Ref whose `section` is
+/// outside the Phase-3 safe-integer domain — v2's `Ref::validate` never bounded
+/// it, and #35 is explicit that historical representations stay under their own
+/// contracts and are not reinterpreted under the newer one. Projecting all
+/// seven fields would walk that Ref, apply the P3 bound to it, and fail a
+/// dependency that never selected it.
+///
+/// That would make a Ref depend on a field it did not declare, which is the one
+/// thing field-relative selection exists to prevent.
+///
+/// The canonicalization rule is still shared: `refs` and `relations` go through
+/// the same [`canonical_set`] that [`crate::proof::SectionSemantic::of`] uses,
+/// and `the_two_projections_agree_field_by_field` holds the two to the same
+/// value for every member of the vocabulary. Sharing the *rule* per field is
+/// what keeps one definition without making every selection pay for all of it.
 pub fn semantic_value(section: &Section, field: SemanticField) -> Result<Value> {
-    semantic_projection(section)?
-        .remove(field.as_str())
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_INVARIANT,
-                format!(
-                    "the canonical section projection carries no {}",
-                    field.as_str()
-                ),
-            )
-        })
+    let value = match field {
+        SemanticField::Admission => serde_json::to_value(section.admission),
+        SemanticField::BasedOn => serde_json::to_value(&section.based_on),
+        SemanticField::Content => serde_json::to_value(&section.content),
+        SemanticField::Refs => {
+            let mut refs = section.refs.clone();
+            canonical_set(&mut refs, "reference")?;
+            serde_json::to_value(refs)
+        }
+        SemanticField::Relations => {
+            let mut relations = section.relations.clone();
+            canonical_set(&mut relations, "relation")?;
+            serde_json::to_value(relations)
+        }
+        SemanticField::Role => serde_json::to_value(section.role),
+        SemanticField::Text => serde_json::to_value(&section.text),
+    };
+    value.map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("semantic value for {}: {error}", field.as_str()),
+        )
+    })
 }
 
 /// The complete canonical Section semantic projection (#35 §3).
 ///
-/// **Read from [`crate::proof::SectionSemantic`] rather than rebuilt here.**
-/// #35 says there is one canonical projection, shared by dependency selection,
-/// admission and Rule Review semantics, and drift. Writing it twice made that
-/// sentence a claim two definitions had to keep agreeing on — and they did not:
-/// the proof projection copied `refs` and `relations` verbatim while this one
-/// canonicalized them, so one Section hashed one way through a candidate proof
-/// and another way through dependency semantics.
+/// The whole vocabulary at once, for a caller that wants every fact.
 ///
-/// [`SemanticField`] is therefore a vocabulary *over* that projection, not a
-/// second copy of it. `the_vocabulary_is_exactly_the_canonical_projection`
-/// pins the two to the same member names, so a field added to one and not the
-/// other fails rather than diverges quietly.
+/// #35 says there is one canonical projection, shared by dependency selection,
+/// admission and Rule Review semantics, and drift. It is one **rule**, applied
+/// per field: this and [`crate::proof::SectionSemantic::of`] canonicalize the
+/// same members the same way, and `the_two_projections_agree_field_by_field`
+/// holds them to identical values for every field in the vocabulary — so they
+/// cannot drift the way they once did, when the proof projection copied `refs`
+/// verbatim while this one canonicalized it.
+///
+/// Nothing on the selective-Ref path calls this. Selection is field-relative,
+/// and projecting all seven fields to answer a question about one is how an
+/// unselected field comes to break a dependency that never declared it.
 ///
 /// A view, and only a view. #35 lists "a second persisted semantic/content
 /// digest such as `semantic_sha256`" among its non-goals, so this deliberately
 /// has no `digest()`: the only thing that hashes a semantic selection is a Ref,
 /// over the fields that Ref declares.
 pub fn semantic_projection(section: &Section) -> Result<Map<String, Value>> {
-    let projected = serde_json::to_value(crate::proof::SectionSemantic::of(section)?)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("section projection: {error}")))?;
-    match projected {
-        Value::Object(members) => Ok(members),
-        _ => Err(Error::new(
-            EXIT_SCHEMA,
-            "a section projects to a JSON object".to_owned(),
-        )),
+    let mut projected = Map::new();
+    for field in ALL {
+        projected.insert(field.as_str().to_owned(), semantic_value(section, *field)?);
     }
+    Ok(projected)
 }
 
 /// A Ref's declared dependency, as Phase 3 persists it (#35 §4).
@@ -686,6 +716,19 @@ pub fn evaluate(
         // finds it at the line that would otherwise lose the distinction.
         Historical::IntegrityFailure => return Ok(Dependency::TargetIntegrityFailure),
     };
+    // #35 §9: a selected field that cannot be interpreted under the applicable
+    // historical *or* current semantic contract is a schema mismatch. Letting
+    // the error escape instead would hand the caller a failure where the
+    // protocol defines an answer, and a caller matching on `Dependency` would
+    // never see the state the contract told it to expect.
+    //
+    // Only the declared fields are consulted, on both sides, for the same
+    // reason `semantic_value` projects one field at a time.
+    for field in &reference.fields {
+        if semantic_value(&then, *field).is_err() || semantic_value(now, *field).is_err() {
+            return Ok(Dependency::SchemaMismatch);
+        }
+    }
     let snapshot = ref_snapshot(
         &reference.target,
         &reference.fields,

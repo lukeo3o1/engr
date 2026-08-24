@@ -490,6 +490,90 @@ fn the_vocabulary_is_exactly_the_canonical_projection() {
 
     assert_eq!(names, vocabulary);
 }
+
+/// A legacy Ref whose `section` predates the Phase-3 numeric domain. Valid v2
+/// history: v2's `Ref::validate` bounds the object id and the commit, never
+/// this number.
+fn out_of_domain_legacy_ref() -> Ref {
+    Ref {
+        object: object_id(),
+        section: 1u64 << 53,
+        sha256: "c".repeat(64),
+        commit: commit(),
+    }
+}
+
+/// An unselected field cannot break a dependency that never declared it.
+///
+/// #35 keeps historical representations under their own contracts, and v2 never
+/// bounded a Ref's `section` by the Phase-3 safe-integer domain. So a retained
+/// v2 Section can hold such a Ref and still be legitimate history. A `[text]`
+/// dependency has nothing to do with it.
+///
+/// This regressed once, from projecting all seven fields to answer a question
+/// about one: the walk reached the unselected Ref, applied the P3 bound, and
+/// failed the selection. Field-relative selection exists precisely to stop a
+/// Ref from depending on what it did not declare.
+#[test]
+fn an_unselected_field_outside_the_phase_three_domain_does_not_break_a_selection() {
+    let mut legacy = section();
+    legacy.refs = vec![out_of_domain_legacy_ref()];
+
+    // The unselected field is genuinely uninterpretable under P3 rules.
+    semantic_value(&legacy, SemanticField::Refs)
+        .expect_err("the P3 domain does not reach that far");
+
+    // And every other field still projects, because none of them looks at it.
+    for field in [
+        SemanticField::Text,
+        SemanticField::Admission,
+        SemanticField::Role,
+        SemanticField::BasedOn,
+        SemanticField::Content,
+        SemanticField::Relations,
+    ] {
+        semantic_value(&legacy, field)
+            .unwrap_or_else(|error| panic!("{} must not depend on refs: {error}", field.as_str()));
+    }
+
+    // A whole-vocabulary projection is a different request and may fail; the
+    // point is that nothing on the selective-Ref path makes it.
+    semantic_projection(&legacy).expect_err("asking for everything asks for that too");
+
+    // The snapshot a `[text]` reference hashes is unaffected.
+    ref_snapshot(target(), &[SemanticField::Text], &legacy, commit()).expect("text alone");
+    check_not_stale_at_birth(&legacy, &legacy, &[SemanticField::Text]).expect("unchanged");
+}
+
+/// The two projections give the same answer for every field in the vocabulary.
+///
+/// This is what makes "one canonical projection" true without materializing all
+/// seven for a one-field question. They are separate code paths sharing a rule,
+/// so the guarantee has to be checked rather than asserted — and checked over
+/// the whole vocabulary, since a divergence in one field is exactly the shape
+/// of the defect this replaced.
+#[test]
+fn the_two_projections_agree_field_by_field() {
+    let mut section = section();
+    section.refs = vec![reference(4), reference(2)];
+    section.relations = vec![Relation::superseded_by(object_id())];
+    section.content = vec![Supplement::new("data.note", "a note")];
+    section.based_on = Some("a".repeat(40));
+
+    let proof = serde_json::to_value(engr::proof::SectionSemantic::of(&section).expect("project"))
+        .expect("value");
+    let proof = proof.as_object().expect("object");
+
+    assert_eq!(proof.len(), engr::dependency::ALL.len());
+    for field in engr::dependency::ALL {
+        assert_eq!(
+            proof.get(field.as_str()),
+            Some(&semantic_value(&section, *field).expect("value")),
+            "{} differs between the two projections",
+            field.as_str()
+        );
+    }
+}
 mod against_a_workspace {
     use super::*;
     use engr::dependency::{admit, evaluate, parse_target, SelectiveRef};
@@ -868,6 +952,71 @@ mod against_a_workspace {
         assert!(
             refused.to_string().contains("names a tree object"),
             "{refused}"
+        );
+    }
+
+    /// Selecting a field that cannot be interpreted under the applicable
+    /// contract is `SchemaMismatch`, a state #35 §9 defines — not a raw error.
+    ///
+    /// The material sits in history, which is where it belongs: v2 never
+    /// bounded a Ref's `section` by the Phase-3 domain, so a committed Section
+    /// holding one is legitimate history under its own contract, and #35 says
+    /// history is not reinterpreted under the newer one. Its v2 seal still
+    /// verifies, because that seal is taken over serde bytes and never applied
+    /// the P3 numeric walk.
+    ///
+    /// The difference matters to a caller: a classified state is an answer it
+    /// was told to expect and can act on, a raw error is a failure it has no
+    /// contract for. This escaped as an error until the classification landed.
+    #[test]
+    fn a_selected_field_the_contract_cannot_interpret_is_a_schema_mismatch() {
+        let (_dir, root, object, _first) = workspace();
+
+        // Commit a Section carrying a legacy out-of-domain Ref.
+        let path = root
+            .join(".engr")
+            .join("objects")
+            .join(format!("{}.json", object.id));
+        let mut legacy = object.clone();
+        legacy.sections[0].refs = vec![Ref {
+            object: object_id(),
+            section: 1u64 << 53,
+            sha256: "c".repeat(64),
+            commit: "d".repeat(40),
+        }];
+        legacy.sections[0].sha256 = legacy.sections[0].recomputed_sha256().expect("v2 seal");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&legacy).expect("serialize"),
+        )
+        .expect("write");
+        let historical = commit_all(&root, "legacy reference");
+
+        // The current target is clean, and carries a Phase-3 seal.
+        let (current, seal) = phase_three_seals(&object);
+
+        let selecting_refs = SelectiveRef {
+            target: target(),
+            fields: vec![SemanticField::Refs],
+            commit: historical.clone(),
+            digest: format!("1:{}", "a".repeat(64)),
+        };
+        assert_eq!(
+            evaluate(&root, &current, &seal, &selecting_refs).expect("classified, not errored"),
+            Dependency::SchemaMismatch
+        );
+
+        // A reference selecting something else is answered normally: the
+        // uninterpretable field is not part of its dependency.
+        let selecting_text = SelectiveRef {
+            fields: vec![SemanticField::Text],
+            ..selecting_refs
+        };
+        let answer = evaluate(&root, &current, &seal, &selecting_text).expect("answered");
+        assert_ne!(
+            answer,
+            Dependency::SchemaMismatch,
+            "text is interpretable regardless of what refs holds"
         );
     }
 
