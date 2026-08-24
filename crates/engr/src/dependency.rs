@@ -20,11 +20,12 @@
 //! [`crate::model::Ref`], because editing that struct would change the bytes of
 //! every Section already on disk. #13's in-progress write boundary, again.
 
-use crate::model::Section;
+use crate::model::{Object, Section};
 use crate::proof::{canonical_bytes, canonical_set, sha256_of};
-use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA, EXIT_USAGE};
+use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::path::Path;
 
 /// The closed vocabulary of selectable semantic facts (#35 §3).
 ///
@@ -337,4 +338,192 @@ pub fn check_not_stale_at_birth(
         );
     }
     Ok(())
+}
+
+/// Split a canonical Section target back into the identity it names.
+///
+/// Strict rather than lenient: `obj:<id>:<section>` and nothing else. A target
+/// this cannot read is refused, because the alternative is guessing which
+/// Section a stored Ref meant and then reporting drift against the wrong one.
+pub fn parse_target(target: &str) -> Result<(String, u64)> {
+    let malformed = || {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{target:?} is not a canonical section target"),
+        )
+    };
+    let rest = target.strip_prefix("obj:").ok_or_else(malformed)?;
+    let (id, section) = rest.rsplit_once(':').ok_or_else(malformed)?;
+    crate::model::validate_object_id(id)?;
+    let section: u64 = section.parse().map_err(|_| malformed())?;
+    ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    Ok((id.to_owned(), section))
+}
+
+/// The target as it stood at the commit a Ref pins.
+///
+/// Three outcomes, not two. "The commit does not have it" and "the commit has
+/// something this build cannot interpret" call for different answers, and #35
+/// §9 keeps them apart: provenance unavailable is a gap in history, schema
+/// mismatch is a contract this reader cannot apply.
+enum Historical {
+    Found(Section),
+    Unavailable,
+    SchemaMismatch,
+}
+
+fn historical_section(root: &Path, commit: &str, id: &str, section: u64) -> Historical {
+    if !crate::git::exists(root, commit) {
+        return Historical::Unavailable;
+    }
+    match crate::git::object_at(root, commit, id) {
+        Err(_) => Historical::SchemaMismatch,
+        Ok(None) => Historical::Unavailable,
+        Ok(Some(object)) => match object.sections.into_iter().find(|held| held.id == section) {
+            Some(section) => Historical::Found(section),
+            None => Historical::Unavailable,
+        },
+    }
+}
+
+/// Find a Section in the Object that holds it.
+fn section_of(object: &Object, section: u64) -> Result<&Section> {
+    object
+        .sections
+        .iter()
+        .find(|held| held.id == section)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!("object {} has no section {section}", object.id),
+            )
+        })
+}
+
+/// Create a Ref, in the order #35 §8 freezes.
+///
+/// ```text
+/// 1. load current parent Object and target Section
+/// 2. validate applicable current Object and Section integrity
+/// 3. validate fields[]
+/// 4. resolve exact commit and historical target
+/// 5. validate historical integrity under the historical contract where required
+/// 6. project current and historical selected effective values
+/// 7. require current selected values == historical selected values
+/// 8. compute Ref.digest
+/// 9. persist target + fields + commit + digest
+/// ```
+///
+/// Integrity comes **first**, before anything about the selection is trusted.
+/// #35 says why in one sentence: a target whose own integrity fails can never
+/// be legitimized by creating a Ref to a still-hashable subset. Selecting only
+/// the fields that happen to look intact would otherwise launder a tampered
+/// Section into a dependency somebody relies on.
+///
+/// Step 9 is the caller's. Nothing here writes, and under the current write
+/// boundary nothing may — the returned value is the Ref that *would* be
+/// persisted.
+///
+/// `current_seal` is passed rather than read from the Object for the reason
+/// given in [`crate::integrity`]: no workspace carries a Phase-3 aggregate seal
+/// yet, and a function that read one would be checking a v3 projection against
+/// a v2 value.
+pub fn admit(
+    root: &Path,
+    current: &Object,
+    current_seal: &str,
+    section: u64,
+    fields: &[SemanticField],
+    commit: &str,
+) -> Result<SelectiveRef> {
+    let target = crate::proof::section_target(&current.id, section);
+    // 1 + 2. The whole aggregate, not just the Section being referenced: a
+    // Section is only as trustworthy as the Object that says it belongs there.
+    let now = section_of(current, section)?;
+    crate::integrity::check_object_integrity(current, current_seal)?;
+    // 3.
+    let fields = canonical_fields(fields)?;
+    // 4 + 5.
+    ensure!(
+        crate::model::is_canonical_git_oid(commit),
+        EXIT_SCHEMA,
+        "a reference pins a full resolved Git object id"
+    );
+    let then = match historical_section(root, commit, &current.id, section) {
+        Historical::Found(section) => section,
+        Historical::Unavailable => {
+            return Err(Error::new(
+                EXIT_NOT_FOUND,
+                format!("section {section} is not in {} at {commit}", current.id),
+            ))
+        }
+        Historical::SchemaMismatch => {
+            return Err(Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{} at {commit} cannot be read under any contract this build applies",
+                    current.id
+                ),
+            ))
+        }
+    };
+    // 6 + 7.
+    check_not_stale_at_birth(&then, now, &fields)?;
+    // 8.
+    let snapshot = ref_snapshot(&target, &fields, &then, commit)?;
+    Ok(SelectiveRef {
+        target,
+        fields,
+        commit: commit.to_owned(),
+        digest: snapshot.digest()?.to_string(),
+    })
+}
+
+/// Read one stored Ref and say what its dependency looks like now (#35 §9).
+///
+/// The order is the contract's, and each step can only be asked once the one
+/// before it has an answer:
+///
+/// ```text
+/// current target integrity  -> TargetIntegrityFailure
+/// commit / target present   -> ProvenanceUnavailable
+/// historical interpretable  -> SchemaMismatch
+/// stored digest reproduces  -> DigestInvalid
+/// selected facts compared   -> Unchanged | Drifted
+/// ```
+///
+/// Integrity is asked first for the same reason it is in [`admit`]: values read
+/// out of a target that fails its own integrity are not evidence of anything,
+/// so calling them "unchanged" would be the most misleading answer available.
+pub fn evaluate(
+    root: &Path,
+    current: &Object,
+    current_seal: &str,
+    reference: &SelectiveRef,
+) -> Result<Dependency> {
+    let (id, section) = parse_target(&reference.target)?;
+    ensure!(
+        id == current.id,
+        EXIT_INVARIANT,
+        "reference names object {id} and was evaluated against {}",
+        current.id
+    );
+    let Ok(now) = section_of(current, section) else {
+        return Ok(Dependency::TargetIntegrityFailure);
+    };
+    if crate::integrity::check_object_integrity(current, current_seal).is_err() {
+        return Ok(Dependency::TargetIntegrityFailure);
+    }
+    let then = match historical_section(root, &reference.commit, &id, section) {
+        Historical::Found(section) => section,
+        Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),
+        Historical::SchemaMismatch => return Ok(Dependency::SchemaMismatch),
+    };
+    let snapshot = ref_snapshot(
+        &reference.target,
+        &reference.fields,
+        &then,
+        &reference.commit,
+    )?;
+    compare(&snapshot, &reference.digest, now)
 }

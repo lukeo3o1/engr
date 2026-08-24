@@ -320,3 +320,241 @@ fn every_moved_field_is_named() {
         "role did not move and is not listed"
     );
 }
+
+mod against_a_workspace {
+    use super::*;
+    use engr::dependency::{admit, evaluate, parse_target, SelectiveRef};
+    use engr::integrity::{sealed_object, sealed_section};
+    use engr::model::Object;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn commit_all(root: &Path, message: &str) -> String {
+        git(root, &["add", "-A"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                message,
+            ],
+        );
+        engr::git::head(root).expect("HEAD")
+    }
+
+    /// A workspace holding one Object with one Section, committed.
+    fn workspace() -> (TempDir, PathBuf, Object, String) {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q"]);
+        engr::store::init(&root).expect("init");
+
+        let mut object =
+            Object::new(object_id(), "the append boundary".to_owned()).expect("object");
+        object.rev = 1;
+        object.next_section_id = 2;
+        let mut section = section();
+        section.admission = Admission::Human;
+        section.sha256 = section.recomputed_sha256().expect("v2 seal");
+        object.sections = vec![section];
+        engr::store::save_object(&root, &object).expect("save");
+
+        let commit = commit_all(&root, "record");
+        (dir, root, object, commit)
+    }
+
+    /// The v3 seals the Phase-3 verifier expects, computed rather than stored —
+    /// no workspace carries them yet, which is the write boundary, not a gap.
+    fn phase_three_seals(object: &Object) -> (Object, String) {
+        let mut sealed = object.clone();
+        for section in &mut sealed.sections {
+            section.sha256 = sealed_section(section)
+                .expect("project")
+                .seal()
+                .expect("seal");
+        }
+        let seal = sealed_object(&sealed)
+            .expect("project")
+            .seal()
+            .expect("seal");
+        (sealed, seal)
+    }
+
+    #[test]
+    fn a_reference_is_admitted_against_the_commit_it_pins() {
+        let (_dir, root, object, commit) = workspace();
+        let (object, seal) = phase_three_seals(&object);
+
+        let reference = admit(
+            &root,
+            &object,
+            &seal,
+            1,
+            &[SemanticField::Text, SemanticField::Admission],
+            &commit,
+        )
+        .expect("nothing has moved since the commit");
+
+        assert_eq!(reference.target, target());
+        assert_eq!(reference.commit, commit);
+        assert_eq!(
+            reference.fields,
+            vec![SemanticField::Admission, SemanticField::Text]
+        );
+        assert!(reference.digest.starts_with("1:"));
+
+        assert_eq!(
+            evaluate(&root, &object, &seal, &reference).expect("evaluate"),
+            Dependency::Unchanged,
+            "a fresh reference is non-drifting by construction"
+        );
+    }
+
+    /// The order of #35 §8 is load, verify integrity, *then* look at fields. A
+    /// target whose own integrity fails cannot be legitimized by referencing a
+    /// still-hashable subset of it.
+    #[test]
+    fn a_target_that_fails_its_own_integrity_cannot_be_referenced() {
+        let (_dir, root, object, commit) = workspace();
+        let (mut object, seal) = phase_three_seals(&object);
+        object.sections[0].text = "rewritten out of band".to_owned();
+
+        admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit)
+            .expect_err("even selecting a field the edit did not touch");
+
+        // And when the tampering also makes the selection stale, the refusal
+        // still names the integrity failure. Order is why: reporting staleness
+        // here would tell the author to re-pin the commit, when what actually
+        // happened is that the target was rewritten out of band.
+        let refused = admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit)
+            .expect_err("both wrong at once");
+        assert!(
+            !refused.to_string().contains("stale at birth"),
+            "the integrity failure is the one worth reporting: {refused}"
+        );
+
+        let reference = SelectiveRef {
+            target: target(),
+            fields: vec![SemanticField::Role],
+            commit,
+            digest: format!("1:{}", "a".repeat(64)),
+        };
+        assert_eq!(
+            evaluate(&root, &object, &seal, &reference).expect("evaluate"),
+            Dependency::TargetIntegrityFailure,
+            "and reading one reports the tampering rather than drift"
+        );
+    }
+
+    /// A commit that no longer resolves, and a target absent at one that does,
+    /// are the same answer: the provenance is gone, which is not drift.
+    #[test]
+    fn missing_provenance_is_not_drift() {
+        let (_dir, root, object, _commit) = workspace();
+        let (object, seal) = phase_three_seals(&object);
+
+        let unknown = SelectiveRef {
+            target: target(),
+            fields: vec![SemanticField::Text],
+            commit: "f".repeat(40),
+            digest: format!("1:{}", "a".repeat(64)),
+        };
+        assert_eq!(
+            evaluate(&root, &object, &seal, &unknown).expect("evaluate"),
+            Dependency::ProvenanceUnavailable
+        );
+    }
+
+    /// Drift, end to end: the selected fact really moved between the pinned
+    /// commit and now.
+    #[test]
+    fn a_selected_fact_that_moved_is_reported_as_drift() {
+        let (_dir, root, object, commit) = workspace();
+        let (object, seal) = phase_three_seals(&object);
+        let reference =
+            admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+
+        let mut moved = object.clone();
+        moved.sections[0].text = "revised through the gate".to_owned();
+        let (moved, moved_seal) = phase_three_seals(&moved);
+
+        assert_eq!(
+            evaluate(&root, &moved, &moved_seal, &reference).expect("evaluate"),
+            Dependency::Drifted {
+                fields: vec![SemanticField::Text]
+            }
+        );
+
+        // The same movement, for a reference that never selected `text`.
+        let other =
+            admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit).expect("admitted");
+        assert_eq!(
+            evaluate(&root, &moved, &moved_seal, &other).expect("evaluate"),
+            Dependency::Unchanged,
+            "drift is relative to the dependency actually declared"
+        );
+    }
+
+    /// A reference cannot be born already stale.
+    #[test]
+    fn a_reference_stale_at_birth_is_refused() {
+        let (_dir, root, object, commit) = workspace();
+        let (mut object, _) = phase_three_seals(&object);
+        object.sections[0].text = "moved since the commit".to_owned();
+        let (object, seal) = phase_three_seals(&object);
+
+        let refused = admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit)
+            .expect_err("text already differs from the pinned commit");
+        assert!(refused.to_string().contains("stale at birth"), "{refused}");
+
+        // And the same moment admits a reference that selects something else.
+        admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit)
+            .expect("role has not moved");
+    }
+
+    #[test]
+    fn a_target_must_be_a_canonical_section_identity() {
+        parse_target(&target()).expect("canonical");
+        for malformed in [
+            "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+            "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "obj:not-a-uuid:1",
+            "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:0",
+            "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:x",
+            "",
+        ] {
+            parse_target(malformed).expect_err(malformed);
+        }
+    }
+
+    /// A reference evaluated against the wrong Object is refused rather than
+    /// answered — comparing section 1 of one Object with section 1 of another
+    /// would produce a confident, meaningless verdict.
+    #[test]
+    fn a_reference_is_only_evaluated_against_the_object_it_names() {
+        let (_dir, root, object, commit) = workspace();
+        let (object, seal) = phase_three_seals(&object);
+        let reference =
+            admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+
+        let mut stranger = object.clone();
+        stranger.id = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
+        let (stranger, stranger_seal) = phase_three_seals(&stranger);
+        evaluate(&root, &stranger, &stranger_seal, &reference)
+            .expect_err("that is a different object");
+    }
+}
