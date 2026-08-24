@@ -1100,23 +1100,6 @@ fn subject() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
-/// The Object domain's own descriptor, frozen by #25 §4 as exactly
-/// `{operation, target, after}` over `{expected_rev}`.
-///
-/// Separate from [`subject`] because the domains describe their mutations
-/// differently and the binding boundary now holds each to its own shape —
-/// which is the point of having a shape at all.
-fn object_subject() -> (serde_json::Value, serde_json::Value) {
-    (
-        serde_json::json!({
-            "operation": {"name": "section.revised", "parameters": {"becomes": null}},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
-            "after": {"section": {"text": "still unresolved"}}
-        }),
-        serde_json::json!({"expected_rev": 2}),
-    )
-}
-
 /// The hash is the identity of an exact review subject.
 ///
 /// Same subject, same value — across processes, because nothing about it is
@@ -1334,32 +1317,47 @@ fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
     assert!(rule.review.exhausted(attempt(6)));
 }
 
-/// Writing a default out must not change what a rule means.
+/// Writing a default out must not change what a rule *means*.
 ///
 /// This is the whole reason [`rules::Review`] holds effective values rather than
-/// options. A review identity is over what the rule *says*, and two rules that
-/// say the same thing in different YAML are one rule as far as a reviewer is
-/// concerned. If the binding hashed the spelling, an author tidying their front
-/// matter would silently invalidate every attestation against it.
+/// options. Two rules that say the same thing in different YAML are one rule as
+/// far as a reviewer is concerned, and the semantic members of the binding say
+/// so: `review` carries effective values and `body` carries the normative text,
+/// so neither moves when front matter is tidied.
+///
+/// **The binding as a whole now does move**, and that is new. Ruling
+/// `5396557633` added exact reviewed-material provenance, and `content_sha256`
+/// identifies the Rule file that was actually read — front matter included. A
+/// committed Rule has always had this property under the same ruling, since
+/// editing and committing it changes the commit the binding records.
+///
+/// Ruled at #25 `5397877580`: review identity is **artifact-exact**. Any
+/// byte-level change to a Rule file changes the ReviewDigest, even when the
+/// effective semantics are identical, and a prior review does not survive a
+/// semantically equivalent rewrite. That supersedes the older expectation.
+///
+/// So the invariant this test protects is the narrower and truer one: the
+/// *semantic* projection is spelling-independent, while provenance identifies
+/// the artifact, and the binding carries both.
 #[test]
 fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
     let (_dir, root) = workspace();
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let (mutation, precondition) = subject();
-    let hash = |root: &Path| {
-        rules::bind(
+    let semantics = |root: &Path| {
+        let bound = rules::bind(
             root,
             Domain::Backlog,
             mutation.clone(),
             precondition.clone(),
         )
-        .expect("bind")
-        .digest()
-        .expect("hash")
+        .expect("bind");
+        let rule = bound.rules()[0].clone();
+        (rule.review, rule.body, rule.domains, rule.based_on)
     };
 
     write_rule(&root, "architecture", ARCHITECTURE);
-    let silent = hash(&root);
+    let silent = semantics(&root);
 
     write_rule(
         &root,
@@ -1371,7 +1369,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
     );
     assert_eq!(
         silent,
-        hash(&root),
+        semantics(&root),
         "an explicit default is the same review subject as an omitted one"
     );
 
@@ -1385,7 +1383,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
             "review:\n  on_exhaustion: human_confirmation\nbased_on:",
         ),
     );
-    let escalating = hash(&root);
+    let escalating = semantics(&root);
     write_rule(
         &root,
         "architecture",
@@ -1394,7 +1392,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
             "review:\n  max_attempts: 5\n  on_exhaustion: human_confirmation\nbased_on:",
         ),
     );
-    assert_eq!(escalating, hash(&root));
+    assert_eq!(escalating, semantics(&root));
 
     // And it is genuinely a different rule from the default one, or the
     // equality above would be proving nothing.
@@ -1681,23 +1679,22 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
 #[test]
 fn an_exhausted_object_review_stops_and_may_call_a_human() {
     let (_dir, root) = workspace();
-    let (mutation, precondition) = object_subject();
-    let bind = |root: &Path| {
-        rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
+    // Through `assess`, which is the API for "what do the applicable rules say
+    // about this attempt" when there is no mutation to describe. Object
+    // bindings are typed-only now, and inventing a transition here would be
+    // fixture weight in a test about exhaustion composition.
+    let exhaustion = |root: &Path, attempt| {
+        rules::assess(root, Domain::Object, attempt)
+            .expect("object")
+            .1
     };
     write_rule(
         &root,
         "refusing",
         "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
     );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(1)).expect("object"),
-        rules::Exhaustion::NotReached
-    );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
-        rules::Exhaustion::Refused
-    );
+    assert_eq!(exhaustion(&root, attempt(1)), rules::Exhaustion::NotReached);
+    assert_eq!(exhaustion(&root, attempt(2)), rules::Exhaustion::Refused);
 
     write_rule(
         &root,
@@ -1705,7 +1702,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::HumanConfirmation,
         "an exhausted rule naming a human outranks one that only refuses"
     );
@@ -1718,7 +1715,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::Refused,
         "only an actually exhausted rule's action counts"
     );
@@ -1974,9 +1971,13 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     // — this rule file is not in Git, so it binds `commit: null`, `dirty: true`
     // and a `content_sha256`.
     //
-    // Verified outside the build both times: sha256sum over the 416 canonical
+    // Then a third time, when `content_sha256` for a dirty Rule started
+    // covering the whole Rule file rather than only its body — two files with
+    // one body and different front matter had shared an identity.
+    //
+    // Verified outside the build each time: sha256sum over the 416 canonical
     // bytes gives this value. Nothing has been emitted, so nothing needed
-    // migrating on either move.
+    // migrating on any of the three.
     assert_ne!(
         serde_json::to_string(&mutation).expect("serde"),
         serde_jcs::to_string(&mutation).expect("jcs"),
@@ -1992,7 +1993,7 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     .expect("bind");
     assert_eq!(
         bound.digest().expect("digest").to_string(),
-        "1:801cb51c588b12cbfe6fefb1c72f986875cd9ed53ed88ef3a370fb0d0e6ef0a7",
+        "1:bee6d27b551372763d336541ae774c7b3e961e2fdfdc901d0c38b0de6b454953",
         "the review binding digest is ReviewDigestContract 1 over its RFC 8785 bytes"
     );
 
@@ -2424,4 +2425,320 @@ fn provenance_is_resolved_from_the_repository_root_not_the_workspace() {
     assert!(rule.based_on[0].dirty, "the basis moved");
     assert_eq!(rule.based_on[0].commit, None);
     assert!(!rule.dirty, "and the rule file did not");
+}
+
+/// A direct library caller cannot obtain a Contract-1 review scalar for a
+/// descriptor the protocol does not define.
+///
+/// The CLI is not the trust boundary; the library is. `rules::bind` is public,
+/// and before this it would take any JSON with the right three outer member
+/// names and return a value labelled `ReviewDigestContract 1` — for an unfrozen
+/// operation, an operation carrying members of its own, or a target naming
+/// nothing.
+///
+/// The companion half is not testable from out here, and that is the point:
+/// `CandidateSubject` and `ReviewMutation` have private members, so the forging
+/// code in the earlier version of this test no longer compiles. Unreachable
+/// beats refused.
+#[test]
+fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
+    let (_dir, root) = workspace();
+    for mutation in [
+        serde_json::json!({"action": "section_revised"}),
+        serde_json::json!({
+            "operation": {"name": "not.a.frozen.operation", "parameters": {}},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+        serde_json::json!({
+            "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+    ] {
+        let refused = rules::bind(
+            &root,
+            Domain::Object,
+            mutation.clone(),
+            serde_json::json!({"expected_rev": 7}),
+        )
+        .expect_err("the untyped route is closed for this domain");
+        assert!(
+            refused.message.contains("bind_object"),
+            "{}",
+            refused.message
+        );
+
+        rules::rebind(
+            Domain::Object,
+            mutation,
+            serde_json::json!({"expected_rev": 7}),
+            Vec::new(),
+        )
+        .expect_err("and closed on the snapshot route too");
+    }
+
+    // Backlog still describes its own mutations, so the gate is per-domain
+    // rather than a shape imposed on everything.
+    let (mutation, precondition) = subject();
+    rules::bind(&root, Domain::Backlog, mutation, precondition).expect("backlog is not an object");
+}
+
+/// A dirty Rule is identified by the whole file, not by its normative body.
+///
+/// `content_sha256` names the artifact that was read. It hashed only
+/// `Rule.body` when the Rule sat outside Git, so two files with one body and
+/// different front matter shared an identity — provenance that cannot tell two
+/// files apart is not provenance.
+///
+/// The body is held fixed while other Rule-file bytes change, so this cannot
+/// pass by accident of the body moving too.
+#[test]
+fn a_dirty_rule_is_identified_by_its_whole_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let bind = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+    };
+
+    let terse = "---\nid: shape\napplies:\n  domains: [backlog]\n---\n\n# Shape\n\nOne body.\n";
+    let verbose =
+        "---\nid: shape\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 5\n---\n\n# Shape\n\nOne body.\n";
+
+    write_rule(&root, "shape", terse);
+    let first = bind(&root).rules()[0].clone();
+    write_rule(&root, "shape", verbose);
+    let second = bind(&root).rules()[0].clone();
+
+    assert_eq!(first.body, second.body, "the normative text is unchanged");
+    assert_eq!(
+        first.review, second.review,
+        "and so are the effective values"
+    );
+    assert!(first.dirty && second.dirty, "neither is committed");
+    assert_eq!(
+        first.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(terse).as_str()),
+        "the identity is the whole file, front matter included"
+    );
+    assert_eq!(
+        second.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(verbose).as_str())
+    );
+    assert_ne!(first.content_sha256, second.content_sha256);
+}
+
+/// A Rule snapshot that could not have come from the frozen contract cannot be
+/// hashed as ReviewDigestContract 1.
+///
+/// The typed mutation builder closed one level; this is the level beneath it.
+/// `rebind_object` takes snapshots as *data* — they are read back from a
+/// candidate that stored them — so they cannot be made unconstructible the way
+/// the mutation types were. What they can be held to is the contract a resolved
+/// Rule satisfies.
+///
+/// Each case below is a Rule that could never exist, and each one previously
+/// produced a perfectly well-formed `1:` scalar.
+#[test]
+fn an_impossible_rule_snapshot_cannot_be_hashed_as_contract_one() {
+    let honest = engr::rules::BoundRule {
+        id: "honest".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "record what happened".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    honest.validate().expect("a rule that could exist");
+
+    type Break = fn(&mut engr::rules::BoundRule);
+    let cases: [(&str, Break); 8] = [
+        ("an id outside the grammar", |rule| {
+            rule.id = "INVALID!".to_owned()
+        }),
+        ("no applicable domain", |rule| rule.domains.clear()),
+        ("a ceiling of zero", |rule| rule.review.max_attempts = 0),
+        ("no normative text", |rule| rule.body.clear()),
+        ("committed and dirty at once", |rule| {
+            rule.commit = Some("d".repeat(40));
+        }),
+        ("neither committed nor dirty", |rule| {
+            rule.dirty = false;
+            rule.content_sha256 = None;
+        }),
+        ("dirty with no identity", |rule| rule.content_sha256 = None),
+        ("a body of whitespace", |rule| rule.body = " \t ".to_owned()),
+    ];
+
+    for (why, break_it) in cases {
+        let mut forged = honest.clone();
+        break_it(&mut forged);
+        forged.validate().expect_err(why);
+
+        let (before, after, payload) = object_transition();
+        let mutation =
+            engr::proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+        let refused = rules::rebind_object(&mutation, 1, vec![forged]).expect_err(why);
+        assert!(
+            refused.message.contains("rule snapshot"),
+            "{why}: refused, but not as a snapshot problem: {}",
+            refused.message
+        );
+    }
+}
+
+fn object_transition() -> (
+    engr::model::Object,
+    engr::model::Object,
+    engr::model::Payload,
+) {
+    let id = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f".to_owned();
+    let before = engr::model::Object::new(id.clone(), "a title".to_owned()).expect("object");
+    let mut after = before.clone();
+    after.rev = 1;
+    let payload = engr::model::Payload {
+        action: engr::model::Action::ObjectCreated,
+        object: id,
+        becomes: None,
+        content: engr::model::Content::default(),
+    };
+    (before, after, payload)
+}
+
+/// The snapshot set is the rules that *apply* to the domain being bound, and a
+/// set of identities.
+///
+/// Two holes, both one level past the last fix. `BoundRule::validate` required
+/// `domains` to be non-empty and canonical, which is not the same as
+/// applicable: a perfectly well-formed `[backlog]` Rule could be hashed into an
+/// Object binding that `bound_rules(root, Object)` could never have produced.
+/// And `canonical_set` rejects snapshots whose canonical *bytes* are equal,
+/// while two snapshots sharing one `id` with different bodies are not equal —
+/// so both survived, and a set held one Rule identity in two versions.
+#[test]
+fn a_snapshot_set_is_the_applicable_rules_and_holds_each_identity_once() {
+    let (before, after, payload) = object_transition();
+    let mutation =
+        engr::proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+
+    let applicable = engr::rules::BoundRule {
+        id: "applies".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "record what happened".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rules::rebind_object(&mutation, 1, vec![applicable.clone()]).expect("an applicable rule");
+
+    // Valid in itself, and not a rule of this domain.
+    let mut elsewhere = applicable.clone();
+    elsewhere.id = "elsewhere".to_owned();
+    elsewhere.domains = vec![Domain::Backlog];
+    elsewhere.validate().expect("valid as a rule");
+    let refused = rules::rebind_object(&mutation, 1, vec![elsewhere])
+        .expect_err("a backlog rule is not part of an object review");
+    assert!(
+        refused.message.contains("the set is the rules that apply"),
+        "{}",
+        refused.message
+    );
+
+    // One identity, two versions. Each is valid; the set is not.
+    let mut other_version = applicable.clone();
+    other_version.body = "record something else".to_owned();
+    other_version.validate().expect("valid as a rule");
+    assert_ne!(applicable.body, other_version.body);
+    let refused = rules::rebind_object(&mutation, 1, vec![applicable, other_version])
+        .expect_err("one rule id cannot appear twice");
+    assert!(
+        refused.message.contains("two versions"),
+        "{}",
+        refused.message
+    );
+}
+
+/// A whitespace-only body is no body, in a snapshot as in a Rule file.
+///
+/// The loader has always used `trim`, and the snapshot check used
+/// `is_empty` — so a Rule that could never be loaded could still be hashed. The
+/// snapshot contract has to be at least as strict as the value it claims to be
+/// a snapshot of.
+#[test]
+fn a_snapshot_body_is_as_strict_as_the_loader() {
+    let mut rule = engr::rules::BoundRule {
+        id: "blank".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "   \n\t\n".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rule.validate()
+        .expect_err("whitespace is not normative text");
+    rule.body = "something normative".to_owned();
+    rule.validate().expect("and this is");
+}
+
+/// A candidate subject names an identity, and the builder checks it is one.
+///
+/// `object_target` and `section_target` format strings; they do not ask whether
+/// the result denotes anything. So a payload naming `not-an-id`, or naming an
+/// Object that is not the one the states either side describe, or a Section
+/// numbered 0, produced a perfectly well-formed `CandidateDigestContract 1`
+/// over a target denoting nothing — and `object_review_mutation` delegates to
+/// the same builder, so it reached ReviewDigest too.
+#[test]
+fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
+    let (before, after, payload) = object_transition();
+    engr::proof::candidate_subject(&before, &after, &payload, None).expect("a real transition");
+
+    let mut malformed = payload.clone();
+    malformed.object = "not-an-id".to_owned();
+    engr::proof::candidate_subject(&before, &after, &malformed, None)
+        .expect_err("that is not an object id");
+
+    // Well-formed, and not the object either side describes.
+    let mut mismatched = payload.clone();
+    mismatched.object = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
+    let refused = engr::proof::candidate_subject(&before, &after, &mismatched, None)
+        .expect_err("a different object");
+    assert!(
+        refused.message.contains("states either side"),
+        "{}",
+        refused.message
+    );
+
+    // A section number that names no section.
+    let mut zero = payload.clone();
+    zero.action = engr::model::Action::SectionRevised { section: 0 };
+    engr::proof::candidate_subject(&before, &after, &zero, None)
+        .expect_err("section ids start at 1");
+
+    let mut oversize = payload;
+    oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
+    engr::proof::candidate_subject(&before, &after, &oversize, None)
+        .expect_err("past the shared safe-integer ceiling");
 }

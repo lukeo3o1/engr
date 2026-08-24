@@ -789,15 +789,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
     let front: FrontMatter = serde_norway::from_str(front)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{where_}: {error}")))?;
 
-    ensure!(
-        !front.id.is_empty()
-            && front.id.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            }),
-        EXIT_SCHEMA,
-        "{where_}: rule id {:?} is not canonical; v1 ids are [a-z0-9-]+",
-        front.id
-    );
+    check_rule_id(&front.id, &where_)?;
 
     let mut domains = Vec::new();
     for name in &front.applies.domains {
@@ -1021,6 +1013,150 @@ pub struct BoundRule {
     pub content_sha256: Option<String>,
 }
 
+/// The v1 rule-id grammar, in one place so the loader and the snapshot check
+/// cannot drift.
+fn check_rule_id(id: &str, what: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty()
+            && id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }),
+        EXIT_SCHEMA,
+        "{what}: rule id {id:?} is not canonical; v1 ids are [a-z0-9-]+"
+    );
+    Ok(())
+}
+impl BoundRule {
+    /// Hold one snapshot to the frozen Rule contract before it can be hashed.
+    ///
+    /// Validation rather than privacy, unlike [`crate::proof::CandidateSubject`]
+    /// and [`crate::proof::ReviewMutation`]. Those are always computed, so they
+    /// can be made unconstructible; a Rule snapshot arrives **as data**, read
+    /// back from a candidate that stored it, so there is no construction path
+    /// to route it through. What can be required is that it satisfies the same
+    /// contract a resolved Rule does.
+    ///
+    /// Without this, `rebind_object` would take an arbitrary `Vec<BoundRule>`
+    /// and hand back a scalar labelled `ReviewDigestContract 1` over a Rule
+    /// that could never exist: an id outside the grammar, no applicable domain,
+    /// a ceiling of zero, or provenance contradicting itself. Closing the
+    /// mutation side and leaving the snapshot side open would have moved the
+    /// forgery one level down rather than out.
+    pub fn validate(&self) -> Result<()> {
+        check_rule_id(&self.id, "rule snapshot")?;
+        ensure!(
+            !self.domains.is_empty(),
+            EXIT_SCHEMA,
+            "rule snapshot {}: a rule that applies to no domain governs nothing",
+            self.id
+        );
+        ensure!(
+            self.domains == canonical_domains(&self.domains)?,
+            EXIT_SCHEMA,
+            "rule snapshot {}: domains are a protocol set and arrive in canonical order",
+            self.id
+        );
+        ensure!(
+            self.review.max_attempts >= 1,
+            EXIT_SCHEMA,
+            "rule snapshot {}: a review gets at least one attempt; there is no ceiling of zero",
+            self.id
+        );
+        ensure!(
+            !self.body.trim().is_empty(),
+            EXIT_SCHEMA,
+            "rule snapshot {}: a rule with no normative text asks for nothing",
+            self.id
+        );
+        check_material_provenance(
+            self.commit.as_deref(),
+            self.dirty,
+            self.content_sha256.as_deref(),
+            &format!("rule snapshot {}", self.id),
+        )?;
+        for basis in &self.based_on {
+            check_material_provenance(
+                basis.commit.as_deref(),
+                basis.dirty,
+                basis.content_sha256.as_deref(),
+                &format!("rule snapshot {} basis {}", self.id, basis.path),
+            )?;
+        }
+        ensure!(
+            self.based_on == canonical_bases(&self.based_on)?,
+            EXIT_SCHEMA,
+            "rule snapshot {}: bases are a protocol set and arrive in canonical order",
+            self.id
+        );
+        Ok(())
+    }
+}
+
+/// The provenance members are three views of one fact, so they agree or the
+/// snapshot is refused.
+///
+/// Ruled at #25 `5396557633`: material either has a commit that holds it, or is
+/// dirty and identified by hash. A snapshot claiming both, or neither, is
+/// describing a state the contract does not define.
+fn check_material_provenance(
+    commit: Option<&str>,
+    dirty: bool,
+    content_sha256: Option<&str>,
+    what: &str,
+) -> Result<()> {
+    match (commit, dirty) {
+        (Some(commit), false) => {
+            ensure!(
+                crate::model::is_canonical_git_oid(commit),
+                EXIT_SCHEMA,
+                "{what}: {commit:?} is not a full resolved Git object id"
+            );
+            ensure!(
+                content_sha256.is_none(),
+                EXIT_SCHEMA,
+                "{what}: material a commit holds is located by that commit, not also by a hash"
+            );
+            Ok(())
+        }
+        (None, true) => {
+            let hash = content_sha256.ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{what}: dirty material is identified by content_sha256"),
+                )
+            })?;
+            ensure!(
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                EXIT_SCHEMA,
+                "{what}: content_sha256 is 64 lowercase hex characters"
+            );
+            Ok(())
+        }
+        (Some(_), true) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{what}: material cannot be both held by a commit and dirty"),
+        )),
+        (None, false) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{what}: material with no commit is dirty, and says so"),
+        )),
+    }
+}
+
+fn canonical_domains(domains: &[Domain]) -> Result<Vec<Domain>> {
+    let mut domains = domains.to_vec();
+    canonical_set(&mut domains, "domain")?;
+    Ok(domains)
+}
+
+fn canonical_bases(bases: &[ResolvedBasis]) -> Result<Vec<ResolvedBasis>> {
+    let mut bases = bases.to_vec();
+    canonical_set(&mut bases, "basis")?;
+    Ok(bases)
+}
 /// The compact diagnostic Backlog records when it admits an exhausted mutation.
 ///
 /// Deliberately two numbers. It exists to say "this went in without a passing
@@ -1236,21 +1372,139 @@ impl ReviewBinding {
 /// Hold a binding's two caller-supplied arguments to the shape its domain
 /// froze, where the domain has frozen one.
 ///
-/// Only the Object domain has, in #25 §4. Backlog describes its mutations under
-/// #8 and is not held to the Object shape here; Collection and Work have no v1
-/// review semantics at all, and inventing a descriptor for them would be
-/// exactly the guess with a persisted representation that the contract refuses.
+/// The Object domain does not arrive here at all any more. Checking the outer
+/// member names was never enough: an unfrozen operation name, an extra member
+/// inside `operation`, a target naming nothing and an arbitrary `after` all
+/// passed, and produced a scalar labelled `ReviewDigestContract 1` for a
+/// descriptor #25 does not define. A shape check cannot verify that `after` is
+/// *that operation's* projection, because the only thing that knows is the
+/// projection itself.
+///
+/// So Object bindings are built from the typed frozen projection instead —
+/// [`bind_object`] and [`rebind_object`] — and this refuses the untyped route
+/// by name rather than trying to validate its way back to a guarantee.
+///
+/// Backlog describes its mutations under #8 and keeps the untyped route;
+/// Collection and Work have no v1 review semantics at all, and inventing a
+/// descriptor for them would be exactly the guess with a persisted
+/// representation that the contract refuses.
 fn check_domain_shape(
     domain: Domain,
     mutation: &serde_json::Value,
     precondition: &serde_json::Value,
 ) -> Result<()> {
     match domain {
-        Domain::Object => crate::proof::check_object_review_shape(mutation, precondition),
-        Domain::Backlog | Domain::Collection | Domain::Work => Ok(()),
+        Domain::Object => Err(Error::new(
+            EXIT_USAGE,
+            "an object review binds the frozen projection: build it with \
+             proof::object_review_mutation and bind it with rules::bind_object"
+                .to_owned(),
+        )),
+        Domain::Backlog | Domain::Collection | Domain::Work => {
+            let _ = (mutation, precondition);
+            Ok(())
+        }
     }
 }
 
+/// Bind an Object-domain review over the frozen projection (#25 §4).
+///
+/// The typed entry point, and the only one. `mutation` can only have come from
+/// [`crate::proof::object_review_mutation`], which reads the candidate subject
+/// for a real transition — so the operation, target and `after` are the frozen
+/// table's, not a caller's description of them.
+pub fn bind_object(
+    root: &Path,
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+) -> Result<ReviewBinding> {
+    let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
+    Ok(ReviewBinding {
+        domain: Domain::Object,
+        mutation,
+        precondition,
+        rules: bound_rules(root, Domain::Object)?,
+    })
+}
+
+/// Rebuild an Object-domain binding from Rule snapshots somebody else resolved.
+///
+/// The counterpart to [`bind_object`], as [`rebind`] is to [`bind`].
+pub fn rebind_object(
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+    rules: Vec<BoundRule>,
+) -> Result<ReviewBinding> {
+    let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
+    let rules = checked_snapshots(rules, Domain::Object)?;
+    Ok(ReviewBinding {
+        domain: Domain::Object,
+        mutation,
+        precondition,
+        rules,
+    })
+}
+
+fn object_binding_inputs(
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let mutation = serde_json::to_value(mutation)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?;
+    let precondition = serde_json::to_value(crate::proof::ReviewPrecondition { expected_rev })
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review precondition: {error}")))?;
+    // Belt and braces: the typed projection must still serialize to the frozen
+    // shape. If it ever stops doing so, that is a defect in the projection and
+    // this says so here rather than letting the bytes change quietly.
+    crate::proof::check_object_review_shape(&mutation, &precondition)?;
+    within_safe_integers(&mutation, "mutation")?;
+    within_safe_integers(&precondition, "precondition")?;
+    Ok((mutation, precondition))
+}
+
+/// Every snapshot a caller hands in, held to the frozen Rule contract **for the
+/// domain being bound**, and to being a set of Rule identities.
+///
+/// One place, so the two rebind entry points cannot enforce different amounts.
+///
+/// The domain argument is the part that was missing. `#25` defines `rules` as
+/// the *complete applicable* Rule set for the binding domain, and non-empty is
+/// not the same as applicable: a perfectly well-formed `[backlog]` Rule could
+/// be hashed into an Object binding, where `bound_rules(root, Object)` could
+/// never have selected it.
+///
+/// Identity uniqueness is the second half, and `canonical_set` does not cover
+/// it: that rejects two snapshots whose *canonical bytes* are equal, while two
+/// snapshots sharing one `id` with different bodies are not equal and both
+/// survived. Rule ids are workspace-unique, so a set holding one identity twice
+/// in two versions is not a resolved Rule set at all.
+fn checked_snapshots(rules: Vec<BoundRule>, domain: Domain) -> Result<Vec<BoundRule>> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for rule in &rules {
+        rule.validate()?;
+        ensure!(
+            rule.domains.contains(&domain),
+            EXIT_SCHEMA,
+            "rule snapshot {}: applies to {}, and this is a {} review; the set is the rules that apply",
+            rule.id,
+            rule.domains
+                .iter()
+                .map(|domain| domain.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            domain.as_str()
+        );
+        ensure!(
+            seen.insert(rule.id.as_str()),
+            EXIT_SCHEMA,
+            "rule snapshot {}: one rule id, two versions; ids are unique in a workspace",
+            rule.id
+        );
+    }
+    let mut rules = rules;
+    canonical_set(&mut rules, "rule")?;
+    Ok(rules)
+}
 /// Rebuild a binding from Rule snapshots somebody else already resolved.
 ///
 /// The counterpart to [`bind`], which reads the workspace. This one takes what
@@ -1271,8 +1525,7 @@ pub fn rebind(
     check_domain_shape(domain, &mutation, &precondition)?;
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
-    let mut rules = rules;
-    canonical_set(&mut rules, "rule")?;
+    let rules = checked_snapshots(rules, domain)?;
     Ok(ReviewBinding {
         domain,
         mutation,
@@ -1333,25 +1586,32 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
         canonical_set(&mut domains, "domain")?;
-        // The Rule's own provenance, by the same rule as its bases. Read from
-        // the file that was actually loaded, so a Rule edited in the working
-        // tree says it is dirty rather than borrowing the commit its last
-        // version was in.
+        // The Rule's own provenance, by the same rule as its bases. The file is
+        // read either way: `content_sha256` identifies the exact Rule-file
+        // bytes, and only the *commit lookup* depends on the file being inside
+        // the repository.
+        //
+        // It hashed `rule.body` when there was no repository path, which
+        // dropped the front matter from the artifact identity — two Rule files
+        // with one body and different front matter would have shared an
+        // identity, and this member is supposed to say which file was read.
+        let text = std::fs::read_to_string(&rule.source).map_err(|error| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "rule {}: {} could not be read: {error}",
+                    rule.id,
+                    rule.source.display()
+                ),
+            )
+        })?;
         let provenance = match rule_relative_path(root, &rule.source) {
-            Some(path) => match std::fs::read_to_string(&rule.source) {
-                Ok(text) => Provenance::of(root, &path, &text),
-                Err(error) => {
-                    return Err(Error::new(
-                        EXIT_NOT_FOUND,
-                        format!("rule {}: {} could not be read: {error}", rule.id, path),
-                    ))
-                }
-            },
+            Some(path) => Provenance::of(root, &path, &text),
             // Outside the repository entirely, so no commit can hold it. Not a
             // refusal: a Rule read from outside a Git working tree is still a
             // Rule, and saying "no commit has this" is the true answer rather
             // than an evasion.
-            None => Provenance::dirty(&rule.body),
+            None => Provenance::dirty(&text),
         };
         bound.push(BoundRule {
             id: rule.id,
