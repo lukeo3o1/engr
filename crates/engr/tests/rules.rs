@@ -1100,23 +1100,6 @@ fn subject() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
-/// The Object domain's own descriptor, frozen by #25 §4 as exactly
-/// `{operation, target, after}` over `{expected_rev}`.
-///
-/// Separate from [`subject`] because the domains describe their mutations
-/// differently and the binding boundary now holds each to its own shape —
-/// which is the point of having a shape at all.
-fn object_subject() -> (serde_json::Value, serde_json::Value) {
-    (
-        serde_json::json!({
-            "operation": {"name": "section.revised", "parameters": {"becomes": null}},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
-            "after": {"section": {"text": "still unresolved"}}
-        }),
-        serde_json::json!({"expected_rev": 2}),
-    )
-}
-
 /// The hash is the identity of an exact review subject.
 ///
 /// Same subject, same value — across processes, because nothing about it is
@@ -1334,32 +1317,47 @@ fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
     assert!(rule.review.exhausted(attempt(6)));
 }
 
-/// Writing a default out must not change what a rule means.
+/// Writing a default out must not change what a rule *means*.
 ///
 /// This is the whole reason [`rules::Review`] holds effective values rather than
-/// options. A review identity is over what the rule *says*, and two rules that
-/// say the same thing in different YAML are one rule as far as a reviewer is
-/// concerned. If the binding hashed the spelling, an author tidying their front
-/// matter would silently invalidate every attestation against it.
+/// options. Two rules that say the same thing in different YAML are one rule as
+/// far as a reviewer is concerned, and the semantic members of the binding say
+/// so: `review` carries effective values and `body` carries the normative text,
+/// so neither moves when front matter is tidied.
+///
+/// **The binding as a whole now does move**, and that is new. Ruling
+/// `5396557633` added exact reviewed-material provenance, and `content_sha256`
+/// identifies the Rule file that was actually read — front matter included. A
+/// committed Rule has always had this property under the same ruling, since
+/// editing and committing it changes the commit the binding records.
+///
+/// Ruled at #25 `5397877580`: review identity is **artifact-exact**. Any
+/// byte-level change to a Rule file changes the ReviewDigest, even when the
+/// effective semantics are identical, and a prior review does not survive a
+/// semantically equivalent rewrite. That supersedes the older expectation.
+///
+/// So the invariant this test protects is the narrower and truer one: the
+/// *semantic* projection is spelling-independent, while provenance identifies
+/// the artifact, and the binding carries both.
 #[test]
 fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
     let (_dir, root) = workspace();
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let (mutation, precondition) = subject();
-    let hash = |root: &Path| {
-        rules::bind(
+    let semantics = |root: &Path| {
+        let bound = rules::bind(
             root,
             Domain::Backlog,
             mutation.clone(),
             precondition.clone(),
         )
-        .expect("bind")
-        .digest()
-        .expect("hash")
+        .expect("bind");
+        let rule = bound.rules()[0].clone();
+        (rule.review, rule.body, rule.domains, rule.based_on)
     };
 
     write_rule(&root, "architecture", ARCHITECTURE);
-    let silent = hash(&root);
+    let silent = semantics(&root);
 
     write_rule(
         &root,
@@ -1371,7 +1369,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
     );
     assert_eq!(
         silent,
-        hash(&root),
+        semantics(&root),
         "an explicit default is the same review subject as an omitted one"
     );
 
@@ -1385,7 +1383,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
             "review:\n  on_exhaustion: human_confirmation\nbased_on:",
         ),
     );
-    let escalating = hash(&root);
+    let escalating = semantics(&root);
     write_rule(
         &root,
         "architecture",
@@ -1394,7 +1392,7 @@ fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
             "review:\n  max_attempts: 5\n  on_exhaustion: human_confirmation\nbased_on:",
         ),
     );
-    assert_eq!(escalating, hash(&root));
+    assert_eq!(escalating, semantics(&root));
 
     // And it is genuinely a different rule from the default one, or the
     // equality above would be proving nothing.
@@ -1681,23 +1679,22 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
 #[test]
 fn an_exhausted_object_review_stops_and_may_call_a_human() {
     let (_dir, root) = workspace();
-    let (mutation, precondition) = object_subject();
-    let bind = |root: &Path| {
-        rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
+    // Through `assess`, which is the API for "what do the applicable rules say
+    // about this attempt" when there is no mutation to describe. Object
+    // bindings are typed-only now, and inventing a transition here would be
+    // fixture weight in a test about exhaustion composition.
+    let exhaustion = |root: &Path, attempt| {
+        rules::assess(root, Domain::Object, attempt)
+            .expect("object")
+            .1
     };
     write_rule(
         &root,
         "refusing",
         "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
     );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(1)).expect("object"),
-        rules::Exhaustion::NotReached
-    );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
-        rules::Exhaustion::Refused
-    );
+    assert_eq!(exhaustion(&root, attempt(1)), rules::Exhaustion::NotReached);
+    assert_eq!(exhaustion(&root, attempt(2)), rules::Exhaustion::Refused);
 
     write_rule(
         &root,
@@ -1705,7 +1702,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::HumanConfirmation,
         "an exhausted rule naming a human outranks one that only refuses"
     );
@@ -1718,7 +1715,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::Refused,
         "only an actually exhausted rule's action counts"
     );
@@ -1811,28 +1808,34 @@ fn a_review_attempt_is_counted_from_one_and_zero_is_not_a_value() {
 ///
 /// `based_on` was sorted by `path`, which is deterministic, stable, and still
 /// wrong: canonical JSON sorts keys, so a basis's canonical bytes begin with
-/// `commit`, and a pinned basis therefore precedes a floating one whatever the
-/// paths say. Two conforming implementations — one sorting by path, one by
-/// canonical bytes — would hash the same rule differently, which is exactly what
-/// a shared hash contract cannot allow.
+/// `commit`, and that decides the comparison before either path is examined.
+/// Two conforming implementations — one sorting by path, one by canonical
+/// bytes — would hash the same rule differently, which is exactly what a shared
+/// hash contract cannot allow.
 ///
 /// The case is built so the two orders disagree by construction rather than by
-/// luck: `"commit"` sorts before `"content"`, so the pinned basis wins the
-/// comparison before either path is ever examined.
+/// luck. One basis is committed and one is not, so their `commit` values are a
+/// string and `null`; `"` sorts before `n`, so the committed basis wins however
+/// the paths read. The committed one is deliberately given the *later* path.
+///
+/// The earlier version of this test pinned one basis and left the other
+/// floating, on the reasoning that only the pinned one carried a commit. Ruling
+/// `5396557633` retired that reasoning: an unpinned basis whose material *is*
+/// committed now records the commit that holds it, so both sides carried a
+/// string and the case stopped separating the two orderings at all.
 #[test]
 fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
     let (_dir, root) = workspace();
     git(&root, &["init", "-q"]);
-    std::fs::write(root.join("a-floating.md"), "current material\n").expect("floating");
-    std::fs::write(root.join("z-pinned.md"), "pinned material\n").expect("pinned");
-    let commit = commit_all(&root, "bases");
+    std::fs::write(root.join("z-committed.md"), "committed material\n").expect("committed");
+    commit_all(&root, "bases");
+    // Never committed, so no commit holds it and it binds as dirty.
+    std::fs::write(root.join("a-uncommitted.md"), "uncommitted material\n").expect("uncommitted");
 
     write_rule(
         &root,
         "ordering",
-        &format!(
-            "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-floating.md\n  - path: z-pinned.md\n    commit: {commit}\n---\n\n# Ordering\n\nBoth bases matter.\n"
-        ),
+        "---\nid: ordering\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: a-uncommitted.md\n  - path: z-committed.md\n---\n\n# Ordering\n\nBoth bases matter.\n",
     );
 
     // Read order stays human-friendly: by path.
@@ -1842,11 +1845,12 @@ fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
             .iter()
             .map(|basis| basis.path.as_str())
             .collect::<Vec<_>>(),
-        vec!["a-floating.md", "z-pinned.md"],
+        vec!["a-uncommitted.md", "z-committed.md"],
     );
 
-    // Hashed order is canonical: the pinned basis carries a `commit` key, and
-    // `"commit"` precedes `"content"`, so it sorts first despite its path.
+    // Hashed order is canonical: the committed basis carries a string `commit`
+    // and the uncommitted one carries `null`, so it sorts first despite its
+    // path.
     let (mutation, precondition) = subject();
     let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
     assert_eq!(
@@ -1855,7 +1859,7 @@ fn an_unordered_set_is_hashed_in_canonical_byte_order_not_field_order() {
             .iter()
             .map(|basis| basis.path.as_str())
             .collect::<Vec<_>>(),
-        vec!["z-pinned.md", "a-floating.md"],
+        vec!["z-committed.md", "a-uncommitted.md"],
         "the hashed set is in canonical-bytes order, not path order"
     );
 }
@@ -1960,10 +1964,20 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     // true, the digest below is no longer proving what it claims and the case
     // needs sharpening rather than the assertion relaxing.
     //
-    // The pinned value moved when the discriminator and inner version left the
-    // hashed payload, which is what the frozen contract asks for and what makes
-    // every review digest a different number than the prototype produced.
-    // Nothing had been emitted, so nothing needed migrating.
+    // The pinned value has moved twice, both times because the hashed payload
+    // changed shape and never because the hashing did. First when the
+    // discriminator and inner version left it, per the frozen contract; then
+    // when ruling `5396557633` added exact provenance for the reviewed material
+    // — this rule file is not in Git, so it binds `commit: null`, `dirty: true`
+    // and a `content_sha256`.
+    //
+    // Then a third time, when `content_sha256` for a dirty Rule started
+    // covering the whole Rule file rather than only its body — two files with
+    // one body and different front matter had shared an identity.
+    //
+    // Verified outside the build each time: sha256sum over the 416 canonical
+    // bytes gives this value. Nothing has been emitted, so nothing needed
+    // migrating on any of the three.
     assert_ne!(
         serde_json::to_string(&mutation).expect("serde"),
         serde_jcs::to_string(&mutation).expect("jcs"),
@@ -1979,7 +1993,7 @@ fn the_binding_hash_is_rfc_8785_and_not_stable_serde_output() {
     .expect("bind");
     assert_eq!(
         bound.digest().expect("digest").to_string(),
-        "1:cf7558a1363c141ad5ea2ce69e744b92852b5dfe4a53f11aaf6fe97050fd701c",
+        "1:bee6d27b551372763d336541ae774c7b3e961e2fdfdc901d0c38b0de6b454953",
         "the review binding digest is ReviewDigestContract 1 over its RFC 8785 bytes"
     );
 
@@ -2134,4 +2148,597 @@ fn governance_and_the_verdict_are_answered_from_the_same_policy() {
             limit: 2
         })
     );
+}
+
+/// `commit` names the commit whose content *is* the reviewed material, and
+/// nothing else claims to.
+///
+/// Ruling `5396557633`. The failure it closes is quiet: recording the nearest
+/// committed baseline makes a proof say the reviewed material is at a commit
+/// that does not contain it, and a later verifier reconstructing from there
+/// gets different bytes and no warning.
+#[test]
+fn a_recorded_commit_is_the_one_that_holds_the_reviewed_material() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    let committed = commit_all(&root, "policy");
+
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    // Clean: the material is exactly what that commit holds, so it is bound.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(basis.commit.as_deref(), Some(committed.as_str()));
+    assert!(!basis.dirty);
+    assert_eq!(basis.content_sha256, None);
+
+    // Now edit the working tree without committing. The reviewed material is no
+    // longer what any commit holds, so the commit that *used* to hold it must
+    // not be recorded — HEAD gets no special treatment for being HEAD.
+    std::fs::write(root.join("policy.md"), "edited but not committed\n").expect("write");
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(
+        basis.commit, None,
+        "the parent of dirty content is not its commit"
+    );
+    assert!(basis.dirty);
+    assert_eq!(
+        basis.content_sha256.as_deref(),
+        Some(sha256_hex("edited but not committed\n").as_str()),
+        "identified by the exact material actually reviewed"
+    );
+    assert_eq!(
+        basis.content, "edited but not committed\n",
+        "and the live review is still bound to the exact bytes"
+    );
+
+    // Committing those exact bytes makes them locatable again.
+    let now = commit_all(&root, "policy again");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+    assert_eq!(basis.commit.as_deref(), Some(now.as_str()));
+    assert!(!basis.dirty);
+    assert_ne!(now, committed);
+}
+
+/// An unrelated commit does not move a review digest.
+///
+/// The recorded commit is the last one that touched the path, not `HEAD`. Both
+/// are exact; only one is stable. Binding `HEAD` would re-provenance every
+/// reviewed file on every commit, so a change elsewhere in the repository would
+/// invalidate proofs about material nobody touched.
+#[test]
+fn a_commit_that_touched_nothing_relevant_changes_no_review_identity() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+    // Both the rule and its basis are committed first, so the later commit is
+    // genuinely unrelated rather than the one that first records them.
+    commit_all(&root, "policy and rule");
+
+    let (mutation, precondition) = subject();
+    let before = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind")
+    .digest()
+    .expect("digest")
+    .to_string();
+
+    std::fs::write(root.join("unrelated.md"), "nothing to do with the rule\n").expect("write");
+    commit_all(&root, "unrelated");
+
+    let after = rules::bind(&root, Domain::Backlog, mutation, precondition)
+        .expect("bind")
+        .digest()
+        .expect("digest")
+        .to_string();
+    assert_eq!(
+        before, after,
+        "a commit that did not touch the path changes nothing"
+    );
+}
+
+/// The boundary is closed on both sides: the Rule's own material carries the
+/// same provenance as the material it rests on.
+///
+/// #25 says not to close it on one side only. A binding that placed every
+/// `based_on` exactly while saying nothing about the Rule file would leave the
+/// normative text — the part that decides the outcome — as the one input nobody
+/// could later locate.
+#[test]
+fn the_rule_file_carries_the_same_provenance_as_its_bases() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "as committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    // Nothing committed yet: both the rule and its basis are dirty.
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.dirty, "the rule file is not in git");
+    assert_eq!(rule.commit, None);
+    assert!(rule.content_sha256.is_some());
+    assert!(rule.based_on[0].dirty, "and neither is its basis");
+
+    // Commit both, and both become locatable.
+    let commit = commit_all(&root, "rule and basis");
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert_eq!(rule.commit.as_deref(), Some(commit.as_str()));
+    assert!(!rule.dirty);
+    assert_eq!(rule.content_sha256, None);
+    assert_eq!(rule.based_on[0].commit.as_deref(), Some(commit.as_str()));
+
+    // Edit only the rule: it goes dirty, its basis does not.
+    let source = rules::dir(&root).join("provenance.md");
+    let text = std::fs::read_to_string(&source).expect("read");
+    std::fs::write(&source, format!("{text}\nOne more line.\n")).expect("write");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.dirty, "the rule moved");
+    assert!(!rule.based_on[0].dirty, "the basis did not");
+}
+
+/// Dirty material is identified, never copied somewhere durable to make the
+/// proof replayable.
+///
+/// #25 is explicit, and the consequence is meant to be visible rather than
+/// papered over: once the material is gone, verification says so instead of
+/// reconstructing from a nearby commit.
+#[test]
+fn dirty_material_is_identified_and_not_copied() {
+    let (_dir, root) = workspace();
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("policy.md"), "never committed\n").expect("write");
+    write_rule(
+        &root,
+        "provenance",
+        "---\nid: provenance\napplies:\n  domains:\n    - backlog\nbased_on:\n  - path: policy.md\n---\n\n# Provenance\n\nBody.\n",
+    );
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let basis = &bound.rules()[0].based_on[0];
+
+    assert_eq!(
+        basis.content_sha256.as_deref(),
+        Some(sha256_hex("never committed\n").as_str()),
+        "the identity of the exact material"
+    );
+    // The only place the content itself appears is the live binding input,
+    // which is what the review is computed over. Nothing else retains it.
+    assert_eq!(basis.content, "never committed\n");
+    assert_eq!(basis.commit, None);
+}
+
+fn sha256_hex(text: &str) -> String {
+    engr::proof::sha256_of(text)
+}
+
+/// Provenance is looked up in one coordinate system, and it is the
+/// repository's.
+///
+/// `.engr` may live below the repository top level, and the two Git calls
+/// involved disagree about what a relative path means: `git show <commit>:<p>`
+/// resolves from the top level whatever `-C` says, while `git log -- <p>`
+/// applies the pathspec from the working directory. Run from `repo/sub`, a rule
+/// at `sub/.engr/rules/x.md` was therefore looked for at
+/// `sub/sub/.engr/rules/x.md`, and an unpinned basis `AGENTS.md` was looked for
+/// under `sub/` while its content had been read from the top.
+///
+/// Nothing matched, so material that was committed and clean reported itself as
+/// `dirty` with no commit — the wrong answer under ruling `5396557633`, and
+/// arrived at without any error to notice.
+///
+/// Both sides are checked, because the review found it on both: the Rule file
+/// itself and an unpinned `based_on`.
+#[test]
+fn provenance_is_resolved_from_the_repository_root_not_the_workspace() {
+    let dir = TempDir::new().expect("temp dir");
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    std::fs::create_dir_all(repo.join("sub")).expect("sub");
+    std::fs::write(repo.join("AGENTS.md"), "the repository contract\n").expect("basis");
+
+    let root = repo.join("sub");
+    store::init(&root).expect("init");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write_rule(
+        &root,
+        "nested",
+        "---\nid: nested\napplies:\n  domains: [backlog]\nbased_on:\n  - path: AGENTS.md\n---\n\n# Nested\n\nBody.\n",
+    );
+    let committed = commit_all(repo, "everything");
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert_eq!(
+        rule.commit.as_deref(),
+        Some(committed.as_str()),
+        "the rule file is committed and clean"
+    );
+    assert!(!rule.dirty);
+    assert_eq!(
+        rule.based_on[0].commit.as_deref(),
+        Some(committed.as_str()),
+        "and so is the basis it names"
+    );
+    assert!(!rule.based_on[0].dirty);
+
+    // And the dirty side still works from a subdirectory: editing the basis at
+    // the repository top level, which is the file the rule actually names.
+    std::fs::write(repo.join("AGENTS.md"), "edited, not committed\n").expect("edit");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.based_on[0].dirty, "the basis moved");
+    assert_eq!(rule.based_on[0].commit, None);
+    assert!(!rule.dirty, "and the rule file did not");
+}
+
+/// A direct library caller cannot obtain a Contract-1 review scalar for a
+/// descriptor the protocol does not define.
+///
+/// The CLI is not the trust boundary; the library is. `rules::bind` is public,
+/// and before this it would take any JSON with the right three outer member
+/// names and return a value labelled `ReviewDigestContract 1` — for an unfrozen
+/// operation, an operation carrying members of its own, or a target naming
+/// nothing.
+///
+/// The companion half is not testable from out here, and that is the point:
+/// `CandidateSubject` and `ReviewMutation` have private members, so the forging
+/// code in the earlier version of this test no longer compiles. Unreachable
+/// beats refused.
+#[test]
+fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
+    let (_dir, root) = workspace();
+    for mutation in [
+        serde_json::json!({"action": "section_revised"}),
+        serde_json::json!({
+            "operation": {"name": "not.a.frozen.operation", "parameters": {}},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+        serde_json::json!({
+            "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+    ] {
+        let refused = rules::bind(
+            &root,
+            Domain::Object,
+            mutation.clone(),
+            serde_json::json!({"expected_rev": 7}),
+        )
+        .expect_err("the untyped route is closed for this domain");
+        assert!(
+            refused.message.contains("bind_object"),
+            "{}",
+            refused.message
+        );
+
+        rules::rebind(
+            Domain::Object,
+            mutation,
+            serde_json::json!({"expected_rev": 7}),
+            Vec::new(),
+        )
+        .expect_err("and closed on the snapshot route too");
+    }
+
+    // Backlog still describes its own mutations, so the gate is per-domain
+    // rather than a shape imposed on everything.
+    let (mutation, precondition) = subject();
+    rules::bind(&root, Domain::Backlog, mutation, precondition).expect("backlog is not an object");
+}
+
+/// A dirty Rule is identified by the whole file, not by its normative body.
+///
+/// `content_sha256` names the artifact that was read. It hashed only
+/// `Rule.body` when the Rule sat outside Git, so two files with one body and
+/// different front matter shared an identity — provenance that cannot tell two
+/// files apart is not provenance.
+///
+/// The body is held fixed while other Rule-file bytes change, so this cannot
+/// pass by accident of the body moving too.
+#[test]
+fn a_dirty_rule_is_identified_by_its_whole_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let (mutation, precondition) = subject();
+    let bind = |root: &Path| {
+        rules::bind(
+            root,
+            Domain::Backlog,
+            mutation.clone(),
+            precondition.clone(),
+        )
+        .expect("bind")
+    };
+
+    let terse = "---\nid: shape\napplies:\n  domains: [backlog]\n---\n\n# Shape\n\nOne body.\n";
+    let verbose =
+        "---\nid: shape\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 5\n---\n\n# Shape\n\nOne body.\n";
+
+    write_rule(&root, "shape", terse);
+    let first = bind(&root).rules()[0].clone();
+    write_rule(&root, "shape", verbose);
+    let second = bind(&root).rules()[0].clone();
+
+    assert_eq!(first.body, second.body, "the normative text is unchanged");
+    assert_eq!(
+        first.review, second.review,
+        "and so are the effective values"
+    );
+    assert!(first.dirty && second.dirty, "neither is committed");
+    assert_eq!(
+        first.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(terse).as_str()),
+        "the identity is the whole file, front matter included"
+    );
+    assert_eq!(
+        second.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(verbose).as_str())
+    );
+    assert_ne!(first.content_sha256, second.content_sha256);
+}
+
+/// A Rule snapshot that could not have come from the frozen contract cannot be
+/// hashed as ReviewDigestContract 1.
+///
+/// The typed mutation builder closed one level; this is the level beneath it.
+/// `rebind_object` takes snapshots as *data* — they are read back from a
+/// candidate that stored them — so they cannot be made unconstructible the way
+/// the mutation types were. What they can be held to is the contract a resolved
+/// Rule satisfies.
+///
+/// Each case below is a Rule that could never exist, and each one previously
+/// produced a perfectly well-formed `1:` scalar.
+#[test]
+fn an_impossible_rule_snapshot_cannot_be_hashed_as_contract_one() {
+    let honest = engr::rules::BoundRule {
+        id: "honest".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "record what happened".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    honest.validate().expect("a rule that could exist");
+
+    type Break = fn(&mut engr::rules::BoundRule);
+    let cases: [(&str, Break); 8] = [
+        ("an id outside the grammar", |rule| {
+            rule.id = "INVALID!".to_owned()
+        }),
+        ("no applicable domain", |rule| rule.domains.clear()),
+        ("a ceiling of zero", |rule| rule.review.max_attempts = 0),
+        ("no normative text", |rule| rule.body.clear()),
+        ("committed and dirty at once", |rule| {
+            rule.commit = Some("d".repeat(40));
+        }),
+        ("neither committed nor dirty", |rule| {
+            rule.dirty = false;
+            rule.content_sha256 = None;
+        }),
+        ("dirty with no identity", |rule| rule.content_sha256 = None),
+        ("a body of whitespace", |rule| rule.body = " \t ".to_owned()),
+    ];
+
+    for (why, break_it) in cases {
+        let mut forged = honest.clone();
+        break_it(&mut forged);
+        forged.validate().expect_err(why);
+
+        let (before, after, payload) = object_transition();
+        let mutation =
+            engr::proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+        let refused = rules::rebind_object(&mutation, 1, vec![forged]).expect_err(why);
+        assert!(
+            refused.message.contains("rule snapshot"),
+            "{why}: refused, but not as a snapshot problem: {}",
+            refused.message
+        );
+    }
+}
+
+fn object_transition() -> (
+    engr::model::Object,
+    engr::model::Object,
+    engr::model::Payload,
+) {
+    let id = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f".to_owned();
+    let before = engr::model::Object::new(id.clone(), "a title".to_owned()).expect("object");
+    let mut after = before.clone();
+    after.rev = 1;
+    let payload = engr::model::Payload {
+        action: engr::model::Action::ObjectCreated,
+        object: id,
+        becomes: None,
+        content: engr::model::Content::default(),
+    };
+    (before, after, payload)
+}
+
+/// The snapshot set is the rules that *apply* to the domain being bound, and a
+/// set of identities.
+///
+/// Two holes, both one level past the last fix. `BoundRule::validate` required
+/// `domains` to be non-empty and canonical, which is not the same as
+/// applicable: a perfectly well-formed `[backlog]` Rule could be hashed into an
+/// Object binding that `bound_rules(root, Object)` could never have produced.
+/// And `canonical_set` rejects snapshots whose canonical *bytes* are equal,
+/// while two snapshots sharing one `id` with different bodies are not equal —
+/// so both survived, and a set held one Rule identity in two versions.
+#[test]
+fn a_snapshot_set_is_the_applicable_rules_and_holds_each_identity_once() {
+    let (before, after, payload) = object_transition();
+    let mutation =
+        engr::proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+
+    let applicable = engr::rules::BoundRule {
+        id: "applies".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "record what happened".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rules::rebind_object(&mutation, 1, vec![applicable.clone()]).expect("an applicable rule");
+
+    // Valid in itself, and not a rule of this domain.
+    let mut elsewhere = applicable.clone();
+    elsewhere.id = "elsewhere".to_owned();
+    elsewhere.domains = vec![Domain::Backlog];
+    elsewhere.validate().expect("valid as a rule");
+    let refused = rules::rebind_object(&mutation, 1, vec![elsewhere])
+        .expect_err("a backlog rule is not part of an object review");
+    assert!(
+        refused.message.contains("the set is the rules that apply"),
+        "{}",
+        refused.message
+    );
+
+    // One identity, two versions. Each is valid; the set is not.
+    let mut other_version = applicable.clone();
+    other_version.body = "record something else".to_owned();
+    other_version.validate().expect("valid as a rule");
+    assert_ne!(applicable.body, other_version.body);
+    let refused = rules::rebind_object(&mutation, 1, vec![applicable, other_version])
+        .expect_err("one rule id cannot appear twice");
+    assert!(
+        refused.message.contains("two versions"),
+        "{}",
+        refused.message
+    );
+}
+
+/// A whitespace-only body is no body, in a snapshot as in a Rule file.
+///
+/// The loader has always used `trim`, and the snapshot check used
+/// `is_empty` — so a Rule that could never be loaded could still be hashed. The
+/// snapshot contract has to be at least as strict as the value it claims to be
+/// a snapshot of.
+#[test]
+fn a_snapshot_body_is_as_strict_as_the_loader() {
+    let mut rule = engr::rules::BoundRule {
+        id: "blank".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "   \n\t\n".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rule.validate()
+        .expect_err("whitespace is not normative text");
+    rule.body = "something normative".to_owned();
+    rule.validate().expect("and this is");
+}
+
+/// A candidate subject names an identity, and the builder checks it is one.
+///
+/// `object_target` and `section_target` format strings; they do not ask whether
+/// the result denotes anything. So a payload naming `not-an-id`, or naming an
+/// Object that is not the one the states either side describe, or a Section
+/// numbered 0, produced a perfectly well-formed `CandidateDigestContract 1`
+/// over a target denoting nothing — and `object_review_mutation` delegates to
+/// the same builder, so it reached ReviewDigest too.
+#[test]
+fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
+    let (before, after, payload) = object_transition();
+    engr::proof::candidate_subject(&before, &after, &payload, None).expect("a real transition");
+
+    let mut malformed = payload.clone();
+    malformed.object = "not-an-id".to_owned();
+    engr::proof::candidate_subject(&before, &after, &malformed, None)
+        .expect_err("that is not an object id");
+
+    // Well-formed, and not the object either side describes.
+    let mut mismatched = payload.clone();
+    mismatched.object = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
+    let refused = engr::proof::candidate_subject(&before, &after, &mismatched, None)
+        .expect_err("a different object");
+    assert!(
+        refused.message.contains("states either side"),
+        "{}",
+        refused.message
+    );
+
+    // A section number that names no section.
+    let mut zero = payload.clone();
+    zero.action = engr::model::Action::SectionRevised { section: 0 };
+    engr::proof::candidate_subject(&before, &after, &zero, None)
+        .expect_err("section ids start at 1");
+
+    let mut oversize = payload;
+    oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
+    engr::proof::candidate_subject(&before, &after, &oversize, None)
+        .expect_err("past the shared safe-integer ceiling");
 }
