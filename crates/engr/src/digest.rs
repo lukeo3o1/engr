@@ -350,3 +350,23 @@ pub const CANDIDATE: Family = Family {
         SHA256_HEX,
     )],
 };
+
+/// The selective semantic dependency snapshot a Section Ref pins.
+///
+/// Field-local, like the others: this version namespace is `refs[].digest`'s
+/// alone and shares nothing with CandidateDigestContract or
+/// ReviewDigestContract. Version 1 is **undomained** — it hashes its canonical
+/// snapshot bytes with no kind or version prefix mixed in — so a later contract
+/// may add domain separation without redefining how a v1 value verifies.
+pub const REF: Family = Family {
+    name: "RefDigestContract",
+    current: 1,
+    versions: &[(
+        1,
+        Support {
+            emit: true,
+            verify: true,
+        },
+        SHA256_HEX,
+    )],
+};
