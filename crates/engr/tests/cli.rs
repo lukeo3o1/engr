@@ -2,7 +2,7 @@
 
 use engr::{
     gate,
-    model::{Action, Confirmation, Content, Event, Object, Payload, EVENT_FORMAT},
+    model::{Action, Content, Event, Object, Payload, Provenance, EVENT_FORMAT},
     ops, store,
 };
 use serde_json::Value;
@@ -238,10 +238,10 @@ fn reference_admission_uses_the_effective_target_projection() {
         rev: revision.candidate.binding.expected_rev + 1,
         time: "2026-08-17T00:00:00Z".to_owned(),
         payload: revision.candidate.payload.clone(),
-        confirmation: Confirmation {
-            challenge: revision.candidate.challenge.clone(),
-            payload_sha256: revision.candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            revision.candidate.challenge.clone(),
+            revision.candidate.payload_sha256.clone(),
+        ),
     };
     store::append_event(root, &revision_event).expect("append without projection");
     let effective = ops::effective_section(root, &target, 1).expect("effective target section");
@@ -651,7 +651,8 @@ fn migration_refuses_retained_events_that_cannot_reconcile_without_partial_rewri
             refs: Vec::new(),
             ..Content::default()
         };
-        event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+        event.provenance =
+            Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
         std::fs::write(&path, serde_json::to_vec(&event).expect("json")).expect("event");
     });
 }
@@ -791,6 +792,74 @@ fn runtime_and_migration_reject_the_same_future_event_gap() {
             path.display()
         );
     }
+}
+
+#[test]
+fn the_coordinated_phase_three_generation_is_implemented_and_not_written() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "durable boundary"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object").to_owned();
+    let section = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--text",
+            "wording",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &section);
+
+    // A version has exactly one canonical interpretation for current resources.
+    // Version 3 is being implemented in slices, so nothing here may claim it:
+    // not the authority, not a resource, not a record.
+    let authority: Value = serde_json::from_slice(
+        &std::fs::read(store::engr_dir(root).join("format.json")).expect("format"),
+    )
+    .expect("json");
+    assert_eq!(authority["version"], Value::from(engr::WORKSPACE_VERSION));
+    assert_ne!(
+        authority["version"],
+        Value::from(engr::PHASE_3_WORKSPACE_VERSION),
+        "an unfinished generation is never what a workspace says it is"
+    );
+
+    let object: Value =
+        serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
+            .expect("json");
+    let stored = object["sections"][0].as_object().expect("section");
+    assert!(stored.contains_key("confirmed_at"));
+    for absent in ["admission", "admitted_at", "sha256_object"] {
+        assert!(
+            !stored.contains_key(absent),
+            "{absent} belongs to the coordinated Phase-3 contract, which is not durable yet"
+        );
+    }
+
+    let events = std::fs::read_to_string(store::events_path(root, &id)).expect("events");
+    for line in events.lines() {
+        let event: Value = serde_json::from_str(line).expect("event");
+        assert_eq!(
+            event["version"],
+            Value::from(engr::EVENT_ENVELOPE_VERSION_V0)
+        );
+        assert!(event.get("admission").is_none());
+    }
+
+    // And the model that generation describes is nevertheless here, and works.
+    let loaded = store::load_object(root, &id).expect("object");
+    assert_eq!(
+        loaded.sections[0].admission,
+        engr::semantics::Admission::Human,
+        "at this version the human gate is the only door, so that is what every section came through"
+    );
+    assert!(!loaded.sections[0].admitted_at.is_empty());
 }
 
 #[test]
@@ -1260,17 +1329,17 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
         rev: 1,
         time: "2026-08-13T00:00:00Z".to_owned(),
         payload,
-        confirmation: Confirmation {
-            challenge: "234567".to_owned(),
-            payload_sha256,
-        },
+        provenance: Provenance::confirmed("234567", payload_sha256),
     };
     (workspace, root, event)
 }
 
+/// Written raw rather than appended, because the write boundary now refuses
+/// these too — and what is under test here is that a record which arrived by
+/// some other means is refused on the way back in.
 fn assert_event_is_rejected(root: &Path, event: Event) {
     let id = event.payload.object.clone();
-    store::append_event(root, &event).expect("write event");
+    append_raw(root, &id, &event);
     let output = run_engr(root, &["verify", &id]);
     assert_eq!(
         output.status.code(),
@@ -1278,6 +1347,17 @@ fn assert_event_is_rejected(root: &Path, event: Event) {
         "malformed events must be rejected as stored-data errors: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Append one record with no write-boundary checks, the way a hand edit, a
+/// restore or a merge resolution would put one there.
+fn append_raw(root: &Path, id: &str, event: &Event) {
+    let line = serde_json::to_string(event).expect("serialize event");
+    let path = store::events_path(root, id);
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }
 
 fn write_event_to(root: &Path, id: &str, event: &Event) {
@@ -1478,10 +1558,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             rev: 2,
             time: "2026-08-13T00:00:00Z".to_owned(),
             payload,
-            confirmation: Confirmation {
-                challenge: "234567".to_owned(),
-                payload_sha256,
-            },
+            provenance: Provenance::confirmed("234567", payload_sha256),
         },
     )
     .expect("append unprojected event");
@@ -1528,7 +1605,26 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
 fn unsupported_event_versions_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
     event.version += 1;
-    assert_event_is_rejected(&root, event);
+    let id = event.payload.object.clone();
+
+    // Refused on the way in, so nothing writes one...
+    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        !store::events_path(&root, &id).exists(),
+        "nothing was written"
+    );
+
+    // ...and refused on the way out, because a file can arrive by other means
+    // than this build writing it.
+    write_event_to(&root, &id, &event);
+    let output = run_engr(&root, &["verify", &id]);
+    assert_eq!(
+        output.status.code(),
+        Some(engr::EXIT_SCHEMA),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -1536,7 +1632,8 @@ fn events_must_belong_to_their_object_file() {
     let (_workspace, root, mut event) = event_workspace();
     let path_id = event.payload.object.clone();
     event.payload.object = engr::model::new_id();
-    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    event.provenance =
+        Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
     write_event_to(&root, &path_id, &event);
     let output = run_engr(&root, &["verify", &path_id]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
@@ -1546,22 +1643,23 @@ fn events_must_belong_to_their_object_file() {
 fn invalid_event_payloads_are_rejected() {
     let (_workspace, root, mut event) = event_workspace();
     event.payload.content.text.clear();
-    event.confirmation.payload_sha256 = event.payload.sha256().expect("payload hash");
+    event.provenance =
+        Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
     assert_event_is_rejected(&root, event);
 }
 
 #[test]
 fn event_confirmation_hashes_are_verified() {
     let (_workspace, root, mut event) = event_workspace();
-    event.confirmation.payload_sha256 = "0".repeat(64);
+    event.provenance = Provenance::confirmed("234567", "0".repeat(64));
     assert_event_is_rejected(&root, event);
 }
 
 #[test]
 fn duplicate_event_revisions_are_rejected() {
     let (_workspace, root, event) = event_workspace();
-    store::append_event(&root, &event).expect("write first event");
-    store::append_event(&root, &event).expect("write duplicate event");
+    append_raw(&root, &event.payload.object.clone(), &event);
+    append_raw(&root, &event.payload.object.clone(), &event);
     let output = run_engr(&root, &["verify", &event.payload.object]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }
@@ -1569,10 +1667,10 @@ fn duplicate_event_revisions_are_rejected() {
 #[test]
 fn event_revisions_must_be_contiguous_within_history() {
     let (_workspace, root, event) = event_workspace();
-    store::append_event(&root, &event).expect("write first event");
+    append_raw(&root, &event.payload.object.clone(), &event);
     let mut skipped = event.clone();
     skipped.rev += 2;
-    store::append_event(&root, &skipped).expect("write skipped event");
+    append_raw(&root, &event.payload.object.clone(), &skipped);
     let output = run_engr(&root, &["verify", &event.payload.object]);
     assert_eq!(output.status.code(), Some(engr::EXIT_SCHEMA));
 }

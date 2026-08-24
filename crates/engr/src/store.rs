@@ -12,7 +12,9 @@
 //!   collections/<id>.json    planning metadata, confirmed by nobody
 //! ```
 
-use crate::model::{replay_recoverable_tail, Action, Event, Object, EVENT_FORMAT};
+use crate::model::{
+    replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
+};
 use crate::{
     ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION_V0, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
@@ -475,6 +477,25 @@ pub fn load_object(root: &Path, id: &str) -> Result<Object> {
 pub fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
+    // Model state with no representation at this version fails closed rather
+    // than being serialized away. `Section.admission` is not persisted yet, so
+    // writing an Agent Section would drop the one field that says these words
+    // carry no human authority — and reading the same bytes back would answer
+    // `human`, because at this version the Human Gate is the only door there is.
+    //
+    // That is laundering, not lost presentation: the authority would be
+    // manufactured by a round trip. Nothing in this build produces an Agent
+    // Section yet, which is exactly why the boundary belongs here now, while the
+    // only thing it can refuse is a mistake.
+    for section in &object.sections {
+        ensure!(
+            section.admission == crate::semantics::Admission::Human,
+            EXIT_SCHEMA,
+            "§{}: {} admission has no representation at workspace version {WORKSPACE_VERSION}, and writing it would read back as human",
+            section.id,
+            section.admission.as_str()
+        );
+    }
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -614,8 +635,230 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     }
 }
 
+/// A record may carry only the shapes its own generation defined.
+///
+/// One rule, asked on the way in *and* on the way out, because those two are the
+/// same question and answering it in only one place is how they drift. Asked
+/// only at read, a write path appends history its own next read refuses. Asked
+/// only at write, a file that arrived some other way is replayed under rules it
+/// was never written against.
+///
+/// What it currently excludes is the merge that names the Section surviving it.
+/// That belongs to the Event generation the coordinated Phase-3 transition
+/// targets; the model implements it, and nothing writes it. A record carrying it
+/// under the generation this build does emit would be claiming that version
+/// means something it does not, and replaying it would reconstruct a different
+/// Object from the one that was admitted.
+/// Members this generation's writers have legitimately omitted, at one time or
+/// another, without the record meaning anything different.
+///
+/// `based_on` is the one with history behind it: an absent basis was spelled
+/// `null` before it became an absent field, and every event emitted then still
+/// says so. The rest are optional semantic members this build omits when they
+/// carry nothing, so a record that spells one out explicitly is saying the same
+/// thing the longer way.
+///
+/// A list of what may be *absent from the model's own output*, never a list of
+/// what is forbidden. Forgetting to extend this one refuses a spelling; a list
+/// of forbidden keys, forgotten, accepts a field from a generation this build
+/// does not implement — and only one of those two mistakes is safe.
+const OMISSIBLE_EVENT_MEMBERS: &[&str] = &["becomes", "role", "content", "based_on", "relations"];
+
+/// Nothing in the stored bytes went missing on the way into the typed model.
+///
+/// `Event` cannot use `deny_unknown_fields`: its payload is flattened, and serde
+/// forbids the two together. So the check is done against what the decode
+/// produced — every member the record carries must be one the model has a place
+/// for, and must survive with its value intact.
+///
+/// It has to happen *before* anything reads the decoded value, because the
+/// dropped member is exactly the one that would have said the record is not of
+/// this generation. A record carrying admission provenance is not a record of
+/// the generation that had only one door; dropping that member leaves the stored
+/// `payload_sha256` verifying, since it was never inside the payload, and replay
+/// then reports `human` for bytes that said `agent`. Reconciliation can make
+/// that reading authoritative after a crash.
+///
+/// What it must **not** do is treat the current serializer's single spelling as
+/// the whole historical read contract. History is read under its own contract
+/// and is never rewritten, so a member this build omits today but wrote
+/// yesterday is a valid record, not an unknown field.
+fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Result<()> {
+    let decoded = serde_json::to_value(event)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+    let (stored, decoded) = match (stored.as_object(), decoded.as_object()) {
+        (Some(stored), Some(decoded)) => (stored, decoded),
+        _ => return Err(Error::new(EXIT_SCHEMA, "event must be a JSON object")),
+    };
+    for (member, value) in stored {
+        match decoded.get(member) {
+            Some(kept) => ensure!(
+                kept == value,
+                EXIT_SCHEMA,
+                "{member} did not survive being read, so this record does not mean what it says"
+            ),
+            None => ensure!(
+                OMISSIBLE_EVENT_MEMBERS.contains(&member.as_str()),
+                EXIT_SCHEMA,
+                "{member} is not a member this generation defines, so this record is not one of its records"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Everything a record must satisfy to belong in this store, asked on the way in
+/// and on the way out.
+///
+/// One function rather than two lists kept in step by hand. A write path that
+/// checks less than the read path is a write path that can append history
+/// nothing loads — which is the same self-corrupting asymmetry whichever member
+/// it is, so the whole contract moves together rather than the parts of it that
+/// happened to be noticed.
+///
+/// `stored` is the raw bytes when there are any. Appending has no raw form yet,
+/// and needs none: a value that came from this build's own model cannot be
+/// carrying a member the model has no place for.
+fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value>) -> Result<()> {
+    ensure!(
+        event.format == EVENT_FORMAT,
+        EXIT_SCHEMA,
+        "not an engr event"
+    );
+    if let Some(stored) = stored {
+        check_nothing_was_dropped(stored, event)?;
+    }
+    check_event_generation(event)?;
+    ensure!(
+        event.payload.object == id,
+        EXIT_SCHEMA,
+        "event belongs to object {:?}, not {:?}",
+        event.payload.object,
+        id
+    );
+    event.payload.validate().map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("invalid event payload: {}", error.message),
+        )
+    })?;
+    let payload_sha256 = event.payload.sha256().map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("invalid event payload: {}", error.message),
+        )
+    })?;
+    // The retained generation identifies its mutation by hashing it. The
+    // mixed-authority generation names the semantic transition instead, so this
+    // is asked of the shape that has it rather than of every record.
+    if let Some(confirmation) = event.confirmation() {
+        ensure!(
+            confirmation.payload_sha256 == payload_sha256,
+            EXIT_SCHEMA,
+            "confirmation does not match the event payload"
+        );
+    }
+    event.provenance.validate()?;
+    Ok(())
+}
+
+fn check_event_generation(event: &Event) -> Result<()> {
+    // The generation itself, before anything about its contents. Leaving this to
+    // the read side alone was the same asymmetry one level up: a record naming a
+    // generation this build does not emit could be written and then refused by
+    // the very next read of the log it was written to.
+    ensure!(
+        event.version == EVENT_ENVELOPE_VERSION_V0,
+        EXIT_SCHEMA,
+        "unsupported event version {}",
+        event.version
+    );
+    ensure!(
+        !matches!(
+            &event.payload.action,
+            Action::SectionMerged {
+                merge: Merge::Into { .. }
+            }
+        ),
+        EXIT_SCHEMA,
+        "event version {} does not define a merge that names the section surviving it",
+        event.version
+    );
+    // The tagged admission structure belongs to the same generation the merge
+    // shape does, and for the same reason it is implemented and not written: a
+    // record carrying it under the generation this build emits would be saying
+    // this version means something it does not.
+    ensure!(
+        !matches!(event.provenance, Provenance::Tagged { .. }),
+        EXIT_SCHEMA,
+        "event version {} does not define tagged admission provenance",
+        event.version
+    );
+    Ok(())
+}
+
+/// Append one confirmed record, taking the workspace writer lock.
+///
+/// The lock belongs here rather than at the caller because the check this
+/// function performs is about the file it is about to write: it reads the tail
+/// to refuse a revision the next load would reject, and a read-then-append with
+/// nothing held between them is two writers agreeing on the same predecessor and
+/// both appending it. That is the exact durable boundary this path exists to
+/// keep sound, so leaving the serialization to whoever happens to call is
+/// leaving it to chance.
+///
+/// [`append_event_locked`] is the same work for a caller that already holds the
+/// lock — `confirm` does, and taking it again from the same process would wait
+/// on a lock nothing will release.
 pub fn append_event(root: &Path, event: &Event) -> Result<()> {
-    let path = events_path(root, &event.payload.object);
+    with_lock(root, || append_event_locked(root, event))
+}
+
+/// [`append_event`] for a caller already inside [`with_lock`].
+pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
+    // The durable Event path is part of the workspace-generation boundary, and a
+    // direct library caller reaches it without passing the gate. Asked here as
+    // well as there, because "this build may write this workspace" is a property
+    // of the workspace rather than of the route taken to it.
+    require_current(root)?;
+    // Before anything is written, and before the Object is saved — `confirm`
+    // appends here first, so refusing at this point leaves the workspace exactly
+    // as it was rather than advanced past history it could not record.
+    check_event_record(event, &event.payload.object, None)?;
+    let id = &event.payload.object;
+    let path = events_path(root, id);
+    // Continuity against what is already there, which is the one part of the
+    // read contract that is about the file rather than the record. Reading the
+    // tail is the cost of not being able to append a revision the next load
+    // would refuse.
+    let mut tail = load_events(root, id)?;
+    if let Some(last) = tail.last() {
+        ensure!(
+            last.rev.checked_add(1) == Some(event.rev),
+            EXIT_SCHEMA,
+            "event rev {} does not immediately follow rev {}",
+            event.rev,
+            last.rev
+        );
+    }
+    // And that the history this produces is one the record can actually be
+    // arrived at through. A record can be well formed, contiguous and still
+    // impossible: revising a Section that does not exist, or beginning a history
+    // with something no Object comes from. `.engr/events` is append-only and is
+    // never purged, so such a record is not a mistake anybody can take back — it
+    // durably breaks every read that reconstructs the Object, and it breaks
+    // crash recovery, which is the one thing this file is for.
+    //
+    // The same check the store already applies to a retained tail, asked before
+    // the tail exists rather than after, and inside the same lock so what is
+    // validated is what gets written.
+    tail.push(event.clone());
+    let object = match load_object(root, id) {
+        Ok(object) => Some(object),
+        Err(error) if error.code == EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
+    validate_recoverable_tail(id, object, &tail)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
@@ -642,67 +885,28 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         if line.trim().is_empty() {
             continue;
         }
-        let event: Event = serde_json::from_str(line).map_err(|error| {
+        let stored: serde_json::Value = serde_json::from_str(line).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}:{}: {error}", path.display(), index + 1),
             )
         })?;
-        ensure!(
-            event.format == EVENT_FORMAT,
-            EXIT_SCHEMA,
-            "{}:{}: not an engr event",
-            path.display(),
-            index + 1
-        );
+        let event: Event = serde_json::from_value(stored.clone()).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {error}", path.display(), index + 1),
+            )
+        })?;
         // Reconciliation can turn an event back into authority after a crash,
-        // so corrupt recovery data must fail before it reaches the reducer.
-        ensure!(
-            event.version == EVENT_ENVELOPE_VERSION_V0,
-            EXIT_SCHEMA,
-            "{}:{}: unsupported event version {}",
-            path.display(),
-            index + 1,
-            event.version
-        );
-        ensure!(
-            event.payload.object == id,
-            EXIT_SCHEMA,
-            "{}:{}: event belongs to object {:?}, not {:?}",
-            path.display(),
-            index + 1,
-            event.payload.object,
-            id
-        );
-        event.payload.validate().map_err(|error| {
+        // so corrupt recovery data must fail before it reaches the reducer — and
+        // it fails against the same rules the write boundary applied, rather
+        // than a second copy of them kept in step by hand.
+        check_event_record(&event, id, Some(&stored)).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
-                format!(
-                    "{}:{}: invalid event payload: {}",
-                    path.display(),
-                    index + 1,
-                    error.message
-                ),
+                format!("{}:{}: {}", path.display(), index + 1, error.message),
             )
         })?;
-        let payload_sha256 = event.payload.sha256().map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "{}:{}: invalid event payload: {}",
-                    path.display(),
-                    index + 1,
-                    error.message
-                ),
-            )
-        })?;
-        ensure!(
-            event.confirmation.payload_sha256 == payload_sha256,
-            EXIT_SCHEMA,
-            "{}:{}: confirmation does not match the event payload",
-            path.display(),
-            index + 1
-        );
         if let Some(previous) = events.last() {
             ensure!(
                 previous.rev.checked_add(1) == Some(event.rev),

@@ -4,7 +4,7 @@
 //! against the exact response. There is no unconfirmed write path.
 
 use crate::model::{
-    canonical_object_id, project, Action, Confirmation, Content, Event, Object, Payload,
+    canonical_object_id, project, Action, Content, Event, Object, Payload, Provenance,
     CANDIDATE_FORMAT, EVENT_FORMAT,
 };
 use crate::semantics::{self, Relation, RelationType, Role, Supplement, Target};
@@ -278,7 +278,9 @@ pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateSt
                     .into_iter()
                     .find(|event| {
                         event.rev == applied_rev
-                            && event.confirmation.payload_sha256 == candidate.payload_sha256
+                            && event.confirmation().is_some_and(|confirmation| {
+                                confirmation.payload_sha256 == candidate.payload_sha256
+                            })
                     })
                 {
                     return Ok(CandidateState::AlreadyApplied(Box::new(event)));
@@ -475,18 +477,22 @@ fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String
 /// Deferring that check is what let one mistyped id in the previous design
 /// poison a global health check permanently.
 pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Admission::Normal)
+    prepare_admitting(root, payload, Allowance::Normal)
 }
 
 /// Prepare a proposal that broke a normal size threshold, after a first attempt
 /// was already refused.
 pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
-    prepare_admitting(root, payload, Admission::Oversize)
+    prepare_admitting(root, payload, Allowance::Oversize)
 }
 
 /// How much this proposal is allowed to be.
+///
+/// Not to be confused with [`crate::semantics::Admission`], which says which
+/// door a Section came through. This one is about size, and about one proposal
+/// rather than about the record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Admission {
+pub enum Allowance {
     /// Normal thresholds apply, and breaking one is refused.
     Normal,
     /// The explicit retry of a refusal, admitting this one proposal past a
@@ -500,11 +506,11 @@ pub enum Admission {
 /// admission and Backlog bookkeeping are two independent operations, so a
 /// candidate carries no declared source and confirming one settles nothing in
 /// staging by itself.
-pub fn prepare_admitting(root: &Path, payload: Payload, admission: Admission) -> Result<Prepared> {
+pub fn prepare_admitting(root: &Path, payload: Payload, allowance: Allowance) -> Result<Prepared> {
     // Refuse legacy workspaces before opening the writer lock: even creating a
     // lock file would violate their explicit read-only migration boundary.
     store::require_current(root)?;
-    store::with_lock(root, move || prepare_locked(root, payload, admission))
+    store::with_lock(root, move || prepare_locked(root, payload, allowance))
 }
 
 /// Which proposals engr has refused for size, so an explicit retry can prove it
@@ -528,7 +534,7 @@ struct Refusals {
 
 const REFUSALS_REMEMBERED: usize = 32;
 
-/// The two-stage admission enforced, rather than described.
+/// The two-stage size allowance enforced, rather than described.
 ///
 /// #14 says the first `prepare` above a normal threshold MUST refuse and only an
 /// explicit retry may ask for the exception. A flag cannot carry that on its
@@ -537,8 +543,8 @@ const REFUSALS_REMEMBERED: usize = 32;
 /// proposal, byte for byte. The payload is already canonical here, so the same
 /// wording written against a different basis is a different proposal and earns
 /// its own refusal first.
-fn check_admission(root: &Path, payload: &Payload, admission: Admission) -> Result<()> {
-    let oversize = admission == Admission::Oversize;
+fn check_allowance(root: &Path, payload: &Payload, allowance: Allowance) -> Result<()> {
+    let oversize = allowance == Allowance::Oversize;
     let breaches = semantics::exceeded(&payload.content.text, &payload.content.content);
     let hard = breaches.iter().any(|item| item.hard);
 
@@ -609,8 +615,25 @@ fn spend_refusal(root: &Path, payload_sha256: &str) -> Result<()> {
 /// Resolve each declared source and pin what it currently says.
 ///
 /// Refused up front, like every other precondition at this gate: a candidate
-fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Result<Prepared> {
+fn prepare_locked(root: &Path, mut payload: Payload, allowance: Allowance) -> Result<Prepared> {
     store::require_current(root)?;
+    // Here, not in `Payload::validate`: that runs when events are loaded, and
+    // the model has to keep being able to project a merge that names its
+    // survivor. What it may not do is *admit* one — that representation belongs
+    // to the Event generation the coordinated Phase-3 transition targets, and
+    // nothing writes that generation yet. Admitting one here would append a
+    // record claiming version 1 while carrying a shape version 1 never defined,
+    // and it would do it after a human had confirmed it.
+    if let Action::SectionMerged {
+        merge: crate::model::Merge::Into { .. },
+    } = &payload.action
+    {
+        return Err(Error::new(
+            EXIT_INVARIANT,
+            "a merge that names the section surviving it belongs to the coordinated Phase-3 Event generation, which is implemented but not yet written"
+                .to_owned(),
+        ));
+    }
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
     // A title is the line a listing prints, so whitespace around it is never
@@ -657,13 +680,13 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
     // workspace holding a Section admitted under an exception has to keep being
     // able to replay its own history.
     if payload.action.carries_content() && !payload.action.carries_title() {
-        check_admission(root, &payload, admission)?;
+        check_allowance(root, &payload, allowance)?;
     } else {
         // Nothing here is measured against a Section threshold, so an exception
         // would be one the candidate claims and no refusal ever granted — a
         // screen saying engr already refused this when it never did.
         ensure!(
-            admission == Admission::Normal,
+            allowance == Allowance::Normal,
             EXIT_USAGE,
             "{} carries no Section content, so there is no size exception to make",
             payload.action.label()
@@ -709,10 +732,13 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         (Action::SectionDeleted { section }, Some(object)) => {
             Some(object.section(*section)?.text.clone())
         }
-        (Action::SectionMerged { absorbs }, Some(object)) => {
+        (Action::SectionMerged { merge }, Some(object)) => {
+            // Every participant, survivor first, because the survivor's own
+            // wording is being replaced too. Showing only what is consumed
+            // would present a merge as if the destination were untouched.
             let mut parts = Vec::new();
-            for id in absorbs {
-                parts.push(format!("§{id}: {}", object.section(*id)?.text.trim_end()));
+            for id in merge.participants() {
+                parts.push(format!("§{id}: {}", object.section(id)?.text.trim_end()));
             }
             Some(parts.join("\n"))
         }
@@ -752,10 +778,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
             rev: trial.rev + 1,
             time: now(),
             payload: payload.clone(),
-            confirmation: Confirmation {
-                challenge: String::new(),
-                payload_sha256: String::new(),
-            },
+            provenance: Provenance::confirmed(String::new(), String::new()),
         };
         project(&mut trial, &probe)?;
         trial
@@ -774,7 +797,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         previous_content: previous.content,
         previous_relations: previous.relations,
         previous_semantics_recorded: matches!(payload.action, Action::SectionRevised { .. }),
-        oversize: admission == Admission::Oversize,
+        oversize: allowance == Allowance::Oversize,
         object_title: object
             .as_ref()
             .map(|object| object.title.clone())
@@ -813,7 +836,7 @@ fn prepare_locked(root: &Path, mut payload: Payload, admission: Admission) -> Re
         &store::candidate_path(root, &candidate.challenge)?,
         &candidate,
     )?;
-    if admission == Admission::Oversize {
+    if allowance == Allowance::Oversize {
         spend_refusal(root, &candidate.payload_sha256)?;
     }
 
@@ -945,13 +968,69 @@ fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a merge that would consume a Section something still points at.
+///
+/// v1 has no redirect, no tombstone and no automatic rewrite of an inbound Ref,
+/// and adding one would be inventing a forwarding semantics nobody agreed to —
+/// so the only honest answer is to refuse the merge and let whoever holds the
+/// reference decide what it should say now. A consumed id is never reused, so
+/// the alternative is a reference pinned to wording that no longer exists
+/// anywhere, pointing at an id that will never exist again.
+///
+/// The merge's own participants are excluded, and precisely: the sources are
+/// removed by this same operation, and the destination's content is replaced
+/// wholesale by the wording being confirmed. Their current references do not
+/// survive it, so counting them would refuse merges that leave nothing dangling.
+/// What the destination's *new* wording may point at is checked below, with the
+/// self-reference rule it is a case of.
+fn check_consumed_sections_are_unreferenced(root: &Path, payload: &Payload) -> Result<()> {
+    let Action::SectionMerged { merge } = &payload.action else {
+        return Ok(());
+    };
+    let consumed = merge.consumed();
+    let participants = merge.participants();
+    for id in store::object_ids(root)? {
+        let object = ops::effective(root, &id)?;
+        for section in &object.sections {
+            if object.id == payload.object && participants.contains(&section.id) {
+                continue;
+            }
+            for reference in &section.refs {
+                ensure!(
+                    reference.object != payload.object
+                        || !consumed.contains(&reference.section),
+                    EXIT_INVARIANT,
+                    "§{} of {} depends on §{}, which this merge would consume; a consumed id is never reused, so revise that reference first",
+                    section.id,
+                    object.id,
+                    reference.section
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_refs(root: &Path, payload: &Payload) -> Result<()> {
+    check_consumed_sections_are_unreferenced(root, payload)?;
     for reference in &payload.content.refs {
         if let Action::SectionRevised { section } = payload.action {
             ensure!(
                 reference.object != payload.object || reference.section != section,
                 EXIT_INVARIANT,
                 "section §{section} cannot directly reference itself"
+            );
+        }
+        // The same rule, for the wording a merge produces. A Section cannot rest
+        // on something this very operation is about to remove — including the
+        // destination itself, which after the merge is what this wording *is*.
+        if let Action::SectionMerged { merge } = &payload.action {
+            ensure!(
+                reference.object != payload.object
+                    || !merge.participants().contains(&reference.section),
+                EXIT_INVARIANT,
+                "the merged wording cannot depend on §{}, which this merge consumes or replaces",
+                reference.section
             );
         }
         let section = ops::effective_section(root, &reference.object, reference.section).map_err(
@@ -1073,7 +1152,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             });
         }
         CandidateState::Stale { current_rev } => {
-            crate::confirmation::admission(
+            crate::confirmation::classify_retry(
                 &candidate.binding.expected_rev,
                 &current_rev,
                 false,
@@ -1089,7 +1168,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             Err(error) => return Err(error),
         },
     };
-    crate::confirmation::admission(
+    crate::confirmation::classify_retry(
         &candidate.binding.expected_rev,
         &object.rev,
         false,
@@ -1107,10 +1186,10 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         rev: object.rev + 1,
         time: now(),
         payload: candidate.payload.clone(),
-        confirmation: Confirmation {
-            challenge: candidate.challenge.clone(),
-            payload_sha256: candidate.payload_sha256.clone(),
-        },
+        provenance: Provenance::confirmed(
+            candidate.challenge.clone(),
+            candidate.payload_sha256.clone(),
+        ),
     };
 
     project(&mut object, &event)?;
@@ -1127,7 +1206,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             candidate.context.oversize,
         )?;
     }
-    store::append_event(root, &event)?;
+    store::append_event_locked(root, &event)?;
     store::save_object(root, &object)?;
     discard_locked(root, code)?;
     Ok(Admitted { event, object })

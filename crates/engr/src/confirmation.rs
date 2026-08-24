@@ -150,7 +150,7 @@ pub enum Response<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Admission {
+pub enum Application {
     Apply,
     AlreadyApplied,
 }
@@ -226,17 +226,17 @@ pub fn valid_challenge(code: &str) -> bool {
 
 /// Classify retry before applying. A domain supplies its own binding comparison
 /// and durable-history lookup; the shared gate owns the never-apply-twice rule.
-pub fn admission<B: Eq + Display>(
+pub fn classify_retry<B: Eq + Display>(
     expected: &B,
     current: &B,
     already_applied: bool,
     authority: &str,
-) -> Result<Admission> {
+) -> Result<Application> {
     if already_applied {
-        return Ok(Admission::AlreadyApplied);
+        return Ok(Application::AlreadyApplied);
     }
     ensure_fresh(expected, current, authority)?;
-    Ok(Admission::Apply)
+    Ok(Application::Apply)
 }
 
 pub fn ensure_fresh<T: Eq + Display>(expected: &T, current: &T, authority: &str) -> Result<()> {
@@ -296,24 +296,24 @@ mod tests {
             "presentation context is covered by candidate integrity"
         );
         assert_eq!(
-            admission(
+            classify_retry(
                 &candidate.binding.resolver_fingerprint,
                 &"before".to_owned(),
                 false,
                 "alias registry"
             )
             .expect("fresh"),
-            Admission::Apply
+            Application::Apply
         );
         assert_eq!(
-            admission(
+            classify_retry(
                 &candidate.binding.resolver_fingerprint,
                 &"after".to_owned(),
                 true,
                 "alias registry"
             )
             .expect("retry"),
-            Admission::AlreadyApplied
+            Application::AlreadyApplied
         );
     }
 }
