@@ -489,3 +489,130 @@ fn a_reseal_after_an_authorized_mutation_is_the_normal_case() {
     check_object_integrity(&admitted.object, &admitted.seal).expect("sealed over what it now says");
     reseal(&admitted.object, &admitted.seal).expect("and reseals to itself unchanged");
 }
+
+/// P3 renames one persisted member and adds one the v2 shape does not write.
+///
+/// Listed rather than inferred, because both are exactly the kind of difference
+/// that makes a name-based coverage check quietly vacuous.
+const RENAMED_IN_PHASE_3: &[(&str, &str)] = &[("confirmed_at", "admitted_at")];
+
+/// Persisted members the seal deliberately does not cover, each with a reason
+/// the contract gives.
+const NOT_SEALED: &[(&str, &str)] = &[
+    ("sha256", "a seal cannot cover itself"),
+    (
+        "format",
+        "#31 removes the legacy per-resource marker from current Objects",
+    ),
+    (
+        "version",
+        "the workspace version comes only from .engr/format.json",
+    ),
+];
+
+fn members(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_object()
+        .expect("a resource is a JSON object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn covered(persisted: &[String], sealed: &[String], what: &str) {
+    for member in persisted {
+        if let Some((_, reason)) = NOT_SEALED.iter().find(|(name, _)| name == member) {
+            let _ = reason;
+            continue;
+        }
+        let expected = RENAMED_IN_PHASE_3
+            .iter()
+            .find(|(from, _)| from == member)
+            .map(|(_, to)| (*to).to_owned())
+            .unwrap_or_else(|| member.clone());
+        assert!(
+            sealed.contains(&expected),
+            "the persisted {what} writes {member:?} and the seal projection does not cover it; \
+             add it to the projection, or to NOT_SEALED with the reason it is excluded"
+        );
+    }
+}
+
+/// Every member the persisted shape writes is either under the seal or on a
+/// list saying why it is not.
+///
+/// The claim "`Object.sha256` covers every stable persisted Object field except
+/// itself" is otherwise enforced by nobody: add a field to `Object` and the
+/// projection silently stops covering it, every existing test still passes, and
+/// the new field is one a hand-edit can change without detection. #31 says the
+/// omission of `next_section_id` from illustrative lists was not an exclusion —
+/// this is what stops the next such omission from being one.
+///
+/// Deliberately a list of exclusions rather than a list of inclusions: forget
+/// to extend it and the test fails, which is the direction that fails safe.
+#[test]
+fn no_persisted_field_escapes_the_seal() {
+    // Everything optional is populated, so nothing is missing merely because it
+    // was empty and skipped.
+    let mut section = section(1);
+    section.content = vec![Supplement::new("data.note", "a note")];
+    section.based_on = Some("a".repeat(40));
+    section.refs = vec![reference(2)];
+    section.relations = vec![Relation::superseded_by(object_id())];
+    section.sha256 = seal_of_section(&section);
+
+    let persisted = members(&serde_json::to_value(&section).expect("persisted section"));
+    let sealed = members(
+        &serde_json::to_value(sealed_section(&section).expect("project")).expect("projection"),
+    );
+    assert!(
+        persisted.contains(&"sha256".to_owned()),
+        "the fixture must exercise the excluded member too: {persisted:?}"
+    );
+    covered(&persisted, &sealed, "section");
+
+    let mut object = object();
+    object.sections = vec![section];
+    object.object_type = Some(ObjectType::Decision);
+    object.legacy_format = Some("engr-object".to_owned());
+    object.legacy_version = Some(1);
+
+    let persisted = members(&serde_json::to_value(&object).expect("persisted object"));
+    let sealed = members(
+        &serde_json::to_value(sealed_object(&object).expect("project")).expect("projection"),
+    );
+    assert!(
+        persisted.contains(&"format".to_owned()) && persisted.contains(&"version".to_owned()),
+        "the fixture must exercise the legacy markers: {persisted:?}"
+    );
+    covered(&persisted, &sealed, "object");
+}
+
+/// The same question for the nested Section representation the aggregate
+/// carries: it holds the Section's own members plus the seal, and nothing else.
+#[test]
+fn the_nested_representation_covers_the_same_members_plus_the_seal() {
+    let mut section = section(1);
+    section.based_on = Some("a".repeat(40));
+    section.sha256 = seal_of_section(&section);
+    let mut object = object();
+    object.sections = vec![section.clone()];
+
+    let projected = sealed_object(&object).expect("project");
+    let nested = members(&projected.sections[0]);
+    let sealed = members(
+        &serde_json::to_value(sealed_section(&section).expect("project")).expect("projection"),
+    );
+
+    for member in &sealed {
+        assert!(
+            nested.contains(member),
+            "the nested form dropped {member:?}"
+        );
+    }
+    assert_eq!(
+        nested.len(),
+        sealed.len() + 1,
+        "and adds exactly one member, the seal: {nested:?}"
+    );
+}
