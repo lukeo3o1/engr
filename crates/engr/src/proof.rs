@@ -104,7 +104,42 @@ pub fn canonical_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))
 }
 
-fn sha256_of(bytes: &str) -> String {
+/// Put a persisted set in its protocol order, refusing canonical duplicates.
+///
+/// The protocol classifies every persisted array as `ordered` or `set`. A set
+/// is ordered by the JCS bytes of its own elements — **not** by `derive(Ord)`,
+/// struct declaration order, insertion order or anything else the host language
+/// happens to offer. Those all order by something a second implementation in
+/// another language cannot see, which is the one thing a canonical form may not
+/// depend on.
+///
+/// Sorting by one chosen field is the trap this replaces, and it is not
+/// obviously wrong: `based_on` sorted by `path` is deterministic and stable. It
+/// is still a different order, because canonical JSON sorts keys — so a basis's
+/// bytes begin with `commit`, and two conforming implementations that each
+/// picked a "natural" field would disagree on the same set.
+///
+/// Duplicates are rejected by the same bytes that order them, so two members
+/// that are canonically equal are refused even when the Rust values differ in
+/// some way the canonical form does not carry.
+pub fn canonical_set<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
+    let mut keyed: Vec<(String, T)> = Vec::with_capacity(items.len());
+    for item in std::mem::take(items) {
+        let canonical = canonical_bytes(&item, what)?;
+        keyed.push((canonical, item));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in keyed.windows(2) {
+        ensure!(
+            pair[0].0 != pair[1].0,
+            EXIT_SCHEMA,
+            "the same {what} appears twice"
+        );
+    }
+    items.extend(keyed.into_iter().map(|(_, item)| item));
+    Ok(())
+}
+pub(crate) fn sha256_of(bytes: &str) -> String {
     format!("{:x}", Sha256::digest(bytes.as_bytes()))
 }
 

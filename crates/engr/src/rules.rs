@@ -20,7 +20,7 @@
 //! file. Changing one changes what the *next* mutation must be reviewed
 //! against, and nothing already admitted.
 
-use crate::proof::{canonical_bytes, within_safe_integers};
+use crate::proof::{canonical_bytes, canonical_set, within_safe_integers};
 use crate::{
     ensure, git, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -1022,7 +1022,7 @@ impl ReviewBinding {
     /// pointing one at the other.
     ///
     /// The rule and basis lists were put in canonical order before they got
-    /// here; see [`canonical_order`].
+    /// here; see [`canonical_set`].
     pub fn digest(&self) -> Result<crate::digest::Versioned> {
         crate::digest::REVIEW.emit(self.digest_under(crate::digest::REVIEW.current)?)
     }
@@ -1073,38 +1073,6 @@ impl ReviewBinding {
     }
 }
 
-/// Put an unordered collection into the one order the protocol defines.
-///
-/// Canonicalize each element, sort by the lexicographic order of those canonical
-/// bytes, and refuse duplicates. That is the protocol-wide rule for any field
-/// whose semantics are a set, and it exists to keep implementation-specific
-/// ordering — Rust's `derive(Ord)`, struct declaration order, or sorting by
-/// whichever field seemed natural — out of a hash contract two implementations
-/// must agree on.
-///
-/// Sorting by one field is the trap this replaces, and it is not obviously
-/// wrong: `based_on` sorted by `path` is deterministic and stable. It is still a
-/// different order, because canonical JSON sorts keys, so a basis's bytes begin
-/// with `commit` rather than `path`. Two conforming implementations would then
-/// hash the same rule differently.
-fn canonical_order<T: Serialize>(items: &mut Vec<T>, what: &str) -> Result<()> {
-    let mut keyed: Vec<(String, T)> = Vec::with_capacity(items.len());
-    for item in std::mem::take(items) {
-        let canonical = canonical_bytes(&item, what)?;
-        keyed.push((canonical, item));
-    }
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    for pair in keyed.windows(2) {
-        ensure!(
-            pair[0].0 != pair[1].0,
-            EXIT_SCHEMA,
-            "the same {what} appears twice"
-        );
-    }
-    items.extend(keyed.into_iter().map(|(_, item)| item));
-    Ok(())
-}
-
 /// Hold a binding's two caller-supplied arguments to the shape its domain
 /// froze, where the domain has frozen one.
 ///
@@ -1144,7 +1112,7 @@ pub fn rebind(
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
     let mut rules = rules;
-    canonical_order(&mut rules, "rule")?;
+    canonical_set(&mut rules, "rule")?;
     Ok(ReviewBinding {
         domain,
         mutation,
@@ -1202,9 +1170,9 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         // `Rule::based_on` is kept in path order for reading; the *hashed* order
         // is this one, because the two answer different questions and only one
         // of them is a contract.
-        canonical_order(&mut based_on, "basis")?;
+        canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
-        canonical_order(&mut domains, "domain")?;
+        canonical_set(&mut domains, "domain")?;
         bound.push(BoundRule {
             id: rule.id,
             domains,
@@ -1213,7 +1181,7 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
             body: rule.body,
         });
     }
-    canonical_order(&mut bound, "applicable rule")?;
+    canonical_set(&mut bound, "applicable rule")?;
     Ok(bound)
 }
 

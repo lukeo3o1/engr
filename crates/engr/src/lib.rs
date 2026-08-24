@@ -10,6 +10,7 @@ pub mod confirmation;
 pub mod digest;
 pub mod gate;
 pub mod git;
+pub mod integrity;
 pub mod model;
 pub mod ops;
 pub mod proof;
