@@ -2358,3 +2358,70 @@ fn dirty_material_is_identified_and_not_copied() {
 fn sha256_hex(text: &str) -> String {
     engr::proof::sha256_of(text)
 }
+
+/// Provenance is looked up in one coordinate system, and it is the
+/// repository's.
+///
+/// `.engr` may live below the repository top level, and the two Git calls
+/// involved disagree about what a relative path means: `git show <commit>:<p>`
+/// resolves from the top level whatever `-C` says, while `git log -- <p>`
+/// applies the pathspec from the working directory. Run from `repo/sub`, a rule
+/// at `sub/.engr/rules/x.md` was therefore looked for at
+/// `sub/sub/.engr/rules/x.md`, and an unpinned basis `AGENTS.md` was looked for
+/// under `sub/` while its content had been read from the top.
+///
+/// Nothing matched, so material that was committed and clean reported itself as
+/// `dirty` with no commit — the wrong answer under ruling `5396557633`, and
+/// arrived at without any error to notice.
+///
+/// Both sides are checked, because the review found it on both: the Rule file
+/// itself and an unpinned `based_on`.
+#[test]
+fn provenance_is_resolved_from_the_repository_root_not_the_workspace() {
+    let dir = TempDir::new().expect("temp dir");
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    std::fs::create_dir_all(repo.join("sub")).expect("sub");
+    std::fs::write(repo.join("AGENTS.md"), "the repository contract\n").expect("basis");
+
+    let root = repo.join("sub");
+    store::init(&root).expect("init");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write_rule(
+        &root,
+        "nested",
+        "---\nid: nested\napplies:\n  domains: [backlog]\nbased_on:\n  - path: AGENTS.md\n---\n\n# Nested\n\nBody.\n",
+    );
+    let committed = commit_all(repo, "everything");
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = &bound.rules()[0];
+    assert_eq!(
+        rule.commit.as_deref(),
+        Some(committed.as_str()),
+        "the rule file is committed and clean"
+    );
+    assert!(!rule.dirty);
+    assert_eq!(
+        rule.based_on[0].commit.as_deref(),
+        Some(committed.as_str()),
+        "and so is the basis it names"
+    );
+    assert!(!rule.based_on[0].dirty);
+
+    // And the dirty side still works from a subdirectory: editing the basis at
+    // the repository top level, which is the file the rule actually names.
+    std::fs::write(repo.join("AGENTS.md"), "edited, not committed\n").expect("edit");
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
+    let rule = &bound.rules()[0];
+    assert!(rule.based_on[0].dirty, "the basis moved");
+    assert_eq!(rule.based_on[0].commit, None);
+    assert!(!rule.dirty, "and the rule file did not");
+}

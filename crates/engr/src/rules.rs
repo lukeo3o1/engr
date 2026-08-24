@@ -233,8 +233,20 @@ struct Provenance {
 
 impl Provenance {
     fn of(root: &Path, path: &str, reviewed: &str) -> Self {
-        let committed = git::last_commit_for(root, Path::new(path))
-            .filter(|commit| git::blob_at(root, commit, path).as_deref() == Some(reviewed));
+        // Both lookups run from the repository top level, because that is the
+        // coordinate system the path is already in.
+        //
+        // They did not, and the two disagreed silently. `git show <commit>:<p>`
+        // resolves from the top level whatever `-C` says, while `git log -- <p>`
+        // applies the pathspec from the working directory — so with `.engr` in
+        // `repo/sub`, a rule at `sub/.engr/rules/x.md` was looked for at
+        // `sub/sub/.engr/rules/x.md` and an unpinned basis `AGENTS.md` was
+        // looked for under `sub/` while its content had been read from the top.
+        // Nothing matched, so committed material reported itself as dirty:
+        // the wrong answer, arrived at without any error.
+        let project = project_root(root);
+        let committed = git::last_commit_for(&project, Path::new(path))
+            .filter(|commit| git::blob_at(&project, commit, path).as_deref() == Some(reviewed));
         match committed {
             Some(commit) => Self {
                 commit: Some(commit),
