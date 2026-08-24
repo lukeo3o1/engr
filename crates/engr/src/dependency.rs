@@ -447,6 +447,43 @@ enum Historical {
     IntegrityFailure,
 }
 
+/// Require an object id to name a commit itself, not something that peels to
+/// one.
+///
+/// `is_canonical_git_oid` says the id is well formed; it cannot say what kind
+/// of object it is. An annotated tag has its own 40- or 64-character object id,
+/// and every path that reads history peels it silently: `git rev-parse
+/// <oid>^{commit}` resolves it, and `git show <tag-oid>:<path>` returns the
+/// blob from the commit behind it.
+///
+/// So without this, a Ref could store the tag's id as its `commit` while its
+/// `values` came from a different id entirely. The digest would be perfectly
+/// stable and would attest the wrong kind of identity — and #35 §6 is specific
+/// that `commit` is the exact full native Git object id *used for the
+/// historical snapshot*, with commit OIDs persisted in native full form.
+///
+/// An id this repository does not have is **not** refused here. That is a
+/// question about provenance, and the callers already answer it — admission
+/// fails and read-time reports it — so answering it twice, differently, is how
+/// the two would drift apart.
+fn check_commit_identity(root: &Path, commit: &str) -> Result<()> {
+    ensure!(
+        crate::model::is_canonical_git_oid(commit),
+        EXIT_SCHEMA,
+        "a reference pins a full resolved Git object id, not {commit:?}"
+    );
+    match crate::git::object_type(root, commit).as_deref() {
+        Some("commit") | None => Ok(()),
+        Some(other) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{commit} names a {other} object; a reference pins the commit itself, \
+                 not something that resolves to one"
+            ),
+        )),
+    }
+}
+
 /// Resolve the target as it stood at one commit, and **verify it** before
 /// handing it back as authority.
 ///
@@ -545,11 +582,7 @@ pub fn admit(
     // 3.
     let fields = canonical_fields(fields)?;
     // 4 + 5.
-    ensure!(
-        crate::model::is_canonical_git_oid(commit),
-        EXIT_SCHEMA,
-        "a reference pins a full resolved Git object id"
-    );
+    check_commit_identity(root, commit)?;
     let then = match historical_section(root, commit, &current.id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => {
@@ -625,6 +658,11 @@ pub fn evaluate(
     if crate::integrity::check_object_integrity(current, current_seal).is_err() {
         return Ok(Dependency::TargetIntegrityFailure);
     }
+    // A stored `commit` that is not a commit id is malformed Ref data, not a
+    // dependency outcome — the same treatment a malformed target already gets
+    // above. Reporting it as one of §9's states would put a verdict on a
+    // reference that does not say what it depends on.
+    check_commit_identity(root, &reference.commit)?;
     let then = match historical_section(root, &reference.commit, &id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),

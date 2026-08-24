@@ -661,6 +661,110 @@ mod against_a_workspace {
         .expect("untouched history is still authority");
     }
 
+    fn rev_parse(root: &Path, revision: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", revision])
+            .output()
+            .expect("rev-parse");
+        assert!(out.status.success(), "rev-parse {revision}");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    }
+
+    fn object_type(root: &Path, oid: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["cat-file", "-t", oid])
+            .output()
+            .expect("cat-file");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    }
+
+    /// A reference pins the commit itself, not something that resolves to one.
+    ///
+    /// An annotated tag has its own object id, full-length hex like any other,
+    /// and every path that reads history peels it silently — `git show
+    /// <tag-oid>:<path>` returns the blob from the commit behind it. So before
+    /// this check, admitting against a tag id succeeded and stored the *tag's*
+    /// id as `commit` while the `values` came from the commit it pointed at:
+    /// a stable digest attesting the wrong kind of identity.
+    ///
+    /// Well-formedness cannot catch it. `is_canonical_git_oid` says the id is
+    /// 40 or 64 lowercase hex characters, which a tag id is. Only asking the
+    /// repository what kind of object it is separates them.
+    #[test]
+    fn a_reference_pins_a_commit_and_not_a_tag_that_points_at_one() {
+        let (_dir, root, object, commit) = workspace();
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "tag",
+                "-a",
+                "v1",
+                "-m",
+                "annotated",
+            ],
+        );
+        let tag = rev_parse(&root, "v1");
+        assert_eq!(object_type(&root, &tag), "tag", "an annotated tag object");
+        assert_ne!(tag, commit, "with an id of its own");
+        assert_eq!(
+            rev_parse(&root, "v1^{commit}"),
+            commit,
+            "that peels to the commit"
+        );
+
+        let (current, seal) = phase_three_seals(&object);
+        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tag)
+            .expect_err("the tag is not the commit");
+        assert!(
+            refused.to_string().contains("names a tag object"),
+            "{refused}"
+        );
+
+        // The peeled commit id is accepted, so this refuses the wrong identity
+        // rather than refusing tagged history.
+        let reference = admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit)
+            .expect("the commit itself");
+        assert_eq!(reference.commit, commit);
+
+        // And the read path fails closed on a stored Ref that names the tag.
+        let stored = SelectiveRef {
+            commit: tag,
+            ..reference
+        };
+        evaluate(&root, &current, &seal, &stored).expect_err("not a commit id");
+    }
+
+    /// A tree id is full-length hex too, and `git show <tree>:<path>` reads
+    /// straight through it — so the same check has to refuse it.
+    #[test]
+    fn a_tree_id_is_not_a_commit_either() {
+        let (_dir, root, object, commit) = workspace();
+        let tree = rev_parse(&root, &format!("{commit}^{{tree}}"));
+        assert_eq!(object_type(&root, &tree), "tree");
+
+        let (current, seal) = phase_three_seals(&object);
+        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tree)
+            .expect_err("a tree is not a commit");
+        assert!(
+            refused.to_string().contains("names a tree object"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn a_target_must_be_a_canonical_section_identity() {
         parse_target(&target()).expect("canonical");
