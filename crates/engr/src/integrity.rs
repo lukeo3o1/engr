@@ -35,6 +35,7 @@ use crate::proof::{canonical_bytes, canonical_set, sha256_of};
 use crate::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// The canonical persisted Section representation, minus its own seal.
 ///
@@ -348,7 +349,30 @@ pub fn check_mechanical_reseal(before: &Object, after: &Object) -> Result<()> {
         EXIT_INVARIANT,
         "a mechanical reseal cannot add or remove a section"
     );
-    for (before, after) in before.sections.iter().zip(&after.sections) {
+    // Paired by `Section.id`, never by array position. The protocol
+    // canonicalizes `sections[]` by id and says incidental stored order is not
+    // integrity meaning — so a positional walk would call a pure reordering a
+    // semantic change, and refuse the exact representation-only rewrite this
+    // permission exists to authorize.
+    let mut after_by_id: BTreeMap<u64, &Section> = BTreeMap::new();
+    for section in &after.sections {
+        ensure!(
+            after_by_id.insert(section.id, section).is_none(),
+            EXIT_INVARIANT,
+            "section {} appears twice in the resealed object",
+            section.id
+        );
+    }
+    for before in &before.sections {
+        let after = after_by_id.get(&before.id).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "a mechanical reseal cannot change which sections exist; {} is gone",
+                    before.id
+                ),
+            )
+        })?;
         ensure!(
             before.admission == after.admission,
             EXIT_INVARIANT,

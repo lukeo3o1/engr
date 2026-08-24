@@ -616,3 +616,33 @@ fn the_nested_representation_covers_the_same_members_plus_the_seal() {
         "and adds exactly one member, the seal: {nested:?}"
     );
 }
+
+/// A representation-only rewrite may reorder the stored `sections[]` array,
+/// because the protocol canonicalizes it by `Section.id` and says incidental
+/// array position is not integrity meaning. The equivalence guard has to prove
+/// semantic equality under *that* identity, not under input position — or the
+/// one operation it exists to authorize is the one it refuses.
+#[test]
+fn reordered_sections_are_the_same_object_to_the_equivalence_guard() {
+    let forward = object();
+    let mut backward = forward.clone();
+    backward.sections.reverse();
+
+    assert_eq!(
+        seal_of(&forward),
+        seal_of(&backward),
+        "the contract already says these are one object"
+    );
+    check_mechanical_reseal(&forward, &backward).expect("so the guard must agree");
+
+    // And it still catches a real change hiding behind a reorder.
+    let mut edited = backward.clone();
+    let last = edited.sections.len() - 1;
+    edited.sections[last].text = "changed while shuffled".to_owned();
+    check_mechanical_reseal(&forward, &edited).expect_err("reordering is not cover");
+
+    // A section replaced by a duplicate of another is not a reorder either.
+    let mut duplicated = forward.clone();
+    duplicated.sections[1] = duplicated.sections[0].clone();
+    check_mechanical_reseal(&forward, &duplicated).expect_err("section 2 is gone");
+}
