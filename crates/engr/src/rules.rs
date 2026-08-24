@@ -789,15 +789,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
     let front: FrontMatter = serde_norway::from_str(front)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{where_}: {error}")))?;
 
-    ensure!(
-        !front.id.is_empty()
-            && front.id.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            }),
-        EXIT_SCHEMA,
-        "{where_}: rule id {:?} is not canonical; v1 ids are [a-z0-9-]+",
-        front.id
-    );
+    check_rule_id(&front.id, &where_)?;
 
     let mut domains = Vec::new();
     for name in &front.applies.domains {
@@ -1021,6 +1013,150 @@ pub struct BoundRule {
     pub content_sha256: Option<String>,
 }
 
+/// The v1 rule-id grammar, in one place so the loader and the snapshot check
+/// cannot drift.
+fn check_rule_id(id: &str, what: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty()
+            && id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }),
+        EXIT_SCHEMA,
+        "{what}: rule id {id:?} is not canonical; v1 ids are [a-z0-9-]+"
+    );
+    Ok(())
+}
+impl BoundRule {
+    /// Hold one snapshot to the frozen Rule contract before it can be hashed.
+    ///
+    /// Validation rather than privacy, unlike [`crate::proof::CandidateSubject`]
+    /// and [`crate::proof::ReviewMutation`]. Those are always computed, so they
+    /// can be made unconstructible; a Rule snapshot arrives **as data**, read
+    /// back from a candidate that stored it, so there is no construction path
+    /// to route it through. What can be required is that it satisfies the same
+    /// contract a resolved Rule does.
+    ///
+    /// Without this, `rebind_object` would take an arbitrary `Vec<BoundRule>`
+    /// and hand back a scalar labelled `ReviewDigestContract 1` over a Rule
+    /// that could never exist: an id outside the grammar, no applicable domain,
+    /// a ceiling of zero, or provenance contradicting itself. Closing the
+    /// mutation side and leaving the snapshot side open would have moved the
+    /// forgery one level down rather than out.
+    pub fn validate(&self) -> Result<()> {
+        check_rule_id(&self.id, "rule snapshot")?;
+        ensure!(
+            !self.domains.is_empty(),
+            EXIT_SCHEMA,
+            "rule snapshot {}: a rule that applies to no domain governs nothing",
+            self.id
+        );
+        ensure!(
+            self.domains == canonical_domains(&self.domains)?,
+            EXIT_SCHEMA,
+            "rule snapshot {}: domains are a protocol set and arrive in canonical order",
+            self.id
+        );
+        ensure!(
+            self.review.max_attempts >= 1,
+            EXIT_SCHEMA,
+            "rule snapshot {}: a review gets at least one attempt; there is no ceiling of zero",
+            self.id
+        );
+        ensure!(
+            !self.body.is_empty(),
+            EXIT_SCHEMA,
+            "rule snapshot {}: a rule with no normative text asks for nothing",
+            self.id
+        );
+        check_material_provenance(
+            self.commit.as_deref(),
+            self.dirty,
+            self.content_sha256.as_deref(),
+            &format!("rule snapshot {}", self.id),
+        )?;
+        for basis in &self.based_on {
+            check_material_provenance(
+                basis.commit.as_deref(),
+                basis.dirty,
+                basis.content_sha256.as_deref(),
+                &format!("rule snapshot {} basis {}", self.id, basis.path),
+            )?;
+        }
+        ensure!(
+            self.based_on == canonical_bases(&self.based_on)?,
+            EXIT_SCHEMA,
+            "rule snapshot {}: bases are a protocol set and arrive in canonical order",
+            self.id
+        );
+        Ok(())
+    }
+}
+
+/// The provenance members are three views of one fact, so they agree or the
+/// snapshot is refused.
+///
+/// Ruled at #25 `5396557633`: material either has a commit that holds it, or is
+/// dirty and identified by hash. A snapshot claiming both, or neither, is
+/// describing a state the contract does not define.
+fn check_material_provenance(
+    commit: Option<&str>,
+    dirty: bool,
+    content_sha256: Option<&str>,
+    what: &str,
+) -> Result<()> {
+    match (commit, dirty) {
+        (Some(commit), false) => {
+            ensure!(
+                crate::model::is_canonical_git_oid(commit),
+                EXIT_SCHEMA,
+                "{what}: {commit:?} is not a full resolved Git object id"
+            );
+            ensure!(
+                content_sha256.is_none(),
+                EXIT_SCHEMA,
+                "{what}: material a commit holds is located by that commit, not also by a hash"
+            );
+            Ok(())
+        }
+        (None, true) => {
+            let hash = content_sha256.ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{what}: dirty material is identified by content_sha256"),
+                )
+            })?;
+            ensure!(
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                EXIT_SCHEMA,
+                "{what}: content_sha256 is 64 lowercase hex characters"
+            );
+            Ok(())
+        }
+        (Some(_), true) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{what}: material cannot be both held by a commit and dirty"),
+        )),
+        (None, false) => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{what}: material with no commit is dirty, and says so"),
+        )),
+    }
+}
+
+fn canonical_domains(domains: &[Domain]) -> Result<Vec<Domain>> {
+    let mut domains = domains.to_vec();
+    canonical_set(&mut domains, "domain")?;
+    Ok(domains)
+}
+
+fn canonical_bases(bases: &[ResolvedBasis]) -> Result<Vec<ResolvedBasis>> {
+    let mut bases = bases.to_vec();
+    canonical_set(&mut bases, "basis")?;
+    Ok(bases)
+}
 /// The compact diagnostic Backlog records when it admits an exhausted mutation.
 ///
 /// Deliberately two numbers. It exists to say "this went in without a passing
@@ -1300,8 +1436,7 @@ pub fn rebind_object(
     rules: Vec<BoundRule>,
 ) -> Result<ReviewBinding> {
     let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
-    let mut rules = rules;
-    canonical_set(&mut rules, "rule")?;
+    let rules = checked_snapshots(rules)?;
     Ok(ReviewBinding {
         domain: Domain::Object,
         mutation,
@@ -1327,6 +1462,18 @@ fn object_binding_inputs(
     Ok((mutation, precondition))
 }
 
+/// Every snapshot a caller hands in, held to the frozen Rule contract and put
+/// in protocol set order.
+///
+/// One place, so the two rebind entry points cannot enforce different amounts.
+fn checked_snapshots(rules: Vec<BoundRule>) -> Result<Vec<BoundRule>> {
+    for rule in &rules {
+        rule.validate()?;
+    }
+    let mut rules = rules;
+    canonical_set(&mut rules, "rule")?;
+    Ok(rules)
+}
 /// Rebuild a binding from Rule snapshots somebody else already resolved.
 ///
 /// The counterpart to [`bind`], which reads the workspace. This one takes what
@@ -1347,8 +1494,7 @@ pub fn rebind(
     check_domain_shape(domain, &mutation, &precondition)?;
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
-    let mut rules = rules;
-    canonical_set(&mut rules, "rule")?;
+    let rules = checked_snapshots(rules)?;
     Ok(ReviewBinding {
         domain,
         mutation,
@@ -1409,25 +1555,32 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
         canonical_set(&mut domains, "domain")?;
-        // The Rule's own provenance, by the same rule as its bases. Read from
-        // the file that was actually loaded, so a Rule edited in the working
-        // tree says it is dirty rather than borrowing the commit its last
-        // version was in.
+        // The Rule's own provenance, by the same rule as its bases. The file is
+        // read either way: `content_sha256` identifies the exact Rule-file
+        // bytes, and only the *commit lookup* depends on the file being inside
+        // the repository.
+        //
+        // It hashed `rule.body` when there was no repository path, which
+        // dropped the front matter from the artifact identity — two Rule files
+        // with one body and different front matter would have shared an
+        // identity, and this member is supposed to say which file was read.
+        let text = std::fs::read_to_string(&rule.source).map_err(|error| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "rule {}: {} could not be read: {error}",
+                    rule.id,
+                    rule.source.display()
+                ),
+            )
+        })?;
         let provenance = match rule_relative_path(root, &rule.source) {
-            Some(path) => match std::fs::read_to_string(&rule.source) {
-                Ok(text) => Provenance::of(root, &path, &text),
-                Err(error) => {
-                    return Err(Error::new(
-                        EXIT_NOT_FOUND,
-                        format!("rule {}: {} could not be read: {error}", rule.id, path),
-                    ))
-                }
-            },
+            Some(path) => Provenance::of(root, &path, &text),
             // Outside the repository entirely, so no commit can hold it. Not a
             // refusal: a Rule read from outside a Git working tree is still a
             // Rule, and saying "no commit has this" is the true answer rather
             // than an evasion.
-            None => Provenance::dirty(&rule.body),
+            None => Provenance::dirty(&text),
         };
         bound.push(BoundRule {
             id: rule.id,
