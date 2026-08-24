@@ -186,12 +186,24 @@ pub fn canonical_fields(fields: &[SemanticField]) -> Result<Vec<SemanticField>> 
 
 /// Exactly what RefDigestContract 1 hashes (#35 §6).
 ///
-/// Four members and no others, in the shape the contract writes out. It is
-/// spelled as a struct so the bytes come from one place, and #35 is explicit
-/// that this must not be replaced by "tuple concatenation, host-struct
+/// Four members and no others, in the shape the contract writes out. #35 is
+/// explicit that this must not be replaced by "tuple concatenation, host-struct
 /// serialization, field declaration order or an equivalent-looking alternative
 /// object shape" — the example's key order is explanatory, and JCS decides the
 /// real one.
+///
+/// **The members are private and there is one constructor.** They were public
+/// once, and that made every contract rule in this module advisory: a caller
+/// could assemble an empty `fields`, a `values` map that did not match it, a
+/// target that names nothing and a five-character commit, and still get a
+/// perfectly well-formed `1:<sha256>` back. A digest over an illegal snapshot
+/// is worse than no digest, because it verifies — against itself, forever, and
+/// against nothing any other implementation would compute.
+///
+/// So the validation lives at construction rather than before each hash. That
+/// is not the same as running a check inside `digest_under`: a check can be
+/// skipped by a second entry point somebody adds later, while a value that
+/// cannot be built wrong has no second entry point to add.
 ///
 /// `values` is **not persisted inside the Ref**. It is reconstructed from the
 /// target at the exact `commit` whenever the digest is computed or checked, so
@@ -199,13 +211,29 @@ pub fn canonical_fields(fields: &[SemanticField]) -> Result<Vec<SemanticField>> 
 /// names.
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct RefSnapshot {
-    pub target: String,
-    pub fields: Vec<SemanticField>,
-    pub values: Map<String, Value>,
-    pub commit: String,
+    target: String,
+    fields: Vec<SemanticField>,
+    values: Map<String, Value>,
+    commit: String,
 }
 
 impl RefSnapshot {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn fields(&self) -> &[SemanticField] {
+        &self.fields
+    }
+
+    pub fn values(&self) -> &Map<String, Value> {
+        &self.values
+    }
+
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+
     /// The versioned scalar this snapshot hashes to: `1:<64 lowercase hex>`.
     pub fn digest(&self) -> Result<crate::digest::Versioned> {
         crate::digest::REF.emit(self.digest_under(crate::digest::REF.current)?)
@@ -229,28 +257,43 @@ impl RefSnapshot {
 
 /// Build the hash input for one selection over one historical Section.
 ///
-/// The `values` keys are derived from `fields`, never supplied alongside them.
-/// #35 requires "no missing selected key, no unselected extra key", and the way
-/// to guarantee that is to make the two impossible to state separately.
+/// The only way to obtain a [`RefSnapshot`], and therefore the one place every
+/// Contract-1 rule is enforced:
+///
+/// - the target is a canonical Section identity, parsed rather than trusted;
+/// - the commit is a full native Git object id, not an abbreviation;
+/// - `fields` is non-empty, duplicate-free and in protocol set order;
+/// - `values` keys are *derived from* `fields`, never supplied beside them.
+///
+/// That last one is why "no missing selected key, no unselected extra key" is
+/// not a rule anyone can forget to apply: there is no argument through which a
+/// mismatched `values` could arrive.
 pub fn ref_snapshot(
     target: impl Into<String>,
     fields: &[SemanticField],
     section: &Section,
     commit: impl Into<String>,
 ) -> Result<RefSnapshot> {
+    let target = target.into();
+    parse_target(&target)?;
+    let commit = commit.into();
+    ensure!(
+        crate::model::is_canonical_git_oid(&commit),
+        EXIT_SCHEMA,
+        "a reference snapshot pins a full resolved Git object id, not {commit:?}"
+    );
     let fields = canonical_fields(fields)?;
     let mut values = Map::new();
     for field in &fields {
         values.insert(field.as_str().to_owned(), semantic_value(section, *field)?);
     }
     Ok(RefSnapshot {
-        target: target.into(),
+        target,
         fields,
         values,
-        commit: commit.into(),
+        commit,
     })
 }
-
 /// What a Ref's dependency looks like when it is read (#35 §9).
 ///
 /// Kept as distinct outcomes rather than a boolean, because they call for

@@ -102,7 +102,7 @@ fn two_references_to_one_target_can_disagree_about_staleness() {
 fn birth_and_read_agree_by_construction() {
     let section = section();
     let snapshot = snapshot(&section, &[SemanticField::Text, SemanticField::Role]);
-    check_not_stale_at_birth(&section, &section, &snapshot.fields).expect("not stale");
+    check_not_stale_at_birth(&section, &section, snapshot.fields()).expect("not stale");
     assert_eq!(
         compare(&snapshot, &digest_of(&snapshot), &section).expect("compare"),
         Dependency::Unchanged
@@ -123,7 +123,7 @@ fn the_snapshot_is_the_four_member_object_the_contract_writes_out() {
     );
 
     let values = members["values"].as_object().expect("values");
-    let selected: Vec<&str> = snapshot.fields.iter().map(|f| f.as_str()).collect();
+    let selected: Vec<&str> = snapshot.fields().iter().map(|f| f.as_str()).collect();
     assert_eq!(
         values.keys().map(String::as_str).collect::<Vec<_>>(),
         selected,
@@ -321,6 +321,69 @@ fn every_moved_field_is_named() {
     );
 }
 
+/// Every Contract-1 rule is enforced where a snapshot is built, because that is
+/// the only place a snapshot can come from.
+///
+/// The defect this replaces: `RefSnapshot` once had public members, so every
+/// rule in the module was advisory. An empty selection, a target naming
+/// nothing and a five-character commit produced a perfectly well-formed
+/// `1:<sha256>` — a digest that verifies against itself forever and against
+/// nothing any other implementation would compute.
+///
+/// Missing and extra `values` keys are absent from this list on purpose: they
+/// are no longer reachable to test. `values` is derived from `fields` inside
+/// the constructor, so there is no argument through which a mismatched map
+/// could arrive. The nearest check is
+/// `the_snapshot_is_the_four_member_object_the_contract_writes_out`, which
+/// asserts the keys are exactly the selection.
+#[test]
+fn an_illegal_snapshot_cannot_be_built_and_therefore_cannot_be_hashed() {
+    let section = section();
+
+    // A target that is not a canonical Section identity.
+    for target in [
+        "not a target",
+        "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "obj:not-a-uuid:1",
+        "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:0",
+        "",
+    ] {
+        ref_snapshot(target, &[SemanticField::Text], &section, commit()).expect_err(target);
+    }
+
+    // A commit that is not a full native Git object id.
+    for oid in ["short", "", &"d".repeat(39), &"g".repeat(40), "HEAD"] {
+        let refused = ref_snapshot(target(), &[SemanticField::Text], &section, oid).expect_err(oid);
+        assert!(
+            refused.to_string().contains("full resolved Git object id"),
+            "{oid}: {refused}"
+        );
+    }
+
+    // An empty selection, and one that names a fact twice.
+    ref_snapshot(target(), &[], &section, commit()).expect_err("no implicit full reference");
+    ref_snapshot(
+        target(),
+        &[SemanticField::Text, SemanticField::Text],
+        &section,
+        commit(),
+    )
+    .expect_err("one fact selected twice is not two facts");
+
+    // The legal case still works, and abbreviating its commit does not.
+    ref_snapshot(target(), &[SemanticField::Text], &section, commit()).expect("legal");
+    ref_snapshot(target(), &[SemanticField::Text], &section, &commit()[..8])
+        .expect_err("an abbreviation is not the object id");
+}
+
+/// A 64-character (SHA-256) Git object id is as legal as a 40-character one:
+/// #35 says commits are persisted in their native full repository form, so a
+/// check that assumed SHA-1 would refuse every Ref in a SHA-256 repository.
+#[test]
+fn a_sha256_repository_object_id_is_a_full_object_id() {
+    ref_snapshot(target(), &[SemanticField::Text], &section(), "a".repeat(64))
+        .expect("native full form, whichever algorithm the repository uses");
+}
 mod against_a_workspace {
     use super::*;
     use engr::dependency::{admit, evaluate, parse_target, SelectiveRef};
