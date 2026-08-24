@@ -319,14 +319,33 @@ pub struct Operation {
 /// proof that did not say so would be a proof of a different act.
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct CandidateSubject {
-    pub operation: Operation,
-    pub target: String,
-    pub before: serde_json::Value,
-    pub after: serde_json::Value,
-    pub review_digest: Option<String>,
+    operation: Operation,
+    target: String,
+    before: serde_json::Value,
+    after: serde_json::Value,
+    review_digest: Option<String>,
 }
 
 impl CandidateSubject {
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn before(&self) -> &serde_json::Value {
+        &self.before
+    }
+
+    pub fn after(&self) -> &serde_json::Value {
+        &self.after
+    }
+
+    pub fn review_digest(&self) -> Option<&str> {
+        self.review_digest.as_deref()
+    }
     /// The versioned scalar this subject hashes to.
     pub fn digest(&self) -> Result<String> {
         let bytes = canonical_bytes(self, "candidate subject")?;
@@ -838,8 +857,8 @@ mod table_tests {
 /// in [`ReviewPrecondition`].
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct ReviewMutation {
-    pub operation: Operation,
-    pub target: String,
+    operation: Operation,
+    target: String,
     /// The after projection **under the admission path that actually ran**.
     ///
     /// Not normalized to Human semantics: an Agent-reviewed Section projects
@@ -847,7 +866,21 @@ pub struct ReviewMutation {
     /// result including promotion where that applies. Forcing one of them would
     /// make an Agent review and a Human confirmation of the same wording share
     /// a proof, which is the one thing mixed authority must not do.
-    pub after: serde_json::Value,
+    after: serde_json::Value,
+}
+
+impl ReviewMutation {
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn after(&self) -> &serde_json::Value {
+        &self.after
+    }
 }
 
 /// The Object-domain ReviewDigest `precondition` (#25 §4): one member.
@@ -1189,17 +1222,7 @@ pub fn check_review_identity(
     precondition: serde_json::Value,
 ) -> Result<()> {
     let binding = crate::rules::rebind(domain, mutation, precondition, review.rules.clone())?;
-    let checked = crate::digest::REVIEW.recheck(&review.review_digest, |version| {
-        binding.digest_under(version)
-    })?;
-    ensure!(
-        checked.agrees(),
-        EXIT_INVARIANT,
-        "the candidate names review {} and its own rule snapshots produce {}",
-        checked.attested,
-        checked.expected
-    );
-    Ok(())
+    check_named_identity(review, &binding)
 }
 
 /// Check a candidate's review identity against the frozen Object-domain
@@ -1214,11 +1237,26 @@ pub fn check_object_review_identity(
     mutation: &ReviewMutation,
     expected_rev: u64,
 ) -> Result<()> {
-    let mutation = serde_json::to_value(mutation)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?;
-    let precondition = serde_json::to_value(ReviewPrecondition { expected_rev })
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review precondition: {error}")))?;
-    check_review_identity(review, crate::rules::Domain::Object, mutation, precondition)
+    let binding = crate::rules::rebind_object(mutation, expected_rev, review.rules.clone())?;
+    check_named_identity(review, &binding)
+}
+
+/// Compare a stored review identity against a binding rebuilt from snapshots.
+fn check_named_identity(
+    review: &CandidateReview,
+    binding: &crate::rules::ReviewBinding,
+) -> Result<()> {
+    let checked = crate::digest::REVIEW.recheck(&review.review_digest, |version| {
+        binding.digest_under(version)
+    })?;
+    ensure!(
+        checked.agrees(),
+        EXIT_INVARIANT,
+        "the candidate names review {} and its own rule snapshots produce {}",
+        checked.attested,
+        checked.expected
+    );
+    Ok(())
 }
 /// The agreement #25 §14 requires between a candidate's two identities.
 ///
@@ -1273,7 +1311,10 @@ mod review_context_tests {
     /// must build it. An ad-hoc mutation is refused at the binding boundary now
     /// — which is the point, and which is why these fixtures cannot be a
     /// convenient blob.
-    fn binding_inputs() -> (serde_json::Value, serde_json::Value) {
+    /// The frozen descriptor, built the way the only entry point builds it.
+    /// The untyped route is closed for this domain now, so a test that wants an
+    /// Object binding has to ask for one the same way production does.
+    fn binding_inputs() -> (ReviewMutation, u64) {
         let mutation = ReviewMutation {
             operation: Operation {
                 name: "section_revised".to_owned(),
@@ -1282,10 +1323,7 @@ mod review_context_tests {
             target: "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1".to_owned(),
             after: serde_json::json!({"admission": "human", "text": "revised"}),
         };
-        (
-            serde_json::to_value(mutation).expect("mutation"),
-            serde_json::to_value(ReviewPrecondition { expected_rev: 7 }).expect("precondition"),
-        )
+        (mutation, 7)
     }
     fn review(result: ReviewResult, attempt: u32, rules: Vec<BoundRule>) -> CandidateReview {
         CandidateReview {
@@ -1353,15 +1391,10 @@ mod review_context_tests {
     /// follows from it.
     #[test]
     fn snapshots_that_do_not_produce_the_named_identity_fail_closed() {
-        let (mutation, precondition) = binding_inputs();
+        let (mutation, expected_rev) = binding_inputs();
         let rules = vec![rule("a", 5)];
-        let binding = crate::rules::rebind(
-            Domain::Object,
-            mutation.clone(),
-            precondition.clone(),
-            rules.clone(),
-        )
-        .expect("rebind");
+        let binding =
+            crate::rules::rebind_object(&mutation, expected_rev, rules.clone()).expect("rebind");
         let honest = CandidateReview {
             review_digest: crate::digest::REVIEW
                 .emit(binding.digest_under(1).expect("digest"))
@@ -1369,19 +1402,14 @@ mod review_context_tests {
                 .to_string(),
             ..review(ReviewResult::Passed, 1, rules)
         };
-        check_review_identity(
-            &honest,
-            Domain::Object,
-            mutation.clone(),
-            precondition.clone(),
-        )
-        .expect("its own snapshots produce the name it gives itself");
+        check_object_review_identity(&honest, &mutation, expected_rev)
+            .expect("its own snapshots produce the name it gives itself");
 
         // Same digest, a ceiling quietly loosened. The review identity covers
         // the effective policy, so this cannot pass as the same review.
         let mut edited = honest.clone();
         edited.rules = vec![rule("a", 50)];
-        let caught = check_review_identity(&edited, Domain::Object, mutation.clone(), precondition)
+        let caught = check_object_review_identity(&edited, &mutation, expected_rev)
             .expect_err("edited on disk");
         assert!(
             caught.to_string().contains("rule snapshots produce"),
@@ -1394,21 +1422,13 @@ mod review_context_tests {
     /// would have to preserve an ordering the protocol calls insignificant.
     #[test]
     fn the_stored_snapshot_order_is_not_part_of_the_identity() {
-        let (mutation, precondition) = binding_inputs();
-        let one = crate::rules::rebind(
-            Domain::Object,
-            mutation.clone(),
-            precondition.clone(),
-            vec![rule("a", 5), rule("b", 2)],
-        )
-        .expect("rebind");
-        let other = crate::rules::rebind(
-            Domain::Object,
-            mutation,
-            precondition,
-            vec![rule("b", 2), rule("a", 5)],
-        )
-        .expect("rebind");
+        let (mutation, expected_rev) = binding_inputs();
+        let one =
+            crate::rules::rebind_object(&mutation, expected_rev, vec![rule("a", 5), rule("b", 2)])
+                .expect("rebind");
+        let other =
+            crate::rules::rebind_object(&mutation, expected_rev, vec![rule("b", 2), rule("a", 5)])
+                .expect("rebind");
         assert_eq!(
             one.digest_under(1).expect("digest"),
             other.digest_under(1).expect("digest")
@@ -1523,22 +1543,9 @@ mod object_binding_tests {
     #[test]
     fn the_object_binding_hashes_to_its_pinned_contract_bytes() {
         let (before, after, payload) = revised(Admission::Human);
-        let mutation = serde_json::to_value(
-            object_review_mutation(&before, &after, &payload).expect("mutation"),
-        )
-        .expect("value");
-        let precondition = serde_json::to_value(ReviewPrecondition {
-            expected_rev: before.rev,
-        })
-        .expect("value");
-
-        let binding = crate::rules::rebind(
-            crate::rules::Domain::Object,
-            mutation.clone(),
-            precondition.clone(),
-            Vec::new(),
-        )
-        .expect("rebind");
+        let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
+        let binding =
+            crate::rules::rebind_object(&mutation, before.rev, Vec::new()).expect("rebind");
 
         let canonical = canonical_bytes(&binding, "review binding").expect("canonical");
         assert_eq!(
@@ -1552,78 +1559,81 @@ mod object_binding_tests {
         );
     }
 
-    /// A descriptor the protocol no longer permits is refused where it is
-    /// bound, not accepted into a digest that verifies against itself and
-    /// against nothing anyone else computes.
+    /// The untyped route is closed for this domain, and closed by name.
+    ///
+    /// Checking the outer member names was never enough. An unfrozen operation
+    /// name, an extra member inside `operation`, a target naming nothing and an
+    /// arbitrary `after` all passed that check and produced a scalar labelled
+    /// `ReviewDigestContract 1` for a descriptor #25 does not define. Nor could
+    /// a shape check have fixed it: whether `after` is *that operation's*
+    /// projection is knowable only from the projection.
+    ///
+    /// So the guarantee comes from the type instead. An Object binding can only
+    /// be built from a `ReviewMutation`, and a `ReviewMutation` can only come
+    /// from `object_review_mutation` reading a real transition through the
+    /// frozen table.
     #[test]
-    fn a_non_canonical_object_descriptor_is_refused_at_the_boundary() {
-        let (before, after, payload) = revised(Admission::Human);
-        let good = serde_json::to_value(
-            object_review_mutation(&before, &after, &payload).expect("mutation"),
-        )
-        .expect("value");
-        let precondition = serde_json::json!({"expected_rev": 7});
-
-        // The pre-freeze prototype shape.
-        let refused = crate::rules::rebind(
-            crate::rules::Domain::Object,
-            serde_json::json!({"action": "section_revised"}),
-            precondition.clone(),
-            Vec::new(),
-        )
-        .expect_err("not the frozen descriptor");
-        assert!(refused.to_string().contains("exactly"), "{refused}");
-
-        // CandidateDigest's own subject, which carries one member too many.
-        let mut with_before = good.as_object().expect("object").clone();
-        with_before.insert("before".to_owned(), serde_json::Value::Null);
-        crate::rules::rebind(
-            crate::rules::Domain::Object,
-            serde_json::Value::Object(with_before),
-            precondition.clone(),
-            Vec::new(),
-        )
-        .expect_err("the review predecessor is not the candidate's before");
-
-        // A precondition standing for more than the revision.
-        crate::rules::rebind(
-            crate::rules::Domain::Object,
-            good.clone(),
-            serde_json::json!({"expected_rev": 7, "refs_are_sound": true}),
-            Vec::new(),
-        )
-        .expect_err("apply-time invariants are not folded into expected_rev");
-
-        // A revision that is not a revision.
-        crate::rules::rebind(
-            crate::rules::Domain::Object,
-            good,
-            serde_json::json!({"expected_rev": "7"}),
-            Vec::new(),
-        )
-        .expect_err("expected_rev is the exact revision, not a spelling of it");
+    fn an_object_review_cannot_be_bound_from_arbitrary_json() {
+        for (why, mutation) in [
+            (
+                "the pre-freeze prototype shape",
+                serde_json::json!({"action": "section_revised"}),
+            ),
+            (
+                "an operation the table does not define",
+                serde_json::json!({
+                    "operation": {"name": "not.a.frozen.operation", "parameters": {}},
+                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "after": serde_json::Value::Null
+                }),
+            ),
+            (
+                "an operation carrying a member of its own",
+                serde_json::json!({
+                    "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
+                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "after": serde_json::Value::Null
+                }),
+            ),
+            (
+                "a target naming nothing",
+                serde_json::json!({
+                    "operation": {"name": "section.revised", "parameters": {}},
+                    "target": "not a target",
+                    "after": serde_json::Value::Null
+                }),
+            ),
+        ] {
+            let refused = crate::rules::rebind(
+                crate::rules::Domain::Object,
+                mutation,
+                serde_json::json!({"expected_rev": 7}),
+                Vec::new(),
+            )
+            .expect_err(why);
+            assert!(
+                refused.to_string().contains("bind_object"),
+                "{why}: {refused}"
+            );
+        }
     }
 
     /// Creation binds `expected_rev = 0`, which is a predecessor rather than a
     /// missing one, so it must survive the boundary rather than read as absent.
     #[test]
     fn creation_binds_the_zero_predecessor() {
-        let mutation = serde_json::to_value(ReviewMutation {
-            operation: Operation {
-                name: "object_created".to_owned(),
-                parameters: serde_json::json!({}),
-            },
-            target: format!("obj:{}", object_id()),
-            after: serde_json::json!({"state": "open"}),
-        })
-        .expect("value");
-        crate::rules::rebind(
-            crate::rules::Domain::Object,
-            mutation,
-            serde_json::to_value(ReviewPrecondition { expected_rev: 0 }).expect("value"),
-            Vec::new(),
-        )
-        .expect("zero is the creation predecessor");
+        let before = Object::new(object_id(), "the append boundary".to_owned()).expect("object");
+        let mut after = before.clone();
+        after.rev = 1;
+        let payload = Payload {
+            action: Action::ObjectCreated,
+            object: object_id(),
+            becomes: None,
+            content: Content::default(),
+        };
+        let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
+        crate::rules::rebind_object(&mutation, 0, Vec::new())
+            .expect("zero is the creation predecessor");
     }
 
     /// Backlog describes its mutations under #8 and is not held to the Object

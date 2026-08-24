@@ -1100,23 +1100,6 @@ fn subject() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
-/// The Object domain's own descriptor, frozen by #25 §4 as exactly
-/// `{operation, target, after}` over `{expected_rev}`.
-///
-/// Separate from [`subject`] because the domains describe their mutations
-/// differently and the binding boundary now holds each to its own shape —
-/// which is the point of having a shape at all.
-fn object_subject() -> (serde_json::Value, serde_json::Value) {
-    (
-        serde_json::json!({
-            "operation": {"name": "section.revised", "parameters": {"becomes": null}},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
-            "after": {"section": {"text": "still unresolved"}}
-        }),
-        serde_json::json!({"expected_rev": 2}),
-    )
-}
-
 /// The hash is the identity of an exact review subject.
 ///
 /// Same subject, same value — across processes, because nothing about it is
@@ -1681,23 +1664,22 @@ fn an_exhausted_backlog_review_marks_the_mutation_instead_of_escalating() {
 #[test]
 fn an_exhausted_object_review_stops_and_may_call_a_human() {
     let (_dir, root) = workspace();
-    let (mutation, precondition) = object_subject();
-    let bind = |root: &Path| {
-        rules::bind(root, Domain::Object, mutation.clone(), precondition.clone()).expect("bind")
+    // Through `assess`, which is the API for "what do the applicable rules say
+    // about this attempt" when there is no mutation to describe. Object
+    // bindings are typed-only now, and inventing a transition here would be
+    // fixture weight in a test about exhaustion composition.
+    let exhaustion = |root: &Path, attempt| {
+        rules::assess(root, Domain::Object, attempt)
+            .expect("object")
+            .1
     };
     write_rule(
         &root,
         "refusing",
         "---\nid: refusing\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n---\n\n# Refusing\n\nOne try, then no.\n",
     );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(1)).expect("object"),
-        rules::Exhaustion::NotReached
-    );
-    assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
-        rules::Exhaustion::Refused
-    );
+    assert_eq!(exhaustion(&root, attempt(1)), rules::Exhaustion::NotReached);
+    assert_eq!(exhaustion(&root, attempt(2)), rules::Exhaustion::Refused);
 
     write_rule(
         &root,
@@ -1705,7 +1687,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nOne try, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::HumanConfirmation,
         "an exhausted rule naming a human outranks one that only refuses"
     );
@@ -1718,7 +1700,7 @@ fn an_exhausted_object_review_stops_and_may_call_a_human() {
         "---\nid: escalating\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 9\n  on_exhaustion: human_confirmation\n---\n\n# Escalating\n\nNine tries, then ask.\n",
     );
     assert_eq!(
-        bind(&root).exhaustion(attempt(2)).expect("object"),
+        exhaustion(&root, attempt(2)),
         rules::Exhaustion::Refused,
         "only an actually exhausted rule's action counts"
     );
@@ -2424,4 +2406,61 @@ fn provenance_is_resolved_from_the_repository_root_not_the_workspace() {
     assert!(rule.based_on[0].dirty, "the basis moved");
     assert_eq!(rule.based_on[0].commit, None);
     assert!(!rule.dirty, "and the rule file did not");
+}
+
+/// A direct library caller cannot obtain a Contract-1 review scalar for a
+/// descriptor the protocol does not define.
+///
+/// The CLI is not the trust boundary; the library is. `rules::bind` is public,
+/// and before this it would take any JSON with the right three outer member
+/// names and return a value labelled `ReviewDigestContract 1` — for an unfrozen
+/// operation, an operation carrying members of its own, or a target naming
+/// nothing.
+///
+/// The companion half is not testable from out here, and that is the point:
+/// `CandidateSubject` and `ReviewMutation` have private members, so the forging
+/// code in the earlier version of this test no longer compiles. Unreachable
+/// beats refused.
+#[test]
+fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
+    let (_dir, root) = workspace();
+    for mutation in [
+        serde_json::json!({"action": "section_revised"}),
+        serde_json::json!({
+            "operation": {"name": "not.a.frozen.operation", "parameters": {}},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+        serde_json::json!({
+            "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
+            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "after": null
+        }),
+    ] {
+        let refused = rules::bind(
+            &root,
+            Domain::Object,
+            mutation.clone(),
+            serde_json::json!({"expected_rev": 7}),
+        )
+        .expect_err("the untyped route is closed for this domain");
+        assert!(
+            refused.message.contains("bind_object"),
+            "{}",
+            refused.message
+        );
+
+        rules::rebind(
+            Domain::Object,
+            mutation,
+            serde_json::json!({"expected_rev": 7}),
+            Vec::new(),
+        )
+        .expect_err("and closed on the snapshot route too");
+    }
+
+    // Backlog still describes its own mutations, so the gate is per-domain
+    // rather than a shape imposed on everything.
+    let (mutation, precondition) = subject();
+    rules::bind(&root, Domain::Backlog, mutation, precondition).expect("backlog is not an object");
 }

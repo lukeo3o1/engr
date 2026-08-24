@@ -1236,19 +1236,95 @@ impl ReviewBinding {
 /// Hold a binding's two caller-supplied arguments to the shape its domain
 /// froze, where the domain has frozen one.
 ///
-/// Only the Object domain has, in #25 §4. Backlog describes its mutations under
-/// #8 and is not held to the Object shape here; Collection and Work have no v1
-/// review semantics at all, and inventing a descriptor for them would be
-/// exactly the guess with a persisted representation that the contract refuses.
+/// The Object domain does not arrive here at all any more. Checking the outer
+/// member names was never enough: an unfrozen operation name, an extra member
+/// inside `operation`, a target naming nothing and an arbitrary `after` all
+/// passed, and produced a scalar labelled `ReviewDigestContract 1` for a
+/// descriptor #25 does not define. A shape check cannot verify that `after` is
+/// *that operation's* projection, because the only thing that knows is the
+/// projection itself.
+///
+/// So Object bindings are built from the typed frozen projection instead —
+/// [`bind_object`] and [`rebind_object`] — and this refuses the untyped route
+/// by name rather than trying to validate its way back to a guarantee.
+///
+/// Backlog describes its mutations under #8 and keeps the untyped route;
+/// Collection and Work have no v1 review semantics at all, and inventing a
+/// descriptor for them would be exactly the guess with a persisted
+/// representation that the contract refuses.
 fn check_domain_shape(
     domain: Domain,
     mutation: &serde_json::Value,
     precondition: &serde_json::Value,
 ) -> Result<()> {
     match domain {
-        Domain::Object => crate::proof::check_object_review_shape(mutation, precondition),
-        Domain::Backlog | Domain::Collection | Domain::Work => Ok(()),
+        Domain::Object => Err(Error::new(
+            EXIT_USAGE,
+            "an object review binds the frozen projection: build it with \
+             proof::object_review_mutation and bind it with rules::bind_object"
+                .to_owned(),
+        )),
+        Domain::Backlog | Domain::Collection | Domain::Work => {
+            let _ = (mutation, precondition);
+            Ok(())
+        }
     }
+}
+
+/// Bind an Object-domain review over the frozen projection (#25 §4).
+///
+/// The typed entry point, and the only one. `mutation` can only have come from
+/// [`crate::proof::object_review_mutation`], which reads the candidate subject
+/// for a real transition — so the operation, target and `after` are the frozen
+/// table's, not a caller's description of them.
+pub fn bind_object(
+    root: &Path,
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+) -> Result<ReviewBinding> {
+    let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
+    Ok(ReviewBinding {
+        domain: Domain::Object,
+        mutation,
+        precondition,
+        rules: bound_rules(root, Domain::Object)?,
+    })
+}
+
+/// Rebuild an Object-domain binding from Rule snapshots somebody else resolved.
+///
+/// The counterpart to [`bind_object`], as [`rebind`] is to [`bind`].
+pub fn rebind_object(
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+    rules: Vec<BoundRule>,
+) -> Result<ReviewBinding> {
+    let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
+    let mut rules = rules;
+    canonical_set(&mut rules, "rule")?;
+    Ok(ReviewBinding {
+        domain: Domain::Object,
+        mutation,
+        precondition,
+        rules,
+    })
+}
+
+fn object_binding_inputs(
+    mutation: &crate::proof::ReviewMutation,
+    expected_rev: u64,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let mutation = serde_json::to_value(mutation)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?;
+    let precondition = serde_json::to_value(crate::proof::ReviewPrecondition { expected_rev })
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review precondition: {error}")))?;
+    // Belt and braces: the typed projection must still serialize to the frozen
+    // shape. If it ever stops doing so, that is a defect in the projection and
+    // this says so here rather than letting the bytes change quietly.
+    crate::proof::check_object_review_shape(&mutation, &precondition)?;
+    within_safe_integers(&mutation, "mutation")?;
+    within_safe_integers(&precondition, "precondition")?;
+    Ok((mutation, precondition))
 }
 
 /// Rebuild a binding from Rule snapshots somebody else already resolved.
