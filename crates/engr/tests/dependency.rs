@@ -662,13 +662,13 @@ mod against_a_workspace {
         )
         .expect("nothing has moved since the commit");
 
-        assert_eq!(reference.target, target());
-        assert_eq!(reference.commit, commit);
+        assert_eq!(reference.target(), target());
+        assert_eq!(reference.commit(), commit);
         assert_eq!(
-            reference.fields,
-            vec![SemanticField::Admission, SemanticField::Text]
+            reference.fields(),
+            [SemanticField::Admission, SemanticField::Text]
         );
-        assert!(reference.digest.starts_with("1:"));
+        assert!(reference.digest().starts_with("1:"));
 
         assert_eq!(
             evaluate(&root, &object, &seal, &reference).expect("evaluate"),
@@ -700,12 +700,13 @@ mod against_a_workspace {
             "the integrity failure is the one worth reporting: {refused}"
         );
 
-        let reference = SelectiveRef {
-            target: target(),
-            fields: vec![SemanticField::Role],
+        let reference = SelectiveRef::stored(
+            target(),
+            vec![SemanticField::Role],
             commit,
-            digest: format!("1:{}", "a".repeat(64)),
-        };
+            format!("1:{}", "a".repeat(64)),
+        )
+        .expect("canonical");
         assert_eq!(
             evaluate(&root, &object, &seal, &reference).expect("evaluate"),
             Dependency::TargetIntegrityFailure,
@@ -720,12 +721,13 @@ mod against_a_workspace {
         let (_dir, root, object, _commit) = workspace();
         let (object, seal) = phase_three_seals(&object);
 
-        let unknown = SelectiveRef {
-            target: target(),
-            fields: vec![SemanticField::Text],
-            commit: "f".repeat(40),
-            digest: format!("1:{}", "a".repeat(64)),
-        };
+        let unknown = SelectiveRef::stored(
+            target(),
+            vec![SemanticField::Text],
+            "f".repeat(40),
+            format!("1:{}", "a".repeat(64)),
+        )
+        .expect("canonical");
         assert_eq!(
             evaluate(&root, &object, &seal, &unknown).expect("evaluate"),
             Dependency::ProvenanceUnavailable
@@ -824,12 +826,13 @@ mod against_a_workspace {
         // Reading a Ref that already points at such a commit reports the
         // integrity failure, not drift — the dependency did not move, the
         // record it was pinned to was rewritten.
-        let reference = SelectiveRef {
-            target: target(),
-            fields: vec![SemanticField::Text],
-            commit: tampered,
-            digest: format!("1:{}", "a".repeat(64)),
-        };
+        let reference = SelectiveRef::stored(
+            target(),
+            vec![SemanticField::Text],
+            tampered,
+            format!("1:{}", "a".repeat(64)),
+        )
+        .expect("canonical");
         assert_eq!(
             evaluate(&root, &current, &seal, &reference).expect("evaluate"),
             Dependency::TargetIntegrityFailure
@@ -928,13 +931,16 @@ mod against_a_workspace {
         // rather than refusing tagged history.
         let reference = admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit)
             .expect("the commit itself");
-        assert_eq!(reference.commit, commit);
+        assert_eq!(reference.commit(), commit);
 
         // And the read path fails closed on a stored Ref that names the tag.
-        let stored = SelectiveRef {
-            commit: tag,
-            ..reference
-        };
+        let stored = SelectiveRef::stored(
+            reference.target(),
+            reference.fields().to_vec(),
+            tag,
+            reference.digest(),
+        )
+        .expect("canonical spelling; the commit kind is evaluate's question");
         evaluate(&root, &current, &seal, &stored).expect_err("not a commit id");
     }
 
@@ -995,12 +1001,13 @@ mod against_a_workspace {
         // The current target is clean, and carries a Phase-3 seal.
         let (current, seal) = phase_three_seals(&object);
 
-        let selecting_refs = SelectiveRef {
-            target: target(),
-            fields: vec![SemanticField::Refs],
-            commit: historical.clone(),
-            digest: format!("1:{}", "a".repeat(64)),
-        };
+        let selecting_refs = SelectiveRef::stored(
+            target(),
+            vec![SemanticField::Refs],
+            historical.clone(),
+            format!("1:{}", "a".repeat(64)),
+        )
+        .expect("canonical");
         assert_eq!(
             evaluate(&root, &current, &seal, &selecting_refs).expect("classified, not errored"),
             Dependency::SchemaMismatch
@@ -1008,16 +1015,116 @@ mod against_a_workspace {
 
         // A reference selecting something else is answered normally: the
         // uninterpretable field is not part of its dependency.
-        let selecting_text = SelectiveRef {
-            fields: vec![SemanticField::Text],
-            ..selecting_refs
-        };
+        let selecting_text = SelectiveRef::stored(
+            selecting_refs.target(),
+            vec![SemanticField::Text],
+            selecting_refs.commit(),
+            selecting_refs.digest(),
+        )
+        .expect("canonical");
         let answer = evaluate(&root, &current, &seal, &selecting_text).expect("answered");
         assert_ne!(
             answer,
             Dependency::SchemaMismatch,
             "text is interpretable regardless of what refs holds"
         );
+    }
+
+    /// A stored Ref has one spelling; authoring may have any.
+    ///
+    /// #35 and #13 give current resources exactly one schema-canonical
+    /// representation, and `fields[]` is a protocol set whose persisted array
+    /// is already in canonical order. So the two boundaries are genuinely
+    /// different: `admit` takes whatever selection the author names and
+    /// *produces* the canonical order, while a value read as already-stored
+    /// must already be in it.
+    ///
+    /// Before the distinction was in the type, a Ref stored as
+    /// `[text, admission]` evaluated to `Unchanged` against the digest of
+    /// `[admission, text]` — the read path canonicalized before hashing, and so
+    /// never noticed it had been handed a second encoding of one Ref.
+    ///
+    /// Normalizing on read would have been the easy fix and the wrong one: it
+    /// accepts the second spelling instead of refusing it, which is what having
+    /// one canonical representation is supposed to prevent.
+    #[test]
+    fn a_stored_reference_carries_the_canonical_field_order_and_only_that() {
+        let (_dir, root, object, commit) = workspace();
+        let (current, seal) = phase_three_seals(&object);
+
+        // Authoring: either order is accepted, and one order comes back.
+        let canonical = admit(
+            &root,
+            &current,
+            &seal,
+            1,
+            &[SemanticField::Text, SemanticField::Admission],
+            &commit,
+        )
+        .expect("admitted");
+        assert_eq!(
+            canonical.fields(),
+            [SemanticField::Admission, SemanticField::Text],
+            "admission emits the canonical order whichever way it was asked"
+        );
+        let other_way = admit(
+            &root,
+            &current,
+            &seal,
+            1,
+            &[SemanticField::Admission, SemanticField::Text],
+            &commit,
+        )
+        .expect("admitted");
+        assert_eq!(canonical.digest(), other_way.digest());
+
+        // Reading: the non-canonical spelling is refused, not repaired.
+        let refused = SelectiveRef::stored(
+            canonical.target(),
+            vec![SemanticField::Text, SemanticField::Admission],
+            canonical.commit(),
+            canonical.digest(),
+        )
+        .expect_err("a stored reference is already canonical");
+        assert!(refused.to_string().contains("canonical order"), "{refused}");
+
+        // The canonical one reads back and evaluates.
+        let stored = SelectiveRef::stored(
+            canonical.target(),
+            canonical.fields().to_vec(),
+            canonical.commit(),
+            canonical.digest(),
+        )
+        .expect("canonical");
+        assert_eq!(
+            evaluate(&root, &current, &seal, &stored).expect("evaluate"),
+            Dependency::Unchanged
+        );
+
+        // The other members are checked as written too.
+        SelectiveRef::stored(
+            "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:01",
+            vec![SemanticField::Text],
+            commit.clone(),
+            canonical.digest(),
+        )
+        .expect_err("non-canonical target spelling");
+        SelectiveRef::stored(
+            canonical.target(),
+            vec![SemanticField::Text],
+            &commit[..8],
+            canonical.digest(),
+        )
+        .expect_err("abbreviated commit");
+        SelectiveRef::stored(
+            canonical.target(),
+            vec![SemanticField::Text],
+            commit.clone(),
+            "a".repeat(64),
+        )
+        .expect_err("unversioned digest scalar");
+        SelectiveRef::stored(canonical.target(), Vec::new(), commit, canonical.digest())
+            .expect_err("no implicit full reference");
     }
 
     #[test]

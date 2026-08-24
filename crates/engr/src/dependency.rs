@@ -192,12 +192,83 @@ pub fn semantic_projection(section: &Section) -> Result<Map<String, Value>> {
 /// actually relies on, and that selection becomes part of the admitted source
 /// Section's own semantics — which is why it cannot be inferred later from
 /// whatever the target happens to contain.
+///
+/// # Authoring and reading are not the same boundary
+///
+/// [`admit`] may take a caller's selection in any order and *produce* the
+/// canonical one. A value being read as an already-stored Ref may not: a
+/// current resource has exactly one schema-canonical representation, so a
+/// stored `fields[]` that is merely equivalent to the canonical order is
+/// schema-invalid, not something to normalize on the way past.
+///
+/// Members are private and [`SelectiveRef::stored`] is the only way to build
+/// one from outside, for the same reason [`RefSnapshot`]'s are. Without it, a
+/// Ref stored as `[text, admission]` verified happily against the digest of
+/// `[admission, text]`, because the read path canonicalized before hashing and
+/// so never noticed it had been handed a second spelling of one Ref.
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct SelectiveRef {
-    pub target: String,
-    pub fields: Vec<SemanticField>,
-    pub commit: String,
-    pub digest: String,
+    target: String,
+    fields: Vec<SemanticField>,
+    commit: String,
+    digest: String,
+}
+
+impl SelectiveRef {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn fields(&self) -> &[SemanticField] {
+        &self.fields
+    }
+
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Read a Ref that is already stored, requiring the canonical spelling.
+    ///
+    /// Every member is checked as written rather than repaired: the target
+    /// parses as a canonical Section identity, `fields` already **equals** its
+    /// canonical order, the commit is a full native object id, and the digest
+    /// is a well-formed versioned scalar for a contract this build knows.
+    ///
+    /// Equality, not normalization. Sorting the fields here would reproduce the
+    /// defect this exists to close — a second encoding accepted silently and
+    /// verified against the first one's digest.
+    pub fn stored(
+        target: impl Into<String>,
+        fields: Vec<SemanticField>,
+        commit: impl Into<String>,
+        digest: impl Into<String>,
+    ) -> Result<Self> {
+        let target = target.into();
+        parse_target(&target)?;
+        let commit = commit.into();
+        ensure!(
+            crate::model::is_canonical_git_oid(&commit),
+            EXIT_SCHEMA,
+            "a stored reference pins a full resolved Git object id, not {commit:?}"
+        );
+        ensure!(
+            fields == canonical_fields(&fields)?,
+            EXIT_SCHEMA,
+            "a stored reference carries its selected fields in canonical order"
+        );
+        let digest = digest.into();
+        crate::digest::REF.verify(&digest)?;
+        Ok(Self {
+            target,
+            fields,
+            commit,
+            digest,
+        })
+    }
 }
 
 /// Validate a declared selection: non-empty, duplicate-free, canonically
