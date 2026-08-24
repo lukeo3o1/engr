@@ -6,8 +6,8 @@
 //! the two visibly come apart, and it has its own test here.
 
 use engr::dependency::{
-    canonical_fields, check_not_stale_at_birth, compare, ref_snapshot, semantic_projection,
-    semantic_value, Dependency, SemanticField,
+    canonical_fields, check_not_stale_at_birth, compare, parse_target, ref_snapshot,
+    semantic_projection, semantic_value, Dependency, SemanticField,
 };
 use engr::model::{Ref, Section};
 use engr::proof::section_target;
@@ -619,5 +619,70 @@ mod against_a_workspace {
         let (stranger, stranger_seal) = phase_three_seals(&stranger);
         evaluate(&root, &stranger, &stranger_seal, &reference)
             .expect_err("that is a different object");
+    }
+}
+
+/// A Section id inside target text is still a Section id, and still bound by
+/// the shared numeric domain.
+///
+/// #35 §7 says string embedding is not an escape from it. It has to be checked
+/// where the string is parsed, because the safe-integer walk that guards every
+/// other protocol integer runs over JSON *numbers* — and this one is inside a
+/// string, where that walk cannot reach it. Without this, `2^53` produced a
+/// perfectly valid `1:` digest for a target the schema says cannot denote a
+/// Section.
+#[test]
+fn a_section_id_in_target_text_cannot_escape_the_shared_domain() {
+    let ceiling = (1u64 << 53) - 1;
+    let at_the_bound = format!("obj:{}:{ceiling}", object_id());
+    assert_eq!(
+        parse_target(&at_the_bound)
+            .expect("the bound itself is inside")
+            .1,
+        ceiling
+    );
+
+    for outside in [1u64 << 53, (1u64 << 53) + 1, u64::MAX] {
+        let target = format!("obj:{}:{outside}", object_id());
+        let refused = parse_target(&target).expect_err("past the ceiling");
+        assert!(
+            refused.to_string().contains("safe-integer domain"),
+            "{outside}: {refused}"
+        );
+        ref_snapshot(&target, &[SemanticField::Text], &section(), commit())
+            .expect_err("and it cannot be hashed either");
+    }
+}
+
+/// One Section identity has one spelling.
+///
+/// `:01` and `:1` name the same Section and hash differently, so accepting both
+/// would give one identity two digests — the ambiguity a canonical form exists
+/// to remove. The check rebuilds the target from what it parsed, so the reader
+/// accepts exactly what the emitter writes and the two cannot drift apart.
+#[test]
+fn a_target_has_exactly_one_canonical_spelling() {
+    let id = object_id();
+    parse_target(&format!("obj:{id}:1")).expect("canonical");
+
+    for padded in [
+        format!("obj:{id}:01"),
+        format!("obj:{id}:001"),
+        format!("obj:{id}:+1"),
+        format!("obj:{id}:1 "),
+    ] {
+        let refused = parse_target(&padded).expect_err(&padded);
+        assert!(
+            refused.to_string().contains("canonical"),
+            "{padded}: {refused}"
+        );
+        ref_snapshot(&padded, &[SemanticField::Text], &section(), commit())
+            .expect_err("and it cannot be hashed either");
+    }
+
+    // Whatever the emitter writes is what the reader accepts, by construction.
+    for section in [1u64, 9, 10, 4095, (1u64 << 53) - 1] {
+        let emitted = engr::proof::section_target(&id, section);
+        assert_eq!(parse_target(&emitted).expect("round trip").1, section);
     }
 }

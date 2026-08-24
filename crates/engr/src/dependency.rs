@@ -385,9 +385,27 @@ pub fn check_not_stale_at_birth(
 
 /// Split a canonical Section target back into the identity it names.
 ///
-/// Strict rather than lenient: `obj:<id>:<section>` and nothing else. A target
-/// this cannot read is refused, because the alternative is guessing which
-/// Section a stored Ref meant and then reporting drift against the wrong one.
+/// Strict rather than lenient, in two ways that both matter.
+///
+/// **The Section id obeys the shared numeric domain.** #35 §7 says a Section ID
+/// embedded in canonical Ref target text is still bound by the workspace's
+/// Section-ID domain — string embedding is not an escape from it. It has to be
+/// enforced here explicitly, because nothing else would catch it: the shared
+/// safe-integer walk that guards every other protocol integer runs over JSON
+/// *numbers*, and this one lives inside a string, where that walk cannot see
+/// it.
+///
+/// **The spelling is the canonical one.** `:01` and `:1` name the same Section
+/// and produce different bytes, so accepting both would mean one Section
+/// identity with two digests — exactly the ambiguity a canonical form exists to
+/// remove. Checked by rebuilding the target from what was parsed and requiring
+/// the result to equal what arrived, so the emitter and the reader cannot drift
+/// apart: whatever [`crate::proof::section_target`] writes is by definition the
+/// only spelling this accepts.
+///
+/// A target this cannot read is refused rather than guessed at, because the
+/// alternative is deciding which Section a stored Ref meant and then reporting
+/// drift against whatever that guess landed on.
 pub fn parse_target(target: &str) -> Result<(String, u64)> {
     let malformed = || {
         Error::new(
@@ -400,6 +418,17 @@ pub fn parse_target(target: &str) -> Result<(String, u64)> {
     crate::model::validate_object_id(id)?;
     let section: u64 = section.parse().map_err(|_| malformed())?;
     ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    ensure!(
+        section <= crate::proof::MAX_SAFE_INTEGER,
+        EXIT_SCHEMA,
+        "section id {section} is outside the shared safe-integer domain, and \
+         writing it inside a target string does not put it back in"
+    );
+    ensure!(
+        crate::proof::section_target(id, section) == target,
+        EXIT_SCHEMA,
+        "{target:?} is not the canonical spelling of section {section}"
+    );
     Ok((id.to_owned(), section))
 }
 
