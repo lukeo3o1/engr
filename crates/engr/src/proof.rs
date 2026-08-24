@@ -374,6 +374,20 @@ pub fn candidate_subject(
     payload: &Payload,
     review_digest: Option<String>,
 ) -> Result<CandidateSubject> {
+    // The identities first, because everything below formats them into a target
+    // that a proof then names. `object_target` and `section_target` only build
+    // strings — a payload naming `not-an-id`, or naming an Object the states
+    // either side are not, produced a perfectly well-formed
+    // `CandidateDigestContract 1` over a target that denotes nothing.
+    crate::model::validate_object_id(&payload.object)?;
+    ensure!(
+        payload.object == before.id && payload.object == after.id,
+        EXIT_INVARIANT,
+        "the payload names object {} and the states either side are {} and {}",
+        payload.object,
+        before.id,
+        after.id
+    );
     let id = &payload.object;
     let becomes = match &payload.becomes {
         Some(destination) => serde_json::to_value(Lifecycle {
@@ -487,6 +501,10 @@ pub fn candidate_subject(
         }
     };
 
+    // And the formatted target parses back as the identity it claims to be.
+    // A Section id of 0, or one past the shared safe-integer ceiling, formats
+    // into a string like any other and denotes no Section at all.
+    check_canonical_target(&target)?;
     Ok(CandidateSubject {
         operation: Operation {
             name: payload.action.label().to_owned(),
@@ -535,6 +553,27 @@ pub fn object_target(id: &str) -> String {
     format!("obj:{id}")
 }
 
+/// A formatted target must parse back as the identity it claims to be.
+///
+/// `object_target` and `section_target` format; they do not check. Whether the
+/// result denotes anything is a separate question, and it is the one a proof
+/// naming that target depends on.
+fn check_canonical_target(target: &str) -> Result<()> {
+    match target.rsplit_once(':') {
+        Some((_, section)) if section.chars().all(|c| c.is_ascii_digit()) => {
+            crate::dependency::parse_target(target).map(|_| ())
+        }
+        _ => {
+            let id = target.strip_prefix("obj:").ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{target:?} is not a canonical object target"),
+                )
+            })?;
+            crate::model::validate_object_id(id)
+        }
+    }
+}
 /// The canonical target of an operation that names one Section.
 pub fn section_target(id: &str, section: u64) -> String {
     format!("obj:{id}:{section}")

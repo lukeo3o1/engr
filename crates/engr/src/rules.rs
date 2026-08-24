@@ -1063,7 +1063,7 @@ impl BoundRule {
             self.id
         );
         ensure!(
-            !self.body.is_empty(),
+            !self.body.trim().is_empty(),
             EXIT_SCHEMA,
             "rule snapshot {}: a rule with no normative text asks for nothing",
             self.id
@@ -1436,7 +1436,7 @@ pub fn rebind_object(
     rules: Vec<BoundRule>,
 ) -> Result<ReviewBinding> {
     let (mutation, precondition) = object_binding_inputs(mutation, expected_rev)?;
-    let rules = checked_snapshots(rules)?;
+    let rules = checked_snapshots(rules, Domain::Object)?;
     Ok(ReviewBinding {
         domain: Domain::Object,
         mutation,
@@ -1462,13 +1462,44 @@ fn object_binding_inputs(
     Ok((mutation, precondition))
 }
 
-/// Every snapshot a caller hands in, held to the frozen Rule contract and put
-/// in protocol set order.
+/// Every snapshot a caller hands in, held to the frozen Rule contract **for the
+/// domain being bound**, and to being a set of Rule identities.
 ///
 /// One place, so the two rebind entry points cannot enforce different amounts.
-fn checked_snapshots(rules: Vec<BoundRule>) -> Result<Vec<BoundRule>> {
+///
+/// The domain argument is the part that was missing. `#25` defines `rules` as
+/// the *complete applicable* Rule set for the binding domain, and non-empty is
+/// not the same as applicable: a perfectly well-formed `[backlog]` Rule could
+/// be hashed into an Object binding, where `bound_rules(root, Object)` could
+/// never have selected it.
+///
+/// Identity uniqueness is the second half, and `canonical_set` does not cover
+/// it: that rejects two snapshots whose *canonical bytes* are equal, while two
+/// snapshots sharing one `id` with different bodies are not equal and both
+/// survived. Rule ids are workspace-unique, so a set holding one identity twice
+/// in two versions is not a resolved Rule set at all.
+fn checked_snapshots(rules: Vec<BoundRule>, domain: Domain) -> Result<Vec<BoundRule>> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for rule in &rules {
         rule.validate()?;
+        ensure!(
+            rule.domains.contains(&domain),
+            EXIT_SCHEMA,
+            "rule snapshot {}: applies to {}, and this is a {} review; the set is the rules that apply",
+            rule.id,
+            rule.domains
+                .iter()
+                .map(|domain| domain.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            domain.as_str()
+        );
+        ensure!(
+            seen.insert(rule.id.as_str()),
+            EXIT_SCHEMA,
+            "rule snapshot {}: one rule id, two versions; ids are unique in a workspace",
+            rule.id
+        );
     }
     let mut rules = rules;
     canonical_set(&mut rules, "rule")?;
@@ -1494,7 +1525,7 @@ pub fn rebind(
     check_domain_shape(domain, &mutation, &precondition)?;
     within_safe_integers(&mutation, "mutation")?;
     within_safe_integers(&precondition, "precondition")?;
-    let rules = checked_snapshots(rules)?;
+    let rules = checked_snapshots(rules, domain)?;
     Ok(ReviewBinding {
         domain,
         mutation,

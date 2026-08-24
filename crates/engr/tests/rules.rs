@@ -1331,10 +1331,14 @@ fn an_unwritten_review_policy_is_the_defaults_rather_than_an_absence() {
 /// committed Rule has always had this property under the same ruling, since
 /// editing and committing it changes the commit the binding records.
 ///
-/// So the invariant this test protects is now the narrower and truer one: the
+/// Ruled at #25 `5397877580`: review identity is **artifact-exact**. Any
+/// byte-level change to a Rule file changes the ReviewDigest, even when the
+/// effective semantics are identical, and a prior review does not survive a
+/// semantically equivalent rewrite. That supersedes the older expectation.
+///
+/// So the invariant this test protects is the narrower and truer one: the
 /// *semantic* projection is spelling-independent, while provenance identifies
-/// the artifact. Raised on #25 in case the collision was not intended — the two
-/// statements cannot both be read as "the binding is unchanged".
+/// the artifact, and the binding carries both.
 #[test]
 fn spelling_a_default_out_is_the_same_rule_as_omitting_it() {
     let (_dir, root) = workspace();
@@ -2560,7 +2564,7 @@ fn an_impossible_rule_snapshot_cannot_be_hashed_as_contract_one() {
     honest.validate().expect("a rule that could exist");
 
     type Break = fn(&mut engr::rules::BoundRule);
-    let cases: [(&str, Break); 7] = [
+    let cases: [(&str, Break); 8] = [
         ("an id outside the grammar", |rule| {
             rule.id = "INVALID!".to_owned()
         }),
@@ -2575,6 +2579,7 @@ fn an_impossible_rule_snapshot_cannot_be_hashed_as_contract_one() {
             rule.content_sha256 = None;
         }),
         ("dirty with no identity", |rule| rule.content_sha256 = None),
+        ("a body of whitespace", |rule| rule.body = " \t ".to_owned()),
     ];
 
     for (why, break_it) in cases {
@@ -2610,4 +2615,130 @@ fn object_transition() -> (
         content: engr::model::Content::default(),
     };
     (before, after, payload)
+}
+
+/// The snapshot set is the rules that *apply* to the domain being bound, and a
+/// set of identities.
+///
+/// Two holes, both one level past the last fix. `BoundRule::validate` required
+/// `domains` to be non-empty and canonical, which is not the same as
+/// applicable: a perfectly well-formed `[backlog]` Rule could be hashed into an
+/// Object binding that `bound_rules(root, Object)` could never have produced.
+/// And `canonical_set` rejects snapshots whose canonical *bytes* are equal,
+/// while two snapshots sharing one `id` with different bodies are not equal —
+/// so both survived, and a set held one Rule identity in two versions.
+#[test]
+fn a_snapshot_set_is_the_applicable_rules_and_holds_each_identity_once() {
+    let (before, after, payload) = object_transition();
+    let mutation =
+        engr::proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+
+    let applicable = engr::rules::BoundRule {
+        id: "applies".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "record what happened".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rules::rebind_object(&mutation, 1, vec![applicable.clone()]).expect("an applicable rule");
+
+    // Valid in itself, and not a rule of this domain.
+    let mut elsewhere = applicable.clone();
+    elsewhere.id = "elsewhere".to_owned();
+    elsewhere.domains = vec![Domain::Backlog];
+    elsewhere.validate().expect("valid as a rule");
+    let refused = rules::rebind_object(&mutation, 1, vec![elsewhere])
+        .expect_err("a backlog rule is not part of an object review");
+    assert!(
+        refused.message.contains("the set is the rules that apply"),
+        "{}",
+        refused.message
+    );
+
+    // One identity, two versions. Each is valid; the set is not.
+    let mut other_version = applicable.clone();
+    other_version.body = "record something else".to_owned();
+    other_version.validate().expect("valid as a rule");
+    assert_ne!(applicable.body, other_version.body);
+    let refused = rules::rebind_object(&mutation, 1, vec![applicable, other_version])
+        .expect_err("one rule id cannot appear twice");
+    assert!(
+        refused.message.contains("two versions"),
+        "{}",
+        refused.message
+    );
+}
+
+/// A whitespace-only body is no body, in a snapshot as in a Rule file.
+///
+/// The loader has always used `trim`, and the snapshot check used
+/// `is_empty` — so a Rule that could never be loaded could still be hashed. The
+/// snapshot contract has to be at least as strict as the value it claims to be
+/// a snapshot of.
+#[test]
+fn a_snapshot_body_is_as_strict_as_the_loader() {
+    let mut rule = engr::rules::BoundRule {
+        id: "blank".to_owned(),
+        domains: vec![Domain::Object],
+        based_on: Vec::new(),
+        review: rules::Review {
+            max_attempts: 5,
+            on_exhaustion: rules::OnExhaustion::Reject,
+        },
+        body: "   \n\t\n".to_owned(),
+        commit: None,
+        dirty: true,
+        content_sha256: Some(engr::proof::sha256_of("whatever")),
+    };
+    rule.validate()
+        .expect_err("whitespace is not normative text");
+    rule.body = "something normative".to_owned();
+    rule.validate().expect("and this is");
+}
+
+/// A candidate subject names an identity, and the builder checks it is one.
+///
+/// `object_target` and `section_target` format strings; they do not ask whether
+/// the result denotes anything. So a payload naming `not-an-id`, or naming an
+/// Object that is not the one the states either side describe, or a Section
+/// numbered 0, produced a perfectly well-formed `CandidateDigestContract 1`
+/// over a target denoting nothing — and `object_review_mutation` delegates to
+/// the same builder, so it reached ReviewDigest too.
+#[test]
+fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
+    let (before, after, payload) = object_transition();
+    engr::proof::candidate_subject(&before, &after, &payload, None).expect("a real transition");
+
+    let mut malformed = payload.clone();
+    malformed.object = "not-an-id".to_owned();
+    engr::proof::candidate_subject(&before, &after, &malformed, None)
+        .expect_err("that is not an object id");
+
+    // Well-formed, and not the object either side describes.
+    let mut mismatched = payload.clone();
+    mismatched.object = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
+    let refused = engr::proof::candidate_subject(&before, &after, &mismatched, None)
+        .expect_err("a different object");
+    assert!(
+        refused.message.contains("states either side"),
+        "{}",
+        refused.message
+    );
+
+    // A section number that names no section.
+    let mut zero = payload.clone();
+    zero.action = engr::model::Action::SectionRevised { section: 0 };
+    engr::proof::candidate_subject(&before, &after, &zero, None)
+        .expect_err("section ids start at 1");
+
+    let mut oversize = payload;
+    oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
+    engr::proof::candidate_subject(&before, &after, &oversize, None)
+        .expect_err("past the shared safe-integer ceiling");
 }
