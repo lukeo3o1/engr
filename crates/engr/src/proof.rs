@@ -182,16 +182,35 @@ pub struct SectionSemantic {
 }
 
 impl SectionSemantic {
-    pub fn of(section: &Section) -> Self {
-        Self {
+    /// The one canonical Section semantic projection.
+    ///
+    /// #35 says there is exactly one, shared by dependency selection, admission
+    /// and Rule Review semantics, and drift. `crate::dependency` reads this
+    /// rather than building its own, so "shared" is a fact about the build
+    /// instead of a claim two definitions have to keep agreeing on.
+    ///
+    /// `refs` and `relations` are canonicalized here, and that is the whole
+    /// reason this returns a `Result`. They were copied verbatim, which made
+    /// every proof over a Section sensitive to the order its array happened to
+    /// be in — and the retained v2 model orders `refs` by `derive(Ord)`
+    /// (`object`, `section`, `sha256`, `commit`) while the protocol set rule
+    /// orders by each element's JCS bytes, which begin with `commit`. Those two
+    /// disagree for the same set, so one Section could hash one way through a
+    /// candidate proof and another way through dependency semantics.
+    pub fn of(section: &Section) -> Result<Self> {
+        let mut refs = section.refs.clone();
+        let mut relations = section.relations.clone();
+        canonical_set(&mut refs, "reference")?;
+        canonical_set(&mut relations, "relation")?;
+        Ok(Self {
             admission: section.admission,
             role: section.role,
             text: section.text.clone(),
             content: section.content.clone(),
             based_on: section.based_on.clone(),
-            refs: section.refs.clone(),
-            relations: section.relations.clone(),
-        }
+            refs,
+            relations,
+        })
     }
 }
 
@@ -228,21 +247,20 @@ pub struct ObjectInvariant {
 }
 
 impl ObjectInvariant {
-    pub fn of(object: &Object) -> Self {
-        let mut sections: Vec<SectionEntry> = object
-            .sections
-            .iter()
-            .map(|section| SectionEntry {
+    pub fn of(object: &Object) -> Result<Self> {
+        let mut sections: Vec<SectionEntry> = Vec::with_capacity(object.sections.len());
+        for section in &object.sections {
+            sections.push(SectionEntry {
                 id: section.id,
-                semantic: SectionSemantic::of(section),
-            })
-            .collect();
+                semantic: SectionSemantic::of(section)?,
+            });
+        }
         sections.sort_by_key(|entry| entry.id);
-        Self {
+        Ok(Self {
             object_type: object.object_type,
             state: object.state,
             sections,
-        }
+        })
     }
 }
 
@@ -346,7 +364,10 @@ pub fn candidate_subject(
     let section_state = |object: &Object, section: u64| -> Result<SectionOperation> {
         Ok(SectionOperation {
             lifecycle: Lifecycle::of(object),
-            section: object.section(section).ok().map(SectionSemantic::of),
+            section: match object.section(section) {
+                Ok(section) => Some(SectionSemantic::of(section)?),
+                Err(_) => None,
+            },
         })
     };
     let json = |value: &dyn erased_json::Erased| value.to_json();
@@ -428,8 +449,8 @@ pub fn candidate_subject(
             (
                 section_target(id, *destination),
                 serde_json::json!({ "sources": sources, "becomes": becomes }),
-                json(&ObjectInvariant::of(before))?,
-                json(&ObjectInvariant::of(after))?,
+                json(&ObjectInvariant::of(before)?)?,
+                json(&ObjectInvariant::of(after)?)?,
             )
         }
         Action::ObjectSuperseded => {
@@ -437,8 +458,8 @@ pub fn candidate_subject(
             (
                 object_target(id),
                 serde_json::json!({ "rationale_section": added }),
-                json(&ObjectInvariant::of(before))?,
-                json(&ObjectInvariant::of(after))?,
+                json(&ObjectInvariant::of(before)?)?,
+                json(&ObjectInvariant::of(after)?)?,
             )
         }
     };
@@ -603,7 +624,7 @@ mod tests {
                 admitted_at: "2026-08-23T00:00:00Z".to_owned(),
             });
         }
-        let projected = ObjectInvariant::of(&object);
+        let projected = ObjectInvariant::of(&object).expect("project");
         assert_eq!(
             projected
                 .sections
