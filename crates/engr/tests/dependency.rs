@@ -589,6 +589,78 @@ mod against_a_workspace {
             .expect("role has not moved");
     }
 
+    /// History that was changed outside the gate cannot become the authority
+    /// for a new reference.
+    ///
+    /// The laundering this prevents is specific and quiet. Commit a Section
+    /// whose wording was hand-edited while its stored seal was left alone: it
+    /// is schema-valid, so `git::object_at` returns it happily. Then point a
+    /// new Ref at that commit, selecting a field whose current value happens to
+    /// match the edit. Before this check, admission succeeded and produced
+    /// `1:5a21bf13…` — a fresh, valid, permanently verifiable proof over an
+    /// out-of-band change.
+    ///
+    /// Structural validation does not close it. `Object::validate` checks ids,
+    /// states and relations; whether the bytes are the ones that were admitted
+    /// is a different question, and only the seal answers it.
+    #[test]
+    fn history_changed_outside_the_gate_cannot_authorize_a_reference() {
+        let (_dir, root, object, honest) = workspace();
+
+        let path = root
+            .join(".engr")
+            .join("objects")
+            .join(format!("{}.json", object.id));
+        let stored = std::fs::read_to_string(&path).expect("read");
+        let edited = stored.replace("the store appends under a lock", "hand edited in history");
+        assert_ne!(stored, edited, "the fixture wording must be present");
+        std::fs::write(&path, edited).expect("write");
+        let tampered = commit_all(&root, "tampered");
+
+        // Current state agrees with what the tampered history says, which is
+        // exactly the case that used to slip through: nothing looks stale.
+        let mut current = object.clone();
+        current.sections[0].text = "hand edited in history".to_owned();
+        current.sections[0].sha256 = current.sections[0].recomputed_sha256().expect("v2 seal");
+        let (current, seal) = phase_three_seals(&current);
+
+        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tampered)
+            .expect_err("the pinned commit holds a section that fails its own seal");
+        assert!(
+            refused.to_string().contains("outside the gate"),
+            "{refused}"
+        );
+
+        // Reading a Ref that already points at such a commit reports the
+        // integrity failure, not drift — the dependency did not move, the
+        // record it was pinned to was rewritten.
+        let reference = SelectiveRef {
+            target: target(),
+            fields: vec![SemanticField::Text],
+            commit: tampered,
+            digest: format!("1:{}", "a".repeat(64)),
+        };
+        assert_eq!(
+            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+            Dependency::TargetIntegrityFailure
+        );
+
+        // The honest commit is still usable, so the check refuses tampering
+        // rather than refusing history.
+        let mut original = object.clone();
+        original.sections[0].sha256 = original.sections[0].recomputed_sha256().expect("v2 seal");
+        let (original, original_seal) = phase_three_seals(&original);
+        admit(
+            &root,
+            &original,
+            &original_seal,
+            1,
+            &[SemanticField::Text],
+            &honest,
+        )
+        .expect("untouched history is still authority");
+    }
+
     #[test]
     fn a_target_must_be_a_canonical_section_identity() {
         parse_target(&target()).expect("canonical");

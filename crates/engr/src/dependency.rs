@@ -442,8 +442,30 @@ enum Historical {
     Found(Section),
     Unavailable,
     SchemaMismatch,
+    /// Present and schema-valid, and its own stored seal does not follow from
+    /// its contents.
+    IntegrityFailure,
 }
 
+/// Resolve the target as it stood at one commit, and **verify it** before
+/// handing it back as authority.
+///
+/// The verification is the point, and #35 §8 puts it before projection for a
+/// reason: without it, a commit holding a schema-valid hand-edited Section with
+/// a stale seal is a perfectly good source of `values` for a brand-new Ref
+/// digest. If the current wording happens to match that edit, admission
+/// succeeds — and the out-of-band change has been laundered into a fresh,
+/// valid, permanently verifiable proof. #28's safety ordering says the same
+/// thing in different words.
+///
+/// `git::object_at` does not close this. It validates the historical workspace
+/// format and then the structure — ids, states, relations — which is a
+/// different question from whether the bytes are the ones that were admitted.
+///
+/// The seal checked here is the one the historical contract attested: for v1/v2
+/// history that is the retained Section content seal. A v3 history will carry
+/// its own Section and Object seals and must be verified under those; this
+/// deliberately does not pretend the current projection applies to older bytes.
 fn historical_section(root: &Path, commit: &str, id: &str, section: u64) -> Historical {
     if !crate::git::exists(root, commit) {
         return Historical::Unavailable;
@@ -452,8 +474,15 @@ fn historical_section(root: &Path, commit: &str, id: &str, section: u64) -> Hist
         Err(_) => Historical::SchemaMismatch,
         Ok(None) => Historical::Unavailable,
         Ok(Some(object)) => match object.sections.into_iter().find(|held| held.id == section) {
-            Some(section) => Historical::Found(section),
             None => Historical::Unavailable,
+            Some(section) => match section.recomputed_sha256() {
+                // Unable to compute the historical seal at all: the bytes are
+                // not interpretable under a contract this build applies, which
+                // is a different answer from "they were changed".
+                Err(_) => Historical::SchemaMismatch,
+                Ok(recomputed) if recomputed == section.sha256 => Historical::Found(section),
+                Ok(_) => Historical::IntegrityFailure,
+            },
         },
     }
 }
@@ -538,6 +567,16 @@ pub fn admit(
                 ),
             ))
         }
+        Historical::IntegrityFailure => {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "section {section} of {} at {commit} does not match its own seal; a reference \
+                     cannot be built over history that was changed outside the gate",
+                    current.id
+                ),
+            ))
+        }
     };
     // 6 + 7.
     check_not_stale_at_birth(&then, now, &fields)?;
@@ -590,6 +629,12 @@ pub fn evaluate(
         Historical::Found(section) => section,
         Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),
         Historical::SchemaMismatch => return Ok(Dependency::SchemaMismatch),
+        // §9 names this outcome by what it is — integrity invalid — rather than
+        // by which side of the comparison it was found on. Reporting it as
+        // drift would be worse than imprecise: it would tell a reader their
+        // dependency moved, when what happened is that the record it was
+        // pinned to was rewritten.
+        Historical::IntegrityFailure => return Ok(Dependency::TargetIntegrityFailure),
     };
     let snapshot = ref_snapshot(
         &reference.target,
