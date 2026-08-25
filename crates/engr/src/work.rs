@@ -230,6 +230,11 @@ impl Work {
         let value = serde_json::to_value(self)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("work: {error}")))?;
         crate::proof::within_safe_integers(&value, "work")?;
+        ensure!(
+            self.next_item_id >= 1,
+            EXIT_SCHEMA,
+            "next_item_id must be positive"
+        );
         // Every fault here is a fault in *stored* data, so they all read as
         // schema rather than usage. A caller who typed something too long is
         // refused earlier, by the same rule with the other exit code — a file
@@ -273,6 +278,7 @@ impl Work {
         }
         let mut seen = std::collections::BTreeSet::new();
         for item in &self.items {
+            ensure!(item.id >= 1, EXIT_SCHEMA, "work item ids must be positive");
             bounded(EXIT_SCHEMA, "a work item", &item.text, ITEM_TEXT_MAX)?;
             if let Some(result) = &item.result {
                 bounded(EXIT_SCHEMA, "a work item result", result, ITEM_RESULT_MAX)?;

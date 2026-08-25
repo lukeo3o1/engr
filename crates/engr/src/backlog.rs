@@ -484,19 +484,12 @@ pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
 /// `subjects[]` is a set, so order is not content. Reordering one leaves the
 /// same unresolved thing by design; activity has to agree, or triage
 /// reports work on a point nobody touched.
-/// Compared on identity, which **excludes `dirty`**. That flag records how the
-/// target looked when it was observed, not which target is meant, so a subject
-/// re-observed against a dirty worktree still concerns the same thing and must
-/// not read as fresh work.
+/// Persisted observation metadata participates even though it is not target
+/// identity: changing `dirty` changes the staging state and therefore activity
+/// and Rule Review bookkeeping.
 fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
-    let mut left: Vec<String> = left
-        .iter()
-        .map(|subject| canonical_json(&subject.identity()))
-        .collect::<Result<_>>()?;
-    let mut right: Vec<String> = right
-        .iter()
-        .map(|subject| canonical_json(&subject.identity()))
-        .collect::<Result<_>>()?;
+    let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
+    let mut right: Vec<String> = right.iter().map(canonical_json).collect::<Result<_>>()?;
     left.sort();
     right.sort();
     Ok(left == right)

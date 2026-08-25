@@ -1138,13 +1138,11 @@ fn a_dirty_target_pins_its_baseline_and_records_that_it_is_inexact() {
     }
 }
 
-/// `dirty` is observation detail, not part of which target is meant.
-///
-/// Re-observing the same file at the same commit against a modified worktree
-/// concerns the same thing, so it must not read as fresh work in the field
-/// triage sorts by.
+/// `dirty` is not target identity, but it is persisted observation state.
+/// Re-observing the same target with changed metadata is activity because the
+/// current Backlog bytes and the review bookkeeping both changed.
 #[test]
-fn the_dirty_marker_is_not_part_of_subject_identity() {
+fn changing_the_dirty_observation_is_activity() {
     let (_dir, root) = workspace();
     repository(&root);
     std::fs::write(root.join("file.rs"), "fn a() {}\n").expect("source");
@@ -1176,10 +1174,10 @@ fn the_dirty_marker_is_not_part_of_subject_identity() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     backlog::set_subjects(&root, &id, 1, vec![observed_dirty], &Prepared::first())
         .expect("re-observe");
-    assert_eq!(
+    assert_ne!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         before,
-        "the same target re-observed is not activity"
+        "changed persisted observation state is activity"
     );
 }
 

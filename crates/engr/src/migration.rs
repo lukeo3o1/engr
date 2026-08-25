@@ -443,6 +443,10 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         manifest.source_version,
         workspace_version
     );
+    if workspace_version == manifest.target_version {
+        fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
+        return Ok(());
+    }
     let current_ids = store::object_ids(root)?;
     ensure!(
         current_ids.len() == manifest.objects.len()

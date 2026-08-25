@@ -581,9 +581,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
-    let mut text = serde_json::to_string_pretty(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    text.push('\n');
+    let text = crate::proof::canonical_bytes(value, &path.display().to_string())?;
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, text.as_bytes())
         .map_err(|error| tool_error(temporary.display(), error))?;
