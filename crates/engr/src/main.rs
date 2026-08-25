@@ -1,16 +1,16 @@
 use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use engr::backlog::{self, Subject};
-use engr::model::{self, Action, Payload, Ref};
+use engr::model::{self, Action, Merge, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{collection, gate, git, ops, store, view, work};
-use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
+use engr::{collection, gate, git, ops, rules, store, view, work};
+use engr::{ensure, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
     name = "engr",
     version = engr::IMPLEMENTATION_VERSION,
-    about = "Engineering records whose every word a human confirmed"
+    about = "Engineering records with explicit Human or reviewed Agent authority"
 )]
 struct Cli {
     /// Workspace root. Defaults to the nearest ancestor containing .engr
@@ -24,12 +24,12 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
-    /// Explicitly upgrade a recognized legacy v0 workspace
+    /// Explicitly upgrade a recognized predecessor workspace to v3
     Migrate,
     /// Print the protocol this build implements
     Protocol,
-    /// Put a change up for a human to confirm
-    Prepare(Prepare),
+    /// Prepare a Human change, or admit a reviewed Agent change
+    Prepare(Box<Prepare>),
     /// List candidates awaiting confirmation, or show one in full
     Candidate {
         /// Challenge code. Omit to list everything pending
@@ -56,7 +56,7 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Recompute section hashes
+    /// Verify Object and Section integrity plus dependencies
     Verify { object: Option<String> },
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
     #[command(subcommand)]
@@ -67,11 +67,58 @@ enum Command {
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
+    /// Project rules an agent must read before a semantic mutation
+    #[command(subcommand)]
+    Rules(RulesCommand),
+}
+
+/// Rules are project policy data, so this surface is read-only.
+///
+/// engr does not author or edit a rule. There is no `rules new`, no gate, no
+/// event: a rule is a file in the repository, and git is its history. What engr
+/// owes an agent is the ability to see exactly which rules govern a mutation
+/// and exactly what they rest on — everything a review has to have covered.
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// What rules exist, and what they govern
+    Ls {
+        /// Only rules governing this domain
+        #[arg(long, value_enum, value_name = "DOMAIN")]
+        domain: Option<DomainArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One rule in full, with its bases resolved to what must be read
+    Show {
+        /// The rule's stable id, not its filename
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DomainArg {
+    Object,
+    Backlog,
+    Collection,
+    Work,
+}
+
+impl DomainArg {
+    fn model(self) -> rules::Domain {
+        match self {
+            Self::Object => rules::Domain::Object,
+            Self::Backlog => rules::Domain::Backlog,
+            Self::Collection => rules::Domain::Collection,
+            Self::Work => rules::Domain::Work,
+        }
+    }
 }
 
 /// Backlog edits do not go through the gate, and must not look as though they
 /// might: a separate namespace keeps `ls`, `show` and `verify` meaning exactly
-/// what they meant before, which is confirmed record and nothing else.
+/// what they meant before, which is admitted record and nothing else.
 #[derive(Subcommand)]
 enum Backlog {
     /// Start a topic with its first unresolved point
@@ -82,6 +129,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// List unresolved topics
     Ls {
@@ -99,6 +148,8 @@ enum Backlog {
         item: String,
         #[arg(long)]
         topic: String,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Add another unresolved point to a topic
     Add {
@@ -107,6 +158,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Reword an unresolved point
     Revise {
@@ -115,6 +168,8 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         text: TextArg,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Replace what an unresolved point concerns
     Subjects {
@@ -123,24 +178,134 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Consolidate unresolved points into one
+    /// Consolidate unresolved points into one of them
     Merge {
         item: String,
+        /// The point that survives, keeping its id and taking the merged wording
+        #[arg(long = "into", value_name = "SECTION")]
+        into: u64,
+        /// The points merged into it. They are removed, and their ids not reused
         #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
         sections: Vec<u64>,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Remove an unresolved point, or the whole topic
-    Rm {
+    /// Record durable knowledge this point produced. Does not resolve it
+    Produced {
         item: String,
-        /// Remove one point. The topic goes when its last one does
         #[arg(long)]
-        section: Option<u64>,
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        /// Take the outcome back off: the bookkeeping was wrong, not the record
+        #[arg(long)]
+        forget: bool,
+        #[command(flatten)]
+        review: ReviewArg,
     },
+    /// Consume a resolved point. The topic goes when its last one does
+    Consume {
+        item: String,
+        /// The point being judged resolved
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        review: ReviewArg,
+    },
+}
+
+/// What the agent read and reviewed, and how many times it has been round.
+///
+/// The attempt is attested, not counted: engr keeps no retry state, so nothing
+/// there can be checked against anything. It is honest because saying a lower
+/// number buys an agent nothing except a review it has already failed.
+///
+/// `--expect` is the other half, and it is the one engr *can* check. The review
+/// happens before the command is invoked, so a command that reads and writes
+/// under one lock still leaves the interval between what the agent reviewed and
+/// what gets applied wide open — a concurrent edit in that interval lands
+/// underneath a mutation nobody reviewed against it. The value is printed by
+/// `backlog show --json` beside the thing it describes.
+#[derive(Args, Clone)]
+struct ReviewArg {
+    /// Which attempt of this review sequence this is, counted from 1
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    attempt: u32,
+    /// The `expect` value from `backlog show --json` for what you read.
+    /// Repeat once per point for a merge
+    #[arg(long = "expect", value_name = "TOKEN")]
+    expect: Vec<String>,
+}
+
+impl ReviewArg {
+    /// Turn what the caller said into the predecessor this mutation binds.
+    ///
+    /// `binds` builds the precondition from current state; the caller's token is
+    /// compared against it, so a mismatch means the world moved between reading
+    /// and running rather than that the caller spelled something wrong. The
+    /// precondition then travels into the mutation and is checked again under
+    /// the writer lock — this comparison narrows the window, and that one closes
+    /// it.
+    /// Creating an item, which binds nothing engr can check.
+    ///
+    /// `--expect` is refused rather than ignored, and refused with an answer: a
+    /// caller that offers one has a predecessor in mind, and being told the id
+    /// is not theirs to choose is more use than silence.
+    fn for_creation(&self) -> Result<backlog::Prepared> {
+        ensure!(
+            self.expect.is_empty(),
+            EXIT_USAGE,
+            "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
+        );
+        Ok(backlog::Prepared::attempt(rules::Attempt::new(
+            self.attempt,
+        )?))
+    }
+
+    fn prepared(
+        &self,
+        governed: bool,
+        binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
+    ) -> Result<backlog::Prepared> {
+        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
+        if self.expect.is_empty() {
+            // Only where a review was actually required. With no applicable rule
+            // there is no review for a predecessor to anchor, and demanding one
+            // would be ceremony; with one, an unanchored mutation is a review of
+            // something nobody can show was what got applied.
+            ensure!(
+                !governed,
+                engr::EXIT_USAGE,
+                "a project rule governs backlog, so this needs --expect: run `engr backlog show <item> --json`, review what you read, and pass its expect value back"
+            );
+            return Ok(prepared);
+        }
+        let bound = binds()?;
+        let mut wanted = Vec::new();
+        for precondition in &bound {
+            wanted.push(precondition.token()?);
+        }
+        let mut given = self.expect.clone();
+        given.sort();
+        wanted.sort();
+        ensure!(
+            given == wanted,
+            engr::EXIT_STALE,
+            "what you read is not what is there now; read it again and review the current wording"
+        );
+        // One precondition per bound thing on the wire, one on the mutation: a
+        // merge is a single judgement about several points, so it binds them
+        // together rather than one at a time.
+        Ok(prepared.against(backlog::Precondition::combine(bound)?))
+    }
 }
 
 #[derive(Args)]
@@ -207,9 +372,11 @@ impl SubjectArgs {
             subjects.push(subject);
         }
         for path in &self.subject_file {
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-file", path, error))?;
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
             });
         }
@@ -220,9 +387,11 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-symbol", path, error))?;
             let subject = Subject::Symbol {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
                 symbol: symbol.clone(),
             };
@@ -304,6 +473,24 @@ enum RoleArg {
     AcceptanceCriterion,
 }
 
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum ReviewResultArg {
+    Passed,
+    Failed,
+    Exhausted,
+}
+
+impl ReviewResultArg {
+    fn model(self) -> engr::proof::ReviewResult {
+        match self {
+            Self::Passed => engr::proof::ReviewResult::Passed,
+            Self::Failed => engr::proof::ReviewResult::Failed,
+            Self::Exhausted => engr::proof::ReviewResult::Exhausted,
+        }
+    }
+}
+
 impl RoleArg {
     fn model(self) -> semantics::Role {
         match self {
@@ -334,9 +521,17 @@ struct Prepare {
     /// Replace the wording of a section
     #[arg(long, value_name = "SECTION")]
     revise: Option<u64>,
-    /// Consolidate sections into one
-    #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-    merge: Option<Vec<u64>>,
+    /// Consolidate sections into this surviving destination
+    #[arg(long, value_name = "DESTINATION")]
+    merge: Option<u64>,
+    /// Sections consumed by --merge
+    #[arg(
+        long,
+        value_name = "SECTIONS",
+        value_delimiter = ',',
+        requires = "merge"
+    )]
+    sources: Vec<u64>,
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
@@ -410,17 +605,64 @@ struct Prepare {
     /// Record that this wording has no repository basis
     #[arg(long, conflicts_with = "based_on")]
     no_based_on: bool,
-    /// A section this wording depends on, as OBJECT:SECTION
-    #[arg(long = "ref", value_name = "OBJECT:SECTION")]
+    /// A section this wording depends on, followed by comma-separated semantic fields
+    #[arg(long = "ref", value_names = ["OBJECT:SECTION", "FIELDS"], num_args = 2)]
     references: Vec<String>,
     /// Retry a proposal a size threshold already refused once
     #[arg(long)]
     oversize: bool,
+    /// Admit directly through Agent Rule Review instead of minting a Human challenge
+    #[arg(long)]
+    agent: bool,
+    /// ReviewDigest surfaced by the first governed attempt
+    #[arg(long = "review", value_name = "DIGEST")]
+    review_digest: Option<String>,
+    /// Rule id actually reviewed. Repeat for the complete surfaced set
+    #[arg(long = "reviewed-rule", value_name = "RULE")]
+    reviewed_rules: Vec<String>,
+    /// Which attempt of the continuous review sequence this is
+    #[arg(long = "review-attempt", default_value_t = 1, value_name = "N")]
+    review_attempt: u32,
+    /// Agent-attested outcome of reviewing the exact mutation
+    #[arg(long = "review-result", value_enum, value_name = "RESULT")]
+    review_result: Option<ReviewResultArg>,
+    /// Exact explanation shown when a Human is asked to override
+    #[arg(long = "review-explanation", value_name = "TEXT")]
+    review_explanation: Option<String>,
     #[arg(long)]
     json: bool,
 }
 
 impl Prepare {
+    fn review(&self) -> Result<Option<gate::ReviewAttestation>> {
+        let any = self.review_digest.is_some()
+            || !self.reviewed_rules.is_empty()
+            || self.review_result.is_some()
+            || self.review_explanation.is_some();
+        if !any {
+            return Ok(None);
+        }
+        let review_digest = self.review_digest.clone().ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review <DIGEST>",
+            )
+        })?;
+        let result = self.review_result.ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review-result passed|failed|exhausted",
+            )
+        })?;
+        Ok(Some(gate::ReviewAttestation {
+            review_digest,
+            reviewed_rules: self.reviewed_rules.clone(),
+            attempt: self.review_attempt,
+            result: result.model(),
+            explanation: self.review_explanation.clone(),
+        }))
+    }
+
     /// The supplementary entries, in the order the caller wrote them.
     ///
     /// Inline and from-file entries are two spellings of one list, and clap
@@ -486,12 +728,11 @@ impl Prepare {
         let revision = self.implemented_at.as_deref();
         let mut relations = Vec::new();
         for path in &self.implemented_by_file {
+            let commit = pin_exact(root, path, revision, "--implemented-by-file")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::File {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-file", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                 },
             });
@@ -503,12 +744,11 @@ impl Prepare {
                     "--implemented-by-symbol takes a path and a symbol name",
                 ));
             };
+            let commit = pin_exact(root, path, revision, "--implemented-by-symbol")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::Symbol {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-symbol", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                     symbol: symbol.clone(),
                 },
@@ -609,7 +849,7 @@ fn run(cli: Cli) -> Result<()> {
 
     let root = store::find_root(cli.root.as_deref())?;
     if matches!(cli.command, Command::Migrate) {
-        store::with_lock(&root, || store::migrate(&root))?;
+        store::migrate(&root)?;
         println!(
             "migrated {} to workspace version {}",
             store::engr_dir(&root).display(),
@@ -617,13 +857,13 @@ fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    let workspace_format = store::validate_format(&root)?;
+    store::validate_format(&root)?;
 
     match cli.command {
         Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
         Command::Prepare(command) => {
             store::require_current(&root)?;
-            prepare(&root, command)
+            prepare(&root, *command)
         }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
@@ -639,7 +879,6 @@ fn run(cli: Cli) -> Result<()> {
                 // later revision would say the wrong thing happened.
                 admitted.event.rev
             );
-            report_backlog(&root, &admitted.backlog);
             warn_uncommitted(&root, &admitted.object.id);
             Ok(())
         }
@@ -651,9 +890,20 @@ fn run(cli: Cli) -> Result<()> {
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
-            let object = if workspace_format == store::WorkspaceFormat::Current {
-                store::with_lock(&root, || ops::reconcile(&root, &id))?
+            let object = if store::validate_format(&root)? == store::WorkspaceFormat::Current {
+                let stored = store::load_object(&root, &id)?;
+                if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
+                    // Reconciliation is a write and shares the same lock as
+                    // admission. The integrity check is repeated inside the
+                    // lock by `reconcile`; this first check only decides
+                    // whether show may repair or must remain diagnostic-only.
+                    ops::reconcile(&root, &id)?
+                } else {
+                    ops::effective(&root, &id)?
+                }
             } else {
+                // Explicit migration is the only write allowed to a
+                // predecessor generation, including creation of its lock file.
                 ops::effective(&root, &id)?
             };
             if format == Format::Json {
@@ -667,46 +917,31 @@ fn run(cli: Cli) -> Result<()> {
                 .iter()
                 .filter(|(_, status)| status.forged())
                 .count();
-            if forged > 0 {
+            let object_forged = object.sha256.as_deref().is_some_and(|seal| {
+                engr::integrity::check_object_integrity(&object, seal).is_err()
+            });
+            if forged > 0 || object_forged {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    format!("{forged} sections are not what was confirmed; run: engr verify"),
+                    format!(
+                        "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
+                    ),
                 ));
             }
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
+        Command::Rules(command) => rules_command(&root, command),
         Command::Work(command) => work_command(&root, command),
         Command::Collection(command) => collection_command(&root, command),
     }
 }
 
-/// Say what confirmation did to unresolved staging, in the same breath as the
-/// admission. A source that moved needs a decision, and the moment the human is
-/// still here is the moment to say so.
-fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
-    let width = view::backlog_width(root);
-    for outcome in outcomes {
-        let item = shorten(&outcome.item, width);
-        let line = match &outcome.result {
-            backlog::Reconciliation::Recorded { added: 0 } => {
-                "already recorded — nothing to add".to_owned()
-            }
-            backlog::Reconciliation::Recorded { added } => {
-                format!("recorded {added} produced outcome(s); still unresolved")
-            }
-            backlog::Reconciliation::Consumed { item_removed: true } => {
-                "resolved and consumed; the topic had nothing else unresolved".to_owned()
-            }
-            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
-            backlog::Reconciliation::SourceChanged => {
-                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
-            }
-            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
-        };
-        println!("backlog    {item} §{}  {line}", outcome.section);
-    }
+/// Whether a project rule governs backlog here, and so whether a review was
+/// required at all.
+fn governed(root: &Path) -> Result<bool> {
+    Ok(!rules::applicable(root, rules::Domain::Backlog)?.is_empty())
 }
 
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
@@ -715,8 +950,19 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             topic,
             text,
             subjects,
+            review,
         } => {
-            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            let item = backlog::create(
+                root,
+                &topic,
+                &text.read()?,
+                subjects.build(root)?,
+                // Creation binds nothing, so it is never treated as governed
+                // here: engr allocates the id, and demanding a predecessor it
+                // cannot express would make `backlog new` impossible in every
+                // workspace that has a backlog rule.
+                &review.for_creation()?,
+            )?;
             print!("{}", view::render_backlog_show(root, &item));
             Ok(())
         }
@@ -741,9 +987,16 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             }
             Ok(())
         }
-        Backlog::Rename { item, topic } => {
+        Backlog::Rename {
+            item,
+            topic,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let item = backlog::rename(root, &id, &topic)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::topic(root, &id)?])
+            })?;
+            let item = backlog::rename(root, &id, &topic, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
         }
@@ -751,9 +1004,18 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            let section = backlog::add_section(
+                root,
+                &id,
+                &text.read()?,
+                subjects.build(root)?,
+                &review.prepared(governed(root)?, || {
+                    Ok(vec![backlog::Precondition::section_absent(root, &id)?])
+                })?,
+            )?;
             println!("added §{section}");
             Ok(())
         }
@@ -761,9 +1023,13 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             text,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            backlog::revise_section(root, &id, section, &text.read()?)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
             Ok(())
         }
@@ -771,47 +1037,92 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             section,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            backlog::set_subjects(root, &id, section, subjects)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
             Ok(())
         }
         Backlog::Merge {
             item,
+            into,
             sections,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::merge_sections(
+            backlog::merge_into(
                 root,
                 &id,
+                into,
                 &sections,
                 &text.read()?,
                 subjects.build(root)?,
+                &review.prepared(governed(root)?, || {
+                    let mut bound = vec![backlog::Precondition::section(root, &id, into)?];
+                    for source in &sections {
+                        bound.push(backlog::Precondition::section(root, &id, *source)?);
+                    }
+                    Ok(bound)
+                })?,
             )?;
-            println!("merged into §{section}");
+            let absorbed = sections
+                .iter()
+                .map(|section| format!("§{section}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("merged {absorbed} into §{into}");
             Ok(())
         }
-        Backlog::Rm { item, section } => {
+        Backlog::Produced {
+            item,
+            section,
+            target,
+            forget,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            match section {
-                Some(section) => {
-                    if backlog::delete_section(root, &id, section)? {
-                        println!(
-                            "removed §{section}, and the topic with it — nothing else was unresolved"
-                        );
-                    } else {
-                        println!("removed §{section}");
-                    }
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            let outcome = backlog::Produced::object(
+                backlog::EngrTarget::new(target.clone()).reference.clone(),
+            );
+            if forget {
+                if backlog::forget_produced(root, &id, section, &outcome, &prepared)? {
+                    println!("§{section} no longer records that outcome");
+                } else {
+                    println!("§{section} was not recording that outcome");
                 }
-                None => {
-                    backlog::delete_item(root, &id)?;
-                    println!("removed {}", shorten(&id, view::backlog_width(root)));
-                }
+            } else if backlog::record_produced(root, &id, section, outcome, &prepared)? {
+                println!("§{section} produced {target}; still unresolved");
+            } else {
+                println!("§{section} already recorded that outcome");
+            }
+            Ok(())
+        }
+        Backlog::Consume {
+            item,
+            section,
+            review,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let prepared = review.prepared(governed(root)?, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            if backlog::consume_section(root, &id, section, &prepared)? {
+                println!(
+                    "consumed §{section}, and the topic with it — nothing else was unresolved"
+                );
+            } else {
+                println!("consumed §{section}");
             }
             Ok(())
         }
@@ -827,8 +1138,23 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         Action::SectionAdded
     } else if let Some(section) = command.revise {
         Action::SectionRevised { section }
-    } else if let Some(absorbs) = command.merge.clone() {
-        Action::SectionMerged { absorbs }
+    } else if let Some(destination) = command.merge {
+        let mut sources = command.sources.clone();
+        sources.sort_unstable();
+        for pair in sources.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--sources names each consumed Section once",
+                ));
+            }
+        }
+        Action::SectionMerged {
+            merge: Merge::Into {
+                destination,
+                sources,
+            },
+        }
     } else if let Some(section) = command.delete {
         Action::SectionDeleted { section }
     } else if command.close {
@@ -961,8 +1287,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
 
     let mut references = Vec::new();
-    for spec in &command.references {
-        references.push(parse_ref(root, spec)?);
+    for pair in command.references.chunks(2) {
+        let [spec, fields] = pair else {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--ref takes an Object section and a comma-separated field list",
+            ));
+        };
+        references.push(parse_ref(root, spec, fields)?);
     }
     check_unique_arguments(&references, "--ref")?;
     if !action.carries_content() && command.no_based_on {
@@ -1010,10 +1342,43 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         becomes,
         content,
     };
-    let prepared = if command.oversize {
-        gate::prepare_oversize(root, payload)?
+    let review = command.review()?;
+    if command.agent {
+        ensure!(
+            !command.oversize,
+            EXIT_USAGE,
+            "--oversize is a Human candidate exception; an Agent admission cannot claim it"
+        );
+        let admitted = gate::admit_agent(root, payload, review)?;
+        if command.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "event": admitted.event,
+                    "object": admitted.object,
+                }))
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+            );
+        } else {
+            println!(
+                "ADMITTED   {}  {}  rev {}  agent",
+                shorten(&admitted.object.id, view::width(root)),
+                admitted.event.payload.action.label(),
+                admitted.event.rev
+            );
+            warn_uncommitted(root, &admitted.object.id);
+        }
+        return Ok(());
+    }
+    let allowance = if command.oversize {
+        gate::Allowance::Oversize
     } else {
-        gate::prepare(root, payload)?
+        gate::Allowance::Normal
+    };
+    let prepared = match review {
+        Some(review) => gate::prepare_reviewed(root, payload, allowance, review)?,
+        None if command.oversize => gate::prepare_oversize(root, payload)?,
+        None => gate::prepare(root, payload)?,
     };
 
     if command.json {
@@ -1055,6 +1420,47 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pin a commit for an **authoritative** relation target, refusing a dirty path.
+///
+/// Backlog subjects may now pin a baseline and record `dirty: true`, because
+/// losing the context entirely is worse than recording an inexact one. A record
+/// relation is not that: `implemented_by` is admitted wording claiming this
+/// assertion is implemented *there*, and a snapshot that does not describe what
+/// was read is a claim nobody can check later.
+///
+/// Whether the record should relax the same way is #9's and #35's question, not
+/// this slice's, so the refusal stays exactly where it was and only Backlog
+/// moved.
+///
+/// Which means asking the record's own question rather than reusing Backlog's
+/// answer. `backlog::pin` reports whether the file differs from **the commit
+/// being pinned**, which is right for a subject: `dirty` there says the observed
+/// target holds bytes outside its recoverable baseline. Reusing it here quietly
+/// rewrote this refusal — an author naming an explicit historical revision from
+/// a clean worktree got told the file had uncommitted changes, because the file
+/// had legitimately moved on since. What this guard is for is narrower: the
+/// wording claims something is implemented *there*, so what the author read must
+/// be committed somewhere, not identical to the revision they chose.
+fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
+    let (commit, _) = backlog::pin(root, path, revision)
+        .map_err(|error| malformed_argument(flag, path, error))?;
+    let uncommitted = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            engr::EXIT_INVARIANT,
+            format!("{flag} {path}: could not determine whether it has uncommitted changes"),
+        )
+    })?;
+    if uncommitted {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{flag} {path} has uncommitted changes, so no commit describes what was read; commit it first, or choose another committed revision"
+            ),
+        ));
+    }
+    Ok(commit)
 }
 
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
@@ -1102,31 +1508,11 @@ fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<Stri
     backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
-/// The content identity to pin, recomputed from what the target actually says.
-///
-/// Not `section.sha256`. That value is the target's confirmed integrity seal —
-/// a claim about what was admitted — and copying a claim is not the same as
-/// checking it. A section rewritten outside the gate keeps its old seal, so a
-/// ref built from the seal would pin a hash the current wording does not
-/// produce, and the pin would look like agreement to text nobody confirmed.
-///
-/// Recomputing and then refusing the mismatch keeps the two roles apart:
-/// `section.sha256` says what was confirmed, `refs[].sha256` says what this
-/// section was actually written against, and they are only allowed to be equal.
-fn pin_target(target: &engr::model::Section, object: &str, section: u64) -> Result<String> {
-    let actual = target.recomputed_sha256()?;
-    if actual != target.sha256 {
-        return Err(Error::new(
-            engr::EXIT_INVARIANT,
-            format!(
-                "{object} §{section} does not match its own confirmed hash; its wording was changed outside the gate, so it cannot be referenced until that is resolved"
-            ),
-        ));
-    }
-    Ok(actual)
-}
-
-fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+fn parse_ref(root: &Path, spec: &str, field_names: &str) -> Result<Ref> {
+    let fields = field_names
+        .split(',')
+        .map(engr::dependency::SemanticField::parse)
+        .collect::<Result<Vec<_>>>()?;
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
             .map_err(|error| malformed_argument("--ref", spec, error))?;
@@ -1147,12 +1533,6 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         let section = canonical
             .section()
             .expect("checked before canonicalization");
-        let target_section = ops::effective_section(root, &id, section)?;
-        // Content identity before provenance, in that order. What the target
-        // says is the question a reference is about; which commit it was read
-        // at explains the answer. Asking for a repository first would refuse a
-        // rewritten target with a message about git.
-        let sha256 = pin_target(&target_section, &id, section)?;
         let commit = match canonical.snapshot() {
             Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
@@ -1162,12 +1542,15 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
                 )
             })?,
         };
-        return Ok(Ref {
-            object: id,
-            section,
-            sha256,
-            commit,
-        });
+        let target = ops::effective(root, &id)?;
+        let seal = target.sha256.as_deref().ok_or_else(|| {
+            Error::new(
+                engr::EXIT_SCHEMA,
+                format!("reference target object {id} has no aggregate seal"),
+            )
+        })?;
+        return engr::dependency::admit(root, &target, seal, section, &fields, &commit)
+            .map(Ref::selective);
     }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
@@ -1182,20 +1565,20 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         )
     })?;
     let id = resolve_object_argument(root, "--ref", prefix)?;
-    let target_section = ops::effective_section(root, &id, section)?;
-    let sha256 = pin_target(&target_section, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
             "a reference records the commit it was read at, which needs a git repository",
         )
     })?;
-    Ok(Ref {
-        object: id,
-        section,
-        sha256,
-        commit,
-    })
+    let target = ops::effective(root, &id)?;
+    let seal = target.sha256.as_deref().ok_or_else(|| {
+        Error::new(
+            engr::EXIT_SCHEMA,
+            format!("reference target object {id} has no aggregate seal"),
+        )
+    })?;
+    engr::dependency::admit(root, &target, seal, section, &fields, &commit).map(Ref::selective)
 }
 
 fn shorten(id: &str, width: usize) -> &str {
@@ -1203,13 +1586,31 @@ fn shorten(id: &str, width: usize) -> &str {
 }
 
 fn render_ref(reference: &Ref, width: usize) -> String {
-    format!(
-        "{} §{}  sha256 {}  commit {}",
-        shorten(&reference.object, width),
-        reference.section,
-        shorten(&reference.sha256, 8),
-        shorten(&reference.commit, 8)
-    )
+    let (object, section) = reference
+        .target_identity()
+        .unwrap_or_else(|_| ("invalid".to_owned(), 0));
+    match reference {
+        Ref::Selective(reference) => format!(
+            "{} §{}  fields {}  digest {}  commit {}",
+            shorten(&object, width),
+            section,
+            reference
+                .fields()
+                .iter()
+                .map(|field| field.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            shorten(reference.digest(), 10),
+            shorten(reference.commit(), 8)
+        ),
+        Ref::Legacy(reference) => format!(
+            "{} §{}  sha256 {}  commit {}",
+            shorten(&reference.object, width),
+            reference.section,
+            shorten(&reference.sha256, 8),
+            shorten(&reference.commit, 8)
+        ),
+    }
 }
 
 fn render_relation(relation: &Relation) -> String {
@@ -1426,7 +1827,6 @@ fn render_basis(basis: Option<&str>) -> String {
 /// consumes.
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
-    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
@@ -1446,14 +1846,15 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // change what a pending candidate presents while the payload hash, the
     // integrity hash and `expected_rev` all still checked out. Omitted when
     // there is none, which is the case for `object.created` — its title is the
-    // wording below — and for candidates prepared before the snapshot existed.
+    // wording below.
     let subject = match &candidate.payload.action {
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { absorbs } => format!(
+        Action::SectionMerged { merge } => format!(
             " absorbing {}",
-            absorbs
+            merge
+                .consumed()
                 .iter()
                 .map(|section| format!("§{section}"))
                 .collect::<Vec<_>>()
@@ -1597,24 +1998,28 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             ));
         }
     }
-    // Confirming this will also edit unresolved staging, so the human reading
-    // the change is shown that before they type, not told about it afterwards.
-    for source in &candidate.context.backlog {
+    if let Some(review) = &candidate.context.rule_review {
+        let result = match review.result {
+            engr::proof::ReviewResult::Passed => "passed",
+            engr::proof::ReviewResult::Failed => "failed — Human override required",
+            engr::proof::ReviewResult::Exhausted => "exhausted — Human override required",
+        };
         out.push_str(&format!(
-            "Backlog    {} §{}  {}\n",
-            shorten(&source.item, backlog_width),
-            source.section,
-            if source.resolves {
-                "resolved by this — will be consumed"
-            } else {
-                "still unresolved after this"
-            }
+            "Review     {result}\nAttempt    {}\nDigest     {}\nRules      {}\n",
+            review.attempt,
+            review.review_digest,
+            review
+                .rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
-        for produced in &source.produced {
-            out.push_str(&format!(
-                "           produced engr:{}\n",
-                produced.target.reference
-            ));
+        if let Some(explanation) = &review.explanation {
+            out.push_str("Explanation\n");
+            for line in explanation.lines() {
+                out.push_str(&format!("  {line}\n"));
+            }
         }
     }
     out.push('\n');
@@ -1787,15 +2192,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
             report.sections,
             report.title
         );
+        if report.object_tampered {
+            println!("          current Object integrity failed");
+        }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");
         }
         for stood in &report.standing_on_tampered {
             println!(
-                "          §{} stands on {} §{}, which does not match its own hash",
+                "          §{} stands on {} §{}, whose {} integrity failed",
                 stood.section,
                 shorten(&stood.target, width),
-                stood.target_section
+                stood.target_section,
+                stood.side.unwrap_or("current")
             );
         }
         // Said separately from tampering, and from each other. "Not there" and
@@ -1849,7 +2258,7 @@ fn warn_uncommitted(root: &Path, id: &str) {
 ///
 /// Its own namespace, like `backlog`, and for the same reason: nothing here
 /// goes through the gate, so it must not be reachable by a command that looks
-/// like one that does. `ls`, `show` and `verify` still mean confirmed record
+/// like one that does. `ls`, `show` and `verify` still mean admitted record
 /// and nothing else.
 #[derive(Subcommand)]
 enum Work {
@@ -2483,4 +2892,181 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read-only, because a rule is project data rather than an engr resource.
+///
+/// The listing says whether each rule is *usable*, which is the question an
+/// agent actually has: a rule whose basis cannot be resolved, or whose pinned
+/// basis no longer matches the project, cannot be reviewed against — and under
+/// #25 that blocks the mutations it covers rather than being quietly skipped.
+/// Saying so here means the agent finds out while reading, not at admission.
+fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
+    store::require_current(root)?;
+    match command {
+        RulesCommand::Ls { domain, json } => {
+            let domain = domain.map(DomainArg::model);
+            let all = match domain {
+                Some(domain) => rules::applicable(root, domain)?,
+                None => rules::load_all(root)?,
+            };
+            if json {
+                let listed: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|rule| {
+                        serde_json::json!({
+                            "id": rule.id,
+                            "domains": rule.domains.iter().map(|domain| domain.as_str()).collect::<Vec<_>>(),
+                            "based_on": rule.based_on,
+                            // Effective values, never "unspecified": a machine
+                            // reading this must not have to know the defaults
+                            // to know what the rule does.
+                            "review": rule.review,
+                            "usable": basis_trouble(root, rule).is_none(),
+                            "authority": "project_policy",
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&listed)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rules: {error}")) })?
+                );
+                return Ok(());
+            }
+            if all.is_empty() {
+                // What an empty set means belongs to the domain, not here: for
+                // most it means no review is required, and for autonomous
+                // agent Object admission it is what blocks the path.
+                match domain {
+                    Some(domain) => {
+                        println!("No rule governs {}.", domain.as_str())
+                    }
+                    None => println!("No project rules."),
+                }
+                return Ok(());
+            }
+            println!("PROJECT POLICY — read these before the mutation they govern\n");
+            for rule in &all {
+                let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+                println!("{}  {}", rule.id, domains.join(", "));
+                for basis in &rule.based_on {
+                    match &basis.commit {
+                        Some(commit) => {
+                            println!("    based on {} at {}", basis.path, shorten(commit, 8))
+                        }
+                        None => println!("    based on {} (current)", basis.path),
+                    }
+                }
+                // Listed only when it is not the default. A line on every rule
+                // repeating the same ceiling is noise a reader learns to skip,
+                // and the one rule that escalates to a person would be skipped
+                // with it. `rules show` states it unconditionally.
+                if rule.review != rules::Review::default() {
+                    println!("    review {}", review_line(&rule.review));
+                }
+                if let Some(trouble) = basis_trouble(root, rule) {
+                    println!("    UNUSABLE  {trouble}");
+                }
+            }
+            Ok(())
+        }
+        RulesCommand::Show { id, json } => {
+            let rule = rules::load_all(root)?
+                .into_iter()
+                .find(|rule| rule.id == id)
+                .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("no rule with id {id:?}")))?;
+            let resolved: Result<Vec<_>> = rule
+                .based_on
+                .iter()
+                .map(|basis| basis.resolve(root, &rule.id))
+                .collect();
+            if json {
+                // Nothing reaches stdout until the rule is known to be usable.
+                // Printing first and failing after left a machine surface whose
+                // successful-looking document was indistinguishable from a real
+                // one — a caller that drops the exit status would consume
+                // normative wording as reviewable when engr had already
+                // established that it is not. The human surface may say
+                // "UNUSABLE" and then fail, because a person reads the line; a
+                // parser reads the document.
+                resolved?;
+                let value = serde_json::json!({
+                    "id": rule.id,
+                    "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+                    "based_on": rule.based_on,
+                    "review": rule.review,
+                    "body": rule.body,
+                    "authority": "project_policy",
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rule: {error}")) })?
+                );
+                return Ok(());
+            }
+            let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+            println!("Rule       {}", rule.id);
+            println!("Governs    {}", domains.join(", "));
+            println!("Review     {}", review_line(&rule.review));
+            match &resolved {
+                Ok(bases) if bases.is_empty() => {
+                    println!("Based on   nothing outside the rule itself")
+                }
+                Ok(bases) => {
+                    for basis in bases {
+                        match &basis.commit {
+                            Some(commit) => println!(
+                                "Based on   {} at {} — read it, it is part of this rule",
+                                basis.path,
+                                shorten(commit, 8)
+                            ),
+                            None => println!(
+                                "Based on   {} (current) — read it, it is part of this rule",
+                                basis.path
+                            ),
+                        }
+                    }
+                }
+                Err(error) => println!("Based on   UNUSABLE — {}", error.message),
+            }
+            println!("\n{}", rule.body);
+            resolved.map(|_| ())
+        }
+    }
+}
+
+/// The effective review policy in one line.
+///
+/// States the policy rather than a consequence, because **a rule does not have
+/// one consequence**. What running out of attempts costs depends on the domain
+/// — Object stops, Backlog records and keeps the unresolved state, Collection
+/// and Work are undefined in v1 — and inside Backlog it depends further on the
+/// mutation, since a consume needs a review that passed while an ordinary edit
+/// does not. Even `reject` on an Object is the autonomous-agent outcome and not
+/// a repository prohibition: a human may still initiate the same mutation and
+/// override the result.
+///
+/// So a line here saying "then it is refused" would be false for most rules that
+/// carry the default. It names the effective field instead, and the consequence
+/// is stated once, per domain, in the protocol.
+///
+/// The number is the effective ceiling, so a rule that wrote nothing and one
+/// that wrote `5` read identically — which is what they mean.
+fn review_line(review: &rules::Review) -> String {
+    format!(
+        "{} attempt{}; on_exhaustion = {}",
+        review.max_attempts,
+        if review.max_attempts == 1 { "" } else { "s" },
+        review.on_exhaustion.as_str()
+    )
+}
+
+/// The first reason this rule cannot be reviewed against, if there is one.
+fn basis_trouble(root: &Path, rule: &rules::Rule) -> Option<String> {
+    rule.based_on
+        .iter()
+        .find_map(|basis| basis.resolve(root, &rule.id).err())
+        .map(|error| error.message)
 }

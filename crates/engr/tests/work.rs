@@ -277,7 +277,14 @@ fn work_targets_only_whole_objects_and_backlog_items() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "targets");
     let other = new_object(&root, "another");
-    let item = engr::backlog::create(&root, "unresolved", "a point", Vec::new()).expect("backlog");
+    let item = engr::backlog::create(
+        &root,
+        "unresolved",
+        "a point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
     work::start(&root, &id, None).expect("start");
 
     for allowed in [

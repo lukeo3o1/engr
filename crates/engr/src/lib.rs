@@ -1,4 +1,4 @@
-//! engr v0 — engineering records whose every word a human confirmed.
+//! engr v0 — engineering records with explicit Human or reviewed Agent authority.
 //!
 //! Objects hold sections. Sections are the current authority; confirmed events
 //! are append-only history and audit evidence, projected immediately at confirm
@@ -7,22 +7,60 @@
 pub mod backlog;
 pub mod collection;
 pub mod confirmation;
+pub mod dependency;
+pub mod digest;
 pub mod gate;
 pub mod git;
+pub mod integrity;
+pub mod migration;
 pub mod model;
 pub mod ops;
+pub mod proof;
 pub mod reference;
+pub mod rules;
 pub mod semantics;
 pub mod store;
 pub mod view;
 pub mod work;
 
 /// Schema version of `.engr/format.json`, the workspace-level authority.
-pub const WORKSPACE_VERSION: u32 = 1;
+///
+/// Version 2 is the first to define `review.max_attempts` and
+/// `review.on_exhaustion` on a project Rule, including their effective
+/// defaults. That is a *semantic* change over unchanged bytes: a rule file with
+/// no `review:` block means one thing here and another to a version 1 build, and
+/// an explicit block is an unknown field there. The workspace version is what
+/// stops the two from silently disagreeing — a build that does not know a
+/// version refuses the workspace rather than reading it under its own rules.
+///
+/// Version 3 activates the coordinated mixed-authority contract: explicit
+/// Section admission and timestamps, resource seals, selective references,
+/// and Event generation 2.
+pub const WORKSPACE_VERSION: u32 = 3;
+/// Compatibility name used by the Phase-3 contract tests.
+pub const PHASE_3_WORKSPACE_VERSION: u32 = WORKSPACE_VERSION;
+/// Older workspace versions this build recognizes and can migrate forward.
+///
+/// Recognized is not the same as current: a workspace at one of these is read
+/// only until `engr migrate` is run explicitly. It is also what makes a
+/// *historical* snapshot readable — see [`git::object_at`] — because a commit
+/// predating the migration carries the version that was current when it was
+/// made, and refusing it would make every reference pinned before the migration
+/// unresolvable.
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
-/// Version carried by confirmed Event envelopes that remain readable unchanged.
+/// Version carried by confirmed Event envelopes this build writes and reads.
 pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
+/// Event envelope generation this build emits.
+///
+/// Version 2 is the mixed-authority generation: a merge names the Section that
+/// survives it rather than listing everything it consumed, and admission
+/// provenance becomes one tagged structure. Both are different statements about
+/// what a record means, so it is a generation rather than an addition.
+///
+pub const EVENT_ENVELOPE_VERSION: u32 = 2;
+pub const PHASE_3_EVENT_ENVELOPE_VERSION: u32 = EVENT_ENVELOPE_VERSION;
 /// The candidate envelope this build mints and admits.
 ///
 /// Version 1 stored its binding and its revision-presentation metadata outside
@@ -30,7 +68,7 @@ pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
 /// the upgrade refuses the old envelope outright rather than reading missing
 /// integrity data as if it were protected — the whole point is that what a
 /// human was shown is the thing that gets admitted.
-pub const CANDIDATE_ENVELOPE_VERSION: u32 = 2;
+pub const CANDIDATE_ENVELOPE_VERSION: u32 = 3;
 /// Version carried by candidate envelopes minted before candidate integrity.
 pub const CANDIDATE_ENVELOPE_VERSION_V0: u32 = 1;
 /// There is no version number. One moving release tag, `latest`, and the commit

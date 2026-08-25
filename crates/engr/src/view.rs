@@ -1,8 +1,8 @@
 //! Read surfaces: staleness assessment, `show`, and `ls`.
 //!
-//! Two rules shape everything here. The confirmed wording and how much it can
+//! Two rules shape everything here. The admitted wording and how much it can
 //! be trusted appear on the *same* default surface — the previous design hid the
-//! confirmed text behind a flag, and a reader given the default output drew the
+//! authoritative text behind a flag, and a reader given the default output drew the
 //! opposite conclusion from the truth. And nothing is truncated: an agent asked
 //! to reason from a record needs all of it.
 
@@ -21,10 +21,8 @@ pub struct RefDrift {
     pub confirmed_sha256: String,
     pub current_sha256: Option<String>,
     pub lookback: Option<String>,
-    /// The target's stored content no longer hashes to the target's own
-    /// recorded hash. Comparing hashes cannot see this: an edit that leaves the
-    /// stored hash alone leaves `current_sha256` equal to what was pinned, so
-    /// the ref looks unmoved while the wording under it was rewritten.
+    /// Current or historical target integrity failed before semantic drift
+    /// could be trusted. `integrity_side` keeps the actionable distinction.
     pub target_tampered: bool,
     /// The target could not be read at all — malformed authority, a broken
     /// invariant, a file this build refuses. **Not** the same as the target
@@ -40,13 +38,20 @@ pub struct RefDrift {
     /// `verify` already treated it as a failure while this surface called it
     /// drift was one workspace state with two verdicts.
     pub target_missing: bool,
+    /// Selected semantic fields that changed for a selective Ref.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved_fields: Vec<String>,
+    /// Which side of a selective Ref failed integrity. The machine state is
+    /// intentionally coarse; this diagnostic keeps the actionable distinction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_side: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SectionStatus {
     /// This section's stored content does not hash to its own recorded hash.
     /// Dominates every other signal: a forged section's drift assessment is an
-    /// assessment of something nobody confirmed.
+    /// assessment of something no admission path accepted.
     pub tampered: bool,
     pub basis: Option<git::Distance>,
     pub drifted: Vec<RefDrift>,
@@ -57,7 +62,7 @@ impl SectionStatus {
         !self.tampered && self.basis.is_none() && self.drifted.is_empty()
     }
 
-    /// A section standing on wording that is not what was confirmed.
+    /// A Section standing on semantics that are not what was admitted.
     pub fn stands_on_tampered(&self) -> bool {
         self.drifted.iter().any(|drift| drift.target_tampered)
     }
@@ -131,11 +136,21 @@ impl SectionStatus {
 ///
 /// A hash that cannot be recomputed counts as a mismatch: the alternative is
 /// reporting content we could not check as sound.
-fn tampered(section: &crate::model::Section) -> bool {
+fn section_tampered(object: &Object, section: &crate::model::Section) -> bool {
+    if object.sha256.is_some() {
+        return crate::integrity::check_section_seal(section, &section.sha256).is_err();
+    }
     section
         .recomputed_sha256()
         .map(|now| now != section.sha256)
         .unwrap_or(true)
+}
+
+fn object_tampered(object: &Object) -> bool {
+    object
+        .sha256
+        .as_deref()
+        .is_some_and(|seal| crate::integrity::check_object_integrity(object, seal).is_err())
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -169,47 +184,137 @@ pub fn width(root: &Path) -> usize {
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let loaded = ops::effective(root, &reference.object);
+    let (object, section) = match reference.target_identity() {
+        Ok(identity) => identity,
+        Err(_) => {
+            return RefDrift {
+                object: "invalid reference target".to_owned(),
+                section: 0,
+                confirmed_sha256: String::new(),
+                current_sha256: None,
+                lookback: None,
+                target_tampered: false,
+                target_unreadable: true,
+                target_missing: false,
+                moved_fields: Vec::new(),
+                integrity_side: None,
+            }
+        }
+    };
+    let loaded = ops::effective(root, &object);
     // Absent and unreadable are different answers, and flattening them here is
     // what would let a corrupt dependency read as ordinary drift on the one
     // surface whose job is to say how far wording can be trusted.
-    let target_unreadable = loaded
+    let mut target_unreadable = loaded
         .as_ref()
         .err()
         .is_some_and(|error| error.code != crate::EXIT_NOT_FOUND);
-    let target = loaded
-        .ok()
-        .and_then(|target| target.section(reference.section).ok().cloned());
+    let target_object = loaded.ok();
+    let target = target_object
+        .as_ref()
+        .and_then(|target| target.section(section).ok().cloned());
     let target_missing = target.is_none() && !target_unreadable;
-    let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
+
+    if let Ref::Selective(selective) = reference {
+        let current_integrity_failed = target_object.as_ref().is_some_and(|target| {
+            target.sha256.as_deref().map_or(true, |seal| {
+                crate::integrity::check_object_integrity(target, seal).is_err()
+            })
+        });
+        let evaluated = target_object
+            .as_ref()
+            .and_then(|target| target.sha256.as_deref().map(|seal| (target, seal)))
+            .map(|(target, seal)| crate::dependency::evaluate(root, target, seal, selective));
+        if evaluated.as_ref().is_some_and(Result::is_err) {
+            target_unreadable = true;
+        }
+        let state = evaluated.and_then(Result::ok);
+        let moved_fields = match &state {
+            Some(crate::dependency::Dependency::Drifted { fields }) => fields
+                .iter()
+                .map(|field| field.as_str().to_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let target_tampered = matches!(
+            state,
+            Some(crate::dependency::Dependency::TargetIntegrityFailure)
+        );
+        let target_missing =
+            matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
+        let target_unreadable = target_unreadable
+            || matches!(
+                state,
+                Some(
+                    crate::dependency::Dependency::ProvenanceUnavailable
+                        | crate::dependency::Dependency::SchemaMismatch
+                        | crate::dependency::Dependency::DigestInvalid
+                )
+            );
+        let lookback =
+            (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
+                format!(
+                    "git show {}:{}/objects/{}.json",
+                    short(selective.commit()),
+                    store::DIR,
+                    object
+                )
+            });
+        return RefDrift {
+            object,
+            section,
+            confirmed_sha256: selective.digest().to_owned(),
+            current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
+                .then(|| selective.digest().to_owned()),
+            lookback,
+            target_tampered,
+            target_unreadable,
+            target_missing,
+            moved_fields,
+            integrity_side: target_tampered.then_some(if current_integrity_failed {
+                "current"
+            } else {
+                "historical"
+            }),
+        };
+    }
+    let legacy = reference
+        .as_legacy()
+        .expect("the selective case returned above");
+    let target_tampered = target_object
+        .as_ref()
+        .zip(target.as_ref())
+        .is_some_and(|(object, section)| section_tampered(object, section));
     // Recomputed from the target's actual content, not read off its stored
-    // seal. The seal is a claim about what was confirmed; it is not the
-    // content, and a file rewritten behind the gate keeps the old seal while
+    // seal. The seal is a claim about what was admitted; it is not the
+    // content, and a file rewritten outside admission keeps the old seal while
     // saying something else. Reporting the seal here made the two verdicts
     // agree by accident — "was X, now X" for a section whose wording had
     // changed — because the value being compared was the very value that had
     // not moved. Content identity decides drift; the seal decides tampering.
     let current = target.and_then(|section| section.recomputed_sha256().ok());
-    let moved = current.as_deref() != Some(reference.sha256.as_str());
+    let moved = current.as_deref() != Some(legacy.sha256.as_str());
     // Worth offering whenever the target is not what was pinned, whether it was
-    // revised through the gate or rewritten behind it.
+    // revised through admission or rewritten behind it.
     let lookback = (current.is_some() && (moved || target_tampered)).then(|| {
         format!(
             "git show {}:{}/objects/{}.json",
-            short(&reference.commit),
+            short(&legacy.commit),
             store::DIR,
-            reference.object
+            legacy.object
         )
     });
     RefDrift {
-        object: reference.object.clone(),
-        section: reference.section,
-        confirmed_sha256: reference.sha256.clone(),
+        object: legacy.object.clone(),
+        section: legacy.section,
+        confirmed_sha256: legacy.sha256.clone(),
         current_sha256: current,
         lookback,
         target_tampered,
         target_unreadable,
         target_missing,
+        moved_fields: Vec::new(),
+        integrity_side: None,
     }
 }
 
@@ -237,7 +342,7 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
             (
                 section.id,
                 SectionStatus {
-                    tampered: tampered(section),
+                    tampered: section_tampered(object, section),
                     basis,
                     drifted,
                 },
@@ -249,8 +354,8 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
 pub struct Counts {
     pub total: usize,
     pub ok: usize,
-    /// Sections whose wording, or whose stated basis, is not what was
-    /// confirmed. Counted apart from `attention`: drift is a question for a
+    /// Sections whose persisted state, or whose stated basis, is not what was
+    /// admitted. Counted apart from `attention`: drift is a question for a
     /// human, this is a broken record.
     pub tampered: usize,
     pub attention: usize,
@@ -287,7 +392,7 @@ pub fn classification(object: &Object) -> String {
 /// The supplementary entries, verbatim.
 ///
 /// Never truncated and never re-indented: the body is literal content somebody
-/// confirmed, and an agent reading it back has to get the bytes that were
+/// admitted, and an agent reading it back has to get the bytes that were
 /// hashed, not a prettier arrangement of them.
 fn render_content(out: &mut String, content: &[Supplement]) {
     for (index, entry) in content.iter().enumerate() {
@@ -329,6 +434,20 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
+    if object_tampered(object) {
+        out.push_str("!!         Object integrity failed; current authority changed outside a supported transition\n");
+        match git::last_commit_for(root, &store::object_path(root, &object.id)) {
+            Some(commit) => out.push_str(&format!(
+                "!!         git show {}:{}/objects/{}.json\n",
+                short(&commit),
+                store::DIR,
+                object.id
+            )),
+            None => out.push_str(
+                "!!         this Object was never committed, so there is nothing to compare against\n",
+            ),
+        }
+    }
     // The canonical reference, on the screen you land on when you want to name
     // this object to something else. Every reference-taking flag wants this
     // exact string, and until it was printed the only way to produce one was to
@@ -355,18 +474,21 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         render_relations(&mut out, &section.relations);
         if let Some(commit) = &section.based_on {
             out.push_str(&format!(
-                "    based_on {}   confirmed {}\n",
+                "    based_on {}   admitted {}\n",
                 short(commit),
-                section.confirmed_at
+                section.admitted_at
             ));
         } else {
-            out.push_str(&format!("    confirmed {}\n", section.confirmed_at));
+            out.push_str(&format!("    admitted {}\n", section.admitted_at));
         }
         for reference in &section.refs {
+            let (target, target_section) = reference
+                .target_identity()
+                .unwrap_or_else(|_| ("invalid".to_owned(), 0));
             out.push_str(&format!(
                 "    refs     {} §{}\n",
-                abbrev(&reference.object, w),
-                reference.section
+                abbrev(&target, w),
+                target_section
             ));
         }
         // The hash sits in the same file as the text it covers, so this catches
@@ -375,8 +497,8 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // pointed at it in the moment they learn something is wrong.
         if status.tampered {
             out.push_str(&format!(
-                "    !!       content does not match the hash confirmed at {}\n",
-                section.confirmed_at
+                "    !!       persisted Section does not match the seal admitted at {}\n",
+                section.admitted_at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
                 Some(commit) => out.push_str(&format!(
@@ -395,9 +517,10 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // after the first line has to have stopped on the worse news.
         for drift in status.drifted.iter().filter(|drift| drift.target_tampered) {
             out.push_str(&format!(
-                "    !!       {} §{} does not match its own hash; what this section stands on is not what was confirmed\n",
+                "    !!       {} §{} {} integrity failed; what this section stands on is not what was admitted\n",
                 abbrev(&drift.object, w),
-                drift.section
+                drift.section,
+                drift.integrity_side.unwrap_or("current")
             ));
             if let Some(lookback) = &drift.lookback {
                 out.push_str(&format!("             {lookback}\n"));
@@ -417,9 +540,18 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 continue;
             }
             match (&drift.current_sha256, &drift.lookback) {
+                (_, Some(lookback)) if !drift.moved_fields.is_empty() => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} changed selected fields: {}\n             {}\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        drift.moved_fields.join(", "),
+                        lookback
+                    ));
+                }
                 (Some(current), Some(lookback)) => {
                     out.push_str(&format!(
-                        "    advice   {} §{} was {} when confirmed, now {}\n             {}\n",
+                        "    advice   {} §{} was {} when admitted, now {}\n             {}\n",
                         abbrev(&drift.object, w),
                         drift.section,
                         short(&drift.confirmed_sha256),
@@ -477,7 +609,7 @@ struct JsonSection<'a> {
     #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
     relations: &'a [Relation],
     sha256: &'a str,
-    confirmed_at: &'a str,
+    admitted_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     basis_commits_behind: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,6 +644,8 @@ struct JsonObject<'a> {
     /// is absent from storage because a stored copy would be a second truth.
     attention: bool,
     rev: u64,
+    integrity: &'static str,
+    sha256: Option<&'a str>,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
 }
@@ -540,7 +674,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 refs: &section.refs,
                 relations: &section.relations,
                 sha256: &section.sha256,
-                confirmed_at: &section.confirmed_at,
+                admitted_at: &section.admitted_at,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),
@@ -555,6 +689,12 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         state: object.state.as_str(),
         attention: object.needs_attention(),
         rev: object.rev,
+        integrity: if object_tampered(object) {
+            "tampered"
+        } else {
+            "ok"
+        },
+        sha256: object.sha256.as_deref(),
         summary: JsonSummary {
             sections: tally.total,
             ok: tally.ok,
@@ -592,6 +732,7 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
                 .map(|id| format!("§{id}"))
                 .collect::<Vec<_>>()
                 .join(" "),
+            _ if object_tampered(object) => "object tampered".to_owned(),
             _ if tally.tampered > 0 => format!("{} tampered", tally.tampered),
             _ if tally.attention > 0 => format!("{} stale", tally.attention),
             _ => "ok".to_owned(),
@@ -626,9 +767,15 @@ fn matching_sections(object: &Object, needle: &str) -> Vec<u64> {
 pub fn tampered_count(objects: &[Object]) -> usize {
     objects
         .iter()
-        .flat_map(|object| &object.sections)
-        .filter(|section| tampered(section))
-        .count()
+        .map(|object| {
+            usize::from(object_tampered(object))
+                + object
+                    .sections
+                    .iter()
+                    .filter(|section| section_tampered(object, section))
+                    .count()
+        })
+        .sum()
 }
 
 /// One line per section, so grep can reach the text.
@@ -647,12 +794,17 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     let mut out = String::new();
     for object in objects {
         let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
+        let aggregate_tampered = object_tampered(object);
         for section in &object.sections {
-            let status = assessment
-                .iter()
-                .find(|(id, _)| *id == section.id)
-                .map(|(_, status)| status.key())
-                .unwrap_or("ok");
+            let status = if aggregate_tampered {
+                "object_tampered"
+            } else {
+                assessment
+                    .iter()
+                    .find(|(id, _)| *id == section.id)
+                    .map(|(_, status)| status.key())
+                    .unwrap_or("ok")
+            };
             out.push_str(&format!(
                 "{} §{:<3} {:<20}  {:<14}  {}\n",
                 abbrev(&object.id, w),
@@ -695,7 +847,7 @@ pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
 /// them. Nothing here was read by anyone, and the two are one `engr` command
 /// apart — so the boundary is stated where the reader already is, rather than
 /// left to be inferred from which subcommand they happened to type.
-pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here was confirmed by a human\n";
+pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here is admitted to the record\n";
 
 /// Activity to the second, in UTC.
 ///
@@ -766,7 +918,8 @@ fn subject_note(root: &Path, subject: &backlog::Subject) -> Option<&'static str>
                 Err(_) => Some("unreadable"),
             }
         }
-        backlog::Subject::File { path, commit } | backlog::Subject::Symbol { path, commit, .. } => {
+        backlog::Subject::File { path, commit, .. }
+        | backlog::Subject::Symbol { path, commit, .. } => {
             (!git::path_at(root, commit, path)).then_some("snapshot unavailable")
         }
     }
@@ -813,7 +966,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
 ///
 /// A resumed agent needs all four of text, subjects, produced outcomes and
 /// activity to decide what is left — and needs none of it to read like
-/// confirmed wording, which is what the banner and the section marker are for.
+/// admitted wording, which is what the banner and the section marker are for.
 pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     let w = backlog_width(root);
     let mut out = String::from(STAGING_BANNER);
@@ -851,7 +1004,7 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
         // Said once per Section that has outcomes, because this is the exact
         // place a resuming agent is most likely to conclude the opposite.
         if !section.produced.is_empty() {
-            out.push_str("             (already confirmed; this point is still unresolved)\n");
+            out.push_str("             (already admitted; this point is still unresolved)\n");
         }
     }
     out
@@ -869,6 +1022,12 @@ struct JsonBacklogSection<'a> {
     /// refuses outright. A machine-readable contract that only permissive
     /// readers can read is not one.
     reference: String,
+    /// What to hand back to `--expect` when changing or consuming this point.
+    ///
+    /// The predecessor an agent read, in a form a command line can carry. It
+    /// covers the whole Section and the parent topic, so anything either of them
+    /// does between reading and applying changes it.
+    expect: String,
     #[serde(flatten)]
     section: &'a backlog::Section,
 }
@@ -884,7 +1043,20 @@ struct JsonBacklogItem<'a> {
     authority: &'static str,
     next_section_id: u64,
     updated_at: &'a str,
+    /// The two item-level predecessors, for the two mutations that do not name
+    /// an existing point: renaming the topic, and adding a point.
+    ///
+    /// Separate values because they bind different things. A rename rests on the
+    /// complete item, so any point moving stales it; an add rests only on the
+    /// topic and the id it will receive, so a sibling being reworded does not.
+    expect: JsonBacklogExpect,
     sections: Vec<JsonBacklogSection<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonBacklogExpect {
+    rename: String,
+    add: String,
 }
 
 pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
@@ -897,14 +1069,21 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
         authority: "unconfirmed_staging",
         next_section_id: item.next_section_id,
         updated_at: item.updated_at(),
+        expect: JsonBacklogExpect {
+            rename: backlog::Precondition::of_item(item).token()?,
+            add: backlog::Precondition::of_add(item).token()?,
+        },
         sections: item
             .sections
             .iter()
-            .map(|section| JsonBacklogSection {
-                reference: format!("{}:{}", backlog_reference(&item.id), section.id),
-                section,
+            .map(|section| {
+                Ok(JsonBacklogSection {
+                    reference: format!("{}:{}", backlog_reference(&item.id), section.id),
+                    expect: backlog::Precondition::of_section(item, section.id)?.token()?,
+                    section,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     })
     .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }
@@ -952,7 +1131,7 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
 /// settles nothing — the failure mode worth preventing is an agent reading a
 /// sidecar with every item done and concluding the Object is decided.
 pub const WORK_BANNER: &str =
-    "EXECUTION MEMORY — agent-managed, confirmed by nobody, and not what the record says\n";
+    "EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says\n";
 
 /// Whether a Work target still resolves.
 ///
@@ -1114,7 +1293,7 @@ pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
 /// banner has to stop a reader concluding anything at all about the members
 /// from where they sit in a plan.
 pub const PLANNING_BANNER: &str =
-    "PLANNING — agent-managed, confirmed by nobody, and says nothing about what its members mean\n";
+    "PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean\n";
 
 pub fn collection_width(root: &Path) -> usize {
     collection::ids(root)

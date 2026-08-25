@@ -5,9 +5,13 @@ wrong and should be fixed, or the implementation is a bug — say which.
 
 ## The one rule
 
-**Nothing enters the record that a human has not read and confirmed.** There is
-no unconfirmed write path **into the record**. Every action goes `prepare` → the
-human reads the change → `confirm` with the exact phrase.
+**Every Section says which authority admitted its current semantics.** Human
+admission goes `prepare` → the human reads the change → `confirm` with the exact
+phrase. Agent admission is direct only when every applicable project Rule was
+reviewed against the exact mutation and the review passed. A semantic Agent
+mutation with no applicable usable Object Rule is refused; title creation and
+rename are the only exception because a title is navigation metadata, not
+authority.
 
 The workspace also holds **backlog**, which is explicitly outside the record and
 carries no such guarantee. The scope of the rule is what makes both possible: a
@@ -21,34 +25,35 @@ An **object** is an aggregate. It holds **sections**, each carrying text.
 object
 ├── id                        uuidv7
 ├── title
-├── type?                     design | decision | risk, absent by design
+├── type                      design | decision | risk | null
 ├── state                     one field, valid for the type
-├── rev                       increments on every confirmed action
+├── rev                       increments on every admitted action
 ├── next_section_id           monotonic, never reset
-└── sections[]
+├── sections[]
     ├── id                    integer, never reused, never renumbered
-    ├── role?                 decision | risk | supersession | acceptance_criterion
+    ├── admission             human | agent
+    ├── role                  decision | risk | supersession | acceptance_criterion | null
     ├── text                  always the current wording
-    ├── content[]?            bounded literal excerpts, ordered
-    ├── based_on?             committed repository context, absent by explicit choice
-    ├── refs[]                { object, section, sha256, commit }
-    ├── relations[]?          { type, target }
-    ├── sha256                hash of role + text + content + based_on + refs + relations
-    └── confirmed_at
+    ├── content[]             bounded literal excerpts, ordered
+    ├── based_on              committed repository context | null
+    ├── refs[]                { target, fields[], commit, digest }
+    ├── relations[]           { type, target }
+    ├── sha256                integrity seal over every other Section member
+    └── admitted_at
+└── sha256                    aggregate integrity seal over the Object
 ```
 
 A section's `text` is always its current wording, because wording only changes
-through a confirmed action. Readers never have to ask which of two fields is
+through an admitted action. Readers never have to ask which of two fields is
 authoritative — there is only one.
 
-Every optional field above is **absent when it carries nothing**. An empty
-`content[]`, an empty `relations[]` and a null `role` are not stored, so a
-section using none of them is byte for byte what it was before those fields
-existed — and hashes to the same value.
+The v3 Object and Section representation is exact. Optional scalar semantics are
+stored as `null`, empty sets and sequences as `[]`, and no current Object repeats
+workspace format or version. One meaning has one persisted shape.
 
 ### Sections are current authority; events are durable history
 
-`.engr/events/<id>.jsonl` is append-only confirmed history and audit evidence.
+`.engr/events/<id>.jsonl` is append-only admitted history and audit evidence.
 It is never purged in v0, but it is not a replay authority or a second source of
 current truth. **Sections remain authoritative for current wording**, and git
 additionally preserves committed projections for look-back and tamper evidence.
@@ -77,15 +82,16 @@ where `max(existing) + 1` would hand out a deleted id.
 
 ## Actions
 
-Ten. All of them gated.
+Ten. Human use is gated; the authority matrix below defines which Agent-reviewed
+uses may be admitted directly.
 
 | Action | Data | Effect |
 | --- | --- | --- |
-| `object_created` | — | Creates the object with the confirmed title |
+| `object_created` | — | Creates the object with the admitted title |
 | `object_renamed` | — | Replaces the title |
 | `section_added` | — | Appends a section, id from the counter |
 | `section_revised` | `section` | Replaces that section's content; id unchanged |
-| `section_merged` | `absorbs[]` | New id carrying the confirmed wording; absorbed sections removed |
+| `section_merged` | `destination`, `sources[]` | Destination keeps its id and takes the admitted wording; sources are removed |
 | `section_deleted` | `section` | Removes the section |
 | `object_closed` | — | `state` → `closed`; untyped objects only |
 | `object_reopened` | — | `state` → `open`; untyped objects only |
@@ -99,7 +105,7 @@ relations.
 
 An object that **does not need attention refuses every section action, and a
 rename**. Move it back into the attention set first. The friction is deliberate:
-if confirmed knowledge could still change while nobody was looking at it,
+if admitted knowledge could still change while nobody was looking at it,
 `accepted` would not mean "this has settled". A title is part of what settled,
 so exempting it would narrow that to "the sections have settled" rather than the
 whole object. For an untyped object this is exactly the old "reopen it first"
@@ -145,7 +151,7 @@ path remains available and means something different: two authoritative
 statements, because there were two. A payload with no destination serializes and
 hashes exactly as it did before the field existed.
 
-The rule is about **renewed engineering work** — wording confirmed once being
+The rule is about **renewed engineering work** — wording admitted once being
 changed again out of sight of everyone reading the default listing.
 `object_superseded` is therefore exempt, and the exemption is the rule rather
 than a hole in it: superseding is not resumed work on the object, it is the act
@@ -160,12 +166,13 @@ defines none.
 Sections have no `state` field. Deletion deletes and merging merges, so every
 section in the list is by definition current — there is no state to represent.
 
-A merge must absorb at least two distinct sections.
+A merge names one existing destination and at least one distinct source. The
+destination is not repeated in `sources[]`; every source is unique.
 
 ## Type and state
 
 `type` is optional, and an untyped object is a **first-class long-term form**,
-not a waiting room for classification. Most confirmed knowledge is just
+not a waiting room for classification. Most admitted knowledge is just
 knowledge.
 
 There is exactly one persisted lifecycle field. Which values it may take depends
@@ -251,11 +258,12 @@ and adds one only if a real combination proves meaningfully invalid.
 `acceptance_criterion` states a **verifiable condition, not its verification**.
 It MUST NOT gain `passed`, `failed`, `pending`, `waived` or any other local
 lifecycle. Whether a criterion currently holds is evidence: it changes without
-anyone confirming anything, and putting it here would make the record assert
-something no human read.
+any admission, and putting it here would make the record assert something no
+admission path reviewed.
 
-Because a role changes the machine-readable meaning of confirmed wording, it is
-authoritative content: it passes the gate and it is inside the section hash.
+Because a role changes the machine-readable meaning of admitted wording, it is
+authoritative content: it passes the applicable admission path and is inside the
+Section seal.
 
 ## Relations
 
@@ -269,10 +277,10 @@ implemented_by
 A relation is a typed semantic edge, and each type defines its own legal targets.
 This is not an arbitrary-string knowledge graph.
 
-`relations[]` is not `refs[]`. A ref is a **wording dependency** and drifts when
-its target is reworded; a relation says what this assertion relates to, and
-inherits none of that drift behaviour. Nor is it backlog `subjects[]`, which is
-weak, unconfirmed navigation.
+`relations[]` is not `refs[]`. A Ref is a **selective semantic dependency** and
+drifts when one of its selected target values moves; a relation says what this
+assertion relates to, and inherits none of that drift behaviour. Nor is it
+backlog `subjects[]`, which is weak, unconfirmed navigation.
 
 ### `superseded_by`
 
@@ -328,7 +336,7 @@ The symbol itself is **not** resolved. v0 does not parse the languages a
 repository is written in, and a check that only worked for the ones it could
 parse would be worse than none — failing on real code and passing on the rest.
 
-It is implementation-artifact provenance, not a wording dependency, so a section
+It is implementation-artifact provenance, not a selective semantic dependency, so a Section
 carrying one is never reported as stale because the file moved on.
 
 ## Supplementary content
@@ -452,52 +460,55 @@ sequence. Moving one is a change to the assertion.
 
 `prepare` validates a proposed action against the current object, mints a
 six-character challenge from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — no `0`/`O` or
-`1`/`I` — and stores a candidate.
+`1`/`I` — and stores a version 3 candidate. `prepare --agent` instead validates
+and admits an Agent mutation under the same writer lock; it never mints a Human
+challenge.
 
 `prepare` **refuses up front**, so nothing that cannot apply ever reaches a
 human: the reducer is preflighted, `based_on` must name a real commit, and every
-reference must resolve to an existing section whose current content matches what
-is being pinned. Deferring reference checks to `verify` is what let one mistyped
-id in the previous design poison a global health check permanently, with no way
-back.
+reference must resolve to an existing section whose selected current semantics
+match its historical snapshot. Agent admission applies the same preflight before
+writing. Deferring reference checks to `verify` is what let one mistyped id in
+the previous design poison a global health check permanently, with no way back.
 
-#### A reference pins content, not a claim about content
+#### A reference pins selected semantics, not an integrity seal
 
-`section.sha256` and `refs[].sha256` are related and are **not** the same thing:
+`section.sha256` and `refs[].digest` answer different questions:
 
 | | |
 | --- | --- |
-| `section.sha256` | the target section's confirmed integrity seal |
-| `refs[].sha256` | the content this section was actually written against |
+| `section.sha256` | whether the target Section still matches its admitted persisted state |
+| `refs[].digest` | which selected semantic values the source was written against |
 
-The pin MUST therefore be produced by **recomputing** the target's canonical
-semantic content — the same representation the section seal covers, never a
-second ref-specific or text-only hash — and never by copying the stored seal. A
-seal is a claim about what was admitted; a section rewritten outside the gate
-keeps its old seal while saying something else, so a pin copied from the seal
-would record agreement to wording nobody confirmed.
+`fields[]` is a non-empty canonical set drawn from `admission`, `role`, `text`,
+`content`, `based_on`, `refs` and `relations`. Identity, timestamps and integrity
+seals are not selectable semantics. The digest is versioned and computed from
+the target plus those fields' effective values; it is never copied from a stored
+seal.
 
 Admission is ordered, and the order is load-bearing:
 
-1. Load the effective target section.
-2. Recompute its content hash.
-3. Refuse unless that equals the target's own `section.sha256` — a target whose
-   wording no longer matches its seal cannot be referenced at all.
-4. Pin the recomputed value.
-5. Refuse unless the target content at `refs[].commit` recomputes to it. An
-   uncommitted target wording cannot be referenced.
+1. Validate the current target Object aggregate and every nested Section seal.
+2. Validate and canonicalize `fields[]`.
+3. Resolve the exact commit and load the historical target under that
+   snapshot's own workspace generation, validating historical integrity where
+   that generation defines it.
+4. Project the selected effective values on both sides and refuse unless they
+   are equal. An uncommitted selected value cannot be referenced.
+5. Compute and persist `{target, fields, commit, digest}`.
 
 So at the moment a reference is admitted:
 
 ```text
-recompute(current target content)
-  == target.section.sha256
-  == refs[].sha256
-  == recompute(target content at refs[].commit)
+selected(current target semantics)
+  == selected(target semantics at refs[].commit)
+  -> refs[].digest
 ```
 
-Content identity decides drift; git history explains it. `refs[].commit` remains
-provenance and recovery, not identity.
+Selected semantic identity decides drift; git history explains it.
+`refs[].commit` remains provenance and recovery, not identity. A migrated legacy
+Ref selects all six legacy semantic fields and deliberately does not gain
+`admission`, which the predecessor never asserted.
 
 There is **one live candidate per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.
@@ -535,8 +546,8 @@ cannot be confirmed.
 A candidate stores two fingerprints. `payload_sha256` identifies the mutation:
 it travels into the confirmed event, and an already-applied retry is recognised
 by it, so **its input may never widen**. `integrity_sha256` covers that value
-together with the challenge and the whole prepared context — the binding, the
-previous wording a revision is diffed against, and any backlog declarations.
+together with the challenge and the whole prepared context — the binding and the
+previous wording a revision is diffed against.
 Every load of a candidate MUST check both, not only admission: re-rendering a
 candidate hours later is as much a use of its prepared context as confirming it
 is.
@@ -546,6 +557,20 @@ deciding what the human is shown and what confirmation does. This is **not** a
 boundary against someone who controls the machine — the file is on that machine
 and so is the binary. It is the narrower guarantee that a candidate rewritten on
 disk cannot present or bind a different confirmation context and still pass.
+
+That check is also what happens to a candidate prepared under an older contract.
+When the prepared context changes shape — as it did when Backlog declarations
+left it — an outstanding candidate names an integrity value the current build
+cannot reproduce, and it **fails closed at use**: refused wherever it is loaded,
+told to be prepared again, never reinterpreted under the new shape.
+
+Migration MUST NOT block on such candidates, and MUST NOT rewrite or discard
+them. Migration moves representation; it does not decide the fate of material a
+human was in the middle of, and a migration that silently reinterpreted stale
+Human-Gate material would be authorizing something nobody confirmed. Nor is a
+backward-compatible decoder kept for a withdrawn contract: the compatibility
+surface would then outlive the design that needed it, and the failure would be
+surfaced later and more quietly than at the moment somebody tries to act on it.
 
 The challenge is covered because it is the link between the two halves of the
 gate: what a human is shown, and what their answer admits. A candidate MUST
@@ -608,8 +633,8 @@ its payload hash, its integrity value and its binding all still checked out. The
 same candidate re-rendered later represents the exact context it was prepared
 with, or the confirmation means less than it appears to.
 
-A candidate that predates the snapshot carries no name and MUST render without
-one rather than acquiring a current one.
+A candidate from an older envelope cannot establish the current integrity
+contract and MUST be refused and prepared again, not reinterpreted.
 
 Then the **complete semantic change**, not the whole section again. Revisions use a
 unified line diff with limited unchanged context and separately show old/new
@@ -654,7 +679,7 @@ knows engr already refused this once while there is still a decision to make.
 ### Repository basis
 
 `based_on` names the committed repository context against which wording was
-formed; it is not an exact wording dependency (that is what `refs[]` records).
+formed; it is not an exact semantic dependency (that is what `refs[]` records).
 With a clean source worktree, omitted `--based-on` defaults to `HEAD`. If source
 files outside `.engr/**` are dirty, omission is refused: the caller must select
 a real commit with `--based-on` or explicitly assert no repository basis with
@@ -675,9 +700,11 @@ The response must be exactly `CONFIRM <code>`.
 - Anything else, including whitespace and casing slips → rejected, and the
   candidate survives. A typo is not a qualification.
 
-On confirmation, engr appends the event, projects it into the sections, and
-clears the candidate. Projection is immediate: the sections are the authority, so
-they may not lag the log.
+On confirmation, engr appends a Human Event v2, projects it into the sections,
+reseals the changed Sections and Object, and clears the candidate. Agent
+admission appends an Agent Event v2 carrying its ReviewDigest and projects it in
+the same locked operation. Projection is immediate: the sections are the
+authority, so they may not lag the log.
 
 Re-confirming a code whose event is already applied is **idempotent** — it
 reports what happened rather than applying it twice. That closes the crash window
@@ -686,9 +713,9 @@ between saving the projection and clearing the candidate.
 ### Projection is deterministic
 
 The reducer takes an object and an event and nothing else. **No clocks, no git,
-no language model, no interpretation of prose.** Everything it needs is inside
-the event, because the agent's judgement was frozen there when a human confirmed
-it. Structure that was not recorded does not exist.
+no language model, no interpretation of prose.** Everything it needs, including
+the admitting path, was frozen into the Event before projection. Structure that
+was not recorded does not exist.
 
 ## Absence is not failure
 
@@ -711,31 +738,30 @@ shared layer does not flatten it first.
 
 ## Integrity on the read path
 
-Every read surface MUST recompute each section's hash before rendering it, and
-MUST say so where the reader is already looking. A reading path that prints
-unverified wording under an `ok` is worse than one that prints nothing: it is an
-assertion, and this record's whole claim is that a human agreed to these words.
+Every current read surface MUST validate the Object aggregate and recompute each
+Section seal before rendering it, and MUST say so where the reader is already
+looking. A reading path that prints unverified wording under an `ok` is worse
+than one that prints nothing: it asserts authority that the stored integrity no
+longer supports. Integrity failure is diagnosed without silently resealing it.
 
-A section MUST also be marked when a section it references fails **its** hash.
-Comparing `refs[].sha256` against the target's *stored* `sha256` cannot see this
-— an edit that rewrites the target's text and leaves its stored hash alone moves
-neither side of that comparison, so the reference looks untouched while the
-wording under it was replaced. So the current identity a read reports MUST also
-be recomputed from the target's content, and the two comparisons then say
-different things:
+A Section MUST also be marked when a target it references fails current or
+historical integrity. Comparing a Ref digest alone cannot see a hand edit that
+left the stored seals untouched, so integrity is established before semantic
+drift. The diagnostic SHOULD identify which side failed even though both map to
+the single `TargetIntegrityFailure` dependency state.
 
 | | |
 | --- | --- |
-| recomputed ≠ target's `section.sha256` | the wording was changed outside the gate — **tampered** |
-| recomputed = seal, ≠ `refs[].sha256` | the target was revised through the gate — **drift** |
-| recomputed = seal = `refs[].sha256` | unchanged |
+| current or historical target integrity fails | stored authority cannot be trusted — **integrity failure** |
+| integrity holds, selected current values differ from the historical selection | the dependency moved — **drift** |
+| integrity holds and selected values agree | unchanged |
 
 Only the directly referenced section is checked; the target's own read covers
 what *it* stands on.
 
-Corruption outranks staleness. A section whose content does not match its hash
-is not a section that drifted, and its drift assessment describes something
-nobody confirmed, so the label MUST report the corruption and not the drift.
+Corruption outranks staleness. A Section whose persisted state does not match its
+seal is not a Section that drifted, and its drift assessment would describe
+something no admission path accepted.
 
 ## Staleness
 
@@ -744,7 +770,7 @@ Two signals, both computed at read time, both needing nobody to be reading.
 | Signal | Computed from |
 | --- | --- |
 | The basis moved | `based_on` versus HEAD: commits ahead, files changed |
-| A dependency changed | `refs[].sha256` versus the target section's recomputed content hash |
+| A dependency changed | selected current semantic values versus the historical Ref digest |
 
 Sections without `based_on` have no basis-movement signal. Both signals are
 reported as **information, not a verdict**. A threshold nobody has
@@ -786,17 +812,18 @@ this is a repository, and `confirm` says when an object has uncommitted changes.
 
 ## Verify
 
-`verify` recomputes each section's hash from what is stored, and the hash of
-each section those sections reference.
+`verify` recomputes each Section seal and Object aggregate from what is stored,
+then checks the current and historical sides of every dependency.
 
 It catches a section edited without recomputing the hash. It **cannot** catch an
-edit that recomputes the hash too. Append-only confirmed events preserve audit
+edit that recomputes the hash too. Append-only admitted Events preserve audit
 evidence, and committed git history provides an additional tamper anchor, which
 is why `verify` also reports an uncommitted object.
 
-Do not read `verify` as proof that a human confirmed the current wording. It
-proves internal consistency. The gate is a convention enforced by the agent's
-instructions, not a mechanism — see below.
+Do not read `verify` as proof that the recorded admitting actor really performed
+the path. It proves internal consistency. Human admission in particular is a
+convention enforced by the agent's instructions, not an identity mechanism —
+see below.
 
 ## Backlog
 
@@ -805,10 +832,10 @@ outside the record entirely.
 
 | | Record | Backlog |
 | --- | --- | --- |
-| Admission | human confirmation | none; agents edit it directly |
-| Authority | current confirmed wording | none |
+| Admission | Human confirmation or passing Agent Rule Review | none; agents edit it directly |
+| Authority | current admitted wording | none |
 | History | append-only events, and git | git |
-| Integrity | section hashes, tamper alarms | schema validation only |
+| Integrity | Section and Object seals, tamper alarms | schema validation only |
 
 Committing backlog means only *this was the working thought stored here at that
 point*. It never means anyone agreed to it.
@@ -842,7 +869,7 @@ backlog item
     ├── text
     ├── updated_at
     ├── subjects[]      what this point concerns
-    └── produced[]?     confirmed outcomes so far
+    └── produced[]?     admitted outcomes so far
 ```
 
 Sections, rather than one blob, because a topic commonly holds several
@@ -865,8 +892,48 @@ Section ids are monotonic and never reused, for the reason the record's are —
 `max(existing) + 1` would hand back the id of a consumed Section and silently
 repoint every subject aimed at it.
 
-A confirmed section never moves back into backlog. The confirmed wording remains
-the last-admitted wording until another confirmed revision replaces it; the
+### Merging says two points were one
+
+A merge names one **destination** and one or more **sources**, and is one
+mutation:
+
+```text
+destination survives, keeping its Section id, with the merged wording
+sources are removed
+```
+
+The destination identity survives. A merge MUST NOT allocate a replacement
+Section identity, and MUST NOT reuse a source id later. Minting a fresh id to
+hold the merged wording is the tempting shape and the wrong one: everything
+already aimed at the destination — subjects, `produced[]` entries elsewhere, a
+human's own note — would be left naming a Section that stopped existing at the
+moment somebody observed the two were the same point.
+
+`produced[]` MUST be carried by **set union**:
+
+```text
+destination.produced = union(destination.produced, source.produced)
+```
+
+Merging says these were one unresolved point, not that the outcomes never
+happened. Dropping a source's outcomes would lose the one thing that stops a
+later session re-solving work an earlier one already got admitted.
+
+The merged destination receives a refreshed `updated_at`: it now states
+something it did not state before.
+
+It is **atomic**. Consolidation is a single judgement, and half of it applied is
+a state nobody decided on — a destination carrying merged wording while a source
+it supposedly absorbed still sits there unresolved. An implementation MUST check
+every participant before removing anything, so a merge naming a Section that is
+not there changes nothing at all.
+
+The precondition binds the parent topic, the complete destination and every
+complete source. An unrelated sibling Section changing MUST NOT stale it; any
+change to the topic, the destination or a source MUST.
+
+A Section in the record never moves back into backlog. Its wording remains the
+last-admitted wording until another admitted revision replaces it; the
 doubt goes into backlog instead, and is later settled by a normal record action.
 
 ### subjects[]
@@ -877,21 +944,136 @@ no dependency, no authority, no ordering, and no claim the target must change.
 An `engr` subject may name an Object, an Object Section, another backlog item or
 one of its Sections. **Backlog-to-backlog cycles are valid** — this is a
 navigation relation, not a dependency graph. Authoritative `refs[]` MUST NOT
-gain the ability to target backlog: a confirmed section cannot stand on wording
+gain the ability to target backlog: an authoritative Section cannot stand on wording
 nobody read. The asymmetry is the point.
 
-A `file` or `symbol` subject pins a path and a full resolved commit. Where the
-caller does not choose a committed revision and the path is dirty, engr MUST
-refuse rather than pin HEAD — HEAD would not describe what was actually read.
-The path MUST exist in the commit pinned. Backlog is allowed to be unresolved;
-it is not allowed to claim provenance it does not have. Symbol identity is a
-path and a human-readable name; no language-specific resolution is attempted.
+A `file` or `symbol` subject pins a path and a full resolved commit. The path
+MUST exist in that commit: a baseline that never held the file reconstructs
+nothing. Symbol identity is a path and a human-readable name; no
+language-specific resolution is attempted.
+
+Where the observed target carried changes the pinned commit does not hold, the
+subject is still written and MUST record `dirty: true`. Refusing it was the
+earlier rule and the wrong trade: the agent genuinely read something, and losing
+that context is worse than recording a baseline that is honestly labelled
+inexact. The commit stays recoverable; the extra context may be gone.
+
+The comparison is against **the commit being pinned**, not against the repository
+head. Those coincide only when the pin is the head: an explicitly chosen older
+revision differs from a perfectly clean worktree, and a working-tree cleanliness
+check reports `dirty: false` there while the file is not what that commit
+reconstructs — which is precisely the claim the field makes.
+
+`dirty` is **target-local**. It says nothing about the repository as a whole and
+nothing about `git worktree`. For a `symbol` it means the **containing file**
+was modified — proving a diff intersects one symbol's own source range would
+require language parsing and AST mapping, which this protocol MUST NOT require
+for context metadata, so readers MUST NOT read it as a claim about the symbol.
+
+`dirty` is **not part of subject identity**: the same target re-observed against
+a modified worktree is the same subject, and MUST NOT read as fresh activity. It
+is absent when clean, so a clean subject is byte-for-byte what it always was.
 
 A subject that later stops resolving is a stale signpost, and MUST NOT make the
 item unreadable. Backlog is staging, not a referential-integrity database.
 
 `subjects[]` is semantically **unordered**, and exact duplicates are refused so
-that "the same set" has one meaning. No persisted sort order is required.
+that "the same set" has one meaning. Duplicates are judged by the same identity
+that decides equality, so a target that differs only in `dirty` is a duplicate:
+`dirty` is not part of identity, and a comparison that included it would let one
+target sit in a set twice while the rest of the model calls them one subject. No
+persisted sort order is required.
+
+### Mutation preconditions
+
+A prepared Backlog mutation binds the predecessor it was written against, and is
+applied only while that predecessor still holds:
+
+```text
+read the exact predecessor
+-> prepare and review the exact mutation
+-> apply only while the predecessor still matches
+-> otherwise stale: read again and re-prepare
+```
+
+What each mutation binds is exactly what it rests on:
+
+| mutation | binds |
+| --- | --- |
+| create an item | nothing — see below |
+| change the topic | the **complete** parent item |
+| add a Section | the parent topic, and the id the add will **receive** |
+| change or consume a Section | that **whole** Section, and the parent topic |
+| merge Sections | the parent topic, and the **whole** destination and every source |
+
+A predecessor that still holds is not the same as a predecessor for *this*
+mutation, so an implementation MUST also check that the bound predecessor is the
+one the mutation rests on: the same item, and the same Sections. Otherwise a
+caller holding a genuinely valid predecessor for one item can apply it to
+another, or bind §1 and consume §5, and the guarantee fails exactly where it
+looks satisfied. Which is the wrong answer to report first, so the mismatch MUST
+be distinguishable from staleness — "you prepared against something else" is a
+different problem from "what you prepared against moved".
+
+An add binds the id it will **receive**, not merely that some id is absent.
+Another writer can take that id and consume it: the id reads as absent again
+while the allocation counter has advanced permanently, so an absence check
+passes and the add lands on an identity nobody reviewed — under a number the
+first allocation's subjects may already name.
+
+Creating an item binds nothing, and that is settled rather than pending. **engr
+mints the UUIDv7 while performing the create, and a caller MUST NOT supply or
+choose it**, so there is no proposed id whose absence a creation could bind. A
+creation MUST refuse a precondition rather than accept one it cannot honour:
+whatever id a caller prepared against, the item created is a different one, and
+checking the first would authorize the second.
+
+The alternative was letting a caller propose the id so creation would have a
+predecessor like every other mutation. It was declined because pre-authorizing a
+UUID needs reservation or pending state, or a token proving the caller was
+allowed that id — a whole lifecycle bolted on to protect an identity nobody else
+can be racing for. Rule Review still governs the create intent; identity is
+simply engr's to issue.
+
+The scope is the decision. Binding less than the whole Section is what the
+removed `canonical(text, subjects[])` fingerprint did, and it was blind to every
+field outside its list — including fields added later, which nobody would think
+to add to it. Binding more, such as the whole item for a single-Section change,
+would stale a mutation because an unrelated sibling moved, and a staleness
+signal that fires on unrelated work stops being read.
+
+An implementation MAY compare a hash internally. There is **no** protocol-level
+persisted Backlog fingerprint, and no field records one.
+
+That allowance is what makes the model reachable from a command line, which it
+otherwise would not be: an agent cannot hand back a complete Section as an
+argument. So a read surface MAY print a short stand-in for each predecessor and
+a mutation MAY take it back, as long as nothing persists it and the authority
+remains the whole predecessor compared at apply time.
+
+Carrying it is not optional decoration. Review happens before the mutation runs,
+so a command that reads and writes under one lock still leaves the entire
+interval between reviewing and running unguarded — a concurrent edit in that gap
+lands underneath a mutation nobody reviewed against it, and every check inside
+the lock passes, because they compare against what the command itself read
+rather than against what the agent read. **Where a Rule Review was required, the
+mutation MUST carry the predecessor it was reviewed against.** Where no rule
+applies there was no review to anchor, and a predecessor MAY be omitted.
+
+That requirement belongs to the **mutation**, not to whichever interface reached
+it. An implementation that enforces it only at its command line has enforced its
+command line: any other caller reaches the same semantic mutation, and the check
+has to sit where they meet.
+
+Creating an item is the one exception, because engr issues the identity and
+there is nothing for a predecessor to name. Requiring one would make creating an
+unresolved point impossible in exactly the workspaces that have rules about
+unresolved points, and an implementation MUST NOT resolve that by accepting a
+predecessor it will not honour.
+
+Staleness is its own outcome, not a failed mutation and not corrupt data: the
+caller did nothing wrong and the world moved underneath it. The refusal MUST say
+which part moved, so the retry is intelligent rather than reflexive.
 
 ### updated_at
 
@@ -904,8 +1086,8 @@ cannot disagree.
 
 Neither does a write that changes nothing. Rewriting a Section with the wording
 it already had, or with the same `subjects[]` set in a different order, MUST
-leave `updated_at` alone. Order is not content — the resolution basis already
-treats `subjects[]` as unordered — and an idempotent write that manufactures
+leave `updated_at` alone. Order is not content — `subjects[]` is a set — and an idempotent write that
+manufactures
 activity puts an untouched point at the top of the list somebody reads to find
 what was touched.
 
@@ -917,7 +1099,8 @@ fractional seconds and appending `Z` reports a different moment entirely. Read
 surfaces may normalize the offset for display; they may not change the instant,
 and the stored value keeps its own precision and offset.
 
-It is operational metadata and is **not** part of the resolution basis.
+It is operational metadata, not a concurrency token: whether a prepared mutation
+is still applicable is decided by its precondition, never by this timestamp.
 
 ### produced[]
 
@@ -930,74 +1113,72 @@ the *record* gained.
 produced.length > 0   DOES NOT MEAN   resolved
 ```
 
-One unresolved point may produce several confirmed outcomes across several
+One unresolved point may produce several admitted outcomes across several
 sessions and still have work left in it. They MUST NOT be forced into one batch
-confirmation so the point can be consumed. An agent resuming work should read
+admission so the point can be consumed. An agent resuming work should read
 the text, the subjects and the produced outcomes together before deciding what
 is left — that is what stops it re-solving what an earlier session settled.
 
-A declared outcome asserts that authority exists, so `prepare` MUST refuse one
-that names an Object or Section which will not exist once the candidate is
-admitted. The check is against the **projected** state, not the stored one: the
-usual outcome of working on an unresolved point is the very Object or Section
-the candidate creates, and refusing that would make the field useless for its
-own case. The candidate pins `expected_rev`, so that projection is exact.
+Object admission and this bookkeeping are **two independent operations**.
+Admitting an Object appends nothing here and consumes nothing here; an agent
+that worked from a point updates it afterwards, as an ordinary Backlog mutation.
+engr never infers the link, because an inferred one would eventually consume a
+point nobody meant to resolve.
 
-Existence is checked when the claim is made and never again. Loading backlog
-MUST NOT depend on a recorded outcome still existing: an Object deleted through
-the gate afterwards is history, and history cannot be allowed to make the
-staging around it unreadable.
+A declared outcome asserts that authority exists, so appending one MUST refuse a
+target that does not exist — and MUST refuse one whose persisted integrity no
+longer holds. Existing and sound are different questions: a section edited
+outside the gate loads perfectly and reads as authority, and an entry claiming
+it would launder that edit into a record of what was produced.
 
-### Resolution basis
+Integrity is checked at **the granularity being claimed**. A Section-qualified
+target is judged on that Section's seal. An Object-level target claims the
+Object's own authority — creation, a type or state transition, supersession —
+and nothing seals `title`, `type`, `state` or the revision, so every Section seal
+passing does not establish it. That authority MUST be checked against the
+durable history it was admitted through, and the **complete** rebuilt aggregate
+MUST be compared rather than a chosen set of fields — a Section removed from the
+projection outside the gate is never visited by a per-Section check, and gaps
+below the id counter are what legitimate admitted deletion looks like. Where the
+history cannot rebuild the Object, the claim MUST be refused rather than
+accepted unchecked. **Existence and
+integrity are checked when the claim is made and never again** — which is why
+they MUST be checked where the claim is *written*, under the same lock. Validating first and appending afterwards leaves a gap an
+Object mutation fits through, and the single check this relationship ever gets
+would have been against something that no longer existed when it landed. This
+holds in that direction only: `produced[]` is a record of what happened,
+not a referential-integrity constraint, so it never constrains the Object
+domain. A target may later be superseded, deleted, or absorbed by a merge while
+an entry still names it; the entry becomes an unavailable historical pointer,
+which is not corruption, and it MUST NOT be retargeted to a replacement —
+rewriting it would rewrite what was actually produced.
 
-The transient compare-and-consume token is
+### rule_review
 
-```text
-canonical(text, subjects[])
-```
+Present on a Section only when the wording standing in it was admitted **without
+a passing review** — the attempt had gone past a project rule's ceiling and
+Backlog admitted it anyway. See "How many attempts, and what happens after" for
+why this domain admits rather than refuses, and for the two numbers.
 
-excluding `produced[]`, `updated_at`, the Section id and the parent topic, with
-`subjects[]` canonicalized as an unordered set. It is **not** stored on the
-backlog Section: it is comparison state a candidate pins, not a trust hash.
+Absent is the ordinary case, and it means exactly one thing: this went in
+normally, or no project rule governed it. It MUST NOT be written for a mutation
+that changed nothing, since an idempotent write admitted nothing.
 
-If a produced outcome materially changes what remains unresolved, the agent
-revises `text` or `subjects[]` — which moves the basis, as it should.
+`attempts` MUST be greater than `limit`, and `limit` MUST be at least 1. A
+stored value outside that is not a diagnostic but a claim about a review that
+never happened, and it MUST be refused on read like any other impossible state.
 
-### Candidate-derived outcomes
+A topic rename admits no Section wording, so there is nowhere for this marker to
+go — and an exhausted rename MUST NOT simply proceed unmarked, which would make
+it the one soft-admission nothing records. Marking every Section instead would
+claim of each one something true of none. So an implementation MUST either
+persist the exhaustion in item-level state or **refuse the exhausted rename**.
+What an item-level marker looks like is not settled here, and an implementation
+MUST NOT invent one; refusing is the conforming choice until it is.
 
-A normal record action remains the thing that enters the record. There is no
-`backlog_promoted` event and no second confirmation flow.
-
-A candidate derived from backlog MUST explicitly declare its source Section(s),
-the outcomes produced from each, and whether confirming settles each one. It
-MUST NOT be inferred from the fact that an Object changed. `prepare` pins each
-source's resolution basis and refuses up front if the source does not exist.
-
-Those declarations are covered by candidate integrity and stay out of the event:
-backlog is not part of the authoritative record.
-
-After successful confirmation, per source:
-
-| Basis since prepare | Candidate says | Result |
-| --- | --- | --- |
-| unchanged | still unresolved | declared outcomes appended to `produced[]` |
-| unchanged | resolved | Section consumed; item removed if it was the last |
-| **changed** | either | left untouched, and reported |
-
-The third row is the one that matters. A stale source MUST NOT invalidate
-wording a human already confirmed — the record mutation still admits — and an
-old candidate MUST NOT mutate newer unresolved staging. Failing to reconcile
-because the source moved is an expected outcome, not a failed admission.
-
-A source declared resolved is consumed, so outcomes declared alongside it have
-nowhere to be written and are not: the point is settled, and the outcome is in
-the record, which is where it belongs.
-
-Reconciliation MUST happen inside the same successful confirmation, holding the
-same lock that made the mutation durable, so nothing can edit the source between
-the basis check and the write. It MUST also be idempotent: appending an outcome
-already listed does nothing, and a consumed Section is simply gone, so the retry
-that closes the crash window applies none of it twice.
+It is an ordinary persisted Section field, so it participates in the mutation
+precondition like any other — a mutation prepared against a Section that has
+since been marked is stale.
 
 ### Read surfaces
 
@@ -1013,7 +1194,7 @@ of what a record `PASS` claims.
 
 **Execution memory an agent keeps for one object.** It answers "where does this
 currently stand" and nothing else. Like backlog it is agent-managed, git-tracked
-and confirmed by nobody; unlike backlog it is not a domain of its own but a
+and admitted by nobody; unlike backlog it is not a domain of its own but a
 **sidecar** hanging off an object.
 
 ```text
@@ -1075,7 +1256,7 @@ finishing every item settles nothing
 
 An agent may complete every item it wrote and the object is exactly where it
 was. If a result turns out to be stable engineering knowledge, it reaches the
-record the only way anything does: `prepare`, a human, `confirm`. Unresolved
+record through the applicable Human or Agent admission path. Unresolved
 reasoning belongs in backlog. `summary` is a checkpoint, not a decision record, a
 design analysis, a session transcript, or a copy of git history.
 
@@ -1087,7 +1268,7 @@ that travels furthest from any banner and `{"state": "active"}` on its own is
 indistinguishable from an object's own state.
 
 Text surfaces must say more than backlog's banner does, because the failure worth
-preventing here is not a reader trusting unconfirmed wording but a reader taking
+preventing here is not a reader trusting unadmitted wording but a reader taking
 a finished checklist for a settled object.
 
 ### `paused` is a human saying stop
@@ -1198,7 +1379,7 @@ unresolved part in backlog, the settled part in the object.
 
 **Planning metadata: which work is grouped together, and in what order.** The
 third domain outside the record, and the furthest from it — backlog holds
-wording nobody confirmed, work holds progress nobody confirmed, and a collection
+wording nobody admitted, work holds progress nobody admitted, and a collection
 holds neither. It holds only the claim that some things belong together.
 
 ```text
@@ -1319,15 +1500,17 @@ implementation SHOULD do is report the planning context that went with it.
 Ordinary create, rename, describe, state, schedule, member, order and priority
 changes are agent-managed with no such rule.
 
-## What v0 does not solve
+## What Human admission does not prove
 
 `prepare` prints the challenge code where the agent can read it, and the agent
-runs `confirm`. **Nothing stops an agent confirming its own proposal.**
+runs `confirm`. **Nothing stops an agent confirming its own proposal and thereby
+claiming `admission: human`.** Agent admission does not rely on that fiction: it
+is explicitly tagged and carries the Rule Review that authorized it.
 
-Treat `confirmed_at` and a matching hash as evidence about the *content*, never
-as evidence that a human was present. Making the gate a mechanism needs the
-challenge to travel where the agent cannot read it, or `confirm` to run in a
-different process. That is not v0.
+Treat `admission: human`, `admitted_at` and matching seals as a record of the
+path used, never as identity proof that a human was present. Making the Human
+Gate a mechanism needs the challenge to travel where the agent cannot read it,
+or `confirm` to run in a different process. That is not v0.
 
 ### Supersession is one-way
 
@@ -1410,26 +1593,465 @@ history with a tool meant for it; then accept that references into the deleted
 section no longer resolve. engr adds nothing to those three steps, and pretending
 otherwise would only obscure the second.
 
+## Project rules
+
+Everything above is a mechanical invariant: id grammar, reference existence,
+valid states, size ceilings, hash integrity. Those are decidable, so engr
+decides them. A **rule** carries what is left — whether wording follows *this
+project's* recording policy, whether an entry is really unresolved engineering
+uncertainty, whether a plan follows the milestone policy. No schema answers
+those.
+
+So a rule is not a check engr runs. It is material an agent is required to have
+read, named precisely enough that the requirement can be verified afterwards. It
+proves nothing about comprehension and does not claim to; it makes silently
+skipping the review impossible through the supported path.
+
+Rules are **project policy data, not an authority domain**. There is no event
+store, no candidate and no confirmation for a rule file: git is their history.
+Changing one changes what the *next* mutation must be reviewed against, and
+nothing already admitted.
+
+```text
+.engr/rules/*.md    YAML front matter + a normative Markdown body
+```
+
+`id` is the stable identity and the filename is only a locator, so renaming a
+file does not create a different rule. **Duplicate ids fail closed**: two files
+claiming one identity means the applicable set is not determinable, and a review
+over an indeterminate set attests to nothing. Ids are `[a-z0-9-]+`.
+
+Front matter is **standard YAML**, then a strict rule schema. The layers are
+distinct — YAML decides syntax, engr decides whether the parsed document is a
+rule — and a field this version does not understand is **refused rather than
+ignored**, because reading past it would review against a rule only partly
+understood. The normative body is stored exactly as written; emptiness is
+decided by refusing, never by rewriting.
+
+Applicability is domain-only: `object`, `backlog`, `collection`, `work`. What an
+**empty** applicable set means belongs to the domain that owns the mutation, not
+to this layer.
+
+### How many attempts, and what happens after
+
+```yaml
+review:
+  max_attempts: 5                      # optional, positive
+  on_exhaustion: human_confirmation     # optional: reject | human_confirmation
+```
+
+Both fields are optional and both have **effective values**, so every rule
+answers "how many attempts does this get" from the rule alone:
+
+```text
+max_attempts omitted    -> 5
+on_exhaustion omitted   -> reject
+```
+
+There is no unlimited rule in v1. A rule may raise or lower the ceiling, and a
+ceiling of `0` is refused: it is not a tighter limit but a way of spelling "never
+reviewable", which the schema does not offer.
+
+Exhaustion is `attempt > effective max_attempts`, so a ceiling of 5 leaves
+attempts 1 through 5 reviewable and exhausts at 6. The attempt number is
+**agent-attested process metadata**. engr does not count attempts and stores no
+review series; it says what a given count means.
+
+**Attempts are counted from 1, and 0 is not a value.** A number below the first
+attempt is not a quieter way of saying "not yet" — it is outside what the
+protocol defines, and it is refused rather than answered. The failure it prevents
+is the silent one: an evaluator handed 0 would report that nothing is exhausted,
+which reads exactly like a successful policy result.
+
+The scope of that number is **one active review sequence**, and saying so matters
+because it bounds what the ceiling guarantees:
+
+```text
+same sequence          attempt = 1 -> 2 -> 3 -> ...
+sequence abandoned,
+lost, or restarted     a later independent sequence may begin again at 1
+```
+
+So `max_attempts` bounds repeated self-review within one continuous sequence. It
+is **not a rate limit and not a security control**: nothing persists across a
+restart, so cumulative exhaustion is not guaranteed and must not be relied on as
+though it were. v1 adds no persisted review series, retry counter, reset or
+abandonment record, and no pending-review resource — which is the same decision
+seen from the other side, since any of those would be the durable counter this
+is not.
+
+### A long-lived proof carries its own contract version
+
+A digest that must still be checkable years later is persisted as a **versioned
+scalar**:
+
+```text
+<contract-version>:<digest>          1:<64 lowercase hex>
+```
+
+The version travels with the value because a bare digest says what it is worth
+and not which calculation produced it. Both ways of guessing later are silent:
+verify it under current rules and a mismatch looks like tampering, or relabel it
+and claim a guarantee nobody made. A stored value may be relabelled under a newer
+contract **only** if the calculation is exactly equivalent.
+
+The scalar grammar is shared and owns only syntax:
+
+```text
+version := [1-9][0-9]*        positive uint32, 1..4294967295
+                              0 is permanently reserved and never means
+                              "legacy" or "unversioned"
+digest  := lowercase hex      uppercase is invalid, never silently normalized
+                              length is not fixed here
+```
+
+Contract versions are **field-local**. `ReviewDigestContract 1` and
+`CandidateDigestContract 1` are unrelated contracts that share a number, and each
+validates its own digest length — which is what lets one change hash algorithm
+without touching the grammar or the others. Versions need not be contiguous.
+
+**A number is never redefined, and that is not the same as a support promise.**
+Changing what a version calculates always takes a new version, even while the
+contract is experimental — otherwise one number would mean two things and no
+stored value could be read with confidence. What a *stable* declaration adds is
+the obligation to keep verifying: an experimental contract may be retired and its
+verifier dropped, while a version explicitly declared stable for durable use, and
+emitted under that status, must stay interpretable by later implementations.
+
+Development or pre-release emission alone does not cross that boundary. Stability
+is release policy and is deliberately **not** encoded in the scalar — a stability
+bit in the persisted value would make the guarantee a property of the data rather
+than of the release that made it.
+
+Where such a scalar takes part in canonical ordering it is compared as the parsed
+pair `(version, digest)`, not as text, because `2:` precedes `10:` and string
+order gets that backwards.
+
+**Supported is two questions, not one.** A contract may still verify values
+written under it long after it has stopped being what new values are written
+under; exactly one version per family emits at a time. So a well-formed scalar
+naming a version this build does not know is **not malformed data** — it is
+readable data this build cannot check, and it is reported that way. Only a
+grammar violation is malformed.
+
+**Verification recomputes under the version the value names**, not under the
+current one. That is the difference between carrying a version and using one: a
+build that only asks "is version 1 still supported" will accept a `1:` value and
+then compare it against a recomputation under version 2 — and those disagree by
+construction, because two calculations that agreed would not have needed two
+versions. The valid historical proof is then reported as a changed subject, and
+the guarantee exists only in the support table. A version listed as verifiable
+that this build cannot actually compute is refused rather than served the
+current calculation, since being promised in the contract is not evidence that
+an implementation has it.
+
+### Unordered sets have one order
+
+Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable
+serialization. Every field whose semantics are a set — a rule's domains, its
+bases, the applicable rule set itself — is canonicalized the same way before it
+is hashed:
+
+```text
+1. JCS each element on its own
+2. sort by the lexicographic order of those canonical bytes
+3. reject canonical-equivalent duplicates
+4. JCS the resulting structure and hash it
+```
+
+A review subject must be inside what those bytes can carry. RFC 8785 requires
+numbers **expressible as IEEE-754 binary64**, so an integer that is not exactly
+a double is refused rather than hashed. This is not pedantry about a standard:
+canonicalization takes numbers through a double, so such an integer does not
+fail — it becomes a different one, and `9007199254740993` and `9007199254740992`
+produce the *same* canonical bytes. Two distinct subjects, one hash, and an
+attestation over either verifying against the other. Values needing more
+precision are carried as strings.
+
+The domain is exact representability, **not** the ±(2^53 − 1) safe-integer
+range: that is a recommendation for ECMAScript interoperability, and RFC 8785's
+own examples include `9007199254740992`. Treating the recommendation as the
+domain refuses numbers the standard accepts.
+
+The canonical *spelling* is the standard's, not the author's. `2^60`
+canonicalizes to `1152921504606847000` — the shortest form that parses back to
+exactly `2^60`. The value is unchanged; only the decimal is. Every accepted
+number is exactly a double, so two accepted subjects that differ still differ
+after canonicalization, which is the property the seal depends on.
+
+Naming a standard is the point: JCS orders object members by **UTF-16** code
+units and fixes number formatting, so a second implementation in another
+language computes the same bytes. A stable serializer gives determinism for one
+implementation, which is a weaker claim wearing the same word — and a review
+hash is exactly where the difference bites, because an attestation is meant to
+be checkable by whoever recomputes it. The orders genuinely differ: `U+1F600`
+precedes `U+E000` under UTF-16 and follows it under UTF-8.
+
+Sorting by whichever field looks natural is the trap this replaces, and it is
+not obviously wrong: bases sorted by `path` are deterministic and stable. They
+are still in a different order, because canonical JSON sorts keys, so a basis's
+bytes begin with `commit` and a pinned basis precedes a floating one whatever
+the paths say. Two implementations, one sorting by path and one by canonical
+bytes, would hash the same rule differently — and a hash contract that two
+conforming implementations disagree about is not a contract.
+
+The order a surface *shows* is a separate question with a separate answer: bases
+are listed by path because that is what a reader is looking for, and the
+applicable set is reported by id because an agent must be able to name the set
+without first reproducing the hash.
+
+Parsed policy uses **effective** values, but review identity also binds exact
+Rule-artifact provenance. These two files have the same parsed rule semantics,
+but they are different reviewed artifacts and produce different ReviewDigests:
+
+```yaml
+review:                          review:
+  on_exhaustion: human_confirmation      max_attempts: 5
+                                         on_exhaustion: human_confirmation
+```
+
+Any byte-level edit, including formatting or explicitly spelling a default,
+invalidates the earlier review. This is deliberate: ReviewDigest proves which
+artifact was reviewed, not merely one interpretation of it. The effective
+policy is also *in* the identity, because it decides the outcome: the
+same wording under a ceiling of 5 and under a ceiling of 1 is not the same
+review, and one that escalates to a person is not one that refuses.
+
+One prepared mutation carries **one scalar attempt**, compared independently
+against each applicable rule's own ceiling. There is no per-rule counter and
+engr keeps no attempt state:
+
+```text
+prepare(exact mutation, attempt=N)
+
+  rule A max_attempts=5, attempt=3  ->  reviewable
+  rule B max_attempts=2, attempt=3  ->  exhausted
+```
+
+Which rules are past their ceiling is a mechanical fact and the same everywhere.
+**What that means is the domain's, and the domains deliberately disagree.**
+
+For an **Object**, an exhausted applicable rule stops the autonomous path. If at
+least one *actually exhausted* rule asks for `human_confirmation` the mutation
+escalates to the Human Gate, and otherwise it is refused. Escalation outranks
+refusal among exhausted rules, because a rule naming a human is asking for a
+decision rather than for the attempt to be discarded — and a human can still
+decide to refuse. A rule that asks for a human but is not exhausted escalates
+nothing: the action describes what happens at the ceiling, not a standing
+property.
+
+For the **Backlog**, exhaustion does **not** escalate and does not block, whatever
+any exhausted rule's `on_exhaustion` says. The domain exists to hold unresolved
+engineering intent, so the mutation is admitted and marked:
+
+```json
+"rule_review": { "attempts": 6, "limit": 2 }
+```
+
+`attempts` is the mutation-level attempt supplied; `limit` is the smallest
+effective ceiling in the applicable set — the one that made this exhausted, since
+a shared attempt passes the smallest ceiling first. It is a compact diagnostic,
+not a review history: per-rule ids and limits are not recorded, because the
+complete applicable set already lives in the review binding. A later successful
+revision clears the marker; a later exhausted admission replaces it.
+
+That soft-admission covers mutations that **preserve** unresolved information.
+Removing a Backlog Section destroys it, so removal requires a review that
+actually passed. A Section leaves only two ways, and both are reviewed: a consume,
+or atomically as the source of a merge. Exhausted, neither happens, the Sections
+stay exactly as they were, and **no marker is written** — nothing was admitted for
+a diagnostic to describe.
+
+**Collection and Work have no exhaustion behaviour in v1.** It is refused rather
+than borrowed from another domain, because a composition that answers for a
+domain nobody has decided is an invented rule that looks settled at the call
+site.
+
+Because the workspace version governs how a rule is read, **every path that
+reads rule semantics enforces that version** — not only the commands. A workspace
+at an older version is refused identically whether it is reached through the CLI
+or through the library, so persisted meaning never depends on which door a caller
+came through.
+
+### What a rule rests on
+
+```yaml
+based_on:
+  - path: AGENTS.md                    # the current material
+  - path: docs/architecture.md         # the exact material it was written against
+    commit: <full git object id>
+```
+
+Paths are **repository-relative** — relative to the repository top level, which
+is what `git show <commit>:<path>` uses and need not be where `.engr` sits. Both
+the current and the pinned side MUST resolve the same path the same way; two
+roots for one stored path means a rule can be judged against a file it never
+named.
+
+A pinned basis stops being usable once the current file says something else. The
+comparison is on **content, not commit ids**: a commit that did not touch the
+path changed nothing the rule depends on, and staling for it would train
+everyone to bump the pin without reading anything.
+
+Missing paths, unresolvable commits, and a path absent at its pin all fail
+closed. engr does not guess a rename.
+
+### Rules and bases name real files
+
+v1 **prohibits symlinks** for both `.engr/rules/*.md` and `based_on.path`, and
+for the rules directory itself. A link is refused even when its target stays
+inside the repository.
+
+The reason is that a link does not denote one material. Git records a symlink as
+a blob containing its target's *name*; a working-tree read returns the target's
+*contents*. So a pinned basis over an unchanged in-repository link compares a
+file's text against a filename and is stale forever, with nothing anyone can do
+to the project to make it current. Rules are git-tracked policy, and a rule whose
+bytes git does not hold is not a rule.
+
+A rule entry and a basis must both be **regular files**. `.md` is a name, not a
+kind: a FIFO so named makes a read block until someone opens the other end,
+turning an entry nobody can commit into a workspace that cannot load rules at
+all — a hang rather than an answer. Every one of these checks happens **before**
+reading, which is while it can still be a refusal.
+
+A **pinned** basis is checked against what git *recorded*, not only what git
+prints. `git show <commit>:<path>` prints a symlink's target name as though it
+were content, so a historical link whose target name equals a later regular
+file's contents would compare equal and the pin would read as current across
+exactly the change this prohibition exists to make visible. The tree entry mode
+MUST be a regular blob.
+
+A declared `commit` MUST name a commit object, not merely reach one. An
+annotated tag peels to a commit, so a reachability check accepts its id while
+the stored value is a tag id — a field specified as a commit id that quietly
+holds something else is a persisted representation nobody can rely on reading
+back.
+
+A **broken** rules directory is not an absent one. Absence is an empty rule set;
+a dangling redirection is a refusal, and following the link to decide would
+report a workspace as having no policy when what it has is policy pointing
+somewhere unreadable.
+
+The prohibition covers **every component on the way to a rule file**, not just
+the rule entry and the `rules` directory. A link at `.engr` redirects the whole
+policy while leaving everything behind it well-formed, and git would then track
+that link rather than the rule bytes — the same policy-versus-source mismatch,
+reached one level higher. The check therefore anchors above every component it
+validates.
+
 ## Layout
 
 `.engr/format.json` is the sole schema/version authority for a current
-workspace. New resource files do not repeat those fields. Phase 0 workspaces
-already carrying version 1 are still recognized as transitional while any
-Object uses `status`; workspaces without the authority may also be recognized
-from their legacy resource markers. Either form remains read-only until
-`engr migrate` is explicitly run. Migration changes only incompatible
-representation (`Object.status` to `Object.state`) and preserves compatible
-legacy markers and confirmed Event envelopes. Unknown or newer workspace
-versions are never mutated.
+workspace, and this build writes **version 3**. Current resource files do not
+repeat those fields. Workspaces at versions 1 and 2 are recognized and
+migratable; a workspace without the authority may also be recognized from its
+legacy resource markers. Every predecessor form remains read-only until `engr
+migrate` is explicitly run. Unknown or newer workspace versions are never
+mutated and never read.
+
+### What the admitting path may do
+
+Durable knowledge arrives through two paths — the Human Gate and Agent Rule
+Review — and a Section records which one admitted its current semantics.
+
+`Object.title` is **non-authoritative navigation and discovery metadata**. It is
+what a listing prints so a reader can find the record; it is not identity, it
+need not be unique, and nothing about what the Object *means* rests on it. Older
+wording naming `title`, `type` and `state` together as human-authoritative does
+not describe the current design: after the protocol-defined neutral
+initialization, the human-only Object metadata is exactly `type` and `state`.
+
+From that, and from a Section's own admission, the whole authority matrix
+follows:
+
+```text
+agent MUST NOT carry a becomes destination
+agent MUST NOT use object_closed, object_reopened,
+              object_classified or object_superseded
+agent MUST NOT delete a section admitted through the Human Gate
+agent MUST NOT reword one either, which would leave assented
+              wording standing as ungated
+agent merge MUST consolidate only agent-admitted sections,
+              whichever shape the merge is written in
+agent sections MUST NOT carry relations[] or role=supersession
+agent MAY create and rename a title
+```
+
+`type` and `state` are human-authoritative, and a field does not become
+agent-writable because it is reached through a different action — which is why a
+destination is admissible on the Human path and refused on the Agent one, on the
+very same action.
+
+**Deletion is decided by the current state, not by the envelope.** Whether
+removing §3 is legal depends on what §3 currently is, which no record carries and
+no schema can express. That rule therefore belongs to the current-state model,
+and a reducer MUST NOT rely on a later envelope layer to make its own state
+transition legal. For the same reason a projection MUST be closed under the
+model's invariants: the Section a transition produces is checked as it is built,
+rather than left for a later write to refuse.
+
+### The coordinated v3 migration
+
+A migration to version 3 activates mixed Section authority, `admitted_at`, exact
+Section encoding, Section and Object integrity, selective Ref digests, Candidate
+generation 3 and Event generation 2 as one contract. None is activated lazily
+per Object.
+
+Before writing one authoritative Object, migration MUST preflight the whole
+workspace: predecessor Object and Event reconstruction, every predecessor
+Section seal, every legacy Ref's complete transitive historical closure, retained
+resources and shared safe-integer bounds. Any ambiguous reconstruction,
+integrity failure or unsupported value fails before the workspace version moves.
+
+After preflight, the complete canonical v3 Object set and a digest manifest are
+written to `.engr/migration-v3`. Installing that sealed plan is idempotent, so a
+crash after any prefix of Object copies resumes from the same bytes. Only after
+every staged Object has been revalidated and copied may `format.json` advance to
+version 3; cleanup happens last. A leftover stage after the version write is
+therefore also safely resumable.
+
+Legacy admission reconstructs as `human`, `confirmed_at` becomes `admitted_at`,
+and all current resources are resealed. A legacy Ref becomes a selective Ref over
+the six semantic fields its old whole-content seal actually covered; it MUST NOT
+silently acquire `admission`. Confirmed Event v1 history is retained, not
+rewritten. Pending candidates are neither migrated nor discarded; old envelopes
+fail closed when used and must be prepared again.
+
+### What the workspace version is for
+
+It governs how **persisted data is interpreted**, including data whose bytes do
+not change. Version 2 exists because a project Rule gained `review.max_attempts`
+and `review.on_exhaustion` *with effective defaults*: an unchanged rule file with
+no `review:` block means one thing to a version 2 build and another to a version
+1 build, and an explicit block is an unknown field to the older one. Two builds
+accepting one workspace and disagreeing about what its policy says is the failure
+this authority exists to prevent, so a build that does not know a version refuses
+the workspace instead of reading it under its own rules.
+
+This is distinct from the review binding's own version, which identifies the
+deterministic binding contract and changes when *that* contract changes. A Rule
+does **not** carry a schema version of its own; the workspace answers for it.
+
+A prepared Rule Review attestation does not survive a migration that changes Rule
+interpretation. It named a subject computed under the old semantics, so it is
+stale by definition and must be prepared again.
+
+A **historical** snapshot carries the version that was current when it was taken,
+and is readable at any version this build recognizes. Refusing an older snapshot
+would make every reference pinned before a migration unresolvable — moving the
+workspace forward would retroactively break provenance that was correct when it
+was recorded. Versions 1 and 2 share the predecessor Object representation;
+version 3 decodes those snapshots under that representation and decodes v3 under
+the exact current representation. It never widens the current decoder.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain
 enough to infer one and a guessed classification is an engineering judgement
 nobody made. Classifying an existing object later is an authoritative change like
 any other, and passes the gate with a state valid for the type it is given.
-Adding the Phase 3 fields did not move the workspace version: they are absent
-when empty, so a workspace that uses none of them is byte-for-byte — and hash for
-hash — what it was.
+The v3 migration makes no new engineering judgement: all representation changes
+follow deterministically from verified predecessor state.
 
 ### Event versions are semantic compatibility generations
 
@@ -1454,8 +2076,14 @@ exactly, and an older reader confronted with one fails closed on the
 confirmation hash rather than replaying a revision while missing the
 classification that made it legal. It therefore stays within Event version 1.
 
-Confirmed history is never rewritten to normalize versions. An Event says what
-it said when a human confirmed it.
+Event version 2 is the current mixed-authority generation. Its provenance is
+tagged `human` or `agent`; Agent semantic events carry the ReviewDigest that
+admitted them. Its merge names the surviving destination and consumed sources.
+Those statements cannot be represented as Event v1 without changing meaning,
+so current writes emit v2 while retained v1 history remains readable.
+
+Admitted history is never rewritten to normalize versions. An Event says what
+it said under the authority path that admitted it.
 
 ```text
 .engr/
@@ -1463,8 +2091,9 @@ it said when a human confirmed it.
   .gitignore               excludes lock and candidates/
   lock                     one writer at a time
   objects/<uuid>.json      the authority        commit this
-  events/<uuid>.jsonl      append-only confirmed history
+  events/<uuid>.jsonl      append-only admitted history
   candidates/<CODE>.json   awaiting a human     never commit this
+  rules/*.md               project review policy
   backlog/<uuid>.json      unresolved staging   commit this
   work/objects/<uuid>.json execution memory      commit this
   collections/<id>.json    planning metadata      commit this
@@ -1529,7 +2158,7 @@ bring it in:
 | A backlog status (`resolved`, `partial`, `promoted`) | Something has to be kept in backlog after it is settled, and its absence loses information nobody can recover |
 | A priority, owner or due date on a backlog item | Which unresolved point to take next has to be answered mechanically rather than read |
 | Section ordering | A document has to be generated, or a merge has nowhere to sit |
-| Object-owned relations | A relation that belongs to no particular section, and that no confirmed section can express naturally |
+| Object-owned relations | A relation that belongs to no particular Section, and that no admitted Section can express naturally |
 | More relation types | A real edge that `superseded_by` and `implemented_by` cannot express, where something needs to act on it mechanically |
 | Workspace-defined types, roles or relation types | Discovery labels are needed badly enough to be worth weakening a vocabulary every reader currently agrees on |
 | A `type × role` compatibility matrix | A real combination proves meaningfully invalid rather than merely unusual |
@@ -1565,16 +2194,15 @@ A typed object already answers part of that: `rejected` and `invalidated` say
 reason to widen the untyped vocabulary, and it is why the row above is now
 narrower than it was.
 
-A priority would be a decision like any other and would go through the gate. The
-test for whether it belongs is whether a human wants to be asked to confirm a
-change to it: if confirming it would be tiresome, that is the signal it is
-tracker data, and admitting it would need a second write path — which is the one
-rule. An estimate of size is absent for a different reason and is not expected
-back: it is a guess about the future rather than a record of something agreed,
-and nothing would ever bring a human to re-confirm it.
+A priority would be an authoritative decision like any other and would need an
+explicit admission path. The test for whether it belongs is whether a reader
+needs it as durable engineering meaning: if reviewing it would be tiresome,
+that is the signal it is tracker data. An estimate of size is absent for a
+different reason and is not expected back: it is a guess about the future rather
+than a record of something agreed.
 
 Path scoping would have to be a section field carrying into the content hash —
-what a section is *about* is part of what was confirmed — and it MUST then be
+what a Section is *about* is part of what was admitted — and it MUST then be
 omitted from the canonical form when empty, or every section already recorded
 fails its own hash the day the field is added.
 

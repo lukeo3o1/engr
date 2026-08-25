@@ -9,9 +9,9 @@
 //! What keeps that safe is that Work owns no authority. It is a sidecar on an
 //! Object, not a resource: there is no `engr:work:` reference, nothing points at
 //! it, and finishing every item it lists changes nothing about what the Object
-//! says. Stable conclusions reach the record the only way anything does, through
-//! `prepare` and a human. Work is what the next agent reads first and trusts
-//! least.
+//! says. Stable conclusions reach the record through the applicable Human or
+//! reviewed Agent admission path. Work is what the next agent reads first and
+//! trusts least.
 
 use crate::reference::{canonical_embedded, EngrTarget, ResourceKind};
 use crate::{
@@ -227,6 +227,9 @@ impl Work {
     /// edit, and these files are meant to be read and diffed like any other
     /// tracked file.
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("work: {error}")))?;
+        crate::proof::within_safe_integers(&value, "work")?;
         // Every fault here is a fault in *stored* data, so they all read as
         // schema rather than usage. A caller who typed something too long is
         // refused earlier, by the same rule with the other exit code — a file
@@ -425,6 +428,19 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
             )
         });
     }
+    Ok(work)
+}
+
+/// Validate one retained sidecar during a coordinated workspace migration.
+///
+/// The caller validates ownership against the complete preflight Object set.
+/// Ordinary reads use [`load`], whose ownership check goes through current
+/// Object authority and therefore cannot run while the predecessor generation
+/// is deliberately read-only.
+pub(crate) fn load_for_migration(root: &Path, object: &str) -> Result<Work> {
+    let path = path(root, object);
+    let work: Work = store::read_json(&path)?;
+    work.validate()?;
     Ok(work)
 }
 

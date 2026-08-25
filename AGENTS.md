@@ -2,10 +2,10 @@
 
 ## What this is
 
-engr v0. An object holds sections; every change to a section goes through a gate
-where a human reads it and types a challenge code. Sections are the current
-authority, confirmed events are append-only history, and git anchors committed
-projections.
+engr v0. An object holds sections; every Section records whether its current
+semantics were admitted through the Human challenge gate or a passing Agent Rule
+Review. Sections are the current authority, admitted events are append-only
+history, and git anchors committed projections.
 
 Alongside it, backlog holds work nobody has settled. It is freely agent-editable
 and confirmed by no one, which is the whole reason the record can stay strict —
@@ -41,8 +41,13 @@ crates/engr/tests/cli.rs        what the command line promises the outside world
 
 ## If you are the agent using engr, not editing it
 
-Propose with `prepare`; never look for another way in, because there is not one
-and adding one would defeat the point.
+Use plain `prepare` only when asking a human to admit the rendered candidate;
+never confirm a code the human did not return. For autonomous semantic work,
+use `prepare --agent`, read every surfaced Rule and its bases, then repeat the
+exact mutation with its ReviewDigest, complete Rule ids and a passing result.
+That path writes immediately and records Agent admission. It refuses semantic
+work with no applicable usable Object Rule; title create/rename is the sole
+non-authoritative exception.
 
 `engr candidate <code>` re-renders a pending candidate. Use it when a human comes
 back later — **re-running `prepare` mints a new code and voids the one they are

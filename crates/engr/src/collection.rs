@@ -7,7 +7,7 @@
 //!
 //! It changes nothing about what it contains. Moving an Object between
 //! collections, ranking it, or calling a plan complete is planning activity —
-//! the Object means exactly what its confirmed sections say either way. That is
+//! the Object means exactly what its admitted Sections say either way. That is
 //! the whole trust boundary, and every rule here exists to keep it: membership
 //! carries no authority, priority belongs to the membership rather than to the
 //! target, and completing a plan is a declaration rather than a proof.
@@ -214,6 +214,9 @@ impl Collection {
     /// earlier by the same rule with the other exit code, and a file nobody
     /// currently running a command wrote is not their mistake.
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("collection: {error}")))?;
+        crate::proof::within_safe_integers(&value, "collection")?;
         crate::reference::canonical_embedded(
             &format!("collection:{}", self.id),
             &[ResourceKind::Collection],
