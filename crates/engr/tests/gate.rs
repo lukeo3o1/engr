@@ -2800,3 +2800,75 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
         "nothing was admitted"
     );
 }
+
+/// An always-present member is not optional just because serde has a default.
+///
+/// #9 says Event-v2 `refs` is always present, including `[]`, and #25 says the
+/// same of the candidate's presentation context. A decoder with `#[serde(default)]`
+/// happily fills either in, and `check_nothing_was_dropped` iterates the members
+/// that *were* stored, so it cannot see one that is absent. What closes it is
+/// comparing the stored value against this build's own serialization of the
+/// record it decoded to: the writer always emits `refs`, so a record without it
+/// is not the shape, whatever serde was willing to reconstruct.
+#[test]
+fn an_omitted_always_present_member_is_not_a_second_spelling() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "always present");
+    let path = store::events_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("events");
+    let line = original.lines().next().expect("record").to_owned();
+    assert!(
+        line.contains(r#""refs":[]"#),
+        "the writer emits the member: {line}"
+    );
+
+    // Drop it. Everything else is untouched, and serde would decode it back.
+    let without = line.replacen(r#""refs":[],"#, "", 1);
+    assert_ne!(without, line, "the fixture must actually drop it");
+    std::fs::write(&path, format!("{without}\n")).expect("rewrite");
+    let error = store::load_events(&root, &id).expect_err("refs is always present");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("exact canonical shape"), "{error}");
+
+    std::fs::write(&path, &original).expect("restore");
+    store::load_events(&root, &id).expect("and the emitted record reads back");
+}
+
+/// The same, for each of the candidate's always-present presentation members.
+#[test]
+fn a_candidate_cannot_omit_its_always_present_presentation_members() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "candidate shape");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let prepared = gate::prepare(
+        &root,
+        payload(Action::SectionRevised { section: 1 }, &id, "reworded"),
+    )
+    .expect("prepare");
+    let code = prepared.candidate.challenge.clone();
+    let path = store::candidate_path(&root, &code).expect("candidate path");
+    let original = std::fs::read_to_string(&path).expect("candidate");
+
+    for member in [
+        "previous_text",
+        "previous_based_on",
+        "previous_refs",
+        "previous_semantics_recorded",
+    ] {
+        let mut stored: serde_json::Value = serde_json::from_str(&original).expect("json");
+        assert!(
+            stored.as_object().expect("object").contains_key(member),
+            "the writer emits {member}"
+        );
+        stored.as_object_mut().expect("object").remove(member);
+        write_raw(&path, &stored).expect("a candidate missing one member");
+
+        let error = gate::find(&root, &code)
+            .err()
+            .unwrap_or_else(|| panic!("{member}: an always-present member is not optional"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{member}");
+    }
+
+    std::fs::write(&path, &original).expect("restore");
+    gate::find(&root, &code).expect("and the prepared envelope reads back");
+}
