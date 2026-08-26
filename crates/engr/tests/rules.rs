@@ -2915,3 +2915,49 @@ based_on:
         "a refused mutation writes nothing"
     );
 }
+
+/// A binding is one coherent snapshot of a Rule, or it is nothing.
+///
+/// `.engr/rules` is deliberately editable outside the workspace lock. Parsing a
+/// Rule and then reopening the path to fingerprint it is two reads of a moving
+/// target, and the binding that comes out can name one file's normative text
+/// while claiming the next file's `content_sha256` — provenance for an artifact
+/// whose semantics nobody reviewed. Artifact-exact identity means the two halves
+/// come from the same bytes.
+#[test]
+fn a_rule_binding_never_mixes_two_reads_of_the_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let path = write_rule(&root, "architecture", ARCHITECTURE);
+    let first = std::fs::read_to_string(&path).expect("as written");
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = bound.rules()[0].clone();
+    assert_eq!(
+        rule.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(&first).as_str()),
+        "the provenance identifies the bytes that were parsed"
+    );
+
+    // The file changes. Every half of the next binding describes the new one.
+    let second_text = ARCHITECTURE.replace("architecture contract", "architecture contract (v2)");
+    write_rule(&root, "architecture", &second_text);
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind again");
+    let rule = bound.rules()[0].clone();
+    assert!(
+        rule.body.contains("(v2)"),
+        "the semantics are the new file's"
+    );
+    assert_eq!(
+        rule.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(&second_text).as_str()),
+        "and so is the provenance — never one of each"
+    );
+}

@@ -847,3 +847,47 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
     let text = engr::proof::canonical_bytes(value, "test fixture")?;
     std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }
+
+/// A duplicate member is where two conforming JSON readers may disagree.
+///
+/// Parsing into a value collapses a repeated key silently — one slot per name —
+/// so an exact-members check made after parsing can only ever see one. That is
+/// not a tidiness question: another conforming stack may reject the document or
+/// select the other occurrence, so the bytes no longer have one meaning. The
+/// canonical-bytes rule settles it without a second check, because the collapsed
+/// value no longer re-serializes to the bytes that had both.
+#[test]
+fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "one meaning");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+
+    let path = store::object_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("object bytes");
+    store::load_object(&root, &id).expect("the canonical bytes load");
+
+    for (what, rewritten) in [
+        (
+            "a duplicated top-level member",
+            original.replacen('{', r#"{"state":"open","#, 1),
+        ),
+        (
+            "a duplicated Section member",
+            original.replacen(r#""sections":[{"#, r#""sections":[{"id":1,"#, 1),
+        ),
+    ] {
+        assert_ne!(
+            rewritten, original,
+            "{what}: the fixture must change something"
+        );
+        std::fs::write(&path, &rewritten).expect("write");
+        let error = store::load_object(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains("canonical"), "{what}: {error}");
+    }
+
+    std::fs::write(&path, &original).expect("restore");
+    store::load_object(&root, &id).expect("and it reads back");
+}

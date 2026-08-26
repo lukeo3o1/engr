@@ -2769,3 +2769,41 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
 fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
     write_raw(&engr::store::object_path(root, &object.id), object)
 }
+
+/// A number too large for JCS is a fault in the file, not in the command line.
+///
+/// One traversal, two fault classes. The same walk validates a value a caller
+/// just typed and a value found inside a persisted resource, and reporting the
+/// second as `usage` sends whoever reads the refusal to fix their command
+/// instead of the record.
+#[test]
+fn a_stored_number_outside_the_shared_domain_is_a_schema_fault() {
+    let (_dir, root) = workspace();
+    let id = engr::model::new_id();
+    let beyond = serde_json::Number::from(engr::proof::MAX_SAFE_INTEGER + 1);
+    let item = serde_json::json!({
+        "id": id,
+        "topic": "outside the domain",
+        "next_section_id": beyond,
+        "sections": [{
+            "id": 1,
+            "text": "unresolved",
+            "updated_at": "2026-08-25T00:00:00Z",
+        }],
+    });
+    // Written with an ordinary serializer: JCS cannot carry the value at all,
+    // which is the whole reason the domain exists.
+    std::fs::write(
+        backlog::item_path(&root, &id),
+        serde_json::to_string(&item).expect("json"),
+    )
+    .expect("stage");
+
+    let error = backlog::load(&root, &id).expect_err("that number cannot survive JCS");
+    assert_eq!(
+        error.code,
+        engr::EXIT_SCHEMA,
+        "a stored file outside the schema is not a usage error: {error}"
+    );
+    assert!(error.message.contains("safe integer"), "{error}");
+}

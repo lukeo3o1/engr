@@ -2240,3 +2240,270 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
 fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
     write_raw(&engr::store::object_path(root, &object.id), object)
 }
+
+/// A persisted Event-v2 record *is* its canonical bytes, not merely a value
+/// that parses to the right thing.
+///
+/// Comparing parsed values has already lost the answer: member order,
+/// insignificant whitespace and any duplicate member name the parser collapsed
+/// are gone before the comparison happens. An EventStore arrives through a git
+/// merge, a hand edit or a copy as readily as through an append, so this is a
+/// read-boundary rule and not a property of the writer.
+#[test]
+fn an_event_record_that_is_not_its_canonical_bytes_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "canonical records");
+    let path = store::events_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("events");
+    let line = original.lines().next().expect("one record").to_owned();
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("record");
+
+    let members: Vec<String> = parsed
+        .as_object()
+        .expect("a record is a JSON object")
+        .iter()
+        .rev()
+        .map(|(key, value)| {
+            format!(
+                "{}:{}",
+                serde_json::to_string(key).expect("key"),
+                serde_json::to_string(value).expect("value")
+            )
+        })
+        .collect();
+    for (what, rewritten) in [
+        ("reordered members", format!("{{{}}}", members.join(","))),
+        (
+            "insignificant whitespace",
+            serde_json::to_string_pretty(&parsed)
+                .expect("pretty")
+                .replace('\n', " "),
+        ),
+        ("a duplicate member", line.replacen('{', r#"{"rev":1,"#, 1)),
+    ] {
+        std::fs::write(&path, format!("{rewritten}\n")).expect("rewrite");
+        let error = store::load_events(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+    }
+
+    std::fs::write(&path, &original).expect("restore");
+    store::load_events(&root, &id).expect("the canonical bytes read back");
+}
+
+/// Revision zero is the Object before any Event, and no writer emits it.
+///
+/// Adjacency cannot refuse it: a `0, 1, 2 …` log is perfectly contiguous, and
+/// recovery filters records at or below the projection as old evidence — so an
+/// impossible record could sit in the log being silently skipped rather than
+/// reported. The lower bound belongs to the record contract.
+#[test]
+fn event_revisions_start_at_one() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "revision domain");
+    let path = store::events_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("events");
+    let first: engr::model::Event =
+        serde_json::from_str(original.lines().next().expect("record")).expect("event");
+
+    let mut zero = first.clone();
+    zero.rev = 0;
+    let record = engr::proof::canonical_bytes(&zero, "event").expect("canonical");
+    std::fs::write(&path, format!("{record}\n{original}")).expect("prefix with rev 0");
+
+    let error = store::load_events(&root, &id).expect_err("there is no revision zero");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("start at 1"), "{error}");
+}
+
+/// A transition whose numbers no identity can carry is refused before anything
+/// is minted.
+///
+/// An Object at the shared ceiling is itself entirely valid; what is not
+/// representable is the transition out of it. Some of those numbers appear
+/// nowhere in the payload — the reducer allocates them — so a per-payload check
+/// passes, and for an operation whose CandidateDigest excludes `rev` the hash
+/// succeeds too. A person would then be holding a code for a mutation that can
+/// never be admitted.
+#[test]
+fn preparation_refuses_a_transition_no_identity_can_carry() {
+    let (_dir, root) = workspace();
+    let ceiling = engr::proof::MAX_SAFE_INTEGER;
+
+    let set_rev: fn(&mut engr::model::Object, u64) = |object, value| object.rev = value;
+    let set_counter: fn(&mut engr::model::Object, u64) =
+        |object, value| object.next_section_id = value;
+    for (what, at_ceiling) in [
+        ("the revision", set_rev),
+        ("the section counter", set_counter),
+    ] {
+        let id = new_object(&root, "at the ceiling");
+        let object = store::load_object(&root, &id).expect("object");
+        let seal = object.sha256.clone().expect("aggregate seal");
+        let resealed = engr::integrity::mutate(&object, &seal, |object| {
+            at_ceiling(object, ceiling);
+            Ok(())
+        })
+        .expect("reseal at the ceiling");
+        save_raw(&root, &resealed.object).expect("put it on disk");
+
+        let events = std::fs::read(store::events_path(&root, &id)).expect("events");
+        let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "one more"))
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
+        assert!(error.message.contains("safe integer"), "{what}: {error}");
+        assert!(
+            gate::pending(&root).expect("candidates").is_empty(),
+            "{what}: no candidate was minted"
+        );
+        assert_eq!(
+            std::fs::read(store::events_path(&root, &id)).expect("events"),
+            events,
+            "{what}: and nothing durable moved"
+        );
+    }
+}
+
+/// Two envelopes can share a CandidateDigest and differ in challenge.
+///
+/// The digest names the semantic transition, not the envelope, so an older
+/// identical candidate restored after a later one was applied would match on
+/// the digest alone. Event v2 persists the pair precisely so a record proves
+/// confirmation of *its* challenge, and reporting the older envelope as the
+/// newer one's idempotent retry would say a person answered for something they
+/// never saw.
+#[test]
+fn an_identical_candidate_with_another_challenge_is_not_an_applied_retry() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "two envelopes");
+    let proposal = || payload(Action::SectionAdded, &id, "the same wording");
+
+    let first = gate::prepare(&root, proposal()).expect("first envelope");
+    let first_path = store::candidate_path(&root, &first.candidate.challenge).expect("path");
+    let kept = std::fs::read_to_string(&first_path).expect("keep the envelope");
+
+    // A second proposal for the same mutation supersedes it. Same transition,
+    // same digest, different challenge.
+    let second = gate::prepare(&root, proposal()).expect("second envelope");
+    assert_eq!(
+        first.candidate.candidate_digest, second.candidate.candidate_digest,
+        "the same transition has the same digest"
+    );
+    assert_ne!(first.candidate.challenge, second.candidate.challenge);
+
+    gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge)).expect("admit B");
+
+    // A restores from a backup. It is stale, and it is not B's retry.
+    std::fs::write(&first_path, &kept).expect("restore the older envelope");
+    let restored = gate::find(&root, &first.candidate.challenge).expect("it still reads");
+    match gate::candidate_state(&root, &restored).expect("classify") {
+        gate::CandidateState::Stale { .. } => {}
+        other => panic!("an envelope nobody answered is not applied: {other:?}"),
+    }
+    let error = gate::confirm(&root, &format!("CONFIRM {}", first.candidate.challenge))
+        .expect_err("and confirming it admits nothing");
+    assert_eq!(error.code, engr::EXIT_STALE);
+}
+
+/// The current generation emits exactly one Ref shape, wherever it emits.
+///
+/// The legacy decoder is retained so historical Objects and Events can still be
+/// read under their own generation. Letting that compatibility shape reach an
+/// emission path lets a supported writer mint a candidate — and hand a person a
+/// code for it — that this same build's reader then refuses as schema-invalid.
+#[test]
+fn a_legacy_reference_never_reaches_a_current_candidate() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "depended upon"),
+    );
+    let commit = commit_all(&root, "record target");
+    let source = new_object(&root, "the source");
+
+    // The writer refuses before anything is minted.
+    let mut proposal = payload(Action::SectionAdded, &source, "stands on the target");
+    proposal.content.refs = vec![Ref::legacy(&target, 1, "c".repeat(64), &commit)];
+    let error = gate::prepare(&root, proposal).expect_err("this generation has one Ref shape");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and no challenge was handed out"
+    );
+
+    // And the reader refuses it in the presentation context too, where a
+    // conforming writer of some other build might have put one.
+    let good = text_ref(&root, &target, 1, &commit);
+    let mut proposal = payload(Action::SectionAdded, &source, "stands on the target");
+    proposal.content.refs = vec![good];
+    let prepared = gate::prepare(&root, proposal).expect("a selective ref is fine");
+    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
+    let mut candidate = prepared.candidate.clone();
+    candidate.context.previous_refs = vec![Ref::legacy(&target, 1, "c".repeat(64), &commit)];
+    candidate.integrity_sha256 = candidate
+        .integrity_digest()
+        .expect("recompute the envelope");
+    write_raw(&path, &candidate).expect("a self-consistent envelope");
+
+    let error = gate::find(&root, &prepared.candidate.challenge)
+        .expect_err("a v3 candidate carries no legacy reference");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("legacy references"), "{error}");
+}
+
+/// `sources[]` is a set like any other, and takes the shared order.
+///
+/// A field-local numeric rule is a second canonicalization algorithm in a
+/// protocol that has one, and the two disagree as soon as the ids differ in
+/// digit count. Multi-digit is where it shows: `[2, 10]` is ascending, and
+/// canonical is `[10, 2]`, because `"10"` sorts before `"2"`.
+#[test]
+fn merge_sources_take_the_shared_canonical_set_order() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "many sections");
+    for n in 1..=10 {
+        admit(
+            &root,
+            payload(Action::SectionAdded, &id, &format!("section {n}")),
+        );
+    }
+
+    let proposal = payload(
+        Action::SectionMerged {
+            merge: engr::model::Merge::Into {
+                destination: 1,
+                sources: vec![2, 10],
+            },
+        },
+        &id,
+        "one point",
+    );
+    let prepared = gate::prepare(&root, proposal).expect("prepare the merge");
+    let Action::SectionMerged { merge } = &prepared.candidate.payload.action else {
+        panic!("a merge");
+    };
+    assert_eq!(
+        merge.consumed(),
+        &[10, 2],
+        "canonical set order is over JCS bytes, not over the numbers"
+    );
+
+    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect("confirm")
+        .object;
+    assert_eq!(
+        object.sections.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![1, 3, 4, 5, 6, 7, 8, 9],
+    );
+    let event = store::load_events(&root, &id)
+        .expect("events")
+        .pop()
+        .expect("the merge");
+    let Action::SectionMerged { merge } = &event.payload.action else {
+        panic!("a merge");
+    };
+    assert_eq!(merge.consumed(), &[10, 2], "and that is what is persisted");
+}

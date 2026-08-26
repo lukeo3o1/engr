@@ -1829,3 +1829,78 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
     let text = engr::proof::canonical_bytes(value, "test fixture")?;
     std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }
+
+/// A replacement chain that cannot be walked is not a chain that is clear.
+///
+/// Absence used to end a branch quietly, and it is not the same as there being
+/// nothing further: `effective` already rebuilds a target whose projection is
+/// missing but whose admitted history still establishes it, so `NOT_FOUND` here
+/// means the authority genuinely cannot be established. v1 has no Object
+/// delete, so that edge is a broken invariant already — and an unwalked branch
+/// can hide the cycle the traversal exists to find.
+#[test]
+fn a_new_supersession_through_a_target_that_is_gone_is_refused() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let gone = new_object(&root, "the far end");
+    let middle = new_object(&root, "the middle");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&gone, &middle, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &middle,
+            Content {
+                text: "replaced by the far end".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&gone))],
+                ..Content::default()
+            },
+        ),
+    );
+
+    let replaces_source = || {
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced by the middle".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&middle))],
+                ..Content::default()
+            },
+        )
+    };
+    gate::prepare(&root, replaces_source()).expect("an intact chain");
+    gate::discard(
+        &root,
+        &gate::pending_codes(&root).expect("pending")[0].clone(),
+    )
+    .expect("clear");
+
+    // The far end stops being establishable: no projection, and no admitted
+    // history to rebuild it from.
+    std::fs::remove_file(store::object_path(&root, &gone)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &gone)).expect("remove history");
+    assert!(ops::effective(&root, &gone).is_err());
+
+    let error = gate::prepare(&root, replaces_source())
+        .expect_err("the graph this would join cannot be established");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("no longer exists"),
+        "the refusal names why: {error}"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and no code was handed out"
+    );
+}

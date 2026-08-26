@@ -142,6 +142,17 @@ impl Candidate {
             context: self.presented_context(),
         }
     }
+
+    /// The envelope integrity value this candidate's own contents produce.
+    ///
+    /// A read-only computation over a value the caller already holds, exposed
+    /// so a conforming implementation — and this crate's own tests — can build
+    /// or check an envelope without reimplementing the projection. It publishes
+    /// nothing: there is no public writer for a candidate file, and the gate
+    /// still decides what a candidate may do.
+    pub fn integrity_digest(&self) -> Result<String> {
+        self.envelope_integrity().digest()
+    }
 }
 
 /// What a confirmation produced: the Event that entered the record and the

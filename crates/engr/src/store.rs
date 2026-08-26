@@ -663,6 +663,10 @@ pub(crate) fn check_canonical_bytes(
     text: &str,
     value: &serde_json::Value,
 ) -> Result<()> {
+    // The numeric domain first, because canonicalizing is what would report it —
+    // and would report it as a caller mistake. A number found inside a stored
+    // file is a fault in the file.
+    crate::proof::stored_within_safe_integers(value, &path.display().to_string())?;
     ensure!(
         text == crate::proof::canonical_bytes(value, &path.display().to_string())?,
         EXIT_SCHEMA,
