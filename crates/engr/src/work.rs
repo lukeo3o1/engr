@@ -412,7 +412,7 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
     if store::validate_format(root)? == store::WorkspaceFormat::Current {
-        check_canonical_items(&path, &work)?;
+        check_canonical_work(&path, &work)?;
     }
     // The owner invariant, held on the way *out* as well as on the way in. A
     // sidecar names its Object in its filename, so a copied file can name one
@@ -476,22 +476,28 @@ pub(crate) fn decode_current_staged(path: &Path, object: &str, text: &str) -> Re
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     store::check_canonical_bytes(path, text, &value)?;
     let work = decode_for_migration(path, object, text)?;
-    check_canonical_items(path, &work)?;
+    store::check_current_resource_shape(path, text, &work)?;
+    check_canonical_work(path, &work)?;
     Ok(work)
 }
 
-/// The current writer's one representation for its ordered child list.
-pub(crate) fn canonicalize_items(work: &mut Work) {
+/// The current writer's one representation for each Work collection.
+pub(crate) fn canonicalize_work(work: &mut Work) -> Result<()> {
+    crate::proof::canonical_set(&mut work.dependencies, "work dependency")?;
     work.items.sort_by_key(|item| item.id);
+    for item in &mut work.items {
+        crate::proof::canonical_set(&mut item.commits, "work item commit")?;
+    }
+    Ok(())
 }
 
-fn check_canonical_items(path: &Path, work: &Work) -> Result<()> {
+fn check_canonical_work(path: &Path, work: &Work) -> Result<()> {
     let mut canonical = work.clone();
-    canonicalize_items(&mut canonical);
+    canonicalize_work(&mut canonical)?;
     ensure!(
         canonical == *work,
         EXIT_SCHEMA,
-        "{}: work items are stored in increasing id order",
+        "{}: Work collections are stored in their canonical order",
         path.display()
     );
     Ok(())
@@ -510,7 +516,9 @@ pub fn find(root: &Path, object: &str) -> Result<Option<Work>> {
 
 fn save(root: &Path, object: &str, work: &Work) -> Result<()> {
     work.validate()?;
-    store::write_json(&path(root, object), work)
+    let mut work = work.clone();
+    canonicalize_work(&mut work)?;
+    store::write_json(&path(root, object), &work)
 }
 
 /// Every Work mutation, under the lock, past the applicable Rule set.
@@ -579,7 +587,6 @@ fn edit<T>(
         require_object(root, object)?;
         let mut work = load(root, object)?;
         let outcome = body(&mut work)?;
-        canonicalize_items(&mut work);
         work.updated_at = now();
         save(root, object, &work)?;
         Ok(outcome)

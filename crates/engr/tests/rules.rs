@@ -1509,9 +1509,9 @@ fn the_review_block_refuses_what_v1_does_not_define() {
 
 /// The workspace-version boundary holds on every public door, not just the CLI.
 ///
-/// Rule semantics are versioned by the workspace, so a version 1 workspace must
-/// not be read under version 2 defaults — and it must not matter which public
-/// API asked. Enforcing it only in the command left `engr rules ls` refusing a
+/// Rule semantics are versioned by the workspace, so an older workspace must not
+/// be read under the current generation's defaults — and it must not matter which
+/// public API asked. Enforcing it only in the command left `engr rules ls` refusing a
 /// workspace that `rules::load_all` accepted and silently assigned the newer
 /// effective policy, which is the exact reinterpretation the version exists to
 /// prevent, reached through a different door.
@@ -1525,18 +1525,18 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
     );
     let (mutation, precondition) = subject();
 
-    // Exactly what a version 1 workspace is: intact, and written by a build
-    // that had never heard of `review:`.
+    // Exactly what a version 2 workspace is: intact, and one explicit command
+    // away from being current.
     std::fs::write(
         store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":1}"#,
+        r#"{"format":"engr-workspace","version":2}"#,
     )
     .expect("format");
 
     let refused = |error: engr::Error, what: &str| {
         assert!(
-            error.message.contains("version 1") && error.message.contains("engr migrate"),
-            "{what} should refuse a version 1 workspace by name, said {:?}",
+            error.message.contains("version 2") && error.message.contains("engr migrate"),
+            "{what} should refuse an older workspace by name, said {:?}",
             error.message
         );
     };
@@ -1551,7 +1551,7 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
         mutation.clone(),
         precondition.clone(),
     ) {
-        Ok(_) => panic!("bind produced a v2 binding over a workspace declaring v1"),
+        Ok(_) => panic!("bind produced a v3 binding over a workspace declaring v2"),
         Err(error) => refused(error, "bind"),
     }
     refused(
@@ -2113,6 +2113,15 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
     ] {
         rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("inside the shared range");
     }
+
+    assert!(
+        engr::PROTOCOL.contains("shared Phase-3 integer domain"),
+        "the shipped protocol must state the range the implementation enforces"
+    );
+    assert!(
+        !engr::PROTOCOL.contains("The domain is exact representability"),
+        "the superseded wider numeric contract must not remain normative"
+    );
 }
 
 /// Governance and the verdict come from one reading of policy.

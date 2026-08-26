@@ -157,11 +157,10 @@ pub enum WorkspaceFormat {
     LegacyV0,
     /// A recognized workspace at an older version of the authority.
     ///
-    /// Distinct from [`Self::LegacyV0`], which predates the authority or still
-    /// spells an Object's lifecycle the old way. This one is well formed and
-    /// says exactly what it is; what it is is not what this build writes. Both
-    /// are read-only until `engr migrate`, and they say different things to
-    /// whoever is reading the error.
+    /// Distinct from [`Self::LegacyV0`], which has no workspace authority at
+    /// all. This one is well formed and says exactly what it is; what it is is
+    /// not what this build writes. Both are read-only until `engr migrate`, and
+    /// they say different things to whoever is reading the error.
     OlderVersion(u32),
     Current,
 }
@@ -176,11 +175,15 @@ const GITIGNORE: &str = "\
 # recovered from. events/ is safe to commit too: any challenge codes in it have
 # already been spent, and a spent code resolves to nothing.
 #
-# These two are local only:
+# These four are local only:
 #   lock         a mutex for this machine, nothing to share
 #   candidates/  each file is named after a *live* challenge code
+#   migration-v3/     resumable migration plan for this machine
+#   migration-v3.tmp/ plan before its atomic installation
 /lock
 /candidates/
+/migration-v3/
+/migration-v3.tmp/
 ";
 
 pub fn init(root: &Path) -> Result<PathBuf> {
@@ -211,6 +214,33 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     let ignore = dir.join(".gitignore");
     fs::write(&ignore, GITIGNORE).map_err(|error| tool_error(ignore.display(), error))?;
     Ok(dir)
+}
+
+/// A v3 migration plan is resumable local state, like the lock and live
+/// candidates. Existing predecessor workspaces did not know its name, so
+/// migration adds the two ignores without replacing any local ignore policy.
+pub(crate) fn ensure_migration_ignored(root: &Path) -> Result<()> {
+    let path = engr_dir(root).join(".gitignore");
+    let mut text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    let missing: Vec<_> = ["/migration-v3/", "/migration-v3.tmp/"]
+        .into_iter()
+        .filter(|entry| !text.lines().any(|line| line.trim() == *entry))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for entry in missing {
+        text.push_str(entry);
+        text.push('\n');
+    }
+    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
 }
 
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
@@ -246,9 +276,6 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
             crate::IMPLEMENTATION_VERSION
         );
         return Ok(WorkspaceFormat::OlderVersion(version));
-    }
-    if contains_legacy_objects(root)? {
-        return Ok(WorkspaceFormat::LegacyV0);
     }
     Ok(WorkspaceFormat::Current)
 }
@@ -300,42 +327,6 @@ fn detect_legacy(root: &Path) -> Result<bool> {
         }
     }
     Ok(true)
-}
-
-/// Does any Object here still use the legacy `status` spelling?
-///
-/// Asked of every command, in every domain, because the answer decides whether
-/// the workspace may be mutated at all. That reach is why it must not fail on a
-/// file it cannot read: one malformed Object used to make `backlog ls`, every
-/// Work command and every Collection command exit with a parse error about a
-/// file none of them were going to touch — a single bad byte disabling three
-/// domains that do not depend on it.
-///
-/// So a file that will not read is not evidence of anything here, and is not an
-/// error here either. It stays an error where it matters: `decode_object`
-/// refuses it the moment something actually loads that Object, `verify` reports
-/// it, and `preflight_migration` still validates every retained representation
-/// before moving any of them. Failing closed on Object authority and staying
-/// out of the way of the other domains are the same rule, applied where each
-/// belongs.
-fn contains_legacy_objects(root: &Path) -> Result<bool> {
-    let mut legacy = false;
-    for id in object_ids(root)? {
-        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
-            continue;
-        };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        // A file claiming both spellings cannot say which it means, so it is not
-        // counted as legacy on the strength of the one that happens to be there.
-        // `decode_object` refuses it when it is loaded.
-        if object.contains_key("state") {
-            continue;
-        }
-        legacy |= object.contains_key("status");
-    }
-    Ok(legacy)
 }
 
 pub fn require_current(root: &Path) -> Result<()> {
@@ -689,6 +680,23 @@ pub(crate) fn read_current_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
 }
 
+/// Current resources have the one spelling their writer emits. JCS alone fixes
+/// JSON member order and number text, but it cannot distinguish an omitted
+/// optional field from an explicit `null`, or an omitted false from `false`.
+pub(crate) fn check_current_resource_shape<T: Serialize>(
+    path: &Path,
+    text: &str,
+    resource: &T,
+) -> Result<()> {
+    ensure!(
+        text == crate::proof::canonical_bytes(resource, &path.display().to_string())?,
+        EXIT_SCHEMA,
+        "{}: a current resource is not in the exact shape its writer emits",
+        path.display()
+    );
+    Ok(())
+}
+
 /// The bytes of a current-generation resource against the one serialization it
 /// is allowed to have. Split out so a caller that already holds both can ask.
 pub(crate) fn check_canonical_bytes(
@@ -716,9 +724,19 @@ pub(crate) fn check_canonical_bytes(
 /// there was one persisted spelling. Refusing those bytes here would make a
 /// valid old workspace unreadable rather than migratable, which is the opposite
 /// of what the generation boundary is for.
-pub(crate) fn read_resource<T: DeserializeOwned>(root: &Path, path: &Path) -> Result<T> {
+pub(crate) fn read_resource<T: DeserializeOwned + Serialize>(
+    root: &Path,
+    path: &Path,
+) -> Result<T> {
     if validate_format(root)? == WorkspaceFormat::Current {
-        read_current_json(path)
+        let text = read_text(path)?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+        check_canonical_bytes(path, &text, &value)?;
+        let resource = serde_json::from_value(value)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+        check_current_resource_shape(path, &text, &resource)?;
+        Ok(resource)
     } else {
         read_json(path)
     }
@@ -1337,12 +1355,7 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
 /// Migration needs this form because fingerprinting one read and replaying a
 /// second one can derive a plan from bytes the manifest does not name. Ordinary
 /// reads take the same route after obtaining their text from disk.
-pub(crate) fn decode_events(
-    root: &Path,
-    path: &Path,
-    id: &str,
-    text: &str,
-) -> Result<Vec<Event>> {
+pub(crate) fn decode_events(root: &Path, path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -1447,20 +1460,13 @@ fn check_human_candidate_digests(root: &Path, id: &str, events: &[Event]) -> Res
             continue;
         };
         let review_digest = match &event.provenance {
-            Provenance::Tagged { admission } => {
-                admission.rule_review.as_ref().and_then(|review| {
-                    (review.outcome == ReviewOutcome::Overridden)
-                        .then(|| review.review_digest.clone())
-                })
-            }
+            Provenance::Tagged { admission } => admission.rule_review.as_ref().and_then(|review| {
+                (review.outcome == ReviewOutcome::Overridden).then(|| review.review_digest.clone())
+            }),
             Provenance::Confirmed { .. } => None,
         };
-        let subject = crate::proof::candidate_subject(
-            &before,
-            &projection,
-            &event.payload,
-            review_digest,
-        )?;
+        let subject =
+            crate::proof::candidate_subject(&before, &projection, &event.payload, review_digest)?;
         ensure!(
             subject.digest()? == confirmation.candidate_digest,
             EXIT_SCHEMA,

@@ -216,6 +216,76 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
 }
 
 #[test]
+fn target_version_does_not_discard_an_unpublished_migration_plan() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(
+        interrupted.path(),
+        &[object(id, "target version is not evidence")],
+    );
+    predecessor(
+        completed.path(),
+        &[object(id, "target version is not evidence")],
+    );
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let predecessor = std::fs::read(store::object_path(interrupted.path(), id)).expect("source");
+
+    write_raw(
+        &store::engr_dir(interrupted.path()).join("format.json"),
+        &json!({ "format": "engr-workspace", "version": engr::WORKSPACE_VERSION }),
+    )
+    .expect("independent version edit");
+
+    let error = store::migrate(interrupted.path())
+        .expect_err("the target scalar cannot prove the copies happened");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(stage.exists(), "the recovery plan remains available");
+    assert_eq!(
+        std::fs::read(store::object_path(interrupted.path(), id)).expect("source after"),
+        predecessor,
+        "the source was not mistaken for the staged target"
+    );
+}
+
+#[test]
+fn migration_ignores_its_resumable_stage_in_existing_workspaces() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "local stage")]);
+
+    store::migrate(root).expect("migrate");
+    let ignore = std::fs::read_to_string(store::engr_dir(root).join(".gitignore"))
+        .expect("migration ignore");
+    assert!(ignore.lines().any(|line| line == "/migration-v3/"));
+    assert!(ignore.lines().any(|line| line == "/migration-v3.tmp/"));
+
+    std::fs::create_dir_all(store::engr_dir(root).join("migration-v3")).expect("crash stage");
+    std::fs::write(
+        store::engr_dir(root)
+            .join("migration-v3")
+            .join("manifest.json"),
+        "local recovery state",
+    )
+    .expect("manifest");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["init", "-q"])
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", ".engr/migration-v3/manifest.json"])
+        .status()
+        .expect("git check-ignore");
+    assert!(ignored.success(), "the crash stage is local-only");
+}
+
+#[test]
 fn whole_workspace_preflight_writes_nothing_when_one_predecessor_seal_fails() {
     let temp = tempfile::tempdir().expect("temp");
     let good = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
@@ -441,7 +511,10 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
     );
     let item = engr::backlog::load(root, item_id).expect("and the current reader accepts it");
     assert_eq!(
-        item.sections.iter().map(|section| section.id).collect::<Vec<_>>(),
+        item.sections
+            .iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>(),
         vec![1, 2],
         "migration normalizes the ordered child list"
     );
@@ -613,8 +686,7 @@ fn staged_manifest_resources_are_not_filesystem_capabilities() {
     write_raw(&manifest_path, &manifest).expect("forged manifest");
 
     let victim = interrupted.path().join("victim");
-    let error =
-        store::migrate(interrupted.path()).expect_err("a path escape is not a resource");
+    let error = store::migrate(interrupted.path()).expect_err("a path escape is not a resource");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(!victim.exists(), "nothing was published outside .engr");
 }
@@ -647,17 +719,18 @@ fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
         std::fs::read_to_string(engr::backlog::item_path(interrupted.path(), backlog_id))
             .expect("original resource");
     let stage = staged_plan(interrupted.path(), completed.path(), id);
-    let migrated =
-        std::fs::read_to_string(engr::backlog::item_path(completed.path(), backlog_id))
-            .expect("migrated resource");
+    let migrated = std::fs::read_to_string(engr::backlog::item_path(completed.path(), backlog_id))
+        .expect("migrated resource");
     let relative = format!("backlog/{backlog_id}.json");
-    let staged = stage.join("resources").join("backlog").join(format!("{backlog_id}.json"));
+    let staged = stage
+        .join("resources")
+        .join("backlog")
+        .join(format!("{backlog_id}.json"));
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("resource stage");
     std::fs::write(&staged, &migrated).expect("stage resource");
     let manifest_path = stage.join("manifest.json");
     let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
-    manifest["resources"][relative.as_str()] =
-        Value::String(engr::proof::sha256_of(&migrated));
+    manifest["resources"][relative.as_str()] = Value::String(engr::proof::sha256_of(&migrated));
     manifest["source"][relative.as_str()] = Value::String(engr::proof::sha256_of(&original));
 
     let mut substituted: Value = serde_json::from_str(&migrated).expect("migrated JSON");
@@ -665,14 +738,16 @@ fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
     let substituted = engr::proof::canonical_bytes(&substituted, "substituted resource")
         .expect("canonical substitution");
     std::fs::write(&staged, &substituted).expect("swap staged resource");
-    manifest["resources"][relative.as_str()] =
-        Value::String(engr::proof::sha256_of(&substituted));
+    manifest["resources"][relative.as_str()] = Value::String(engr::proof::sha256_of(&substituted));
     write_raw(&manifest_path, &manifest).expect("consistent forged pair");
 
     let error = store::migrate(interrupted.path())
         .expect_err("a digest pair cannot replace the deterministic migration output");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(error.message.contains("not the canonical migration"), "{error}");
+    assert!(
+        error.message.contains("not the canonical migration"),
+        "{error}"
+    );
 }
 
 /// A predecessor Event carrying a number JCS cannot hold stops the migration.

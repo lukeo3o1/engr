@@ -68,7 +68,9 @@ fn work_item_order_and_allocation_ceiling_are_current_boundaries() {
     work::add_item(&root, &id, "first", engr::rules::Attempt::FIRST).expect("first");
     work::add_item(&root, &id, "second", engr::rules::Attempt::FIRST).expect("second");
 
-    rewrite(&root, &id, |value| value["items"].as_array_mut().expect("items").reverse());
+    rewrite(&root, &id, |value| {
+        value["items"].as_array_mut().expect("items").reverse()
+    });
     let error = work::load(&root, &id).expect_err("writer-only ordering is not accepted");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
@@ -82,7 +84,64 @@ fn work_item_order_and_allocation_ceiling_are_current_boundaries() {
         .expect_err("allocation beyond the safe domain");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(error.message.contains("safe-integer"), "{error}");
-    assert_eq!(std::fs::read(&path).expect("after"), before, "no write occurred");
+    assert_eq!(
+        std::fs::read(&path).expect("after"),
+        before,
+        "no write occurred"
+    );
+}
+
+#[test]
+fn work_set_collections_are_canonical_and_optional_members_are_omitted() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "work sets");
+    let first = new_object(&root, "first prerequisite");
+    let second = new_object(&root, "second prerequisite");
+    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    for target in [first, second] {
+        work::add_dependency(
+            &root,
+            &id,
+            &format!("obj:{}", compact(&target)),
+            None,
+            engr::rules::Attempt::FIRST,
+        )
+        .expect("dependency");
+    }
+    let item =
+        work::add_item(&root, &id, "record commits", engr::rules::Attempt::FIRST).expect("item");
+    for commit in ["f".repeat(40), "0".repeat(40)] {
+        work::add_item_commit(&root, &id, item, &commit, engr::rules::Attempt::FIRST)
+            .expect("commit");
+    }
+
+    rewrite(&root, &id, |value| {
+        value["dependencies"]
+            .as_array_mut()
+            .expect("dependencies")
+            .reverse();
+        value["items"][0]["commits"]
+            .as_array_mut()
+            .expect("commits")
+            .reverse();
+    });
+    let error = work::load(&root, &id).expect_err("set order is part of current bytes");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    rewrite(&root, &id, |value| {
+        value["dependencies"]
+            .as_array_mut()
+            .expect("dependencies")
+            .reverse();
+        value["items"][0]["commits"]
+            .as_array_mut()
+            .expect("commits")
+            .reverse();
+        value["summary"] = Value::Null;
+    });
+    let error = work::load(&root, &id).expect_err("the writer omits absent summary");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("exact shape"), "{error}");
 }
 
 /// A sidecar belongs to an Object, and only to one that exists.

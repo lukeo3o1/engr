@@ -878,16 +878,15 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
     // same relation, and sorting has to see the resolved values or the order
     // would depend on what the caller happened to type.
     payload.content.canonicalize_order()?;
-    // `sources[]` is a protocol-defined set like any other, so it takes the
-    // shared canonical-set order — JCS each element, then sort by those bytes —
-    // rather than a field-local numeric rule. The two disagree as soon as the
-    // ids have different digit counts: `[2, 10]` is ascending, and canonical is
-    // `[10, 2]`, because "10" sorts before "2".
+    // Event v2 defines merge sources as numeric section ids, so this field has
+    // the contract's explicit numeric order rather than the generic JCS-element
+    // set order used by persisted resources.
     if let Action::SectionMerged {
         merge: crate::model::Merge::Into { sources, .. },
     } = &mut payload.action
     {
-        crate::proof::canonical_set(sources, "merge source")?;
+        sources.sort_unstable();
+        sources.dedup();
     }
     payload.validate()
 }

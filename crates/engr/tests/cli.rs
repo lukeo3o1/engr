@@ -4268,16 +4268,16 @@ fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics()
     )
     .expect("rule");
 
-    // Exactly what a version 1 workspace looks like: intact, well formed, and
-    // written by a build that had never heard of `review:`.
+    // Exactly what a version 2 workspace looks like: intact, well formed, and
+    // one explicit command away from being current.
     let format_path = store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let listed = run_engr(root, &["rules", "ls"]);
     assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
     let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
     assert!(
-        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        stderr.contains("version 2") && stderr.contains("engr migrate"),
         "the refusal names the version it found and what to do: {stderr}"
     );
     assert!(
@@ -5066,7 +5066,7 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
 
     // Put the workspace back a generation, leaving the candidate where it is.
     let format_path = engr::store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let migrated = run_engr(root, &["migrate"]);
     assert!(

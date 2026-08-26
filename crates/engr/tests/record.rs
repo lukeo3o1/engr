@@ -596,9 +596,11 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
         "and it says why"
     );
 
-    // (b) the target is gone entirely.
+    // (b) the target is gone entirely — projection and admitted history both.
+    let history = store::events_path(&root, &target);
+    let history_bytes = std::fs::read(&history).expect("history");
     std::fs::remove_file(&path).expect("remove");
-    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
+    std::fs::remove_file(&history).expect("remove events");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(
         !report.passed(),
@@ -607,7 +609,10 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     assert_eq!(report.standing_on_missing.len(), 1);
     assert!(report.standing_on_unreadable.is_empty());
 
-    // (c) the target loads, but the referenced section is not in it.
+    // (c) the target loads, with its history, but the referenced section is not
+    // in it. The history goes back too: a projection with no admitted history at
+    // all is its own finding, and it would mask this one.
+    std::fs::write(&history, &history_bytes).expect("restore history");
     write_raw(&path, &sound).expect("restore");
     let mut without: Value = store::read_json(&path).expect("read");
     without["sections"] = serde_json::json!([]);

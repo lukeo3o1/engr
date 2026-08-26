@@ -272,31 +272,30 @@ fn malformed_confirmation_codes_never_escape_candidates() {
     assert!(gate::find(&root, &code).is_err());
 }
 
+/// A refusal at the generation boundary writes nothing at all — not even a
+/// prefix of what it was about to write.
+///
+/// The workspace goes back a generation with a pending candidate outstanding,
+/// which is the awkward moment: `confirm` has an Event to append, a projection
+/// to save and a candidate to clear, and none of them may happen. The trigger is
+/// the workspace's own authority saying v2, because that is what an older
+/// workspace *is* — a hand-edited Object cannot make one, and no longer
+/// pretends to.
 #[test]
-fn direct_confirmation_refuses_a_legacy_workspace_without_partial_mutation() {
+fn direct_confirmation_refuses_an_older_workspace_without_partial_mutation() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "legacy boundary");
+    let id = new_object(&root, "generation boundary");
     let prepared = gate::prepare(&root, empty(Action::ObjectClosed, &id)).expect("prepare");
     let code = prepared.candidate.challenge.clone();
     let object_path = store::object_path(&root, &id);
     let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
     let events_path = store::events_path(&root, &id);
 
-    let mut object: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
-    object["format"] = serde_json::Value::String("engr-object".to_owned());
-    object["version"] = serde_json::Value::from(1);
-    let state = object
-        .as_object_mut()
-        .expect("object")
-        .remove("state")
-        .expect("state");
-    object["status"] = state;
     std::fs::write(
-        &object_path,
-        serde_json::to_vec_pretty(&object).expect("json"),
+        store::engr_dir(&root).join("format.json"),
+        r#"{"format":"engr-workspace","version":2}"#,
     )
-    .expect("legacy object");
+    .expect("put the workspace back a generation");
 
     let object_before = std::fs::read(&object_path).expect("object snapshot");
     let events_before = std::fs::read(&events_path).expect("events snapshot");
@@ -305,7 +304,7 @@ fn direct_confirmation_refuses_a_legacy_workspace_without_partial_mutation() {
         format!("CONFIRM {code} but leave it open"),
         format!("CONFIRM {code}"),
     ] {
-        let error = gate::confirm(&root, &response).expect_err("legacy confirmation is refused");
+        let error = gate::confirm(&root, &response).expect_err("an older workspace is read-only");
         assert_eq!(error.code, engr::EXIT_SCHEMA);
         assert!(error.message.contains("engr migrate"));
         assert_eq!(
@@ -2351,7 +2350,9 @@ fn a_purged_event_prefix_is_refused() {
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("starts at revision"), "{error}");
     assert_eq!(
-        ops::reconcile(&root, &id).expect_err("recovery cannot accept it").code,
+        ops::reconcile(&root, &id)
+            .expect_err("recovery cannot accept it")
+            .code,
         engr::EXIT_SCHEMA
     );
 }
@@ -2383,7 +2384,10 @@ fn retained_event_v1_cannot_follow_event_v2() {
 
     let error = store::load_events(&root, &id).expect_err("generation cannot go backward");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("cannot follow generation 2"), "{error}");
+    assert!(
+        error.message.contains("cannot follow generation 2"),
+        "{error}"
+    );
 }
 
 /// Candidate envelopes are deleted after confirmation, but their digest remains
@@ -2574,14 +2578,9 @@ fn a_legacy_reference_never_reaches_a_current_candidate() {
     assert!(error.message.contains("legacy references"), "{error}");
 }
 
-/// `sources[]` is a set like any other, and takes the shared order.
-///
-/// A field-local numeric rule is a second canonicalization algorithm in a
-/// protocol that has one, and the two disagree as soon as the ids differ in
-/// digit count. Multi-digit is where it shows: `[2, 10]` is ascending, and
-/// canonical is `[10, 2]`, because `"10"` sorts before `"2"`.
+/// Event-v2 merge sources are the contract's numeric-ascending set exception.
 #[test]
-fn merge_sources_take_the_shared_canonical_set_order() {
+fn merge_sources_take_numeric_ascending_order() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "many sections");
     for n in 1..=10 {
@@ -2607,8 +2606,8 @@ fn merge_sources_take_the_shared_canonical_set_order() {
     };
     assert_eq!(
         merge.consumed(),
-        &[10, 2],
-        "canonical set order is over JCS bytes, not over the numbers"
+        &[2, 10],
+        "Event-v2 sources are numeric section ids"
     );
 
     let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
@@ -2625,7 +2624,7 @@ fn merge_sources_take_the_shared_canonical_set_order() {
     let Action::SectionMerged { merge } = &event.payload.action else {
         panic!("a merge");
     };
-    assert_eq!(merge.consumed(), &[10, 2], "and that is what is persisted");
+    assert_eq!(merge.consumed(), &[2, 10], "and that is what is persisted");
 }
 
 /// The workspace root a caller passes is not the path git answers with.

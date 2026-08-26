@@ -660,6 +660,7 @@ pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     store::check_canonical_bytes(path, text, &value)?;
     let item = decode_for_migration(path, id, text)?;
+    store::check_current_resource_shape(path, text, &item)?;
     check_canonical_sets(path, &item)?;
     Ok(item)
 }

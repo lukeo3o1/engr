@@ -142,6 +142,20 @@ fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
     assert!(raw.get("version").is_none(), "{raw}");
 }
 
+#[test]
+fn a_current_collection_refuses_an_explicit_null_optional_member() {
+    let (_dir, root) = workspace();
+    let collection = plan(&root, "one spelling");
+    rewrite(&root, &collection.id, |value| {
+        value["description"] = Value::Null;
+    });
+
+    let error = collection::load(&root, &collection.id)
+        .expect_err("the writer omits an absent description");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("exact shape"), "{error}");
+}
+
 /// Planning state is declared, never inferred — and it is only about the plan.
 ///
 /// `completed` does not claim its members are resolved. A milestone can be

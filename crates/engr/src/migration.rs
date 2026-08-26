@@ -10,7 +10,7 @@ use crate::model::{LegacyRef, Object, Provenance, Ref, Section};
 use crate::proof::{sha256_of, stored_within_safe_integers};
 use crate::semantics::Admission;
 use crate::store::{self, WorkspaceFormat};
-use crate::{ensure, tool_error, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA, EXIT_USAGE};
+use crate::{ensure, tool_error, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -84,7 +84,7 @@ impl<'a> RefClosure<'a> {
         );
         ensure!(
             reference.section <= crate::proof::MAX_SAFE_INTEGER,
-            EXIT_USAGE,
+            EXIT_SCHEMA,
             "legacy reference section {} is outside the shared safe-integer range",
             reference.section
         );
@@ -216,6 +216,7 @@ pub(crate) fn migrated_replay(root: &Path, mut object: Object) -> Result<Object>
 pub(crate) fn run(root: &Path) -> Result<()> {
     let stage = stage_dir(root);
     if stage.exists() {
+        store::ensure_migration_ignored(root)?;
         return commit_stage(root, &stage);
     }
     let before = store::validate_format(root)?;
@@ -230,6 +231,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
         WorkspaceFormat::Current => unreachable!("checked above"),
     };
     let plan = preflight(root, source_version)?;
+    store::ensure_migration_ignored(root)?;
     stage_plan(root, source_version, &plan)?;
     commit_stage(root, &stage_dir(root))
 }
@@ -483,7 +485,7 @@ fn validate_retained_resources(
             EXIT_SCHEMA,
             "work sidecar {id} belongs to no Object in the migrated projection"
         );
-        crate::work::canonicalize_items(&mut work);
+        crate::work::canonicalize_work(&mut work)?;
         let canonical = crate::proof::canonical_bytes(&work, "work")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
@@ -638,9 +640,7 @@ fn retained_resource(relative: &str) -> Result<RetainedResource> {
         ["work", "objects", name] => Ok(RetainedResource::Work(file_id(name)?)),
         _ => Err(Error::new(
             EXIT_SCHEMA,
-            format!(
-                "staged retained resource {relative:?} is not a known .engr resource path"
-            ),
+            format!("staged retained resource {relative:?} is not a known .engr resource path"),
         )),
     }
 }
@@ -734,8 +734,7 @@ impl RetainedResource {
         );
         let canonical = match self {
             Self::Backlog(id) => {
-                let mut item =
-                    crate::backlog::decode_for_migration(&source_path, id, &source)?;
+                let mut item = crate::backlog::decode_for_migration(&source_path, id, &source)?;
                 crate::backlog::canonicalize_sets(&mut item)?;
                 crate::proof::canonical_bytes(&item, "backlog item")?
             }
@@ -752,7 +751,7 @@ impl RetainedResource {
                     "staged work sidecar {id} belongs to no Object in the migration plan"
                 );
                 let mut work = crate::work::decode_for_migration(&source_path, id, &source)?;
-                crate::work::canonicalize_items(&mut work);
+                crate::work::canonicalize_work(&mut work)?;
                 crate::proof::canonical_bytes(&work, "work")?
             }
         };
@@ -777,7 +776,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         crate::model::validate_object_id(id).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
-                format!("staged migration object id {id:?} is invalid: {}", error.message),
+                format!(
+                    "staged migration object id {id:?} is invalid: {}",
+                    error.message
+                ),
             )
         })?;
     }
@@ -859,6 +861,77 @@ fn stage_plan(root: &Path, source_version: u32, plan: &Plan) -> Result<()> {
     fs::rename(&temporary, &stage).map_err(|error| tool_error(stage.display(), error))
 }
 
+/// A target-version workspace may retain its stage only in the narrow crash
+/// window after every staged artifact was published. The version scalar alone
+/// cannot establish that ordering: it can also have been edited or merged.
+fn verify_published_stage(root: &Path, manifest: &Manifest) -> Result<()> {
+    let current = source_fingerprint(root)?;
+    for path in current.keys() {
+        let reconstructed = staged_object_id(path).is_some_and(|id| {
+            manifest.objects.contains_key(id) && !manifest.source.contains_key(path)
+        });
+        ensure!(
+            manifest.source.contains_key(path) || reconstructed,
+            EXIT_INVARIANT,
+            "{path} appeared after migration preflight"
+        );
+    }
+    for (path, source_digest) in &manifest.source {
+        let actual = current.get(path).ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!("{path} disappeared after migration preflight"),
+            )
+        })?;
+        let published_object = staged_object_id(path).and_then(|id| manifest.objects.get(id));
+        let published_resource = manifest.resources.get(path);
+        ensure!(
+            actual == source_digest
+                || published_object == Some(actual)
+                || published_resource == Some(actual),
+            EXIT_INVARIANT,
+            "{path} does not match either its predecessor or staged target"
+        );
+    }
+
+    let current_ids = store::object_ids(root)?;
+    ensure!(
+        current_ids.len() == manifest.objects.len()
+            && current_ids
+                .iter()
+                .all(|id| manifest.objects.contains_key(id)),
+        EXIT_INVARIANT,
+        "the target workspace does not contain exactly the staged Object set"
+    );
+    for (id, expected) in &manifest.objects {
+        let path = store::object_path(root, id);
+        let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+        ensure!(
+            sha256_of(&bytes) == *expected,
+            EXIT_INVARIANT,
+            "{} is not the staged target Object",
+            path.display()
+        );
+        let value: serde_json::Value = serde_json::from_str(&bytes)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+        let object = store::decode_object(&path, id, value)?;
+        crate::integrity::check_stored_object_integrity(&object)?;
+    }
+    for (relative, expected) in &manifest.resources {
+        let resource = retained_resource(relative)?;
+        let path = resource.destination(root);
+        let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+        ensure!(
+            sha256_of(&bytes) == *expected,
+            EXIT_INVARIANT,
+            "{} is not the staged target resource",
+            path.display()
+        );
+        resource.validate_staged(&path, &bytes, &manifest.objects)?;
+    }
+    Ok(())
+}
+
 fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
     let metadata =
         fs::symlink_metadata(stage).map_err(|error| tool_error(stage.display(), error))?;
@@ -887,6 +960,7 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         workspace_version
     );
     if workspace_version == manifest.target_version {
+        verify_published_stage(root, &manifest)?;
         fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
         return Ok(());
     }
@@ -907,7 +981,11 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             "{id} appeared after migration preflight"
         );
     }
-    for id in manifest.source.keys().filter_map(|path| staged_object_id(path)) {
+    for id in manifest
+        .source
+        .keys()
+        .filter_map(|path| staged_object_id(path))
+    {
         crate::model::validate_object_id(id).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,

@@ -117,21 +117,86 @@ fn backlog_section_order_and_allocation_ceiling_are_current_boundaries() {
         .expect("second section");
     let path = backlog::item_path(&root, &id);
     let mut reversed: serde_json::Value = store::read_json(&path).expect("item");
-    reversed["sections"].as_array_mut().expect("sections").reverse();
+    reversed["sections"]
+        .as_array_mut()
+        .expect("sections")
+        .reverse();
     write_raw(&path, &reversed).expect("canonical reversed file");
     let error = backlog::load(&root, &id).expect_err("writer-only ordering is not accepted");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
-    reversed["sections"].as_array_mut().expect("sections").reverse();
+    reversed["sections"]
+        .as_array_mut()
+        .expect("sections")
+        .reverse();
     reversed["next_section_id"] = serde_json::json!(engr::proof::MAX_SAFE_INTEGER);
     write_raw(&path, &reversed).expect("counter at the valid ceiling");
     let before = std::fs::read(&path).expect("before");
-    let error =
-        backlog::add_section(&root, &id, "one too far", Vec::new(), &on_add(&root, &id))
-            .expect_err("allocation beyond the safe domain");
+    let error = backlog::add_section(&root, &id, "one too far", Vec::new(), &on_add(&root, &id))
+        .expect_err("allocation beyond the safe domain");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(error.message.contains("safe-integer"), "{error}");
-    assert_eq!(std::fs::read(&path).expect("after"), before, "no write occurred");
+    assert_eq!(
+        std::fs::read(&path).expect("after"),
+        before,
+        "no write occurred"
+    );
+}
+
+#[test]
+fn a_current_backlog_item_refuses_an_explicit_empty_optional_collection() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "one spelling", "unresolved");
+    let path = backlog::item_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("item");
+    value["sections"][0]["produced"] = serde_json::json!([]);
+    write_raw(&path, &value).expect("a JCS second spelling");
+
+    let error = backlog::load(&root, &id).expect_err("the writer omits an empty produced list");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("exact shape"), "{error}");
+}
+
+#[test]
+fn a_declared_current_workspace_is_not_downgraded_by_a_malformed_object() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "schema authority");
+    let id = item(&root, "current resource", "unresolved");
+
+    let object_path = store::object_path(&root, &object);
+    let mut malformed: serde_json::Value = store::read_json(&object_path).expect("object");
+    let state = malformed
+        .as_object_mut()
+        .expect("object members")
+        .remove("state")
+        .expect("state");
+    malformed["status"] = state;
+    write_raw(&object_path, &malformed).expect("legacy spelling in declared v3");
+
+    let path = backlog::item_path(&root, &id);
+    let value: serde_json::Value = store::read_json(&path).expect("item");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).expect("non-JCS item"),
+    )
+    .expect("write non-JCS item");
+
+    let error = backlog::load(&root, &id).expect_err("the unrelated resource stays v3");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("canonical JCS"), "{error}");
+    assert!(
+        store::load_object(&root, &object).is_err(),
+        "status is malformed current data"
+    );
+
+    // And the domain still works: one bad Object is one bad Object, not a
+    // workspace that has to be migrated before anything else can be written.
+    let fresh = backlog::create(&root, "topic", "unresolved", Vec::new(), &Prepared::first())
+        .expect("an unrelated domain is not held hostage by it");
+    assert_eq!(
+        backlog::load(&root, &fresh.id).expect("load").topic,
+        "topic"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -612,24 +677,6 @@ fn backlog_keeps_no_event_log_and_needs_no_confirmation() {
             "backlog must not borrow the record's {absent} merely for symmetry"
         );
     }
-}
-
-#[test]
-fn a_legacy_workspace_refuses_backlog_mutation_until_it_is_migrated() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "legacy object");
-    let path = store::object_path(&root, &id);
-    let mut value: serde_json::Value = store::read_json(&path).expect("object");
-    let object = value.as_object_mut().expect("object");
-    let state = object.remove("state").expect("state");
-    object.insert("status".to_owned(), state);
-    write_raw(&path, &value).expect("legacy object");
-
-    let error = backlog::create(&root, "topic", "unresolved", Vec::new(), &Prepared::first())
-        .expect_err("a legacy workspace is read-only until migration");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("engr migrate"));
-    assert!(backlog::ids(&root).expect("ids").is_empty());
 }
 
 #[test]

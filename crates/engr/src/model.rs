@@ -753,20 +753,17 @@ impl Merge {
                     EXIT_INVARIANT,
                     "§{destination} survives the merge, so it cannot also be consumed by it"
                 );
-                // One canonical spelling, and it is the shared one: JCS each
-                // element, then order by those bytes. Not a field-local numeric
-                // rule — that is a second canonicalization algorithm in a
-                // protocol that has one, and the two disagree the moment the
-                // ids differ in digit count. `[2, 10]` is ascending; canonical
-                // is `[10, 2]`, because "10" sorts before "2". Two events
-                // consuming the same sections must be one payload, so the check
-                // is against the persisted order rather than a sorted copy.
+                // Event v2 owns this set's one exception to the generic
+                // persisted-set order: these identifiers are rendered and
+                // reviewed as numeric section ids, and the event contract fixes
+                // them in numeric ascending order.
                 let mut canonical = sources.clone();
-                crate::proof::canonical_set(&mut canonical, "merge source")?;
+                canonical.sort_unstable();
+                canonical.dedup();
                 ensure!(
                     canonical == *sources,
                     EXIT_INVARIANT,
-                    "the sections a merge consumes are listed once each, in canonical set order"
+                    "the sections a merge consumes are listed once each, in numeric ascending order"
                 );
             }
             Merge::Absorbing { absorbs } => {

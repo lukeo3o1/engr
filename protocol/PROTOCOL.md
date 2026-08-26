@@ -454,10 +454,14 @@ proposed value.
 ```text
 refs[]                  set
 relations[]             set
-section_merged.sources[] set
+section_merged.sources[] numeric-ascending set
 backlog subjects[]      set
 backlog produced[]      set
 collection members[]    set
+work dependencies[]     set
+work blockers[]         ordered
+work items[]            ordered by id
+work items[].commits[]  set
 content[]               ordered
 ```
 
@@ -476,7 +480,9 @@ elements by those bytes. Not a field-local rule — a second canonicalization is
 second place for two implementations to disagree, and the two answers diverge as
 soon as the elements differ in length. `[2, 10]` is ascending; canonically it is
 `[10, 2]`, because `"10"` sorts before `"2"`. A human-facing rendering MAY sort
-however reads best; nothing persisted or hashed follows it.
+however reads best; nothing persisted or hashed follows it. Event-v2
+`section_merged.sources[]` is the explicit exception: it names numeric Section
+ids and is persisted in unique numeric ascending order, `[2, 10]`.
 
 **Current-generation resources are persisted in that order.** A workspace-v3
 resource has one persisted representation, so a stored set written another way
@@ -1375,6 +1381,13 @@ accepts shapes the API refuses is a second, larger schema that only ever gets
 discovered by something that came to depend on it. A fault in a stored file is a
 **schema** fault, not a usage error: nobody currently running a command wrote it.
 
+`dependencies[]` and each `items[].commits[]` are sets, in the shared JCS-element
+order; their duplicate checks are part of that contract. `blockers[]` is ordered:
+removing one names its position, and duplicate-looking conditions can still be
+separate observations. `items[]` is ordered by monotonically allocated `id`, not
+by the order an agent happened to describe steps. Those classifications apply on
+both read and write; their order is representation, not execution priority.
+
 `updated_at` MUST be a valid RFC3339 timestamp, and anything ordering work
 objects by it MUST compare **instants** rather than text — two valid values
 written in different offsets do not sort correctly as strings. The stored
@@ -1909,25 +1922,18 @@ is hashed:
 4. JCS the resulting structure and hash it
 ```
 
-A review subject must be inside what those bytes can carry. RFC 8785 requires
-numbers **expressible as IEEE-754 binary64**, so an integer that is not exactly
-a double is refused rather than hashed. This is not pedantry about a standard:
-canonicalization takes numbers through a double, so such an integer does not
-fail — it becomes a different one, and `9007199254740993` and `9007199254740992`
-produce the *same* canonical bytes. Two distinct subjects, one hash, and an
-attestation over either verifying against the other. Values needing more
-precision are carried as strings.
+A review subject must stay inside the shared Phase-3 integer domain
+`-(2^53 - 1)..=(2^53 - 1)`. RFC 8785 can represent some larger integers exactly,
+but this contract is cross-language and uses one range for ReviewDigest,
+CandidateDigest and every current persisted resource. Values such as
+`9007199254740992` and `2^60` are refused rather than hashed; values needing that
+precision are carried as strings. This prevents a subject from being accepted by
+one implementation yet rounded, rejected, or represented differently by another.
 
-The domain is exact representability, **not** the ±(2^53 − 1) safe-integer
-range: that is a recommendation for ECMAScript interoperability, and RFC 8785's
-own examples include `9007199254740992`. Treating the recommendation as the
-domain refuses numbers the standard accepts.
-
-The canonical *spelling* is the standard's, not the author's. `2^60`
-canonicalizes to `1152921504606847000` — the shortest form that parses back to
-exactly `2^60`. The value is unchanged; only the decimal is. Every accepted
-number is exactly a double, so two accepted subjects that differ still differ
-after canonicalization, which is the property the seal depends on.
+The canonical *spelling* of every value inside that domain is still the
+standard's, not the author's. JCS fixes number formatting as well as object-member
+order, so a second implementation computes the same bytes for the same accepted
+subject.
 
 Naming a standard is the point: JCS orders object members by **UTF-16** code
 units and fixes number formatting, so a second implementation in another
@@ -2338,7 +2344,7 @@ it said under the authority path that admitted it.
 ```text
 .engr/
   format.json              workspace format and version
-  .gitignore               excludes lock and candidates/
+  .gitignore               excludes local lock, candidates and migration stages
   lock                     one writer at a time
   objects/<uuid>.json      the authority        commit this
   events/<uuid>.jsonl      append-only admitted history
@@ -2353,11 +2359,14 @@ Backlog is committed: git is its only history. A new optional directory is not
 a schema change, so adding it does not move the workspace version — a workspace
 holding no backlog is byte-for-byte what it was.
 
-`init` MUST write a `.gitignore` excluding `lock` and `candidates/`. A candidate's
-filename is a live challenge code, and `git add -A` is how a workspace gets
-staged: committing one hands the code to everyone with repository access, which
-is not where a code the gate expects a single human to return is supposed to go.
-The exclusion MUST NOT cover `objects/`, since look-back is delegated to git.
+`init` MUST write a `.gitignore` excluding `lock`, `candidates/`, `migration-v3/`
+and `migration-v3.tmp/`; migration adds the latter two to predecessor workspaces
+before it stages a plan. A candidate's filename is a live challenge code, and
+`git add -A` is how a workspace gets staged: committing one hands the code to
+everyone with repository access, which is not where a code the gate expects a
+single human to return is supposed to go. A migration stage is likewise local
+recovery state, not shared authority. The exclusion MUST NOT cover `objects/`,
+since look-back is delegated to git.
 
 Events are safe to commit. The challenge codes they carry have been spent, and a
 spent code resolves to no candidate.

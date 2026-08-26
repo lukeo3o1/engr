@@ -438,15 +438,12 @@ pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<
 }
 
 /// Validate a staged Collection artifact as a current resource before publication.
-pub(crate) fn decode_current_staged(
-    path: &Path,
-    id: &str,
-    text: &str,
-) -> Result<Collection> {
+pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Collection> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     store::check_canonical_bytes(path, text, &value)?;
     let collection = decode_for_migration(path, id, text)?;
+    store::check_current_resource_shape(path, text, &collection)?;
     check_canonical_members(path, &collection)?;
     Ok(collection)
 }
