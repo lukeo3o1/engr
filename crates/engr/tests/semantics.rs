@@ -1152,17 +1152,18 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(object.state, State::Open);
 }
 
-/// A Section with an incidental noncanonical Ref order remains the same
-/// assertion, and re-proposing the same members is still not a change.
+/// One persisted order for a set, and re-proposing the same members either way
+/// round is still not a change.
 ///
-/// Canonicalization is done to the proposal. If the "nothing to confirm" check
-/// did not do the same to the stored value only for the comparison, every
-/// Section stored before this rule holding two refs the other way round would
-/// accept one confirmation and one Event that changed nothing but an array's
-/// order — the exact thing declaring it a set was supposed to rule out. The
-/// stored Section is not tidied either: set order is outside integrity meaning.
+/// Two rules, and they meet here. This generation persists one representation,
+/// so a stored set written the other way round is not valid current authority
+/// however sound its seals are — a reader that accepts both has two encodings
+/// for one value. But *proposing* the members either way round is the same
+/// assertion, because canonicalization is done to the proposal before anything
+/// is hashed, and a revision that changes nothing but an array's order is
+/// refused rather than spending a confirmation on sorting.
 #[test]
-fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
+fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
     let (_dir, root) = workspace();
     let commit = repository(&root);
     let target = new_object(&root, "the target");
@@ -1204,19 +1205,29 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
             },
         ),
     );
-
-    // Seed the same two refs the other way round. The v3 seal canonicalizes
-    // sets, so neither the Section seal nor Object aggregate changes.
-    let mut legacy = object.section(1).expect("section").content();
-    legacy.refs.reverse();
     let stored_sha256 = object.section(1).expect("section").sha256.clone();
+    let canonical = object.section(1).expect("section").refs.clone();
+    let stored_text =
+        std::fs::read_to_string(store::object_path(&root, &id)).expect("stored bytes");
+
+    // Reverse the stored set. The seals still verify — canonical sealing sorts
+    // a clone, so set order was never in the hash — and that is exactly why the
+    // representation rule has to be its own check rather than a consequence of
+    // integrity.
     rewrite(&root, &id, |value| {
         let section = &mut value["sections"][0];
         section["refs"].as_array_mut().expect("refs").reverse();
     });
-    let seeded = store::load_object(&root, &id).expect("an unsorted set is valid stored authority");
-    engr::integrity::check_stored_object_integrity(&seeded)
-        .expect("set order does not change either resource seal");
+    let error =
+        store::load_object(&root, &id).expect_err("a reordered set is not this generation's bytes");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("canonical"),
+        "the refusal names the representation: {error}"
+    );
+
+    std::fs::write(store::object_path(&root, &id), &stored_text).expect("restore");
+    store::load_object(&root, &id).expect("the canonical order loads");
 
     // Both spellings of the same membership are the same assertion.
     for refs in [vec![pin(1), pin(2)], vec![pin(2), pin(1)]] {
@@ -1241,9 +1252,9 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
     let after = store::load_object(&root, &id).expect("load");
     assert_eq!(
         after.sections[0].sha256, stored_sha256,
-        "and nothing sorted the stored Section behind its own hash"
+        "and nothing rewrote the stored Section behind its own hash"
     );
-    assert_eq!(after.sections[0].refs, legacy.refs);
+    assert_eq!(after.sections[0].refs, canonical);
     assert_eq!(
         store::load_events(&root, &id).expect("events").len(),
         2,

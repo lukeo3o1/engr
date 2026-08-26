@@ -1,4 +1,4 @@
-use engr::model::Content;
+use engr::model::{Action, Content, Event, Payload, Provenance, EVENT_FORMAT};
 use engr::{integrity, store};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -27,6 +27,69 @@ fn predecessor(root: &Path, objects: &[Value]) {
             format!("{}\n", serde_json::to_string_pretty(object).expect("json")),
         )
         .expect("object");
+        history(root, object);
+    }
+}
+
+/// The admitted history the stored projection is derivable from.
+///
+/// A predecessor Object with no Event file cannot be proven and is refused, so
+/// a fixture standing in for a real v2 workspace has to carry one — which is
+/// what a real v2 workspace has, because the only way an Object got there was
+/// through the gate.
+fn history(root: &Path, object: &Value) {
+    let id = object["id"].as_str().expect("id");
+    let mut records = vec![event(
+        1,
+        Payload {
+            action: Action::ObjectCreated,
+            object: id.to_owned(),
+            becomes: None,
+            content: Content {
+                text: object["title"].as_str().expect("title").to_owned(),
+                ..Content::default()
+            },
+        },
+    )];
+    for (index, section) in object["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .enumerate()
+    {
+        let content: Content =
+            serde_json::from_value(section.clone()).expect("section content is a Content");
+        records.push(event(
+            2 + index as u64,
+            Payload {
+                action: Action::SectionAdded,
+                object: id.to_owned(),
+                becomes: None,
+                content,
+            },
+        ));
+    }
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("event json"))
+        .collect();
+    std::fs::write(
+        store::events_path(root, id),
+        format!("{}\n", lines.join("\n")),
+    )
+    .expect("events");
+}
+
+fn event(rev: u64, payload: Payload) -> Event {
+    let payload_sha256 = payload.sha256().expect("payload hash");
+    Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev,
+        time: "2026-08-25T00:00:00Z".to_owned(),
+        payload,
+        provenance: Provenance::confirmed("234567", payload_sha256),
     }
 }
 
@@ -39,7 +102,7 @@ fn object(id: &str, text: &str) -> Value {
         "id": id,
         "title": "migration",
         "state": "open",
-        "rev": 1,
+        "rev": 2,
         "next_section_id": 2,
         "sections": [{
             "id": 1,
@@ -104,6 +167,8 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
     );
     let predecessor_bytes =
         std::fs::read_to_string(store::object_path(interrupted.path(), id)).expect("predecessor");
+    let predecessor_events =
+        std::fs::read_to_string(store::events_path(interrupted.path(), id)).expect("history");
     store::migrate(completed.path()).expect("reference migration");
 
     let migrated =
@@ -123,8 +188,10 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
             "source_version": 2,
             "target_version": engr::WORKSPACE_VERSION,
             "objects": staged_objects,
+            "resources": {},
             "source": {
-                format!("objects/{id}.json"): engr::proof::sha256_of(&predecessor_bytes)
+                format!("objects/{id}.json"): engr::proof::sha256_of(&predecessor_bytes),
+                format!("events/{id}.jsonl"): engr::proof::sha256_of(&predecessor_events)
             }
         }),
     )
@@ -224,7 +291,7 @@ fn legacy_refs_become_full_selective_refs_without_gaining_admission() {
         "id": source,
         "title": "source",
         "state": "open",
-        "rev": 1,
+        "rev": 2,
         "next_section_id": 2,
         "sections": [{
             "id": 1,

@@ -578,10 +578,46 @@ pub fn ids(root: &Path) -> Result<Vec<String>> {
     Ok(found)
 }
 
+/// The shared canonical order for this item's set-valued arrays.
+///
+/// `subjects[]` and `produced[]` are declared order-insensitive, which means
+/// they have one persisted spelling for the same reason `refs[]` does: two byte
+/// sequences for one value are two things a reader can disagree about. Applied
+/// on the way out rather than demanded of the caller — reordering a set is not
+/// a change, so a caller writing them another way round has not proposed
+/// anything different and should not be refused for it.
+pub(crate) fn canonicalize_sets(item: &mut Item) -> Result<()> {
+    for section in &mut item.sections {
+        crate::proof::canonical_set(&mut section.subjects, "subject")?;
+        crate::proof::canonical_set(&mut section.produced, "produced outcome")?;
+    }
+    Ok(())
+}
+
+/// Whether this item is already in that order, for a stored file to be held to.
+fn check_canonical_sets(path: &Path, item: &Item) -> Result<()> {
+    let mut canonical = item.clone();
+    canonicalize_sets(&mut canonical)?;
+    ensure!(
+        canonical == *item,
+        EXIT_SCHEMA,
+        "{}: subjects and produced outcomes are stored in canonical set order",
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn load(root: &Path, id: &str) -> Result<Item> {
     let path = item_path(root, id);
-    let item: Item = store::read_json(&path)?;
+    let item: Item = store::read_resource(root, &path)?;
     item.validate()?;
+    // The one-representation rule belongs to the current generation. A
+    // predecessor workspace kept whatever order its writer produced, and
+    // migration is where those bytes are brought forward — refusing them here
+    // would make a migratable workspace unreadable instead.
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_sets(&path, &item)?;
+    }
     ensure!(
         item.id == id,
         EXIT_SCHEMA,
@@ -597,8 +633,12 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
 /// precondition check and its write to be one step.
 fn save(root: &Path, item: &Item) -> Result<()> {
     store::require_current(root)?;
+    // Validated before canonicalizing, so a refusal names the section it is
+    // about rather than reporting a set fault from the shared sorter.
     item.validate()?;
-    store::write_json(&item_path(root, &item.id), item)
+    let mut item = item.clone();
+    canonicalize_sets(&mut item)?;
+    store::write_json(&item_path(root, &item.id), &item)
 }
 
 fn remove(root: &Path, id: &str) -> Result<()> {

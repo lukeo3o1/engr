@@ -18,13 +18,15 @@ fn workspace() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+/// Put an Object on disk without going through any write path.
+///
+/// Written as this generation's canonical bytes on purpose: a hand edit that
+/// also changes the *spelling* is refused as schema before anything looks at a
+/// seal, and every caller here is asking about the seal.
 fn overwrite_object(root: &Path, object: &engr::model::Object) {
     std::fs::write(
         store::object_path(root, &object.id),
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(object).expect("object json")
-        ),
+        engr::proof::canonical_bytes(object, "object").expect("canonical object"),
     )
     .expect("overwrite object outside the gate");
 }
@@ -716,9 +718,12 @@ fn a_subject_may_name_an_object_a_section_or_another_unresolved_point() {
     )
     .expect("create")
     .id;
+    // The same four subjects, in the one order a set is persisted in.
+    let mut canonical = subjects.clone();
+    engr::proof::canonical_set(&mut canonical, "subject").expect("canonical");
     assert_eq!(
         backlog::load(&root, &id).expect("load").sections[0].subjects,
-        subjects
+        canonical
     );
 }
 
@@ -1006,10 +1011,11 @@ fn reordering_an_equivalent_subject_set_is_not_activity() {
         after.sections[0].updated_at, activity,
         "so it cannot look freshly worked on"
     );
+    let mut canonical = subjects.clone();
+    engr::proof::canonical_set(&mut canonical, "subject").expect("canonical");
     assert_eq!(
-        after.sections[0].subjects,
-        subjects.iter().rev().cloned().collect::<Vec<_>>(),
-        "the caller's order is still what gets stored"
+        after.sections[0].subjects, canonical,
+        "a set has one persisted order, and writing it the other way round reaches it"
     );
 
     // Rewriting the identical text is not work either.

@@ -375,11 +375,38 @@ pub fn ids(root: &Path) -> Result<Vec<String>> {
     Ok(found)
 }
 
+/// The shared canonical order for `members[]`.
+///
+/// A plan's own text says the order of members in the file is never the plan's
+/// order — `--order` is, and it is a field. So `members[]` is a set, and a set
+/// has one persisted spelling. Applied on the way out, so a caller adding
+/// members in whatever order they thought of them is not refused for it.
+pub(crate) fn canonicalize_members(collection: &mut Collection) -> Result<()> {
+    crate::proof::canonical_set(&mut collection.members, "collection member")
+}
+
+fn check_canonical_members(path: &Path, collection: &Collection) -> Result<()> {
+    let mut canonical = collection.clone();
+    canonicalize_members(&mut canonical)?;
+    ensure!(
+        canonical == *collection,
+        EXIT_SCHEMA,
+        "{}: members are stored in canonical set order",
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn load(root: &Path, id: &str) -> Result<Collection> {
     let path = path(root, id);
     ensure!(path.exists(), EXIT_NOT_FOUND, "no collection {id}");
-    let collection: Collection = store::read_json(&path)?;
+    let collection: Collection = store::read_resource(root, &path)?;
     collection.validate()?;
+    // Current generation only: a predecessor workspace kept whatever order its
+    // writer produced, and migration is where those bytes come forward.
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_members(&path, &collection)?;
+    }
     // The filename is the identity, so a file whose contents disagree with it
     // is two identities for one plan — and every reference names one of them.
     ensure!(
@@ -394,7 +421,9 @@ pub fn load(root: &Path, id: &str) -> Result<Collection> {
 
 fn save(root: &Path, collection: &Collection) -> Result<()> {
     collection.validate()?;
-    store::write_json(&path(root, &collection.id), collection)
+    let mut collection = collection.clone();
+    canonicalize_members(&mut collection)?;
+    store::write_json(&path(root, &collection.id), &collection)
 }
 
 /// Every Collection mutation, under the lock, past the applicable Rule set.

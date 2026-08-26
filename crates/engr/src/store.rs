@@ -461,6 +461,31 @@ fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<
             "{}: current Sections are stored in increasing id order",
             path.display()
         );
+        // Set-valued arrays have one persisted order too, and it is the shared
+        // one: JCS each element, then order by those bytes. The canonical-bytes
+        // check cannot see this — JCS fixes member order inside an object and
+        // leaves arrays exactly as written — so without it a stored set can be
+        // reordered, keep valid seals, and load: two accepted encodings for one
+        // v3 value, which is the thing this generation says it does not have.
+        for field in ["refs", "relations"] {
+            let items = section
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!("{}: §{id} {field} must be an array", path.display()),
+                    )
+                })?;
+            let mut canonical = items.clone();
+            crate::proof::canonical_set(&mut canonical, field)?;
+            ensure!(
+                canonical == *items,
+                EXIT_SCHEMA,
+                "{}: §{id} {field} must be in canonical set order",
+                path.display()
+            );
+        }
         previous = Some(id);
     }
     Ok(())
@@ -565,15 +590,78 @@ pub fn with_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> 
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).map_err(|error| {
+    let text = read_text(path)?;
+    serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
+}
+
+fn read_text(path: &Path) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(EXIT_NOT_FOUND, format!("{}: not found", path.display()))
         } else {
             tool_error(path.display(), error)
         }
-    })?;
-    serde_json::from_str(&text)
+    })
+}
+
+/// [`read_json`] for a resource of the **current** generation, whose persisted
+/// bytes are one exact representation rather than a family of equivalent ones.
+///
+/// Three properties, and they are one check. The bytes have to be the RFC 8785
+/// serialization of the value they parse to — which fixes member order, number
+/// formatting and insignificant whitespace, and also settles duplicate member
+/// names for free: a repeated key collapses during parsing, so the value
+/// re-serializes with one occurrence and no longer matches the bytes that had
+/// two. That matters beyond tidiness, because a duplicate is where two
+/// conforming JSON stacks are allowed to disagree about what the file says.
+///
+/// On the read path rather than only in the writer, because a current resource
+/// arrives through a git merge, a hand edit, a copy or another implementation
+/// as readily as through this build's own `write_json`. A writer that emits one
+/// representation and a reader that accepts many is not one representation.
+///
+/// Set-valued arrays are the part this cannot answer: JCS fixes member order
+/// inside an object and leaves array order alone. Each resource requires its own
+/// sets to be in the shared canonical order where it validates its shape.
+pub(crate) fn read_current_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let text = read_text(path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    check_canonical_bytes(path, &text, &value)?;
+    serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
+}
+
+/// The bytes of a current-generation resource against the one serialization it
+/// is allowed to have. Split out so a caller that already holds both can ask.
+pub(crate) fn check_canonical_bytes(
+    path: &Path,
+    text: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
+    ensure!(
+        text == crate::proof::canonical_bytes(value, &path.display().to_string())?,
+        EXIT_SCHEMA,
+        "{}: a current resource is persisted as its canonical JCS bytes, and these are not them",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Read one JSON resource, held to the current generation's canonical
+/// representation exactly when the workspace *is* that generation.
+///
+/// A predecessor workspace is read under its own contract, which did not say
+/// there was one persisted spelling. Refusing those bytes here would make a
+/// valid old workspace unreadable rather than migratable, which is the opposite
+/// of what the generation boundary is for.
+pub(crate) fn read_resource<T: DeserializeOwned>(root: &Path, path: &Path) -> Result<T> {
+    if validate_format(root)? == WorkspaceFormat::Current {
+        read_current_json(path)
+    } else {
+        read_json(path)
+    }
 }
 
 /// Write via a temporary file and rename, so a reader never sees half a file.
@@ -589,14 +677,40 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+/// Write exact text via a temporary file and rename.
+///
+/// [`write_json`] serializes; this one publishes bytes that were already
+/// validated as the thing to write. Migration needs that distinction: the
+/// artifact it checked and the artifact it publishes have to be the same value,
+/// not two serializations that ought to agree.
+pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, text.as_bytes())
+        .map_err(|error| tool_error(temporary.display(), error))?;
+    fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
+    Ok(())
+}
+
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     let path = object_path(root, id);
-    let value: serde_json::Value = read_json(&path)?;
+    let text = read_text(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     let version = match validate_format(root)? {
         WorkspaceFormat::LegacyV0 => 0,
         WorkspaceFormat::OlderVersion(version) => version,
         WorkspaceFormat::Current => WORKSPACE_VERSION,
     };
+    // The canonical-bytes rule belongs to the current generation and only to it.
+    // A predecessor Object is read under the contract it was written under, and
+    // that contract did not require one persisted spelling — refusing it here
+    // would make a valid old workspace unreadable instead of migratable.
+    if version >= WORKSPACE_VERSION {
+        check_canonical_bytes(&path, &text, &value)?;
+    }
     decode_object_for_version(&path, id, value, version)
 }
 

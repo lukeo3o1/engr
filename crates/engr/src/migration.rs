@@ -27,6 +27,9 @@ struct Manifest {
     source_version: u32,
     target_version: u32,
     objects: BTreeMap<String, String>,
+    /// Retained resources whose bytes this migration rewrites, by their
+    /// `.engr`-relative path.
+    resources: BTreeMap<String, String>,
     source: BTreeMap<String, String>,
 }
 
@@ -231,11 +234,57 @@ pub(crate) fn run(root: &Path) -> Result<()> {
     commit_stage(root, &stage_dir(root))
 }
 
-fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object>> {
+/// Everything the commit phase will publish, and the exact predecessor bytes it
+/// was derived from.
+///
+/// `source` is not a second read of the workspace taken afterwards. Every entry
+/// is the digest of the text preflight itself decoded, so the manifest names
+/// what was actually validated rather than whatever happens to be on disk when
+/// the manifest is written. A source file that moves in between then fails the
+/// closing comparison instead of quietly becoming the new expected predecessor.
+struct Plan {
+    objects: BTreeMap<String, Object>,
+    /// Retained resources whose persisted bytes change under v3, by their
+    /// `.engr`-relative path.
+    resources: BTreeMap<String, String>,
+    source: BTreeMap<String, String>,
+}
+
+/// One read of a predecessor file, with its digest kept.
+///
+/// The capture and the validation see the same bytes because they are the same
+/// bytes: the read happens once, and everything downstream works from the text
+/// it returned.
+fn capture(source: &mut BTreeMap<String, String>, root: &Path, path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?;
+    source.insert(relative_to_engr(root, path)?, sha256_of(&text));
+    Ok(text)
+}
+
+fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
+    let base = store::engr_dir(root);
+    path.strip_prefix(&base)
+        .map(|relative| {
+            relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .map_err(|_| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{} is outside the workspace", path.display()),
+            )
+        })
+}
+
+fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
+    let mut source = BTreeMap::new();
     let mut predecessor = BTreeMap::new();
     for id in store::object_ids(root)? {
         let path = store::object_path(root, &id);
-        let value: serde_json::Value = store::read_json(&path)?;
+        let text = capture(&mut source, root, &path)?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
         stored_within_safe_integers(&value, &path.display().to_string())?;
         let object = store::decode_object_for_version(&path, &id, value, source_version)?;
         check_legacy_object(&object)?;
@@ -245,8 +294,10 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
     // Validate every Event record and apply only a recoverable tail before
     // converting representation. No v1 Event is ever replayed into a v3
     // projection after the generation has advanced.
-    for id in store::event_ids(root)? {
-        let events = store::load_events(root, &id)?;
+    let event_ids = store::event_ids(root)?;
+    for id in &event_ids {
+        capture(&mut source, root, &store::events_path(root, id))?;
+        let events = store::load_events(root, id)?;
         for event in &events {
             ensure!(
                 event.version == crate::EVENT_ENVELOPE_VERSION_V0
@@ -256,7 +307,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
             );
             ensure_legacy_refs(&event.payload.content.refs)?;
         }
-        let stored = predecessor.remove(&id);
+        let stored = predecessor.remove(id);
         if stored.is_none() {
             ensure!(
                 events.first().is_some_and(|event| event.rev == 1
@@ -289,10 +340,26 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
             );
         }
         check_legacy_object(&reconciled)?;
-        predecessor.insert(id, reconciled);
+        predecessor.insert(id.clone(), reconciled);
     }
 
-    validate_retained_resources(root, &predecessor)?;
+    // An Object with no Event file was never compared against admitted history
+    // at all: the loop above only reaches ids the EventStore knows. Its legacy
+    // Section seals say nothing about the Object level — title, type, state,
+    // revision, counter, Section membership — so granting it the first v3
+    // aggregate seal would launder an unverifiable projection into current
+    // authority. Under the retained EventStore contract every stored Object has
+    // an admitted creation, so absence here is a broken predecessor rather than
+    // a shape this generation has to accommodate.
+    for id in predecessor.keys() {
+        ensure!(
+            event_ids.contains(id),
+            EXIT_INVARIANT,
+            "{id}: no admitted history, so its projection cannot be proven before it is sealed"
+        );
+    }
+
+    let resources = validate_retained_resources(root, &predecessor, &mut source)?;
 
     let mut closure = RefClosure::new(root);
     let mut migrated = BTreeMap::new();
@@ -302,7 +369,13 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
         object.sections.sort_by_key(|section| section.id);
         let mut sections = Vec::with_capacity(object.sections.len());
         for section in object.sections {
-            sections.push(closure.convert_section(section)?);
+            let mut section = closure.convert_section(section)?;
+            // The current generation persists one order for a set, so the
+            // migrated bytes have to be in it. Sealing canonicalizes a clone
+            // either way; what changes here is the representation on disk.
+            crate::proof::canonical_set(&mut section.refs, "reference")?;
+            crate::proof::canonical_set(&mut section.relations, "relation")?;
+            sections.push(section);
         }
         object.sections = sections;
         object.sha256 = None;
@@ -315,33 +388,94 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
         stored_within_safe_integers(&value, &format!("object {id}"))?;
         migrated.insert(id, resealed.object);
     }
-    Ok(migrated)
+
+    // Everything preflight did not have to read is captured now, and everything
+    // it did read is confirmed unchanged. A predecessor file that moved while it
+    // was being validated fails here rather than becoming the expected source of
+    // a plan that was built from the older bytes.
+    let live = source_fingerprint(root)?;
+    for (path, digest) in &source {
+        ensure!(
+            live.get(path) == Some(digest),
+            EXIT_INVARIANT,
+            "{path} changed while migration was validating it"
+        );
+    }
+    Ok(Plan {
+        objects: migrated,
+        resources,
+        source: live,
+    })
 }
 
-fn validate_retained_resources(root: &Path, objects: &BTreeMap<String, Object>) -> Result<()> {
+/// Validate every retained resource, and say which of them need new bytes.
+///
+/// Adopting JCS is itself a representation migration: the predecessor build
+/// wrote these files with a pretty serializer, so an ordinary v2 Backlog,
+/// Collection or Work file is not the bytes v3 says a current resource has.
+/// Advancing `format.json` over them unchanged would leave a workspace full of
+/// resources its own reader refuses. One already byte-identical to its v3 form
+/// needs no rewrite and gets none.
+fn validate_retained_resources(
+    root: &Path,
+    objects: &BTreeMap<String, Object>,
+    source: &mut BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut rewrites = BTreeMap::new();
     for id in crate::backlog::ids(root)? {
-        validate_json_file(&crate::backlog::item_path(root, &id))?;
-        crate::backlog::load(root, &id)?;
+        let path = crate::backlog::item_path(root, &id);
+        validate_json_file(root, &path, source)?;
+        let mut item = crate::backlog::load(root, &id)?;
+        crate::backlog::canonicalize_sets(&mut item)?;
+        let canonical = crate::proof::canonical_bytes(&item, "backlog item")?;
+        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
     for id in crate::collection::ids(root)? {
-        validate_json_file(&crate::collection::path(root, &id))?;
-        crate::collection::load(root, &id)?;
+        let path = crate::collection::path(root, &id);
+        validate_json_file(root, &path, source)?;
+        let mut collection = crate::collection::load(root, &id)?;
+        crate::collection::canonicalize_members(&mut collection)?;
+        let canonical = crate::proof::canonical_bytes(&collection, "collection")?;
+        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
     for id in crate::work::ids(root)? {
-        validate_json_file(&crate::work::path(root, &id))?;
-        crate::work::load_for_migration(root, &id)?;
+        let path = crate::work::path(root, &id);
+        validate_json_file(root, &path, source)?;
+        let work = crate::work::load_for_migration(root, &id)?;
         ensure!(
             objects.contains_key(&id),
             EXIT_SCHEMA,
             "work sidecar {id} belongs to no Object in the migrated projection"
         );
+        let canonical = crate::proof::canonical_bytes(&work, "work")?;
+        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
     crate::rules::load_all_for_migration(root)?;
+    Ok(rewrites)
+}
+
+fn plan_rewrite(
+    root: &Path,
+    path: &Path,
+    canonical: String,
+    source: &BTreeMap<String, String>,
+    rewrites: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let relative = relative_to_engr(root, path)?;
+    if source.get(&relative) != Some(&sha256_of(&canonical)) {
+        rewrites.insert(relative, canonical);
+    }
     Ok(())
 }
 
-fn validate_json_file(path: &Path) -> Result<()> {
-    let value: serde_json::Value = store::read_json(path)?;
+fn validate_json_file(
+    root: &Path,
+    path: &Path,
+    source: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let text = capture(source, root, path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     stored_within_safe_integers(&value, &path.display().to_string())
 }
 
@@ -403,8 +537,7 @@ fn stage_dir(root: &Path) -> PathBuf {
     store::engr_dir(root).join(STAGE)
 }
 
-fn stage_plan(root: &Path, source_version: u32, objects: &BTreeMap<String, Object>) -> Result<()> {
-    let source = source_fingerprint(root)?;
+fn stage_plan(root: &Path, source_version: u32, plan: &Plan) -> Result<()> {
     let temporary = store::engr_dir(root).join(STAGE_TEMP);
     match fs::symlink_metadata(&temporary) {
         Ok(metadata) => {
@@ -423,11 +556,20 @@ fn stage_plan(root: &Path, source_version: u32, objects: &BTreeMap<String, Objec
     let object_dir = temporary.join("objects");
     fs::create_dir_all(&object_dir).map_err(|error| tool_error(object_dir.display(), error))?;
     let mut digests = BTreeMap::new();
-    for (id, object) in objects {
+    for (id, object) in &plan.objects {
         let path = object_dir.join(format!("{id}.json"));
         store::write_json(&path, object)?;
         let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
         digests.insert(id.clone(), sha256_of(&bytes));
+    }
+    let mut resources = BTreeMap::new();
+    for (relative, canonical) in &plan.resources {
+        let path = temporary.join("resources").join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+        }
+        store::write_text(&path, canonical)?;
+        resources.insert(relative.clone(), sha256_of(canonical));
     }
     store::write_json(
         &temporary.join(MANIFEST),
@@ -435,7 +577,8 @@ fn stage_plan(root: &Path, source_version: u32, objects: &BTreeMap<String, Objec
             source_version,
             target_version: crate::WORKSPACE_VERSION,
             objects: digests,
-            source,
+            resources,
+            source: plan.source.clone(),
         },
     )?;
     let stage = stage_dir(root);
@@ -504,15 +647,26 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
                 .strip_prefix("objects/")
                 .and_then(|p| p.strip_suffix(".json"));
             let staged_ok = object_id.and_then(|id| manifest.objects.get(id)) == Some(actual);
+            let rewritten = manifest
+                .resources
+                .get(path)
+                .is_some_and(|digest| digest == actual);
             ensure!(
-                actual == expected || staged_ok,
+                actual == expected || staged_ok || rewritten,
                 EXIT_INVARIANT,
                 "{path} changed after migration preflight"
             );
         }
     }
+    // One pass, and it keeps what it validated. Reading the staged file a second
+    // time to publish it would mean the bytes that were checked and the bytes
+    // that get written are two different reads of a file the workspace lock does
+    // not make immutable — so the validated artifact and the published artifact
+    // are the same value here, held in memory between the two.
+    let mut publish: Vec<(PathBuf, String)> = Vec::new();
     for (id, expected) in &manifest.objects {
         let staged = stage.join("objects").join(format!("{id}.json"));
+        ensure_regular_file(&staged)?;
         let bytes =
             fs::read_to_string(&staged).map_err(|error| tool_error(staged.display(), error))?;
         ensure!(
@@ -525,11 +679,23 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", staged.display())))?;
         let object = store::decode_object(&staged, id, value)?;
         crate::integrity::check_stored_object_integrity(&object)?;
+        publish.push((store::object_path(root, id), bytes));
     }
-    for id in manifest.objects.keys() {
-        let staged = stage.join("objects").join(format!("{id}.json"));
-        let value: serde_json::Value = store::read_json(&staged)?;
-        store::write_json(&store::object_path(root, id), &value)?;
+    for (relative, expected) in &manifest.resources {
+        let staged = stage.join("resources").join(relative);
+        ensure_regular_file(&staged)?;
+        let bytes =
+            fs::read_to_string(&staged).map_err(|error| tool_error(staged.display(), error))?;
+        ensure!(
+            sha256_of(&bytes) == *expected,
+            EXIT_INVARIANT,
+            "{} changed after migration preflight",
+            staged.display()
+        );
+        publish.push((store::engr_dir(root).join(relative), bytes));
+    }
+    for (path, bytes) in publish {
+        store::write_text(&path, &bytes)?;
     }
     store::write_workspace_format(root, crate::WORKSPACE_VERSION)?;
     fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
@@ -537,6 +703,22 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         store::validate_format(root)? == WorkspaceFormat::Current,
         EXIT_SCHEMA,
         "workspace migration did not produce the current format"
+    );
+    Ok(())
+}
+
+/// A staged entry has to be a real file, not a link to one.
+///
+/// The staging directory is inside the repository like everything else, so a
+/// symlink placed there would make the digest check read one path and the
+/// publication read another.
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| tool_error(path.display(), error))?;
+    ensure!(
+        metadata.file_type().is_file(),
+        EXIT_SCHEMA,
+        "{} is not a staged file",
+        path.display()
     );
     Ok(())
 }
@@ -568,11 +750,7 @@ fn source_fingerprint(root: &Path) -> Result<BTreeMap<String, String>> {
                 {
                     pending.push(file);
                 } else {
-                    let relative = file
-                        .strip_prefix(&base)
-                        .expect("walk starts below .engr")
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                    let relative = relative_to_engr(root, &file)?;
                     let bytes = fs::read_to_string(&file)
                         .map_err(|error| tool_error(file.display(), error))?;
                     result.insert(relative, sha256_of(&bytes));

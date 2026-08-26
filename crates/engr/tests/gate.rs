@@ -642,9 +642,11 @@ fn references_are_checked_at_the_gate() {
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&target_before).expect("target JSON");
     tampered["sections"][0]["text"] = serde_json::json!("edited outside the gate");
+    // Written as this generation's canonical bytes, so the refusal that follows
+    // is about the seal rather than about the spelling.
     std::fs::write(
         &target_path,
-        serde_json::to_vec_pretty(&tampered).expect("target JSON"),
+        engr::proof::canonical_bytes(&tampered, "target").expect("canonical"),
     )
     .expect("tamper target");
     let mut forged_current = payload(Action::SectionAdded, &source, "depends on forged wording");

@@ -221,7 +221,17 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
         EXIT_NOT_FOUND,
         "no candidate awaiting {challenge}"
     );
-    let stored: serde_json::Value = store::read_json(&path)?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| crate::tool_error(path.display(), error))?;
+    let stored: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    // A candidate is a current-generation resource, so its bytes are the one
+    // representation this generation writes. That also settles a duplicate
+    // member name — two `challenge` keys, say, with the second the one this
+    // reader picks — because the collapsed value no longer re-serializes to the
+    // bytes that had both, and a duplicate is precisely where two conforming
+    // JSON readers may disagree about what a person was shown.
+    store::check_canonical_bytes(&path, &text, &stored)?;
     let candidate: Candidate = serde_json::from_value(stored.clone())
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     // The code a candidate names is the code it will be admitted by, so a file

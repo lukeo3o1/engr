@@ -404,7 +404,7 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
         EXIT_NOT_FOUND,
         "no work recorded for object {object}"
     );
-    let work: Work = store::read_json(&path)?;
+    let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
     // The owner invariant, held on the way *out* as well as on the way in. A
     // sidecar names its Object in its filename, so a copied file can name one
@@ -446,7 +446,7 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
 /// is deliberately read-only.
 pub(crate) fn load_for_migration(root: &Path, object: &str) -> Result<Work> {
     let path = path(root, object);
-    let work: Work = store::read_json(&path)?;
+    let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
     Ok(work)
 }
