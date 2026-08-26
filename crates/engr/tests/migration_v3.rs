@@ -580,3 +580,121 @@ fn a_predecessor_event_outside_the_shared_integer_domain_fails_preflight() {
         "the version did not advance"
     );
 }
+
+/// A predecessor whose projection is missing but whose history rebuilds it
+/// migrates, atomically.
+///
+/// This is the EventStore's crash-recovery role: a v2 workspace can legitimately
+/// hold admitted history for an Object whose file never landed. Preflight
+/// already admitted that case and rebuilt the projection — but the commit phase
+/// then compared the workspace's Object files against the set the plan
+/// *publishes*, and a reconstructed Object is by definition not among them, so
+/// the plan preflight had just accepted could never commit. The two sets are
+/// different questions: what the predecessor had, and what v3 will hold.
+#[test]
+fn a_projection_rebuilt_from_admitted_history_migrates_with_the_rest() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let kept = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let lost = "018f7d58-4ca7-7a2e-98f1-9b3014681849";
+    predecessor(root, &[object(kept, "the projection that landed")]);
+    predecessor(root, &[object(lost, "the projection that did not")]);
+
+    // The crash: history is durable, the projection never reached disk.
+    std::fs::remove_file(store::object_path(root, lost)).expect("lose the projection");
+    assert!(!store::object_path(root, lost).exists());
+
+    store::migrate(root).expect("the recovery case is the one this admits");
+
+    assert_eq!(
+        store::validate_format(root).expect("format"),
+        store::WorkspaceFormat::Current
+    );
+    for id in [kept, lost] {
+        let migrated = store::load_object(root, id).expect("object");
+        integrity::check_stored_object_integrity(&migrated).expect("integrity");
+        assert_eq!(migrated.sections.len(), 1, "{id}");
+    }
+    assert_eq!(
+        store::load_object(root, lost).expect("rebuilt").sections[0].text,
+        "the projection that did not",
+        "rebuilt from the history that was durable"
+    );
+}
+
+/// The manifest names exactly what preflight read, and nothing else.
+///
+/// The closing walk used to *become* the manifest, so anything it found was
+/// promoted to "expected predecessor" whether or not preflight had ever looked
+/// at it. Now the manifest is the captured set and the walk may only agree with
+/// it — so every file under `.engr` has to be accounted for while it is being
+/// read, Rules included. Remove that accounting and this fails: the walk finds
+/// a file the plan never named.
+///
+/// A Rule's digest is taken from the bytes the loader parsed rather than from a
+/// second read of the path, for the reason artifact-exact identity always
+/// requires it — `.engr/rules` is editable outside the workspace lock. That half
+/// is structural here (one read feeds both) and is pinned at the binding level
+/// in the Rule tests.
+#[test]
+fn every_predecessor_file_is_accounted_for_while_it_is_read() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "with policy")]);
+
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::write(
+        rules.join("architecture.md"),
+        "---\nid: architecture\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Architecture\n\nBody.\n",
+    )
+    .expect("rule");
+    // Not a Rule, and the loader reads only `.md`. It still has to be accounted
+    // for, or the closing set comparison can never be exact.
+    std::fs::write(rules.join("notes.txt"), "not a rule\n").expect("stray file");
+
+    store::migrate(root).expect("a workspace with policy migrates");
+    assert_eq!(
+        store::validate_format(root).expect("format"),
+        store::WorkspaceFormat::Current
+    );
+    assert_eq!(
+        engr::rules::load_all(root).expect("rules").len(),
+        1,
+        "and the policy came through untouched"
+    );
+}
+
+/// A file that appears after the plan was built stops the commit.
+///
+/// It was never enumerated, so nothing schema-, JCS-, replay- or Rule-validated
+/// it; accepting it into the expected predecessor set and then advancing the
+/// generation would leave an unvalidated resource sitting in current v3.
+#[test]
+fn a_file_that_appeared_after_the_plan_stops_the_commit() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(interrupted.path(), &[object(id, "the validated set")]);
+    predecessor(completed.path(), &[object(id, "the validated set")]);
+    staged_plan(interrupted.path(), completed.path(), id);
+
+    let arrival =
+        engr::backlog::item_path(interrupted.path(), "018f7d58-4ca7-7a2e-98f1-9b301468184b");
+    std::fs::write(&arrival, "{}\n").expect("a file nobody validated");
+
+    let error = store::migrate(interrupted.path()).expect_err("that was not in the plan");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("appeared after migration preflight"),
+        "{error}"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(interrupted.path()).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}

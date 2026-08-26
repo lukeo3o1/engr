@@ -160,7 +160,7 @@ fn reconcile_applies_an_event_the_projection_missed() {
     let id = new_object(&root, "reconciliation");
     let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "one"))
         .expect("prepare crash tail");
-    store::append_event(
+    append_admitted_raw(
         &root,
         &engr::model::Event {
             format: engr::model::EVENT_FORMAT.to_owned(),
@@ -180,8 +180,7 @@ fn reconcile_applies_an_event_the_projection_missed() {
                 },
             },
         },
-    )
-    .expect("append without projecting");
+    );
 
     let object_path = store::object_path(&root, &id);
     let events_path = store::events_path(&root, &id);
@@ -890,4 +889,20 @@ fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
 
     std::fs::write(&path, &original).expect("restore");
     store::load_object(&root, &id).expect("and it reads back");
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }

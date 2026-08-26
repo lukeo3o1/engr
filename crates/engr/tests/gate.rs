@@ -1428,7 +1428,7 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     let id = new_object(&root, "interrupted confirmation");
     let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
     let event = candidate_event(&first.candidate);
-    store::append_event(&root, &event).expect("append before the crash");
+    append_admitted_raw(&root, &event);
 
     // A later action must first replay the confirmed tail. Otherwise it is
     // prepared at the same revision, its event collides with this one, and
@@ -1456,7 +1456,7 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
         gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
     let code = prepared.candidate.challenge.clone();
     let event = candidate_event(&prepared.candidate);
-    store::append_event(&root, &event).expect("append before the crash");
+    append_admitted_raw(&root, &event);
 
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
         .expect("the retry is idempotent")
@@ -1478,7 +1478,7 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     let prepared =
         gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
     let event = candidate_event(&prepared.candidate);
-    store::append_event(&root, &event).expect("append before the crash");
+    append_admitted_raw(&root, &event);
 
     let code = prepared.candidate.challenge.clone();
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
@@ -1625,7 +1625,7 @@ fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
         payload: merged,
     };
 
-    let error = store::append_event(&root, &event)
+    let error = store::check_appendable(&root, &event)
         .expect_err("a generation may only carry the shapes it defined");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     store::load_events(&root, &id).expect("and the history is still readable");
@@ -1687,7 +1687,7 @@ fn the_event_write_boundary_refuses_an_unsupported_generation() {
         payload: ordinary,
     };
 
-    let error = store::append_event(&root, &event)
+    let error = store::check_appendable(&root, &event)
         .expect_err("this build does not support that generation");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert_eq!(
@@ -1853,7 +1853,7 @@ fn appending_an_event_requires_a_workspace_this_build_may_write() {
         payload: added,
     };
 
-    let error = store::append_event(&root, &event)
+    let error = store::check_appendable(&root, &event)
         .expect_err("this build does not write a workspace at that version");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert_eq!(
@@ -1923,7 +1923,7 @@ fn appending_an_event_enforces_the_contract_its_own_read_applies() {
         ("revision continuity", wrong_rev),
         ("object identity", wrong_object),
     ] {
-        let error = store::append_event(&root, &event).unwrap_err_or_else_note(what);
+        let error = store::check_appendable(&root, &event).unwrap_err_or_else_note(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
         assert_eq!(
             std::fs::read(&path).expect("events"),
@@ -1932,7 +1932,7 @@ fn appending_an_event_enforces_the_contract_its_own_read_applies() {
         );
     }
 
-    store::append_event(&root, &sound).expect("a sound record still appends");
+    store::check_appendable(&root, &sound).expect("a sound record is still admissible");
     store::load_events(&root, &id).expect("and reads back");
 }
 
@@ -1949,32 +1949,31 @@ impl NoteErr for engr::Result<()> {
     }
 }
 
-/// Two direct callers, one predecessor. The check that refuses a revision the
-/// next load would reject reads the tail, so a read-then-append with nothing
-/// held between them is both writers agreeing on the same predecessor and both
-/// appending it.
+/// Two callers, one predecessor, one winner.
 ///
-/// The gate happens to be serialized because `confirm` already holds the writer
-/// lock, which is exactly why the public primitive cannot rely on its callers:
-/// a direct library caller is not inside it.
+/// The durable append reads the tail to refuse a revision the next load would
+/// reject, so a read-then-append with nothing held between them is both writers
+/// agreeing on the same predecessor and both taking it. `confirm` holds the
+/// writer lock across the whole operation, which is what makes that impossible
+/// — and since the raw append is no longer reachable from outside the crate,
+/// the gate is where the property is observable and where it matters.
 #[test]
-fn two_direct_callers_cannot_both_append_the_same_revision() {
+fn two_callers_cannot_both_admit_the_same_predecessor() {
     let (dir, root) = workspace();
     let id = new_object(&root, "one predecessor");
+    let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "wording"))
+        .expect("one prepared candidate");
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    // One prepared candidate, two callers holding the same admissible record.
-    // The lock decides which of them takes the predecessor; the other finds the
-    // revision already spent.
-    let event = admissible_human_event(&root, payload(Action::SectionAdded, &id, "wording"));
     let outcomes: Vec<bool> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let barrier = std::sync::Arc::clone(&barrier);
                 let root = root.clone();
-                let event = event.clone();
+                let response = response.clone();
                 scope.spawn(move || {
                     barrier.wait();
-                    store::append_event(&root, &event).is_ok()
+                    gate::confirm(&root, &response).is_ok()
                 })
             })
             .collect();
@@ -1987,11 +1986,14 @@ fn two_direct_callers_cannot_both_append_the_same_revision() {
     assert_eq!(
         outcomes.iter().filter(|ok| **ok).count(),
         1,
-        "exactly one of two writers may take a predecessor"
+        "exactly one of two callers may take a predecessor"
     );
     let events = store::load_events(&root, &id).expect("and the history still loads");
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 2, "one admission, not two");
     assert_eq!(events[1].rev, 2);
+    let object = ops::effective(&root, &id).expect("object");
+    assert_eq!(object.rev, 2);
+    assert_eq!(object.sections.len(), 1, "the wording landed exactly once");
     drop(dir);
 }
 
@@ -2011,7 +2013,7 @@ fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
     let absent = payload(Action::SectionRevised { section: 999 }, &id, "wording");
     let event = direct_human_event(&root, &id, absent, 2);
 
-    let error = store::append_event(&root, &event)
+    let error = store::check_appendable(&root, &event)
         .expect_err("history must be able to arrive at what it records");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert_eq!(
@@ -2058,7 +2060,7 @@ fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
         ("an action no object begins with", not_a_beginning),
         ("a revision nothing precedes", skipping),
     ] {
-        let error = store::append_event(&root, &event)
+        let error = store::check_appendable(&root, &event)
             .expect_err("a history must be able to start where it says it starts");
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
         assert!(!path.exists(), "{what}: no history was created");
@@ -2091,7 +2093,7 @@ fn retained_event_generation_cannot_carry_tagged_admission() {
         payload: added,
     };
 
-    let error = store::append_event(&root, &tagged)
+    let error = store::check_appendable(&root, &tagged)
         .expect_err("that provenance belongs to Event generation 2");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert_eq!(std::fs::read(&path).expect("events"), before);
@@ -2136,8 +2138,8 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
                 .clone(),
         });
     }
-    let error =
-        store::append_event(&root, &forged).expect_err("a challenge nobody minted admits nothing");
+    let error = store::check_appendable(&root, &forged)
+        .expect_err("a challenge nobody minted admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
         error.message.contains("not admitted through the gate"),
@@ -2157,7 +2159,7 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
             candidate_digest: format!("1:{}", "b".repeat(64)),
         });
     }
-    let error = store::append_event(&root, &swapped)
+    let error = store::check_appendable(&root, &swapped)
         .expect_err("a candidate digest nothing produced admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
 
@@ -2166,7 +2168,7 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
         before,
         "neither forgery was written"
     );
-    store::append_event(&root, &admissible).expect("the prepared record still appends");
+    store::check_appendable(&root, &admissible).expect("the prepared record is still admissible");
 }
 
 /// The same, for the Agent door.
@@ -2200,8 +2202,8 @@ fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
             },
         },
     };
-    let error =
-        store::append_event(&root, &forged).expect_err("an invented review digest admits nothing");
+    let error = store::check_appendable(&root, &forged)
+        .expect_err("an invented review digest admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
         error.message.contains("Rule Review that is not the one"),
@@ -2214,8 +2216,8 @@ fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
     if let Provenance::Tagged { admission } = &mut bare.provenance {
         admission.rule_review = None;
     }
-    let error =
-        store::append_event(&root, &bare).expect_err("no Rule Review, no semantic Agent admission");
+    let error = store::check_appendable(&root, &bare)
+        .expect_err("no Rule Review, no semantic Agent admission");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
     assert_eq!(
@@ -2566,4 +2568,112 @@ fn a_workspace_reached_through_a_symlink_still_resolves_its_own_paths() {
     let mut proposal = payload(Action::SectionAdded, &source, "stands on it");
     proposal.content.refs = vec![text_ref(&root, &id, 1, &commit)];
     gate::prepare(&root, proposal).expect("a reference resolves through the link");
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
+}
+
+/// A title mutation is exempt from *review*, not from *Rules*.
+///
+/// The exception is that there is no applicable Rule to review against, and it
+/// has to be established rather than inferred from the shape of the action.
+/// Reading "no review is present and this is a rename" as sufficient let a
+/// governed workspace admit a title change no policy ever saw.
+#[test]
+fn a_title_event_with_no_review_is_refused_where_a_rule_governs() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "governed titles");
+    let renamed = payload(Action::ObjectRenamed, &id, "a different title");
+    let bare = agent_event_without_review(&renamed, 2);
+
+    // Ungoverned, there is genuinely nothing to review against.
+    store::check_appendable(&root, &bare).expect("no applicable Rule, no review to carry");
+
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let rules = engr::rules::dir(&root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("titles.md"),
+        "---\nid: titles\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Titles\n\nSay what the thing is.\n",
+    )
+    .expect("rule");
+
+    let error = store::check_appendable(&root, &bare)
+        .expect_err("a rule governs this Object, so the title reviews against it");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("even a title mutation"), "{error}");
+}
+
+fn agent_event_without_review(payload: &Payload, rev: u64) -> engr::model::Event {
+    engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev,
+        time: "2026-08-27T00:00:00Z".to_owned(),
+        payload: payload.clone(),
+        provenance: Provenance::Tagged {
+            admission: TaggedAdmission {
+                kind: engr::semantics::Admission::Agent,
+                confirmation: None,
+                rule_review: None,
+            },
+        },
+    }
+}
+
+/// The attempt is why a durable record cannot be the whole admission capability.
+///
+/// Event provenance is deliberately minimal: outcome and digest, and none of the
+/// transient inputs the decision was made from. A caller can therefore name the
+/// *correct* live ReviewDigest for a mutation while the applicable ceiling has
+/// already been exceeded, and nothing in the record would say so. The gate
+/// carries the attempt and refuses; a raw append had nothing to refuse on, which
+/// is why there is no longer a public one.
+#[test]
+fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
+    let (_dir, root) = workspace();
+    // The Object exists before the policy does, as it would in a real workspace.
+    let id = new_object(&root, "governed");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let rules = engr::rules::dir(&root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 1\n  on_exhaustion: reject\nbased_on:\n  - path: AGENTS.md\n---\n\n# Careful\n\nRead this.\n",
+    )
+    .expect("rule");
+
+    let before = store::load_events(&root, &id).expect("events").len();
+    let error = gate::admit_agent(
+        &root,
+        payload(Action::SectionAdded, &id, "wording"),
+        Some(engr::gate::ReviewAttestation {
+            review_digest: format!("1:{}", "a".repeat(64)),
+            reviewed_rules: vec!["careful".to_owned()],
+            attempt: 2,
+            result: engr::proof::ReviewResult::Passed,
+            explanation: None,
+        }),
+    )
+    .expect_err("attempt 2 is past a ceiling of 1");
+    assert_ne!(error.code, 0);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        before,
+        "nothing was admitted"
+    );
 }

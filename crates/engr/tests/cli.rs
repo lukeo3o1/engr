@@ -287,7 +287,7 @@ fn reference_admission_uses_the_effective_target_projection() {
             },
         },
     };
-    store::append_event(root, &revision_event).expect("append without projection");
+    append_admitted_raw(root, &revision_event);
     let effective = ops::effective_section(root, &target, 1).expect("effective target section");
     assert_ne!(effective.sha256, raw.sha256);
 
@@ -1604,7 +1604,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
     // the crash window `show` has to reconcile, and the durable boundary admits
     // an Event only against the candidate it was prepared as.
     let prepared = gate::prepare(root, payload).expect("prepare the unprojected change");
-    store::append_event(
+    append_admitted_raw(
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
@@ -1624,8 +1624,7 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
                 },
             },
         },
-    )
-    .expect("append unprojected event");
+    );
 
     let lock_path = store::engr_dir(root).join("lock");
     let lock = OpenOptions::new()
@@ -1672,7 +1671,8 @@ fn unsupported_event_versions_are_rejected() {
     let id = event.payload.object.clone();
 
     // Refused on the way in, so nothing writes one...
-    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    let error =
+        store::check_appendable(&root, &event).expect_err("this build emits one generation");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(
         !store::events_path(&root, &id).exists(),
@@ -5106,4 +5106,20 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
 /// Put an Object on disk directly, for a fixture that needs one there.
 fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
     write_raw(&engr::store::object_path(root, &object.id), object)
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }

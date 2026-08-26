@@ -216,9 +216,24 @@ fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
 /// happens to deserialize as today.
 fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
     let objects = format!("{}/objects", workspace_prefix(root)?);
+    // `--full-name` and a top-anchored literal pathspec, for the same reason the
+    // worktree helpers use one: `-C root` gives git a cwd prefix, so both the
+    // pathspec and the output would otherwise be read relative to it — a
+    // workspace at `project/.engr` would be looked for under
+    // `project/project/.engr`, and a real legacy snapshot would report itself as
+    // having no Objects at all.
+    let literal = literal_path(&objects);
     let paths = run(
         root,
-        &["ls-tree", "-r", "--name-only", commit, "--", &objects],
+        &[
+            "ls-tree",
+            "-r",
+            "--full-name",
+            "--name-only",
+            commit,
+            "--",
+            &literal,
+        ],
     )
     .ok_or_else(|| {
         Error::new(

@@ -35,6 +35,24 @@
 //!     engr::store::write_json(&path, object).expect("no such public writer");
 //! }
 //! ```
+//!
+//! The durable Event append is closed for a further reason, and not for
+//! visibility's own sake. Event provenance is deliberately minimal — the
+//! review's outcome and digest, and none of the transient inputs the decision
+//! was made from. The attempt is the one that matters: every mutation carries
+//! one Agent-attested attempt, each applicable Rule judges it against its own
+//! ceiling, and past any ceiling autonomous admission stops. None of that
+//! survives into the record, so re-deriving what the record *does* carry can
+//! never ask the question, and a public raw append would be a second Agent
+//! admission API holding strictly less state than the gate. [`check_appendable`]
+//! is the read-only half.
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn admit(root: &Path, event: &engr::model::Event) {
+//!     engr::store::append_event(root, event).expect("no such public writer");
+//! }
+//! ```
 
 use crate::model::{
     replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
@@ -242,7 +260,21 @@ pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
     }
-    let format: Format = read_json(&path)?;
+    // The schema authority is a current resource too, and it is the one every
+    // other decoder consults to choose its generation — so it cannot be the one
+    // file exempt from the generation's own persisted representation. Checked
+    // after parsing rather than before, because the version it declares is what
+    // says whether the rule applies at all, and a predecessor `format.json` is
+    // read under its own contract. `check_canonical_bytes` does not consult the
+    // workspace version, so there is no recursion.
+    let text = read_text(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    let format: Format = serde_json::from_value(value.clone())
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    if format.version >= WORKSPACE_VERSION {
+        check_canonical_bytes(&path, &text, &value)?;
+    }
     ensure!(
         format.format == WORKSPACE_FORMAT,
         EXIT_SCHEMA,
@@ -1188,25 +1220,48 @@ fn check_event_generation(event: &Event) -> Result<()> {
     }
 }
 
-/// Append one admitted Event, taking the workspace writer lock.
+/// Whether this Event would be accepted by the durable boundary, without
+/// writing anything.
 ///
-/// The lock belongs here rather than at the caller because the check this
-/// function performs is about the file it is about to write: it reads the tail
-/// to refuse a revision the next load would reject, and a read-then-append with
-/// nothing held between them is two writers agreeing on the same predecessor and
-/// both appending it. That is the exact durable boundary this path exists to
-/// keep sound, so leaving the serialization to whoever happens to call is
-/// leaving it to chance.
+/// **There is no public append, and that is the contract.** Recomputing what an Event
+/// persists is not the same as proving admission, because Event provenance is
+/// deliberately minimal: it carries the review's outcome and digest and not the
+/// transient inputs the decision was made from. The attempt is the one that
+/// matters — every mutation carries one Agent-attested attempt, each applicable
+/// Rule judges it against its own ceiling, and past any ceiling autonomous
+/// Object admission stops. None of that is in the record, so no amount of
+/// re-derivation at this boundary can ask it, and a public raw append would be a
+/// second Agent admission API holding strictly less state than the gate.
 ///
-/// [`append_event_locked`] is the same work for a caller that already holds the
-/// lock — `confirm` does, and taking it again from the same process would wait
-/// on a lock nothing will release.
-pub fn append_event(root: &Path, event: &Event) -> Result<()> {
-    with_lock(root, || append_event_locked(root, event))
+/// So this is the read-only half and the only half a consumer gets: every check
+/// the append performs, and no capacity to perform the append. A caller that
+/// wants a record in the log goes through the gate, which is where the admission
+/// inputs live. The lock is taken because the checks read the durable tail, and
+/// an answer about a tail that is moving is not an answer.
+pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
+    with_lock(root, || check_appendable_locked(root, event))
 }
 
-/// [`append_event`] for a caller already inside [`with_lock`].
+/// The durable append, for a caller already inside [`with_lock`] — which is
+/// every caller, because the only routes here are `confirm` and `admit_agent`.
 pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
+    check_appendable_locked(root, event)?;
+    let path = events_path(root, &event.payload.object);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
+    let line = crate::proof::canonical_bytes(event, "Event v2")?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| tool_error(path.display(), error))?;
+    use std::io::Write;
+    writeln!(file, "{line}").map_err(|error| tool_error(path.display(), error))
+}
+
+/// Every check the append performs, and none of the writing.
+fn check_appendable_locked(root: &Path, event: &Event) -> Result<()> {
     // The durable Event path is part of the workspace-generation boundary, and a
     // direct library caller reaches it without passing the gate. Asked here as
     // well as there, because "this build may write this workspace" is a property
@@ -1223,7 +1278,6 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // as it was rather than advanced past history it could not record.
     check_event_record(event, &event.payload.object, None)?;
     let id = &event.payload.object;
-    let path = events_path(root, id);
     // Continuity against what is already there, which is the one part of the
     // read contract that is about the file rather than the record. Reading the
     // tail is the cost of not being able to append a revision the next load
@@ -1259,19 +1313,7 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // Last, and only for a record that is otherwise sound: a malformed Event
     // should be refused for being malformed, not for failing a proof about a
     // shape nothing could admit anyway.
-    crate::gate::check_admission(root, event)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-    }
-    let line = crate::proof::canonical_bytes(event, "Event v2")?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| tool_error(path.display(), error))?;
-    use std::io::Write;
-    writeln!(file, "{line}").map_err(|error| tool_error(path.display(), error))?;
-    Ok(())
+    crate::gate::check_admission(root, event)
 }
 
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {

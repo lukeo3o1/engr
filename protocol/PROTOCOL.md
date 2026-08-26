@@ -52,7 +52,10 @@ stored as `null`, empty sets and sequences as `[]`, and no current Object repeat
 workspace format or version. One meaning has one persisted shape.
 
 A current-generation JSON resource is persisted as the **RFC 8785 (JCS) bytes**
-of its schema-canonical value, with its sets already in canonical order. That is
+of its schema-canonical value, with its sets already in canonical order. That
+includes `format.json`: the schema authority is a current resource too, and it
+is the one every other decoder consults to choose its generation, so it cannot
+be the single file exempt from its own generation's representation. That is
 enforced on the read path and not only in the writer: a current resource arrives
 through a git merge, a hand edit, a copy or another implementation as readily as
 through a supported write, and a writer that emits one representation beside a
@@ -787,6 +790,24 @@ The proof runs after the shape checks, so a malformed record is still refused fo
 being malformed rather than for failing a proof about a shape nothing could admit
 anyway.
 
+Recomputation is necessary and it is not sufficient, which is why there is no
+public raw append. Event provenance is deliberately minimal: it carries the
+review's outcome and digest and none of the transient inputs the decision was
+made from. The attempt is the one that matters — every mutation carries one
+Agent-attested attempt, each applicable Rule judges it against its own ceiling,
+and past any ceiling autonomous Object admission stops — and none of that
+survives into the record. A boundary that can only re-derive what the record
+carries therefore cannot ask the question at all, so a public raw append would
+be a second Agent admission API holding strictly less state than the gate.
+Asking whether a record *would* be accepted is a separate, read-only question
+and may be public.
+
+The title exemption is likewise narrow in both directions. It says there is no
+applicable Rule to review against, not that titles are exempt from Rules: where
+a workspace governs the Object domain, a title mutation reviews against it like
+any other, so the absence MUST be established rather than inferred from the
+shape of the action.
+
 The append boundary MUST also refuse a record whose **replay** would leave the
 workspace outside the current schema. Some current-state integers are allocated
 by the reducer and appear nowhere in the record — a `section_added` carries no
@@ -1197,18 +1218,20 @@ which part moved, so the retry is intelligent rather than reflexive.
 
 ### updated_at
 
-When the unresolved statement itself last changed: creation, text revision,
-subject changes, a merge result. A topic rename MUST NOT refresh it, and neither
-does appending a produced outcome — an outcome deliberately does not change what
-remains unresolved, and refreshing would make an untouched point look worked on.
-Item-level activity is derived from the Sections rather than stored, so the two
-cannot disagree.
+When the unresolved point last saw activity: creation, text revision, subject
+changes, a merge result, and recording or forgetting a produced outcome. A topic
+rename MUST NOT refresh it — the topic is the context a point is read in, not
+the point. Item-level activity is derived from the Sections rather than stored,
+so the two cannot disagree.
 
-Neither does a write that changes nothing. Rewriting a Section with the wording
-it already had, or with the same `subjects[]` set in a different order, MUST
-leave `updated_at` alone. Order is not content — `subjects[]` is a set — and an
-idempotent write that manufactures activity puts an untouched point at the top
-of the list somebody reads to find what was touched.
+Bookkeeping counts, and the earlier reading that it does not was withdrawn.
+Learning what a point produced is meaningful to whoever picks it up next, so a
+`produced[]` change is activity even though the wording did not move. What is
+*not* activity is a write that changes nothing at all: rewriting a Section with
+the wording it already had, or with the same `subjects[]` set in a different
+order, MUST leave `updated_at` alone. Order is not content — `subjects[]` is a
+set — and an idempotent write that manufactures activity puts an untouched point
+at the top of the list somebody reads to find what was touched.
 
 A change to persisted observation metadata is not that. `dirty` records how a
 target looked when it was observed, and it is deliberately outside subject
@@ -2059,6 +2082,12 @@ turning an entry nobody can commit into a workspace that cannot load rules at
 all — a hang rather than an answer. Every one of these checks happens **before**
 reading, which is while it can still be a refusal.
 
+Historical enumeration is anchored the same way. `-C <root>` gives git a cwd
+prefix, so an unanchored pathspec — and unqualified output — are both read
+relative to it: a workspace at `project/.engr` would be looked for under
+`project/project/.engr`, and a real legacy snapshot would report itself as
+having no Objects at all.
+
 A **pinned** basis is checked against what git *recorded*, not only what git
 prints. `git show <commit>:<path>` prints a symlink's target name as though it
 were content, so a historical link whose target name equals a later regular
@@ -2180,7 +2209,13 @@ Section seal, every legacy Ref's complete transitive historical closure, retaine
 resources and shared safe-integer bounds. Any ambiguous reconstruction,
 integrity failure or unsupported value fails before the workspace version moves.
 
-Every predecessor Object MUST be proven from its admitted history. Comparing
+Every predecessor Object MUST be proven from its admitted history, and the set
+of predecessor *projections* is a different set from the Objects the plan
+publishes. A projection that is missing while its admitted history still
+establishes it is the EventStore doing its recovery job: preflight rebuilds it,
+and the commit phase MUST NOT then require it to have been on disk all along —
+comparing the workspace against the published set made the recovery case
+impossible to commit. Comparing
 only the ids the EventStore happens to know leaves an Object with no Event file
 uncompared, and its legacy Section seals say nothing about the Object level at
 all — not its title, type, state, revision, counter, or which Sections belong to
@@ -2191,12 +2226,19 @@ predecessor and MUST fail closed.
 
 The predecessor bytes the plan is built from are the bytes the manifest records.
 An implementation MUST capture the digest of each input **as it reads it**, not
-by re-reading the workspace afterwards: `.engr/rules` and the repository are
-editable outside the workspace lock, so a second read can record bytes that were
-never validated as the expected source, and the commit phase would then accept
-them and overwrite the newer file with a plan built from the older one. Any
-divergence between what was validated and what is on disk MUST fail rather than
-become the new expected predecessor.
+by re-reading the workspace afterwards. The manifest is that captured set, and
+the closing walk may only be asked whether it still agrees: a walk that
+*becomes* the manifest promotes whatever it happens to find into "expected
+predecessor", so a file that appeared after its own domain was enumerated —
+a new Backlog item, a new Event log, a new Rule — is named as validated when
+nothing ever validated it, and the commit then advances the generation over it.
+Rule bytes come from the same read that parsed them, for the reason
+artifact-exact identity always requires it. `.engr/rules` and the repository are
+editable outside the workspace lock, so a second read can record bytes nothing
+ever validated, and the commit phase would then accept them and overwrite the
+newer file with a plan built from the older one. Any divergence between what was
+validated and what is on disk MUST fail rather than become the new expected
+predecessor.
 
 Adopting a new canonical representation is itself a migration. The v3 persisted
 representation is JCS with canonical set order, and the predecessor build did not

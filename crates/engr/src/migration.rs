@@ -406,12 +406,24 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         stored_within_safe_integers(&value, &format!("object {id}"))?;
         migrated.insert(id, resealed.object);
     }
-
-    // Everything preflight did not have to read is captured now, and everything
-    // it did read is confirmed unchanged. A predecessor file that moved while it
-    // was being validated fails here rather than becoming the expected source of
-    // a plan that was built from the older bytes.
+    // Everything preflight read is confirmed unchanged, and nothing else may be
+    // in the set. The closing walk used to *become* `Plan.source`, so a file
+    // that appeared after its own domain was enumerated — a new Backlog item, a
+    // new Event log, a new Rule — was promoted into the manifest as an expected
+    // predecessor without ever being schema, JCS, replay or Rule validated. The
+    // commit phase would then find the workspace exactly as the manifest
+    // described it and advance the generation over an unvalidated resource.
+    //
+    // So the manifest is the captured set, and the live walk is only ever asked
+    // whether it still agrees.
     let live = source_fingerprint(root)?;
+    for path in live.keys() {
+        ensure!(
+            source.contains_key(path),
+            EXIT_INVARIANT,
+            "{path} appeared while migration was validating the workspace"
+        );
+    }
     for (path, digest) in &source {
         ensure!(
             live.get(path) == Some(digest),
@@ -422,7 +434,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
     Ok(Plan {
         objects: migrated,
         resources,
-        source: live,
+        source,
     })
 }
 
@@ -468,7 +480,37 @@ fn validate_retained_resources(
         let canonical = crate::proof::canonical_bytes(&work, "work")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
-    crate::rules::load_all_for_migration(root)?;
+    // Rules are captured from the same read that validated them, exactly as
+    // artifact-exact identity requires everywhere else: reopening the path to
+    // fingerprint it is a second read of a file that is editable outside the
+    // workspace lock, so the manifest could name bytes the loader never
+    // accepted. `Rule::raw` is the text that was parsed.
+    for rule in crate::rules::load_all_for_migration(root)? {
+        source.insert(relative_to_engr(root, &rule.source)?, sha256_of(&rule.raw));
+    }
+    // Anything else living under `rules/` is captured too, and only so the
+    // closing set comparison can be exact. It is not a Rule — the loader reads
+    // `.md` and nothing else — so nothing here claims it was validated as one;
+    // what is claimed is that it was present, and that it did not change.
+    let rules_dir = crate::rules::dir(root);
+    if rules_dir.is_dir() {
+        for entry in
+            fs::read_dir(&rules_dir).map_err(|error| tool_error(rules_dir.display(), error))?
+        {
+            let entry = entry.map_err(|error| tool_error(rules_dir.display(), error))?;
+            let path = entry.path();
+            if entry
+                .file_type()
+                .map_err(|error| tool_error(path.display(), error))?
+                .is_file()
+            {
+                let relative = relative_to_engr(root, &path)?;
+                if !source.contains_key(&relative) {
+                    capture(source, root, &path)?;
+                }
+            }
+        }
+    }
     Ok(rewrites)
 }
 
@@ -551,6 +593,11 @@ fn ensure_lower_sha256(value: &str, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// The Object id a `.engr`-relative source path names, if it names one.
+fn staged_object_id(path: &str) -> Option<&str> {
+    path.strip_prefix("objects/")
+        .and_then(|rest| rest.strip_suffix(".json"))
+}
 fn stage_dir(root: &Path) -> PathBuf {
     store::engr_dir(root).join(STAGE)
 }
@@ -643,28 +690,58 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
         return Ok(());
     }
+    // The Object set the plan was built from is the set of *predecessor
+    // projections*, which the manifest names in `source`. It is not the set the
+    // plan publishes: an Object whose projection was missing and whose admitted
+    // history reconstructs it is legitimately in `objects` and legitimately not
+    // on disk yet. Comparing against `objects` made the recovery case preflight
+    // explicitly admits impossible to commit.
+    //
+    // An id may therefore be present now for exactly two reasons: it had a
+    // predecessor projection, or an interrupted commit already published it.
     let current_ids = store::object_ids(root)?;
-    ensure!(
-        current_ids.len() == manifest.objects.len()
-            && current_ids
-                .iter()
-                .all(|id| manifest.objects.contains_key(id)),
-        EXIT_INVARIANT,
-        "the Object set changed after migration preflight"
-    );
+    for id in &current_ids {
+        ensure!(
+            manifest.objects.contains_key(id),
+            EXIT_INVARIANT,
+            "{id} appeared after migration preflight"
+        );
+    }
+    for id in manifest
+        .source
+        .keys()
+        .filter_map(|path| staged_object_id(path))
+    {
+        ensure!(
+            current_ids.iter().any(|current| current == id),
+            EXIT_INVARIANT,
+            "{id} disappeared after migration preflight"
+        );
+    }
     if workspace_version == manifest.source_version {
         let current = source_fingerprint(root)?;
-        ensure!(
-            current.keys().eq(manifest.source.keys()),
-            EXIT_INVARIANT,
-            "the predecessor workspace resource set changed after migration preflight"
-        );
+        for path in current.keys() {
+            // A file that is in the workspace but not in the plan is either a
+            // reconstructed Object an interrupted commit already published, or
+            // something that arrived after preflight validated the workspace.
+            let published = staged_object_id(path).is_some_and(|id| {
+                manifest.objects.contains_key(id) && !manifest.source.contains_key(path)
+            });
+            ensure!(
+                manifest.source.contains_key(path) || published,
+                EXIT_INVARIANT,
+                "{path} appeared after migration preflight"
+            );
+        }
         for (path, expected) in &manifest.source {
-            let actual = current.get(path).expect("key sets checked");
-            let object_id = path
-                .strip_prefix("objects/")
-                .and_then(|p| p.strip_suffix(".json"));
-            let staged_ok = object_id.and_then(|id| manifest.objects.get(id)) == Some(actual);
+            let Some(actual) = current.get(path) else {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    format!("{path} disappeared after migration preflight"),
+                ));
+            };
+            let staged_ok =
+                staged_object_id(path).and_then(|id| manifest.objects.get(id)) == Some(actual);
             let rewritten = manifest
                 .resources
                 .get(path)

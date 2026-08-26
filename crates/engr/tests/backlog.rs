@@ -2807,3 +2807,50 @@ fn a_stored_number_outside_the_shared_domain_is_a_schema_fault() {
     );
     assert!(error.message.contains("safe integer"), "{error}");
 }
+
+/// Recording what a point produced is activity, and the protocol says so.
+///
+/// Bookkeeping moves the field triage sorts by, because learning what a point
+/// produced is meaningful to whoever picks it up next. The document is what
+/// `engr protocol` prints, so the two cannot disagree — an earlier reading that
+/// an outcome does not count survived in the prose after the build stopped
+/// implementing it, and that is exactly the shape this asserts against.
+#[test]
+fn recording_a_produced_outcome_is_activity_and_the_protocol_agrees() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "a record");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &object, "confirmed wording"),
+    );
+    let id = item(&root, "topic", "unresolved");
+    let before = backlog::load(&root, &id).expect("load").sections[0]
+        .updated_at
+        .clone();
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(backlog::record_produced(
+        &root,
+        &id,
+        1,
+        Produced::object(format!("obj:{}", compact(&object))),
+        &on_section(&root, &id, 1),
+    )
+    .expect("record"));
+    let after = backlog::load(&root, &id).expect("load").sections[0]
+        .updated_at
+        .clone();
+    assert_ne!(
+        after, before,
+        "bookkeeping is activity on the unresolved work"
+    );
+
+    assert!(
+        engr::PROTOCOL.contains("recording or forgetting a produced outcome"),
+        "the normative document must describe the behaviour this build has"
+    );
+    assert!(
+        !engr::PROTOCOL.contains("neither\ndoes appending a produced outcome"),
+        "and must not still carry the reading that was withdrawn"
+    );
+}

@@ -624,9 +624,9 @@ pub(crate) fn check_admission(root: &Path, event: &Event) -> Result<()> {
             project(&mut after, event)?;
             let review = admission.rule_review.as_ref();
             let Some(review) = review else {
-                // The one non-authoritative exception, and it is narrow: a title
-                // asserts nothing about the project, so there is no policy for a
-                // review to be of.
+                // The one non-authoritative exception, and it is narrow: a
+                // title asserts nothing about the project, so there is no policy
+                // for a review to be of.
                 ensure!(
                     matches!(
                         event.payload.action,
@@ -634,6 +634,19 @@ pub(crate) fn check_admission(root: &Path, event: &Event) -> Result<()> {
                     ),
                     EXIT_INVARIANT,
                     "Agent semantic Object admission needs at least one applicable usable Object Rule"
+                );
+                // And narrow in the other direction too: the exception is that
+                // there is no *applicable* Rule, not that titles are exempt from
+                // Rules. Where a workspace does govern the Object domain, a
+                // title mutation reviews against it like any other — so the
+                // absence of a review has to be established, not assumed from
+                // the shape of the action.
+                let mutation =
+                    crate::proof::object_review_mutation(&before, &after, &event.payload)?;
+                ensure!(
+                    !crate::rules::bind_object(root, &mutation, before.rev)?.has_rules(),
+                    EXIT_INVARIANT,
+                    "a project rule governs this Object, so even a title mutation carries its review"
                 );
                 return Ok(());
             };
