@@ -216,7 +216,7 @@ impl Collection {
     pub fn validate(&self) -> Result<()> {
         let value = serde_json::to_value(self)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("collection: {error}")))?;
-        crate::proof::within_safe_integers(&value, "collection")?;
+        crate::proof::stored_within_safe_integers(&value, "collection")?;
         crate::reference::canonical_embedded(
             &format!("collection:{}", self.id),
             &[ResourceKind::Collection],

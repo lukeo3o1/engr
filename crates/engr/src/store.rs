@@ -343,7 +343,7 @@ pub(crate) fn decode_object_for_version(
     version: u32,
 ) -> Result<Object> {
     if version >= 3 {
-        crate::proof::within_safe_integers(&value, &path.display().to_string())?;
+        crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
         check_current_object_shape(path, &value)?;
     } else {
         check_predecessor_object_shape(path, version, &value)?;
@@ -629,7 +629,7 @@ pub fn save_object(root: &Path, object: &Object) -> Result<()> {
     let value = serde_json::to_value(object)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {}: {error}", object.id)))?;
     check_current_object_shape(&object_path(root, &object.id), &value)?;
-    crate::proof::within_safe_integers(&value, &format!("object {}", object.id))?;
+    crate::proof::stored_within_safe_integers(&value, &format!("object {}", object.id))?;
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -688,14 +688,23 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
             Object::new(id.to_owned(), String::new())?
         }
     };
-    replay_recoverable_tail(object, events)
-        .map(|_| ())
-        .map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{id}: event tail cannot reconcile: {}", error.message),
-            )
-        })
+    let (projected, _) = replay_recoverable_tail(object, events).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{id}: event tail cannot reconcile: {}", error.message),
+        )
+    })?;
+    // Replaying is not the whole question. Some current-state integers are
+    // allocated *by* the replay and appear nowhere in the record: a
+    // `section_added` carries no Section id and no counter, so its own
+    // safe-integer walk passes while `take_id()` advances `next_section_id` past
+    // the shared ceiling. The projection would then be one canonical sealing
+    // refuses, and `.engr/events` is append-only — the tail would be durable
+    // history its own recovery path can never materialize. So the check is over
+    // what the replay produces, not only over what the caller wrote.
+    let value = serde_json::to_value(&projected)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{id}: {error}")))?;
+    crate::proof::stored_within_safe_integers(&value, &format!("{id}: replayed object"))
 }
 
 /// Shortest prefix length at which every id is distinct, floored at 8.
@@ -838,16 +847,21 @@ fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Resul
 /// it is, so the whole contract moves together rather than the parts of it that
 /// happened to be noticed.
 ///
-/// `stored` is the raw bytes when there are any. Appending has no raw form yet,
-/// and needs none: a value that came from this build's own model cannot be
+/// `stored` is the record as the file actually holds it: the exact record text
+/// alongside the value it parses to. Appending has no stored form yet, and
+/// needs none — a value that came from this build's own model cannot be
 /// carrying a member the model has no place for.
-fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value>) -> Result<()> {
+fn check_event_record(
+    event: &Event,
+    id: &str,
+    stored: Option<(&str, &serde_json::Value)>,
+) -> Result<()> {
     ensure!(
         event.format == EVENT_FORMAT,
         EXIT_SCHEMA,
         "not an engr event"
     );
-    if let Some(stored) = stored {
+    if let Some((raw, stored)) = stored {
         check_nothing_was_dropped(stored, event)?;
         if event.version == EVENT_ENVELOPE_VERSION {
             let canonical = serde_json::to_value(event)
@@ -857,14 +871,29 @@ fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value
                 EXIT_SCHEMA,
                 "Event v2 is not in its exact canonical shape"
             );
-            crate::proof::within_safe_integers(stored, "Event v2")?;
+            crate::proof::stored_within_safe_integers(stored, "Event v2")?;
+            // The contract is not "parses to the same value". It is that the
+            // persisted record *is* the RFC 8785 bytes. Comparing parsed values
+            // would already have erased member order, insignificant whitespace
+            // and any duplicate member name the parser collapsed, and an
+            // EventStore arrives through git merge, hand edit and copy as
+            // readily as through this build's own append.
+            ensure!(
+                raw == crate::proof::canonical_bytes(event, "Event v2")?,
+                EXIT_SCHEMA,
+                "Event v2 is not persisted as its canonical JCS bytes"
+            );
         }
     }
     check_event_generation(event)?;
     if event.version == EVENT_ENVELOPE_VERSION {
         let value = serde_json::to_value(event)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
-        crate::proof::within_safe_integers(&value, "Event v2")?;
+        crate::proof::stored_within_safe_integers(&value, "Event v2")?;
+        // Revision zero is the Object before any Event: the first admitted one
+        // advances it to 1. No writer emits it, and adjacency alone cannot
+        // refuse it, because a `0, 1, ...` log is perfectly contiguous.
+        ensure!(event.rev >= 1, EXIT_SCHEMA, "Event v2 revisions start at 1");
         ensure!(
             time::OffsetDateTime::parse(
                 &event.time,
@@ -1127,7 +1156,7 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         // so corrupt recovery data must fail before it reaches the reducer — and
         // it fails against the same rules the write boundary applied, rather
         // than a second copy of them kept in step by hand.
-        check_event_record(&event, id, Some(&stored)).map_err(|error| {
+        check_event_record(&event, id, Some((line, &stored))).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}:{}: {}", path.display(), index + 1, error.message),

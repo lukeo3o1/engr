@@ -7,7 +7,7 @@
 
 use crate::dependency::{self, SemanticField};
 use crate::model::{LegacyRef, Object, Provenance, Ref, Section};
-use crate::proof::{sha256_of, within_safe_integers};
+use crate::proof::{sha256_of, stored_within_safe_integers};
 use crate::semantics::Admission;
 use crate::store::{self, WorkspaceFormat};
 use crate::{ensure, tool_error, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA, EXIT_USAGE};
@@ -174,6 +174,41 @@ pub(crate) fn migrated_historical_section(
     })
 }
 
+/// The migrated-v3 reading of an Object reconstructed from retained Event-v1
+/// history.
+///
+/// Retained history is deliberately not rewritten: it is read under its own
+/// generation. So replaying it produces the predecessor in its legacy spelling,
+/// while everything current — the stored Object, and any digest taken against
+/// it — is in the migrated one. Anything that reconstructs a predecessor and
+/// then compares it with current material has to convert first, or it is
+/// comparing two spellings of the same thing and calling them different.
+///
+/// A Section already carrying selective refs is left alone; the closure refuses
+/// those by design, and after a partial history there can be both.
+pub(crate) fn migrated_replay(root: &Path, mut object: Object) -> Result<Object> {
+    let legacy = |section: &Section| {
+        section
+            .refs
+            .iter()
+            .any(|reference| matches!(reference, Ref::Legacy(_)))
+    };
+    if !object.sections.iter().any(legacy) {
+        return Ok(object);
+    }
+    let mut closure = RefClosure::new(root);
+    let mut sections = Vec::with_capacity(object.sections.len());
+    for section in std::mem::take(&mut object.sections) {
+        if legacy(&section) {
+            sections.push(closure.convert_section(section)?);
+        } else {
+            sections.push(section);
+        }
+    }
+    object.sections = sections;
+    Ok(object)
+}
+
 /// Migrate or resume a migration while the caller holds the workspace lock.
 pub(crate) fn run(root: &Path) -> Result<()> {
     let stage = stage_dir(root);
@@ -201,7 +236,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
     for id in store::object_ids(root)? {
         let path = store::object_path(root, &id);
         let value: serde_json::Value = store::read_json(&path)?;
-        within_safe_integers(&value, &path.display().to_string())?;
+        stored_within_safe_integers(&value, &path.display().to_string())?;
         let object = store::decode_object_for_version(&path, &id, value, source_version)?;
         check_legacy_object(&object)?;
         predecessor.insert(id, object);
@@ -277,7 +312,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<BTreeMap<String, Object
         crate::integrity::check_stored_object_integrity(&resealed.object)?;
         let value = serde_json::to_value(&resealed.object)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {id}: {error}")))?;
-        within_safe_integers(&value, &format!("object {id}"))?;
+        stored_within_safe_integers(&value, &format!("object {id}"))?;
         migrated.insert(id, resealed.object);
     }
     Ok(migrated)
@@ -307,7 +342,7 @@ fn validate_retained_resources(root: &Path, objects: &BTreeMap<String, Object>) 
 
 fn validate_json_file(path: &Path) -> Result<()> {
     let value: serde_json::Value = store::read_json(path)?;
-    within_safe_integers(&value, &path.display().to_string())
+    stored_within_safe_integers(&value, &path.display().to_string())
 }
 
 fn check_legacy_object(object: &Object) -> Result<()> {
@@ -558,6 +593,6 @@ impl MigrationContentValidation for crate::model::Content {
     fn validate_for_migration(&self) -> Result<()> {
         let value = serde_json::to_value(self)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("section content: {error}")))?;
-        within_safe_integers(&value, "section content")
+        stored_within_safe_integers(&value, "section content")
     }
 }

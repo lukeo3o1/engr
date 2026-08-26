@@ -1851,15 +1851,22 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { merge } => format!(
-            " absorbing {}",
-            merge
-                .consumed()
-                .iter()
-                .map(|section| format!("§{section}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Action::SectionMerged { merge } => {
+            // Persisted order is the shared canonical set order, which is over
+            // JCS bytes: §10 comes before §2. That is right for hashing and
+            // wrong for the line a person reads before answering, so the
+            // rendering sorts numerically. It changes nothing persisted.
+            let mut consumed = merge.consumed().to_vec();
+            consumed.sort_unstable();
+            format!(
+                " absorbing {}",
+                consumed
+                    .iter()
+                    .map(|section| format!("§{section}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
         _ => String::new(),
     };
     let title = candidate

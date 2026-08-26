@@ -229,7 +229,7 @@ impl Work {
     pub fn validate(&self) -> Result<()> {
         let value = serde_json::to_value(self)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("work: {error}")))?;
-        crate::proof::within_safe_integers(&value, "work")?;
+        crate::proof::stored_within_safe_integers(&value, "work")?;
         ensure!(
             self.next_item_id >= 1,
             EXIT_SCHEMA,

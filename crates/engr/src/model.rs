@@ -753,18 +753,21 @@ impl Merge {
                     EXIT_INVARIANT,
                     "§{destination} survives the merge, so it cannot also be consumed by it"
                 );
-                // Ascending and unique, checked as one pass over the persisted
-                // order rather than over a sorted copy: `sources` is a set, and
-                // a set has one canonical spelling. Two events that consume the
-                // same sections in different orders would otherwise be two
-                // different payloads saying one thing.
-                for (index, source) in sources.iter().enumerate() {
-                    ensure!(
-                        index == 0 || sources[index - 1] < *source,
-                        EXIT_INVARIANT,
-                        "the sections a merge consumes are listed once each, in ascending order"
-                    );
-                }
+                // One canonical spelling, and it is the shared one: JCS each
+                // element, then order by those bytes. Not a field-local numeric
+                // rule — that is a second canonicalization algorithm in a
+                // protocol that has one, and the two disagree the moment the
+                // ids differ in digit count. `[2, 10]` is ascending; canonical
+                // is `[10, 2]`, because "10" sorts before "2". Two events
+                // consuming the same sections must be one payload, so the check
+                // is against the persisted order rather than a sorted copy.
+                let mut canonical = sources.clone();
+                crate::proof::canonical_set(&mut canonical, "merge source")?;
+                ensure!(
+                    canonical == *sources,
+                    EXIT_INVARIANT,
+                    "the sections a merge consumes are listed once each, in canonical set order"
+                );
             }
             Merge::Absorbing { absorbs } => {
                 for absorbed in absorbs {

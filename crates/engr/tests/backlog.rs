@@ -763,16 +763,18 @@ fn the_record_still_cannot_depend_on_unconfirmed_staging() {
     let object = new_object(&root, "record");
     let staging = item(&root, "unresolved", "not confirmed by anyone");
     commit_all(&root, "record and staging");
-
     // `refs[]` names an Object and a section of it. A Backlog id put there
     // resolves to no Object, which is the only answer that keeps a confirmed
     // section from standing on wording nobody read.
     let mut proposal = payload(Action::SectionAdded, &object, "stands on something");
-    proposal.content.refs = vec![Ref::legacy(
-        staging.clone(),
-        1,
-        "0".repeat(64),
-        engr::git::head(&root).expect("HEAD"),
+    proposal.content.refs = vec![Ref::selective(
+        engr::dependency::SelectiveRef::stored(
+            engr::proof::section_target(&staging, 1),
+            vec![engr::dependency::SemanticField::Text],
+            engr::git::head(&root).expect("HEAD"),
+            format!("1:{}", "0".repeat(64)),
+        )
+        .expect("a well formed reference at a staging id"),
     )];
     let error = gate::prepare(&root, proposal).expect_err("a record ref cannot target backlog");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
