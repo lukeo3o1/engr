@@ -753,17 +753,19 @@ impl Merge {
                     EXIT_INVARIANT,
                     "§{destination} survives the merge, so it cannot also be consumed by it"
                 );
-                // Event v2 owns this set's one exception to the generic
-                // persisted-set order: these identifiers are rendered and
-                // reviewed as numeric section ids, and the event contract fixes
-                // them in numeric ascending order.
+                // `sources[]` is a protocol-defined set, and it takes the one
+                // shared algorithm: JCS each element, then order by those bytes.
+                // Ruled at PR #52 `5413218070` and synchronized to #9/#13/#32,
+                // superseding the earlier field-local numeric-ascending wording.
+                // The two disagree as soon as the ids differ in digit count:
+                // `[2, 10]` is ascending, and canonical is `[10, 2]`, because
+                // "10" sorts before "2". A reader may still render numerically.
                 let mut canonical = sources.clone();
-                canonical.sort_unstable();
-                canonical.dedup();
+                crate::proof::canonical_set(&mut canonical, "merge source")?;
                 ensure!(
                     canonical == *sources,
                     EXIT_INVARIANT,
-                    "the sections a merge consumes are listed once each, in numeric ascending order"
+                    "the sections a merge consumes are listed once each, in canonical set order"
                 );
             }
             Merge::Absorbing { absorbs } => {

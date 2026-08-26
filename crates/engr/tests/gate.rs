@@ -2578,9 +2578,15 @@ fn a_legacy_reference_never_reaches_a_current_candidate() {
     assert!(error.message.contains("legacy references"), "{error}");
 }
 
-/// Event-v2 merge sources are the contract's numeric-ascending set exception.
+/// `sources[]` is a set like any other, and takes the shared order.
+///
+/// A field-local numeric rule is a second canonicalization algorithm in a
+/// protocol that has one, and the two disagree as soon as the ids differ in
+/// digit count. Multi-digit is where it shows: `[2, 10]` is ascending, and
+/// canonical is `[10, 2]`, because `"10"` sorts before `"2"`. Ruled at PR #52
+/// `5413218070`, synchronized to #9/#13/#32, superseding the older wording.
 #[test]
-fn merge_sources_take_numeric_ascending_order() {
+fn merge_sources_take_the_shared_canonical_set_order() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "many sections");
     for n in 1..=10 {
@@ -2606,8 +2612,8 @@ fn merge_sources_take_numeric_ascending_order() {
     };
     assert_eq!(
         merge.consumed(),
-        &[2, 10],
-        "Event-v2 sources are numeric section ids"
+        &[10, 2],
+        "canonical set order is over JCS bytes, not over the numbers"
     );
 
     let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
@@ -2624,7 +2630,7 @@ fn merge_sources_take_numeric_ascending_order() {
     let Action::SectionMerged { merge } = &event.payload.action else {
         panic!("a merge");
     };
-    assert_eq!(merge.consumed(), &[2, 10], "and that is what is persisted");
+    assert_eq!(merge.consumed(), &[10, 2], "and that is what is persisted");
 }
 
 /// The workspace root a caller passes is not the path git answers with.

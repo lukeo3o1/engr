@@ -454,7 +454,7 @@ proposed value.
 ```text
 refs[]                  set
 relations[]             set
-section_merged.sources[] numeric-ascending set
+section_merged.sources[] set
 backlog subjects[]      set
 backlog produced[]      set
 collection members[]    set
@@ -480,9 +480,12 @@ elements by those bytes. Not a field-local rule — a second canonicalization is
 second place for two implementations to disagree, and the two answers diverge as
 soon as the elements differ in length. `[2, 10]` is ascending; canonically it is
 `[10, 2]`, because `"10"` sorts before `"2"`. A human-facing rendering MAY sort
-however reads best; nothing persisted or hashed follows it. Event-v2
-`section_merged.sources[]` is the explicit exception: it names numeric Section
-ids and is persisted in unique numeric ascending order, `[2, 10]`.
+however reads best; nothing persisted or hashed follows it — `section_merged`
+renders its consumed sections numerically and persists them canonically.
+
+There is no field-local exception. `section_merged.sources[]` was once specified
+as numeric-ascending; that wording is superseded, and the shared algorithm
+applies to it like every other set.
 
 **Current-generation resources are persisted in that order.** A workspace-v3
 resource has one persisted representation, so a stored set written another way
