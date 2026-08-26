@@ -124,21 +124,55 @@ fn historical_path(commit: &str, path: &str) -> String {
     format!("{commit}:{path}")
 }
 
+/// Where the caller's directory sits in the repository, in **git's** own
+/// coordinates.
+///
+/// Not `strip_prefix(repo_root())`, which is what this was. `rev-parse
+/// --show-toplevel` answers in git's coordinates and the caller's root is
+/// whatever the caller passed, so stripping one from the other compares two
+/// spellings of the same directory. They agree on Linux and nowhere else: macOS
+/// puts temporary directories under `/var`, a symlink to `/private/var`, which
+/// git resolves and the caller does not; Windows answers `C:/…` with forward
+/// slashes, and may answer with an 8.3 short name, against a `C:\…` the caller
+/// built. `--show-prefix` asks git the question directly instead, so there is no
+/// comparison to get wrong.
+fn repo_prefix(root: &Path) -> Option<String> {
+    run(root, &["rev-parse", "--show-prefix"]).map(|prefix| prefix.trim_matches('/').to_owned())
+}
+
+/// One filesystem path as git names it: repository-relative, forward slashes.
+///
+/// A path that is already relative is passed through — that is how Rule
+/// provenance supplies one, having resolved it against the repository itself.
+fn repo_relative(root: &Path, path: &Path) -> Option<String> {
+    let inside = match path.strip_prefix(root) {
+        Ok(relative) => relative,
+        Err(_) if path.is_relative() => path,
+        Err(_) => return None,
+    };
+    let inside = inside
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let prefix = repo_prefix(root)?;
+    Some(if prefix.is_empty() {
+        inside
+    } else {
+        format!("{prefix}/{inside}")
+    })
+}
+
 fn workspace_prefix(root: &Path) -> Result<String> {
-    let repository = repo_root(root).ok_or_else(|| {
+    let prefix = repo_prefix(root).ok_or_else(|| {
         Error::new(
             EXIT_SCHEMA,
             "could not determine repository root".to_owned(),
         )
     })?;
-    let engr = crate::store::engr_dir(root);
-    let relative = engr.strip_prefix(&repository).map_err(|_| {
-        Error::new(
-            EXIT_SCHEMA,
-            "workspace .engr is outside its repository".to_owned(),
-        )
-    })?;
-    Ok(relative.to_string_lossy().replace('\\', "/"))
+    Ok(if prefix.is_empty() {
+        crate::store::DIR.to_owned()
+    } else {
+        format!("{prefix}/{}", crate::store::DIR)
+    })
 }
 
 fn historical_bytes(root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
@@ -332,10 +366,8 @@ pub fn distance(root: &Path, from: &str) -> Option<Distance> {
 /// The last commit that touched `path`. `show` uses it to hand the reader the
 /// command that recovers what a file said before it was edited.
 pub fn last_commit_for(root: &Path, path: &Path) -> Option<String> {
-    let repository = repo_root(root)?;
-    let relative = path.strip_prefix(&repository).unwrap_or(path);
-    let literal = literal_path(&relative.to_string_lossy().replace('\\', "/"));
-    let commit = run(&repository, &["log", "-1", "--format=%H", "--", &literal])?;
+    let literal = literal_path(&repo_relative(root, path)?);
+    let commit = run(root, &["log", "-1", "--format=%H", "--", &literal])?;
     (!commit.is_empty()).then_some(commit)
 }
 
@@ -360,10 +392,8 @@ impl Distance {
 /// Whether a path has changes git has not recorded. Used to warn that current
 /// projections have not yet been committed as an additional tamper anchor.
 pub fn uncommitted(root: &Path, path: &Path) -> Option<bool> {
-    let repository = repo_root(root)?;
-    let relative = path.strip_prefix(&repository).unwrap_or(path);
-    let literal = literal_path(&relative.to_string_lossy().replace('\\', "/"));
-    let status = run(&repository, &["status", "--porcelain", "--", &literal])?;
+    let literal = literal_path(&repo_relative(root, path)?);
+    let status = run(root, &["status", "--porcelain", "--", &literal])?;
     Some(!status.trim().is_empty())
 }
 

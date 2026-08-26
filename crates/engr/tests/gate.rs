@@ -2507,3 +2507,63 @@ fn merge_sources_take_the_shared_canonical_set_order() {
     };
     assert_eq!(merge.consumed(), &[10, 2], "and that is what is persisted");
 }
+
+/// The workspace root a caller passes is not the path git answers with.
+///
+/// `rev-parse --show-toplevel` answers in git's coordinates. macOS puts
+/// temporary directories under `/var`, a symlink to `/private/var`, which git
+/// resolves and the caller does not; Windows answers `C:/…` with forward
+/// slashes against a `C:\…` the caller built. Deriving the repository-relative
+/// path by stripping one from the other therefore worked on Linux and nowhere
+/// else, and the two failure shapes were both quiet: historical resolution
+/// reported valid authority as unreadable, and provenance reported committed
+/// material as having no commit.
+///
+/// Reproduced here on any platform by reaching the same repository through a
+/// symlink, which is exactly the shape macOS hands every test.
+#[test]
+fn a_workspace_reached_through_a_symlink_still_resolves_its_own_paths() {
+    let dir = TempDir::new().expect("temp dir");
+    let real = dir.path().join("real");
+    std::fs::create_dir_all(&real).expect("real");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("symlink");
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_dir(&real, dir.path().join("link")).is_err() {
+        // Windows needs privilege for this; the platform is covered by CI.
+        return;
+    }
+    let root = dir.path().join("link");
+    assert_ne!(root, real, "the two spellings differ");
+
+    store::init(&root).expect("init");
+    let id = new_object(&root, "reached through a link");
+    admit(&root, payload(Action::SectionAdded, &id, "depended upon"));
+    let commit = commit_all(&root, "record");
+
+    // Historical resolution: the workspace prefix has to be found for this to
+    // read at all.
+    let historical = engr::git::object_at(&root, &commit, &id)
+        .expect("the historical workspace resolves")
+        .expect("and holds the object");
+    assert_eq!(historical.sections[0].text, "depended upon");
+
+    // Provenance: the object file is committed, and saying otherwise is the
+    // falsely quiet answer.
+    assert_eq!(
+        engr::git::uncommitted(&root, &store::object_path(&root, &id)),
+        Some(false),
+        "committed material must not report itself as uncommitted"
+    );
+    assert!(
+        engr::git::last_commit_for(&root, &store::object_path(&root, &id)).is_some(),
+        "and a commit does hold it"
+    );
+
+    // And a selective Ref, which is what actually broke: it resolves the target
+    // through the historical workspace.
+    let source = new_object(&root, "the source");
+    let mut proposal = payload(Action::SectionAdded, &source, "stands on it");
+    proposal.content.refs = vec![text_ref(&root, &id, 1, &commit)];
+    gate::prepare(&root, proposal).expect("a reference resolves through the link");
+}
