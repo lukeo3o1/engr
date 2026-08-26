@@ -523,7 +523,6 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
     Ok(())
 }
 
-
 /// Refuse, before anything is minted, a transition no numeric identity can carry.
 ///
 /// #25 §14 puts the allocation boundary *before* the candidate. An Object at

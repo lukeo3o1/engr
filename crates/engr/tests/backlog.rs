@@ -103,9 +103,8 @@ fn on_section(root: &Path, id: &str, section: u64) -> Prepared {
 }
 
 fn on_merge(root: &Path, id: &str, destination: u64, source: u64) -> Prepared {
-    Prepared::first().against(
-        backlog::Precondition::merge(root, id, destination, source).expect("observe"),
-    )
+    Prepared::first()
+        .against(backlog::Precondition::merge(root, id, destination, source).expect("observe"))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +304,11 @@ fn a_merge_naming_a_point_that_is_not_there_changes_nothing() {
     ] {
         // The predecessor cannot be read for a point that is not there, so the
         // caller binds the half that exists. The mutation still refuses.
-        let present = if destination == 9 { source } else { destination };
+        let present = if destination == 9 {
+            source
+        } else {
+            destination
+        };
         assert!(
             backlog::merge_into(
                 &root,
@@ -554,7 +557,10 @@ fn removing_the_last_unresolved_point_removes_the_item() {
 fn backlog_keeps_no_event_log_and_needs_no_confirmation() {
     let (_dir, root) = workspace();
     let id = item(&root, "agent editable", "unresolved");
-    backlog::revise_section(&root, &id, 1,
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
         "reworded without asking anyone",
         &on_section(&root, &id, 1),
     )
@@ -639,13 +645,7 @@ fn ordinary_backlog_mutations_serialize_through_the_workspace_lock() {
         let second_prepared = on_add(&root, &id);
         let first = scope.spawn(move || {
             first_start.wait();
-            backlog::add_section(
-                first_root,
-                &first_id,
-                "second",
-                Vec::new(),
-                &first_prepared,
-            )
+            backlog::add_section(first_root, &first_id, "second", Vec::new(), &first_prepared)
         });
         let second = scope.spawn(move || {
             second_start.wait();
@@ -660,7 +660,10 @@ fn ordinary_backlog_mutations_serialize_through_the_workspace_lock() {
         (first.join().expect("first"), second.join().expect("second"))
     });
     let outcomes = [first, second];
-    let landed: Vec<u64> = outcomes.iter().filter_map(|o| o.as_ref().ok().copied()).collect();
+    let landed: Vec<u64> = outcomes
+        .iter()
+        .filter_map(|o| o.as_ref().ok().copied())
+        .collect();
     assert_eq!(
         landed.len(),
         1,
@@ -732,7 +735,10 @@ fn backlog_subjects_may_form_a_cycle() {
     )
     .expect("create")
     .id;
-    backlog::set_subjects(&root, &first, 1,
+    backlog::set_subjects(
+        &root,
+        &first,
+        1,
         vec![Subject::engr(format!("backlog:{}:1", compact(&second)))],
         &on_section(&root, &first, 1),
     )
@@ -987,7 +993,10 @@ fn reordering_an_equivalent_subject_set_is_not_activity() {
     let activity = before.sections[0].updated_at.clone();
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::set_subjects(&root, &id, 1,
+    backlog::set_subjects(
+        &root,
+        &id,
+        1,
         subjects.iter().rev().cloned().collect(),
         &on_section(&root, &id, 1),
     )
@@ -1012,8 +1021,14 @@ fn reordering_an_equivalent_subject_set_is_not_activity() {
     );
 
     // A real change to either does advance it.
-    backlog::set_subjects(&root, &id, 1, vec![subjects[0].clone()], &on_section(&root, &id, 1))
-        .expect("drop one");
+    backlog::set_subjects(
+        &root,
+        &id,
+        1,
+        vec![subjects[0].clone()],
+        &on_section(&root, &id, 1),
+    )
+    .expect("drop one");
     let changed = backlog::load(&root, &id).expect("load").sections[0]
         .updated_at
         .clone();
@@ -1091,7 +1106,9 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
     let (_dir, root) = workspace();
     let object = compact(&engr::model::new_id());
     let staging = item(&root, "two halves", "first half");
-    backlog::add_section(&root, &staging,
+    backlog::add_section(
+        &root,
+        &staging,
         "second half",
         Vec::new(),
         &on_add(&root, &staging),
@@ -1256,8 +1273,14 @@ fn changing_the_dirty_observation_is_activity() {
         .updated_at
         .clone();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::set_subjects(&root, &id, 1, vec![observed_dirty], &on_section(&root, &id, 1))
-        .expect("re-observe");
+    backlog::set_subjects(
+        &root,
+        &id,
+        1,
+        vec![observed_dirty],
+        &on_section(&root, &id, 1),
+    )
+    .expect("re-observe");
     assert_ne!(
         backlog::load(&root, &id).expect("load").sections[0].updated_at,
         before,
@@ -1317,9 +1340,13 @@ fn recording_an_outcome_is_a_separate_operation_from_admitting_it() {
     );
 
     // Mutable bookkeeping, so a mistaken entry is correctable.
-    assert!(backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1)).expect("forget"));
     assert!(
-        !backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1)).expect("idempotent")
+        backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1))
+            .expect("forget")
+    );
+    assert!(
+        !backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1))
+            .expect("idempotent")
     );
     assert!(backlog::load(&root, &id).expect("load").sections[0]
         .produced
@@ -1359,7 +1386,8 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
     // going away — loading must not depend on a recorded outcome still
     // resolving.
     let outcome = Produced::object(format!("obj:{}", compact(&object)));
-    backlog::record_produced(&root, &id, 1, outcome.clone(), &on_section(&root, &id, 1)).expect("record");
+    backlog::record_produced(&root, &id, 1, outcome.clone(), &on_section(&root, &id, 1))
+        .expect("record");
     std::fs::remove_file(engr::store::object_path(&root, &object)).expect("delete the object");
     std::fs::remove_file(engr::store::events_path(&root, &object)).expect("delete its events");
     let loaded = backlog::load(&root, &id).expect("staging still loads");
@@ -1367,7 +1395,10 @@ fn a_produced_target_is_checked_at_the_claim_and_never_again() {
 
     // And the bookkeeping is still correctable with the target gone, which is
     // exactly when a mistaken entry is hardest to live with.
-    assert!(backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1)).expect("forget"));
+    assert!(
+        backlog::forget_produced(&root, &id, 1, &outcome, &on_section(&root, &id, 1))
+            .expect("forget")
+    );
 }
 
 /// A prepared mutation binds exactly what it rests on — no less, and no more.
@@ -1386,15 +1417,27 @@ fn a_precondition_binds_what_the_mutation_rests_on_and_not_the_whole_item() {
 
     // An unrelated sibling moving does not stale it: this mutation never read
     // §2, so §2 changing says nothing about whether it is still applicable.
-    backlog::revise_section(&root, &id, 2, "second point, sharpened", &on_section(&root, &id, 2))
-        .expect("revise sibling");
+    backlog::revise_section(
+        &root,
+        &id,
+        2,
+        "second point, sharpened",
+        &on_section(&root, &id, 2),
+    )
+    .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a sibling is not part of what this rests on");
 
     // The bound Section moving does.
-    backlog::revise_section(&root, &id, 1, "first point, sharpened", &on_section(&root, &id, 1))
-        .expect("revise target");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "first point, sharpened",
+        &on_section(&root, &id, 1),
+    )
+    .expect("revise target");
     let error = bound.still_holds(&root).expect_err("the target moved");
     assert_eq!(error.code, engr::EXIT_STALE);
     assert!(
@@ -1424,14 +1467,20 @@ fn every_field_of_the_bound_section_stales_it_not_only_the_wording() {
         let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
         match change {
             "subjects" => {
-                backlog::set_subjects(&root, &id, 1,
+                backlog::set_subjects(
+                    &root,
+                    &id,
+                    1,
                     vec![Subject::engr(format!("obj:{}", compact(&object)))],
                     &on_section(&root, &id, 1),
                 )
                 .expect("subjects");
             }
             _ => {
-                backlog::record_produced(&root, &id, 1,
+                backlog::record_produced(
+                    &root,
+                    &id,
+                    1,
                     Produced::object(format!("obj:{}", compact(&object))),
                     &on_section(&root, &id, 1),
                 )
@@ -1468,14 +1517,22 @@ fn adding_a_point_binds_the_id_it_will_take_and_not_the_siblings() {
     let bound = backlog::Precondition::section_absent(&root, &id).expect("observe");
     bound.still_holds(&root).expect("the id is still free");
 
-    backlog::revise_section(&root, &id, 1, "first, sharpened", &on_section(&root, &id, 1))
-        .expect("revise sibling");
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "first, sharpened",
+        &on_section(&root, &id, 1),
+    )
+    .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a sibling is not part of an add");
 
     // Somebody else takes the id this add was going to use.
-    backlog::add_section(&root, &id,
+    backlog::add_section(
+        &root,
+        &id,
         "someone else got there",
         Vec::new(),
         &on_add(&root, &id),
@@ -1493,8 +1550,14 @@ fn a_topic_mutation_binds_the_whole_item() {
     let bound = backlog::Precondition::topic(&root, &id).expect("observe");
     bound.still_holds(&root).expect("unchanged");
 
-    backlog::add_section(&root, &id, "a second point", Vec::new(), &on_add(&root, &id))
-        .expect("add");
+    backlog::add_section(
+        &root,
+        &id,
+        "a second point",
+        Vec::new(),
+        &on_add(&root, &id),
+    )
+    .expect("add");
     let error = bound
         .still_holds(&root)
         .expect_err("renaming is about all of them, so any of them moving matters");
@@ -1517,15 +1580,24 @@ fn a_merge_binds_the_topic_and_both_ends_but_not_an_unnamed_sibling() {
     let bound = backlog::Precondition::merge(&root, &id, 1, 2).expect("observe");
     bound.still_holds(&root).expect("nothing has moved yet");
 
-    backlog::revise_section(&root, &id, 3, "bystander, sharpened", &on_section(&root, &id, 3))
-        .expect("revise sibling");
+    backlog::revise_section(
+        &root,
+        &id,
+        3,
+        "bystander, sharpened",
+        &on_section(&root, &id, 3),
+    )
+    .expect("revise sibling");
     bound
         .still_holds(&root)
         .expect("a point this merge never read cannot stale it");
 
     for (name, moved) in [("the destination", 1u64), ("the source", 2)] {
         let bound = backlog::Precondition::merge(&root, &id, 1, 2).expect("observe");
-        backlog::revise_section(&root, &id, moved,
+        backlog::revise_section(
+            &root,
+            &id,
+            moved,
             &format!("{name}, sharpened"),
             &on_section(&root, &id, moved),
         )
@@ -1592,7 +1664,10 @@ fn an_exhausted_point_is_still_written_down_and_carries_the_diagnostic() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1,
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
         "within the ceiling",
         &reviewing(&root, &id, 1, 2),
     )
@@ -1669,7 +1744,9 @@ fn an_exhausted_backlog_rule_asking_for_a_human_still_does_not_get_one() {
     );
     let id = item(&root, "topic", "unresolved");
 
-    backlog::add_section(&root, &id,
+    backlog::add_section(
+        &root,
+        &id,
         "a second point",
         Vec::new(),
         &attempt(2).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
@@ -1968,7 +2045,9 @@ fn an_add_binds_the_identity_it_will_receive_not_merely_a_free_looking_slot() {
         .expect("§2 is still what this add would take");
 
     // Somebody else takes §2 and then judges it resolved. §2 is absent again.
-    backlog::add_section(&root, &id,
+    backlog::add_section(
+        &root,
+        &id,
         "someone else got there",
         Vec::new(),
         &on_add(&root, &id),
@@ -1998,7 +2077,9 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
     let (_dir, root) = workspace();
     let mine = item(&root, "mine", "unresolved");
     let theirs = item(&root, "theirs", "also unresolved");
-    backlog::add_section(&root, &mine,
+    backlog::add_section(
+        &root,
+        &mine,
         "a second point",
         Vec::new(),
         &on_add(&root, &mine),
@@ -2011,7 +2092,10 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
     elsewhere
         .still_holds(&root)
         .expect("it really has not moved");
-    let error = backlog::revise_section(&root, &mine, 1,
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
         "reworded",
         &on_section(&root, &mine, 1).against(elsewhere),
     )
@@ -2020,7 +2104,10 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
 
     // The right item, the wrong point.
     let sibling = backlog::Precondition::section(&root, &mine, 2).expect("observe");
-    let error = backlog::revise_section(&root, &mine, 1,
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
         "reworded",
         &on_section(&root, &mine, 1).against(sibling),
     )
@@ -2030,7 +2117,10 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
     // The right item and point, the wrong kind of binding: a whole-item
     // predecessor is what a rename rests on, not a reword.
     let whole = backlog::Precondition::topic(&root, &mine).expect("observe");
-    let error = backlog::revise_section(&root, &mine, 1,
+    let error = backlog::revise_section(
+        &root,
+        &mine,
+        1,
         "reworded",
         &on_section(&root, &mine, 1).against(whole),
     )
@@ -2049,7 +2139,10 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
 
     // And the one that does authorize it goes through.
     let exact = backlog::Precondition::section(&root, &mine, 1).expect("observe");
-    backlog::revise_section(&root, &mine, 1,
+    backlog::revise_section(
+        &root,
+        &mine,
+        1,
         "reworded",
         &on_section(&root, &mine, 1).against(exact),
     )
@@ -2282,8 +2375,14 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
 fn a_library_mutation_cannot_skip_the_predecessor_by_going_direct() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "unresolved");
-    backlog::add_section(&root, &id, "a second point", Vec::new(), &on_add(&root, &id))
-        .expect("add");
+    backlog::add_section(
+        &root,
+        &id,
+        "a second point",
+        Vec::new(),
+        &on_add(&root, &id),
+    )
+    .expect("add");
 
     for governed in [false, true] {
         if governed {
@@ -2308,7 +2407,11 @@ fn a_library_mutation_cannot_skip_the_predecessor_by_going_direct() {
             ),
         ] {
             let error = outcome.unwrap_err();
-            assert_eq!(error.code, engr::EXIT_INVARIANT, "{name} (governed: {governed})");
+            assert_eq!(
+                error.code,
+                engr::EXIT_INVARIANT,
+                "{name} (governed: {governed})"
+            );
             assert!(
                 error.message.contains("prepared against"),
                 "{name}: {}",
@@ -2450,7 +2553,10 @@ fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() 
         format!("obj:{}", compact(&moved)),
         format!("obj:{}:1", compact(&moved)),
     ] {
-        let error = backlog::record_produced(&root, &id, 1,
+        let error = backlog::record_produced(
+            &root,
+            &id,
+            1,
             Produced::object(target.clone()),
             &on_section(&root, &id, 1),
         )
@@ -2515,7 +2621,10 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     }
 
     let before = backlog::load(&root, &id).expect("load");
-    let error = backlog::record_produced(&root, &id, 1,
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
         Produced::object(format!("obj:{compact}")),
         &on_section(&root, &id, 1),
     )
@@ -2535,7 +2644,10 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     // Put it back, and the same claim is admissible.
     tampered.state = engr::semantics::State::Open;
     store::save_object(&root, &tampered).expect("restore");
-    assert!(backlog::record_produced(&root, &id, 1,
+    assert!(backlog::record_produced(
+        &root,
+        &id,
+        1,
         Produced::object(format!("obj:{compact}")),
         &on_section(&root, &id, 1),
     )
@@ -2576,7 +2688,10 @@ fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate(
             .expect("every remaining Section seal still passes");
     }
 
-    let error = backlog::record_produced(&root, &id, 1,
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
         Produced::object(format!("obj:{compact}")),
         &on_section(&root, &id, 1),
     )
@@ -2608,7 +2723,10 @@ fn a_produced_target_that_cannot_be_read_is_not_reported_as_missing() {
     let last = text.lines().last().expect("last event").to_owned();
     std::fs::write(&path, format!("{text}{last}\n")).expect("duplicate the rev");
 
-    let error = backlog::record_produced(&root, &id, 1,
+    let error = backlog::record_produced(
+        &root,
+        &id,
+        1,
         Produced::object(format!("obj:{}", compact(&object))),
         &on_section(&root, &id, 1),
     )

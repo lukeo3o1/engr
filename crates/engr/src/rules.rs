@@ -1689,6 +1689,32 @@ pub fn assess(root: &Path, domain: Domain, attempt: Attempt) -> Result<(bool, Ex
     Ok((governed, compose(domain, &rules, attempt)?))
 }
 
+/// The applicable-Rule boundary for a domain whose mutations apply directly.
+///
+/// Collection and Work have no prepared candidate to bind, so this is the whole
+/// of their Rule obligation, and it is not optional: a `domain: collection` or
+/// `domain: work` Rule that exists must be *establishable* before anything is
+/// written — every basis readable, every ceiling known — and the caller's
+/// attempt must be inside those ceilings. Skipping it let a Rule with missing
+/// material, or one already past its limit, sit in the workspace while every
+/// mutation proceeded exactly as if it were not there.
+///
+/// What an exhausted ceiling then *means* for these two domains is deliberately
+/// unsettled, so [`compose`] refuses rather than borrowing another domain's
+/// answer. That refusal is the fail-closed behaviour, not a gap in this one.
+pub fn direct(root: &Path, domain: Domain, attempt: Attempt) -> Result<()> {
+    match assess(root, domain, attempt)?.1 {
+        Exhaustion::NotReached => Ok(()),
+        other => Err(Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "a {} mutation was given the {other:?} verdict, which is not its own",
+                domain.as_str()
+            ),
+        )),
+    }
+}
+
 /// Check an attestation against the subject as it stands right now.
 ///
 /// Recomputed, never looked up. The hash an agent submits is only meaningful if

@@ -57,6 +57,24 @@ fn commit_all(root: &Path, message: &str) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
+/// An admitted Object, so a Work sidecar has an owner that exists.
+fn admitted_object(root: &Path) -> String {
+    let id = engr::model::new_id();
+    let payload = engr::model::Payload {
+        action: engr::model::Action::ObjectCreated,
+        object: id.clone(),
+        becomes: None,
+        content: engr::model::Content {
+            text: "a thing to work on".to_owned(),
+            ..engr::model::Content::default()
+        },
+    };
+    let prepared = engr::gate::prepare(root, payload).expect("prepare");
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    engr::gate::confirm(root, &response).expect("confirm");
+    id
+}
+
 const ARCHITECTURE: &str = "\
 ---
 id: architecture-consistency
@@ -2741,4 +2759,159 @@ fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
     oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
     engr::proof::candidate_subject(&before, &after, &oversize, None)
         .expect_err("past the shared safe-integer ceiling");
+}
+
+// ---------------------------------------------------------------------------
+// Domains whose mutations apply directly
+// ---------------------------------------------------------------------------
+
+/// A Collection or Work Rule is not advisory.
+///
+/// These two domains have no prepared candidate to bind, which is why their
+/// mutations apply directly — not why they are exempt. A Rule that exists must
+/// be establishable before anything is written: every basis readable, every
+/// ceiling known. Before this, a `domain: work` Rule with missing material sat
+/// in the workspace while every sidecar mutation proceeded as if it were not
+/// there.
+#[test]
+fn a_collection_or_work_rule_with_unusable_material_blocks_its_domain() {
+    let (_dir, root) = workspace();
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, Some("stands here"), attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+based_on:
+  - path: MISSING.md
+---
+
+# Read this first
+",
+    );
+
+    let refused = engr::work::add_item(&root, &object, "a step", attempt(1))
+        .expect_err("the applicable Rule cannot be established");
+    assert_ne!(refused.code, 0);
+    let refused = engr::collection::rename(&root, &plan.id, "renamed", attempt(1))
+        .expect_err("the applicable Rule cannot be established");
+    assert_ne!(refused.code, 0);
+    assert_eq!(
+        engr::collection::load(&root, &plan.id).expect("load").name,
+        "a plan",
+        "nothing was written"
+    );
+    assert!(
+        engr::work::load(&root, &object)
+            .expect("load")
+            .items
+            .is_empty(),
+        "nothing was written"
+    );
+}
+
+/// With the material in place, an attempt inside every ceiling goes through.
+#[test]
+fn a_usable_collection_or_work_rule_admits_an_attempt_within_its_ceiling() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+review:
+  max_attempts: 2
+based_on:
+  - path: AGENTS.md
+---
+
+# Read this first
+",
+    );
+
+    engr::work::add_item(&root, &object, "a step", attempt(2)).expect("inside the ceiling");
+    engr::collection::rename(&root, &plan.id, "renamed", attempt(2)).expect("inside the ceiling");
+}
+
+/// Past the ceiling these two fail closed, because v1 never said what an
+/// exhausted Rule means for them.
+///
+/// Not borrowed from Backlog, which keeps the mutation and marks it, and not
+/// borrowed from Object, which escalates. Inventing either here would be
+/// answering a question the owning design left open, in the one place where a
+/// wrong answer is silently durable.
+#[test]
+fn an_exhausted_collection_or_work_attempt_refuses_rather_than_guessing() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+review:
+  max_attempts: 1
+based_on:
+  - path: AGENTS.md
+---
+
+# Read this first
+",
+    );
+
+    for (what, error) in [
+        (
+            "work",
+            engr::work::add_item(&root, &object, "a step", attempt(2)).map(|_| ()),
+        ),
+        (
+            "collection",
+            engr::collection::rename(&root, &plan.id, "renamed", attempt(2)).map(|_| ()),
+        ),
+    ] {
+        let error = error.expect_err("v1 does not define this");
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}");
+        assert!(
+            error.message.contains("does not define"),
+            "{what}: {}",
+            error.message
+        );
+    }
+    assert_eq!(
+        engr::collection::load(&root, &plan.id).expect("load").name,
+        "a plan",
+        "a refused mutation writes nothing"
+    );
+    assert!(
+        engr::work::load(&root, &object)
+            .expect("load")
+            .items
+            .is_empty(),
+        "a refused mutation writes nothing"
+    );
 }

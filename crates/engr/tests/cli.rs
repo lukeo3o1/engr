@@ -2154,22 +2154,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         remaining, 2,
         "the dirty subject was staged as its own point"
     );
-    assert!(
-        run_engr(
-            root,
-            &[
-                "backlog",
-                "consume",
-                &id,
-                "--section",
-                "3",
-                "--expect",
-                &expect_token(root, &id, Some(3))
-            ]
-        )
-        .status
-        .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            "3",
+            "--expect",
+            &expect_token(root, &id, Some(3))
+        ]
+    )
+    .status
+    .success());
     assert_eq!(
         engr::backlog::load(root, &id).expect("item").sections.len(),
         1,
@@ -3952,9 +3950,8 @@ fn backlog_json_sections_do_not_repeat_a_key() {
         &item.id,
         "a second point",
         Vec::new(),
-        &engr::backlog::Prepared::first().against(
-            engr::backlog::Precondition::section_absent(root, &item.id).expect("observe"),
-        ),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section_absent(root, &item.id).expect("observe")),
     )
     .expect("second");
 
@@ -4200,8 +4197,15 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
-    engr::work::start(root, &healthy, Some("underway")).expect("work");
-    engr::collection::create(root, "a plan", None, None).expect("collection");
+    engr::work::start(
+        root,
+        &healthy,
+        Some("underway"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("work");
+    engr::collection::create(root, "a plan", None, None, engr::rules::Attempt::FIRST)
+        .expect("collection");
 
     std::fs::write(store::object_path(root, &broken), "not json at all").expect("break it");
 

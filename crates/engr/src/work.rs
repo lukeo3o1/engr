@@ -14,6 +14,7 @@
 //! trusts least.
 
 use crate::reference::{canonical_embedded, EngrTarget, ResourceKind};
+use crate::rules::Attempt;
 use crate::{
     ensure, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -466,10 +467,16 @@ fn save(root: &Path, object: &str, work: &Work) -> Result<()> {
     store::write_json(&path(root, object), work)
 }
 
-fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+/// Every Work mutation, under the lock, past the applicable Rule set.
+///
+/// The Rule check is inside the lock and before the read, so what it was
+/// established against is what gets written. Work has no prepared candidate to
+/// bind, so the attempt is the whole of what a caller attests.
+fn locked<T>(root: &Path, attempt: Attempt, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
         store::require_current(root)?;
+        crate::rules::direct(root, crate::rules::Domain::Work, attempt)?;
         body()
     })
 }
@@ -516,8 +523,13 @@ fn require_target(root: &Path, target: &str) -> Result<()> {
 
 /// Read, change, stamp, write — under the lock, with the invariants checked on
 /// both sides of the change.
-fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>) -> Result<T> {
-    locked(root, || {
+fn edit<T>(
+    root: &Path,
+    object: &str,
+    attempt: Attempt,
+    body: impl FnOnce(&mut Work) -> Result<T>,
+) -> Result<T> {
+    locked(root, attempt, || {
         require_object(root, object)?;
         let mut work = load(root, object)?;
         let outcome = body(&mut work)?;
@@ -529,11 +541,11 @@ fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>)
 }
 
 /// Begin keeping execution memory for an Object.
-pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+pub fn start(root: &Path, object: &str, summary: Option<&str>, attempt: Attempt) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    locked(root, || {
+    locked(root, attempt, || {
         require_object(root, object)?;
         ensure!(
             !path(root, object).exists(),
@@ -566,8 +578,8 @@ pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
 /// the Skill. Whether human direction should have a mechanical representation at
 /// all is a real question and an open one; see `## What v0 does not solve`.
 /// [`Removed`] reports what was discarded so a caller can say so.
-pub fn remove(root: &Path, object: &str) -> Result<Removed> {
-    locked(root, || {
+pub fn remove(root: &Path, object: &str, attempt: Attempt) -> Result<Removed> {
+    locked(root, attempt, || {
         let work = load(root, object)?;
         let path = path(root, object);
         std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
@@ -592,19 +604,24 @@ pub struct Removed {
 /// rule an agent has to follow is about who decided, not about which value is
 /// stored. engr cannot check that; the Skill is where it is stated, and the
 /// refusal in [`remove`] is where it bites.
-pub fn set_state(root: &Path, object: &str, state: State) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_state(root: &Path, object: &str, state: State, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.state = state;
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_summary(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+pub fn set_summary(
+    root: &Path,
+    object: &str,
+    summary: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.summary = summary.map(str::to_owned);
         Ok(())
     })?;
@@ -616,12 +633,13 @@ pub fn add_dependency(
     object: &str,
     target: &str,
     reason: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a dependency reason", reason, REASON_MAX)?;
     }
     check_target("a dependency target", target)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         // Inside the lock, because the check is what defines admission. It used
         // to live only in the CLI, so what a sidecar could name depended on
         // which door it came through — the same split that was fixed for
@@ -648,8 +666,13 @@ pub fn add_dependency(
     load(root, object)
 }
 
-pub fn remove_dependency(root: &Path, object: &str, target: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_dependency(
+    root: &Path,
+    object: &str,
+    target: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         let before = work.dependencies.len();
         work.dependencies
             .retain(|held| held.target.reference != target);
@@ -668,6 +691,7 @@ pub fn add_blocker(
     object: &str,
     reason: Option<&str>,
     target: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a blocker reason", reason, REASON_MAX)?;
@@ -675,7 +699,7 @@ pub fn add_blocker(
     if let Some(target) = target {
         check_target("a blocker target", target)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         if let Some(target) = target {
             require_target(root, target)?;
         }
@@ -690,8 +714,8 @@ pub fn add_blocker(
 
 /// Blockers are addressed by position, because they have no ids — they are
 /// conditions rather than things, and a condition that cleared is simply gone.
-pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_blocker(root: &Path, object: &str, index: usize, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         ensure!(
             index < work.blockers.len(),
             EXIT_NOT_FOUND,
@@ -704,9 +728,9 @@ pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
     load(root, object)
 }
 
-pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
+pub fn add_item(root: &Path, object: &str, text: &str, attempt: Attempt) -> Result<u64> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         let id = work.take_id()?;
         work.items.push(Item {
             id,
@@ -719,36 +743,60 @@ pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
     })
 }
 
-pub fn set_item_state(root: &Path, object: &str, id: u64, state: ItemState) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_item_state(
+    root: &Path,
+    object: &str,
+    id: u64,
+    state: ItemState,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.state = state;
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_item_text(root: &Path, object: &str, id: u64, text: &str) -> Result<Work> {
+pub fn set_item_text(
+    root: &Path,
+    object: &str,
+    id: u64,
+    text: &str,
+    attempt: Attempt,
+) -> Result<Work> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.text = text.to_owned();
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_item_result(root: &Path, object: &str, id: u64, result: Option<&str>) -> Result<Work> {
+pub fn set_item_result(
+    root: &Path,
+    object: &str,
+    id: u64,
+    result: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(result) = result {
         check_text("a work item result", result, ITEM_RESULT_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.result = result.map(str::to_owned);
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn add_item_commit(
+    root: &Path,
+    object: &str,
+    id: u64,
+    commit: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         let item = work.item_mut(id)?;
         ensure!(
             !item.commits.iter().any(|held| held == commit),
@@ -763,8 +811,8 @@ pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Resu
 
 /// Prune one item. Its id is not reclaimed, and nothing is archived: git holds
 /// what the sidecar used to say.
-pub fn remove_item(root: &Path, object: &str, id: u64) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_item(root: &Path, object: &str, id: u64, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.item(id)?;
         work.items.retain(|item| item.id != id);
         Ok(())

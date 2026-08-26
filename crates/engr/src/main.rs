@@ -59,11 +59,23 @@ enum Command {
     /// Verify Object and Section integrity plus dependencies
     Verify { object: Option<String> },
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
-    #[command(subcommand)]
-    Work(Work),
+    Work {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs work
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: Work,
+    },
     /// Planning metadata: what is grouped together. Nothing here is confirmed
-    #[command(subcommand)]
-    Collection(CollectionCommand),
+    Collection {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs collection
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: CollectionCommand,
+    },
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
@@ -930,8 +942,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Backlog(command) => backlog_command(&root, command),
         Command::Rules(command) => rules_command(&root, command),
-        Command::Work(command) => work_command(&root, command),
-        Command::Collection(command) => collection_command(&root, command),
+        Command::Work { attempt, command } => {
+            work_command(&root, command, rules::Attempt::new(attempt)?)
+        }
+        Command::Collection { attempt, command } => {
+            collection_command(&root, command, rules::Attempt::new(attempt)?)
+        }
     }
 }
 
@@ -984,9 +1000,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(|| {
-                Ok(vec![backlog::Precondition::topic(root, &id)?])
-            })?;
+            let prepared =
+                review.prepared(|| Ok(vec![backlog::Precondition::topic(root, &id)?]))?;
             let item = backlog::rename(root, &id, &topic, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
@@ -1003,9 +1018,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &id,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(|| {
-                    Ok(vec![backlog::Precondition::section_absent(root, &id)?])
-                })?,
+                &review.prepared(|| Ok(vec![backlog::Precondition::section_absent(root, &id)?]))?,
             )?;
             println!("added §{section}");
             Ok(())
@@ -1017,9 +1030,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(|| {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
             Ok(())
@@ -1033,9 +1045,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            let prepared = review.prepared(|| {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
             Ok(())
@@ -1074,9 +1085,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(|| {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             let outcome = backlog::Produced::object(
                 backlog::EngrTarget::new(target.clone()).reference.clone(),
             );
@@ -1099,9 +1109,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(|| {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             if backlog::consume_section(root, &id, section, &prepared)? {
                 println!(
                     "consumed §{section}, and the topic with it — nothing else was unresolved"
@@ -2423,11 +2432,11 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
     }
 }
 
-fn work_command(root: &Path, command: Work) -> Result<()> {
+fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<()> {
     match command {
         Work::Start { object, summary } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            work::start(root, &id, summary.as_deref())?;
+            work::start(root, &id, summary.as_deref(), attempt)?;
             print!(
                 "{}",
                 view::render_work_show(root, &id, &work::load(root, &id)?)
@@ -2454,22 +2463,22 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
         }
         Work::Summary { object, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_summary(root, &id, text.as_deref())?;
+            let item = work::set_summary(root, &id, text.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Pause { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Paused)?;
+            let item = work::set_state(root, &id, work::State::Paused, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Resume { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Active)?;
+            let item = work::set_state(root, &id, work::State::Active, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Rm { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let removed = work::remove(root, &id)?;
+            let removed = work::remove(root, &id, attempt)?;
             println!(
                 "no execution memory for {}",
                 shorten(&id, view::width(root))
@@ -2486,13 +2495,13 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
         Work::Depend { object, on, reason } => {
             let id = resolve_object_argument(root, "object", &object)?;
             let target = work_target(root, "--on", &on)?;
-            let item = work::add_dependency(root, &id, &target, reason.as_deref())?;
+            let item = work::add_dependency(root, &id, &target, reason.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Undepend { object, on } => {
             let id = resolve_object_argument(root, "object", &object)?;
             let target = on.strip_prefix("engr:").unwrap_or(&on).to_owned();
-            let item = work::remove_dependency(root, &id, &target)?;
+            let item = work::remove_dependency(root, &id, &target, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Block {
@@ -2504,24 +2513,24 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
             let target = target
                 .map(|spec| work_target(root, "--target", &spec))
                 .transpose()?;
-            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref())?;
+            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Unblock { object, index } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::remove_blocker(root, &id, index)?;
+            let item = work::remove_blocker(root, &id, index, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
-        Work::Item(command) => return work_item_command(root, command),
+        Work::Item(command) => return work_item_command(root, command, attempt),
     }
     Ok(())
 }
 
-fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
+fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) -> Result<()> {
     match command {
         WorkItem::Add { object, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::add_item(root, &id, &text)?;
+            let item = work::add_item(root, &id, &text, attempt)?;
             println!("work item {item}");
             print!(
                 "{}",
@@ -2530,7 +2539,7 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
         }
         WorkItem::Revise { object, item, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_text(root, &id, item, &text)?;
+            let work = work::set_item_text(root, &id, item, &text, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::State {
@@ -2539,12 +2548,12 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
             state,
         } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_state(root, &id, item, state.into())?;
+            let work = work::set_item_state(root, &id, item, state.into(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Result { object, item, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_result(root, &id, item, text.as_deref())?;
+            let work = work::set_item_result(root, &id, item, text.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Commit {
@@ -2562,12 +2571,12 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
                     format!("--commit {commit:?} does not name a commit in this repository"),
                 )
             })?;
-            let work = work::add_item_commit(root, &id, item, &resolved)?;
+            let work = work::add_item_commit(root, &id, item, &resolved, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Rm { object, item } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::remove_item(root, &id, item)?;
+            let work = work::remove_item(root, &id, item, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
     }
@@ -2762,14 +2771,24 @@ fn priority_of(
     }
 }
 
-fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
+fn collection_command(
+    root: &Path,
+    command: CollectionCommand,
+    attempt: rules::Attempt,
+) -> Result<()> {
     match command {
         CollectionCommand::New {
             name,
             description,
             schedule,
         } => {
-            let item = collection::create(root, &name, description.as_deref(), schedule.build())?;
+            let item = collection::create(
+                root,
+                &name,
+                description.as_deref(),
+                schedule.build(),
+                attempt,
+            )?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Ls => {
@@ -2808,17 +2827,17 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         }
         CollectionCommand::Rename { collection, name } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::rename(root, &id, &name)?;
+            let item = collection::rename(root, &id, &name, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Describe { collection, text } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::describe(root, &id, text.as_deref())?;
+            let item = collection::describe(root, &id, text.as_deref(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::State { collection, state } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_state(root, &id, state.into())?;
+            let item = collection::set_state(root, &id, state.into(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Schedule {
@@ -2826,7 +2845,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             schedule,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_schedule(root, &id, schedule.build())?;
+            let item = collection::set_schedule(root, &id, schedule.build(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Add {
@@ -2839,13 +2858,13 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             let id = collection::resolve_id(root, &collection)?;
             let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
-            let item = collection::add_member(root, &id, &target, order, priority)?;
+            let item = collection::add_member(root, &id, &target, order, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Rm { collection, target } => {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::remove_member(root, &id, &target)?;
+            let item = collection::remove_member(root, &id, &target, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Order {
@@ -2855,7 +2874,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         } => {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::set_order(root, &id, &target, order)?;
+            let item = collection::set_order(root, &id, &target, order, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Priority {
@@ -2867,12 +2886,12 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
             let priority = priority_of(priority, reason)?;
-            let item = collection::set_priority(root, &id, &target, priority)?;
+            let item = collection::set_priority(root, &id, &target, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Delete { collection } => {
             let id = collection::resolve_id(root, &collection)?;
-            let removed = collection::remove(root, &id)?;
+            let removed = collection::remove(root, &id, attempt)?;
             // Carried out and reported, not refused. #10 makes this a rule for
             // the agent and says a technical guard can come later if real use
             // shows one is needed; engr cannot tell who asked, so it says what

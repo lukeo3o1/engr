@@ -379,6 +379,12 @@ done and the Object has not moved. If something you learned is stable knowledge,
 admit it through the appropriate Human or Agent path; if it is still an open
 question, put it in backlog.
 
+A project rule may still govern `work`. When one does, say which attempt of
+your own review this is: `engr work --attempt <n> <subcommand> ...`, counted
+from 1, and 1 if you say nothing. Past every applicable ceiling the mutation is
+refused — v1 has not settled what an exhausted rule means here, and engr will
+not guess on your behalf.
+
 Start by reading it, not by writing it. `engr work ls` is the first thing to run
 when resuming: it says which Objects have execution memory, which are blocked and
 which a human stopped.
@@ -456,6 +462,9 @@ No confirmation, no challenge code — you edit this directly, like backlog and
 work. **Grouping something changes nothing about it.** An Object in a plan means
 exactly what its admitted Sections say; moving it, ranking it, or calling the
 plan complete is planning activity and nothing more.
+
+A project rule may govern `collection` the same way: `engr collection --attempt
+<n> <subcommand> ...`, with the same refusal past the ceiling.
 
 Members are whole Objects or whole backlog items, given as
 `engr:obj:<id>` or `engr:backlog:<id>` — never a section.
