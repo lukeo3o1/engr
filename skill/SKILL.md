@@ -244,7 +244,7 @@ the abbreviation for you.
 
 ## When a section is marked
 
-`show` marks five things, and tells you what to do about each:
+`show` marks six things, and tells you what to do about each:
 
 | Marking | What happened |
 | --- | --- |
@@ -252,17 +252,19 @@ the abbreviation for you.
 | `REF TAMPERED` / `ref_tampered` | A current or historical dependency fails integrity; the detail names the side |
 | `REF UNREADABLE` / `ref_unreadable` | A section this one stands on will not load at all — malformed authority, not a missing one |
 | `REF MISSING` / `ref_missing` | A section this one stands on is gone: the authority it rests on no longer exists |
+| `REPLACEMENT UNAVAILABLE` / `replacement_unavailable` | This object says another replaced it, and that replacement cannot be established |
 | `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
 | `refs moved` / `stale_refs` | One or more selected dependency fields moved through an admission path |
 
-The first four are a different kind of problem from the last two, and they are
+The first five are a different kind of problem from the last two, and they are
 not something to work around. **Stop and tell the human.** Either someone edited
 the stored file directly rather than going through the gate, or authority this
-wording explicitly rests on has vanished — so nothing about that wording was
-agreed to by anyone, or what was agreed to can no longer be checked. `show`
-hands you `git show <commit>:<path>` — run it, and report what the record said
-before the edit. `engr show` and `engr verify` exit non-zero here; `engr ls`
-still exits 0 so a survey of many objects is not cut short.
+wording rests on — or the replacement it points forward to — has vanished. So
+either nothing about that wording was agreed to by anyone, or what was agreed
+to can no longer be checked. `show` hands you `git show <commit>:<path>` — run
+it, and report what the record said before the edit. `engr show` and `engr
+verify` exit non-zero here; `engr ls` still exits 0 so a survey of many objects
+is not cut short.
 
 For the last two: **do not quietly reason from a drifted section.** Take the
 `git show` command `show` hands you, read what the dependency used to say, and

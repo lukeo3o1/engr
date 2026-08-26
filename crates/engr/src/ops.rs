@@ -217,6 +217,75 @@ pub struct StandsOnUnreadable {
     pub reason: String,
 }
 
+/// A section here declares a replacement, and the replacement is not there to
+/// be read.
+///
+/// Kept apart from the three `standing_on_*` lists because it is a different
+/// fact. Those are about `refs[]`: wording that leans on other wording, where
+/// drift is an ordinary state and a person decides what it means. This is an
+/// authoritative relation — `superseded_by` names an existing different Object,
+/// and v1 has no Object delete, so a target that cannot be established means the
+/// invariant is already broken rather than that something moved.
+#[derive(Debug)]
+pub struct BrokenReplacement {
+    pub section: u64,
+    pub target: String,
+    pub reason: String,
+}
+
+/// Every `superseded_by` in one Section whose target cannot be established.
+///
+/// One implementation for both trust surfaces. `verify` reports these as
+/// findings and `show` marks the Section, and two walks of the same relation
+/// would be two answers to one question.
+pub(crate) fn broken_replacements_in(
+    root: &Path,
+    section: &crate::model::Section,
+) -> Vec<BrokenReplacement> {
+    let mut broken = Vec::new();
+    for relation in &section.relations {
+        let crate::semantics::RelationType::SupersededBy = relation.relation else {
+            continue;
+        };
+        let crate::semantics::Target::Engr { reference } = &relation.target else {
+            continue;
+        };
+        let decoded = crate::reference::EngrRef::parse_embedded(reference)
+            .and_then(|parsed| crate::reference::decode_uuid(parsed.id()));
+        let Ok(uuid) = decoded else {
+            broken.push(BrokenReplacement {
+                section: section.id,
+                target: reference.clone(),
+                reason: "the replacement is not a resource this build can resolve".to_owned(),
+            });
+            continue;
+        };
+        let target = uuid.to_string();
+        match effective(root, &target) {
+            Ok(replacement) => {
+                if let Err(error) = sound(root, &replacement, None) {
+                    broken.push(BrokenReplacement {
+                        section: section.id,
+                        target,
+                        reason: error.message,
+                    });
+                }
+            }
+            Err(error) if error.code == EXIT_NOT_FOUND => broken.push(BrokenReplacement {
+                section: section.id,
+                target,
+                reason: "the replacement no longer exists".to_owned(),
+            }),
+            Err(error) => broken.push(BrokenReplacement {
+                section: section.id,
+                target,
+                reason: error.message,
+            }),
+        }
+    }
+    broken
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub object: String,
@@ -228,6 +297,7 @@ pub struct Report {
     pub standing_on_tampered: Vec<StandsOnTampered>,
     pub standing_on_missing: Vec<StandsOnMissing>,
     pub standing_on_unreadable: Vec<StandsOnUnreadable>,
+    pub broken_replacements: Vec<BrokenReplacement>,
     pub unprojected: usize,
     pub uncommitted: Option<bool>,
 }
@@ -239,6 +309,7 @@ impl Report {
             && self.standing_on_tampered.is_empty()
             && self.standing_on_missing.is_empty()
             && self.standing_on_unreadable.is_empty()
+            && self.broken_replacements.is_empty()
             && self.unprojected == 0
     }
 }
@@ -275,7 +346,16 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let mut standing_on_tampered = Vec::new();
     let mut standing_on_missing = Vec::new();
     let mut standing_on_unreadable = Vec::new();
+    let mut broken_replacements = Vec::new();
     for section in &object.sections {
+        // An authoritative forward link, checked here because nothing else
+        // rechecks it after admission. The gate proves the target exists when
+        // the relation is admitted; from then on the source Object's own seals
+        // pass whatever happens to the replacement, and `refs[]` — the only
+        // thing this walk used to follow — does not include it. So a reader
+        // following the chain to find current knowledge could arrive nowhere
+        // while `verify` said PASS.
+        broken_replacements.extend(broken_replacements_in(root, section));
         let section_failed = if object.sha256.is_some() {
             crate::integrity::check_section_seal(section, &section.sha256).is_err()
         } else {
@@ -401,6 +481,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         standing_on_tampered,
         standing_on_missing,
         standing_on_unreadable,
+        broken_replacements,
         unprojected: events
             .iter()
             .filter(|event| event.rev > projection_rev)

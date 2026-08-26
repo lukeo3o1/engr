@@ -7,7 +7,7 @@
 
 use engr::model::{Action, Content, Object, Payload, Ref};
 use engr::semantics::{ObjectType, Relation, RelationType, Role, State, Supplement, Target};
-use engr::{gate, ops, store};
+use engr::{gate, ops, store, view};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1707,6 +1707,74 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
     );
 }
 
+/// A replacement that stops existing is a broken record, not ordinary drift.
+///
+/// `superseded_by` names an existing different Object, and v1 has no Object
+/// delete — so a target that cannot be established means the invariant already
+/// failed. The source Object's own seals cannot see that: nothing about A
+/// changes when B disappears, and `refs[]`, the only thing verification used to
+/// follow, does not include the relation. Left unchecked, a reader following
+/// the chain to find current knowledge arrives nowhere while `verify` says
+/// PASS.
+#[test]
+fn a_replacement_that_cannot_be_established_stops_the_source_reading_clean() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let replacement = new_object(&root, "the replacement");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&replacement, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&replacement))],
+                ..Content::default()
+            },
+        ),
+    );
+    assert!(
+        ops::verify(&root, &source).expect("verify").passed(),
+        "the chain is intact"
+    );
+
+    // The replacement stops being establishable: its projection is gone and so
+    // is the admitted history that could rebuild it.
+    std::fs::remove_file(store::object_path(&root, &replacement)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &replacement)).expect("remove history");
+    assert!(ops::effective(&root, &replacement).is_err());
+
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(!report.passed(), "the forward link leads nowhere");
+    assert_eq!(report.broken_replacements.len(), 1);
+    assert!(
+        report.broken_replacements[0].reason.contains("no longer exists"),
+        "{:?}",
+        report.broken_replacements[0]
+    );
+    assert!(
+        report.standing_on_missing.is_empty() && report.standing_on_unreadable.is_empty(),
+        "an authoritative relation is not reported as a ref"
+    );
+
+    let object = ops::effective(&root, &source).expect("source still loads");
+    let marked = view::assess(&root, &object)
+        .into_iter()
+        .find(|(_, status)| status.replacement.is_some())
+        .expect("show marks the section carrying the relation");
+    assert_eq!(marked.1.label(), "REPLACEMENT UNAVAILABLE");
+    assert!(marked.1.forged(), "this is a stop, not a question");
+}
 /// A classification that changes nothing is not a change to confirm.
 ///
 /// Confirming it would append a permanent Event recording no change, spend a

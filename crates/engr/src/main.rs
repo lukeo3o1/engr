@@ -2228,6 +2228,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 stood.reason
             );
         }
+        // An authoritative forward link that leads nowhere, said in its own
+        // words. It is not drift: nobody is being asked to judge whether this
+        // section still holds. The replacement this object points at cannot be
+        // established, so the chain a reader follows to find current knowledge
+        // is broken.
+        for broken in &report.broken_replacements {
+            println!(
+                "          §{} is superseded by {}, which cannot be established: {}",
+                broken.section,
+                shorten(&broken.target, width),
+                broken.reason
+            );
+        }
         if report.unprojected > 0 {
             println!(
                 "          {} events are not reflected in the sections",
