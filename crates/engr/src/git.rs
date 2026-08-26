@@ -180,6 +180,8 @@ fn historical_bytes(root: &Path, commit: &str, path: &str) -> Result<Option<Vec<
 }
 
 fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     let format: HistoricalWorkspaceFormat = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     ensure!(
@@ -201,12 +203,19 @@ fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
     // under the snapshot's own version rather than widening the check again.
     ensure!(
         format.version == WORKSPACE_VERSION
-            || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&format.version),
+            || crate::HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS.contains(&format.version),
         EXIT_SCHEMA,
         "{path}: workspace version {} is not supported by engr {}",
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
+    if format.version == WORKSPACE_VERSION {
+        ensure!(
+            text == crate::proof::canonical_bytes(&value, path)?,
+            EXIT_SCHEMA,
+            "{path}: workspace-v3 format.json is not persisted as JCS"
+        );
+    }
     Ok(format.version)
 }
 

@@ -109,6 +109,31 @@ fn on_merge(root: &Path, id: &str, destination: u64, source: u64) -> Prepared {
         .against(backlog::Precondition::merge(root, id, destination, source).expect("observe"))
 }
 
+#[test]
+fn backlog_section_order_and_allocation_ceiling_are_current_boundaries() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "ordering", "first");
+    backlog::add_section(&root, &id, "second", Vec::new(), &on_add(&root, &id))
+        .expect("second section");
+    let path = backlog::item_path(&root, &id);
+    let mut reversed: serde_json::Value = store::read_json(&path).expect("item");
+    reversed["sections"].as_array_mut().expect("sections").reverse();
+    write_raw(&path, &reversed).expect("canonical reversed file");
+    let error = backlog::load(&root, &id).expect_err("writer-only ordering is not accepted");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    reversed["sections"].as_array_mut().expect("sections").reverse();
+    reversed["next_section_id"] = serde_json::json!(engr::proof::MAX_SAFE_INTEGER);
+    write_raw(&path, &reversed).expect("counter at the valid ceiling");
+    let before = std::fs::read(&path).expect("before");
+    let error =
+        backlog::add_section(&root, &id, "one too far", Vec::new(), &on_add(&root, &id))
+            .expect_err("allocation beyond the safe domain");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(error.message.contains("safe-integer"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("after"), before, "no write occurred");
+}
+
 // ---------------------------------------------------------------------------
 // Storage and model
 // ---------------------------------------------------------------------------

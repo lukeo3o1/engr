@@ -55,7 +55,8 @@
 //! ```
 
 use crate::model::{
-    replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
+    project, replay_recoverable_tail, Action, Event, Merge, Object, Provenance, ReviewOutcome,
+    EVENT_FORMAT,
 };
 use crate::{
     ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION, EVENT_ENVELOPE_VERSION_V0,
@@ -1319,9 +1320,29 @@ fn check_appendable_locked(root: &Path, event: &Event) -> Result<()> {
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
     let path = events_path(root, id);
     if !path.exists() {
+        ensure!(
+            !object_path(root, id).exists(),
+            EXIT_SCHEMA,
+            "{} exists but its append-only Event history is missing",
+            object_path(root, id).display()
+        );
         return Ok(Vec::new());
     }
     let text = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+    decode_events(root, &path, id, &text)
+}
+
+/// Decode the one EventStore text a caller already captured.
+///
+/// Migration needs this form because fingerprinting one read and replaying a
+/// second one can derive a plan from bytes the manifest does not name. Ordinary
+/// reads take the same route after obtaining their text from disk.
+pub(crate) fn decode_events(
+    root: &Path,
+    path: &Path,
+    id: &str,
+    text: &str,
+) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -1362,5 +1383,90 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         }
         events.push(event);
     }
+    check_event_history(root, path, id, &events)?;
     Ok(events)
+}
+
+/// History is append-only evidence, not a replaceable recovery cache. Its
+/// first admitted transition is therefore always revision 1, and a generation
+/// that introduced mixed authority cannot be followed by the older semantic
+/// generation again.
+fn check_event_history(root: &Path, path: &Path, id: &str, events: &[Event]) -> Result<()> {
+    ensure!(
+        !events.is_empty(),
+        EXIT_SCHEMA,
+        "{} is an empty Event history file",
+        path.display()
+    );
+    ensure!(
+        events[0].rev == 1,
+        EXIT_SCHEMA,
+        "{}: non-empty Event history starts at revision {}, not 1",
+        path.display(),
+        events[0].rev
+    );
+    let mut seen_v2 = false;
+    for event in events {
+        if event.version == EVENT_ENVELOPE_VERSION {
+            seen_v2 = true;
+        } else {
+            ensure!(
+                !seen_v2,
+                EXIT_SCHEMA,
+                "{}: retained Event generation 1 cannot follow generation 2",
+                path.display()
+            );
+        }
+    }
+    check_human_candidate_digests(root, id, events)
+}
+
+/// Event-v2 keeps a Human candidate digest after its short-lived envelope is
+/// deleted. The transition it seals remains reconstructable from immutable
+/// history, so accepting only the digest's scalar syntax would turn durable
+/// admission evidence into an unauthenticated label after confirmation.
+fn check_human_candidate_digests(root: &Path, id: &str, events: &[Event]) -> Result<()> {
+    let mut projection = Object::new(id.to_owned(), String::new())?;
+    let mut migrated = false;
+    for event in events {
+        if event.version == EVENT_ENVELOPE_VERSION && !migrated {
+            projection = crate::migration::migrated_replay(root, projection)?;
+            migrated = true;
+        }
+        let before = projection.clone();
+        project(&mut projection, event).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{id}: Event history cannot reconstruct its transition: {}",
+                    error.message
+                ),
+            )
+        })?;
+        let Some(confirmation) = event.human_confirmation() else {
+            continue;
+        };
+        let review_digest = match &event.provenance {
+            Provenance::Tagged { admission } => {
+                admission.rule_review.as_ref().and_then(|review| {
+                    (review.outcome == ReviewOutcome::Overridden)
+                        .then(|| review.review_digest.clone())
+                })
+            }
+            Provenance::Confirmed { .. } => None,
+        };
+        let subject = crate::proof::candidate_subject(
+            &before,
+            &projection,
+            &event.payload,
+            review_digest,
+        )?;
+        ensure!(
+            subject.digest()? == confirmation.candidate_digest,
+            EXIT_SCHEMA,
+            "{id}: Event rev {} carries a candidate digest no Human transition produced",
+            event.rev
+        );
+    }
+    Ok(())
 }

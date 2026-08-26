@@ -39,15 +39,18 @@ pub mod work;
 pub const WORKSPACE_VERSION: u32 = 3;
 /// Compatibility name used by the Phase-3 contract tests.
 pub const PHASE_3_WORKSPACE_VERSION: u32 = WORKSPACE_VERSION;
-/// Older workspace versions this build recognizes and can migrate forward.
+/// Older workspace versions this build can migrate directly into v3.
 ///
-/// Recognized is not the same as current: a workspace at one of these is read
-/// only until `engr migrate` is run explicitly. It is also what makes a
-/// *historical* snapshot readable — see [`git::object_at`] — because a commit
-/// predating the migration carries the version that was current when it was
-/// made, and refusing it would make every reference pinned before the migration
-/// unresolvable.
-pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
+/// Version 1 remains recognizable as immutable historical material, but no
+/// cumulative v1 -> v3 migration has been defined. Conflating historical
+/// decoding with a live rewrite would make the migrator invent that contract.
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[2];
+/// Older versions whose historical Object representation this build can read.
+///
+/// A snapshot is governed by the authority that wrote it. Version 1 and 2
+/// share the predecessor Object representation, even though only v2 has the
+/// separately frozen direct migration to v3.
+pub const HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
 /// Version carried by confirmed Event envelopes this build writes and reads.

@@ -392,12 +392,19 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
     let item = json!({
         "id": item_id,
         "topic": "unresolved",
-        "next_section_id": 2,
-        "sections": [{
-            "id": 1,
-            "text": "still open",
-            "updated_at": "2026-08-25T00:00:00Z"
-        }]
+        "next_section_id": 3,
+        "sections": [
+            {
+                "id": 2,
+                "text": "second open point",
+                "updated_at": "2026-08-25T00:00:00Z"
+            },
+            {
+                "id": 1,
+                "text": "first open point",
+                "updated_at": "2026-08-25T00:00:00Z"
+            }
+        ]
     });
     let item_path = engr::backlog::item_path(root, item_id);
     std::fs::write(
@@ -405,6 +412,23 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         format!("{}\n", serde_json::to_string_pretty(&item).expect("json")),
     )
     .expect("a v2 backlog item");
+    let work_path = engr::work::path(root, id);
+    let work = json!({
+        "state": "active",
+        "updated_at": "2026-08-25T00:00:00Z",
+        "next_item_id": 3,
+        "dependencies": [],
+        "blockers": [],
+        "items": [
+            { "id": 2, "text": "second step", "state": "pending", "commits": [] },
+            { "id": 1, "text": "first step", "state": "pending", "commits": [] }
+        ]
+    });
+    std::fs::write(
+        &work_path,
+        format!("{}\n", serde_json::to_string_pretty(&work).expect("json")),
+    )
+    .expect("a v2 work sidecar");
 
     store::migrate(root).expect("migrate");
 
@@ -415,7 +439,18 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         engr::proof::canonical_bytes(&value, "item").expect("canonical"),
         "the retained resource is now the bytes v3 says it is"
     );
-    engr::backlog::load(root, item_id).expect("and the current reader accepts it");
+    let item = engr::backlog::load(root, item_id).expect("and the current reader accepts it");
+    assert_eq!(
+        item.sections.iter().map(|section| section.id).collect::<Vec<_>>(),
+        vec![1, 2],
+        "migration normalizes the ordered child list"
+    );
+    let work = engr::work::load(root, id).expect("migrated sidecar");
+    assert_eq!(
+        work.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![1, 2],
+        "migration normalizes work items too"
+    );
 }
 
 /// The staged artifact that was validated is the one that gets published.
@@ -535,6 +570,109 @@ fn staged_plan(root: &Path, reference: &Path, id: &str) -> std::path::PathBuf {
     )
     .expect("manifest");
     stage
+}
+
+#[test]
+fn staged_migration_refuses_unrecognized_or_unfrozen_source_versions() {
+    for version in [1, 4] {
+        let interrupted = tempfile::tempdir().expect("interrupted");
+        let completed = tempfile::tempdir().expect("completed");
+        let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+        predecessor(interrupted.path(), &[object(id, "version authority")]);
+        predecessor(completed.path(), &[object(id, "version authority")]);
+        let stage = staged_plan(interrupted.path(), completed.path(), id);
+        let manifest_path = stage.join("manifest.json");
+        let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+        manifest["source_version"] = json!(version);
+        write_raw(&manifest_path, &manifest).expect("rewritten manifest");
+        write_raw(
+            &store::engr_dir(interrupted.path()).join("format.json"),
+            &json!({ "format": "engr-workspace", "version": version }),
+        )
+        .expect("declared version");
+
+        let error = store::migrate(interrupted.path())
+            .expect_err("a staged plan cannot widen migration authority");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "version {version}");
+        assert!(error.message.contains("no defined migration"), "{error}");
+    }
+}
+
+#[test]
+fn staged_manifest_resources_are_not_filesystem_capabilities() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(interrupted.path(), &[object(id, "path capability")]);
+    predecessor(completed.path(), &[object(id, "path capability")]);
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let manifest_path = stage.join("manifest.json");
+    let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+    manifest["resources"]["../victim"] = Value::String("a".repeat(64));
+    manifest["source"]["../victim"] = Value::String("b".repeat(64));
+    write_raw(&manifest_path, &manifest).expect("forged manifest");
+
+    let victim = interrupted.path().join("victim");
+    let error =
+        store::migrate(interrupted.path()).expect_err("a path escape is not a resource");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(!victim.exists(), "nothing was published outside .engr");
+}
+
+#[test]
+fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let backlog_id = "018f7d58-4ca7-7a2e-98f1-9b301468184a";
+    for root in [interrupted.path(), completed.path()] {
+        predecessor(root, &[object(id, "resource derivation")]);
+        let item = json!({
+            "id": backlog_id,
+            "topic": "unresolved",
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": "open",
+                "updated_at": "2026-08-25T00:00:00Z"
+            }]
+        });
+        std::fs::write(
+            engr::backlog::item_path(root, backlog_id),
+            format!("{}\n", serde_json::to_string_pretty(&item).expect("item")),
+        )
+        .expect("predecessor item");
+    }
+    let original =
+        std::fs::read_to_string(engr::backlog::item_path(interrupted.path(), backlog_id))
+            .expect("original resource");
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let migrated =
+        std::fs::read_to_string(engr::backlog::item_path(completed.path(), backlog_id))
+            .expect("migrated resource");
+    let relative = format!("backlog/{backlog_id}.json");
+    let staged = stage.join("resources").join("backlog").join(format!("{backlog_id}.json"));
+    std::fs::create_dir_all(staged.parent().expect("parent")).expect("resource stage");
+    std::fs::write(&staged, &migrated).expect("stage resource");
+    let manifest_path = stage.join("manifest.json");
+    let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+    manifest["resources"][relative.as_str()] =
+        Value::String(engr::proof::sha256_of(&migrated));
+    manifest["source"][relative.as_str()] = Value::String(engr::proof::sha256_of(&original));
+
+    let mut substituted: Value = serde_json::from_str(&migrated).expect("migrated JSON");
+    substituted["topic"] = Value::String("a different valid resource".to_owned());
+    let substituted = engr::proof::canonical_bytes(&substituted, "substituted resource")
+        .expect("canonical substitution");
+    std::fs::write(&staged, &substituted).expect("swap staged resource");
+    manifest["resources"][relative.as_str()] =
+        Value::String(engr::proof::sha256_of(&substituted));
+    write_raw(&manifest_path, &manifest).expect("consistent forged pair");
+
+    let error = store::migrate(interrupted.path())
+        .expect_err("a digest pair cannot replace the deterministic migration output");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("not the canonical migration"), "{error}");
 }
 
 /// A predecessor Event carrying a number JCS cannot hold stops the migration.

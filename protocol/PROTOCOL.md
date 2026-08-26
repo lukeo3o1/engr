@@ -2149,11 +2149,13 @@ independent of anything local:
 
 `.engr/format.json` is the sole schema/version authority for a current
 workspace, and this build writes **version 3**. Current resource files do not
-repeat those fields. Workspaces at versions 1 and 2 are recognized and
-migratable; a workspace without the authority may also be recognized from its
-legacy resource markers. Every predecessor form remains read-only until `engr
-migrate` is explicitly run. Unknown or newer workspace versions are never
-mutated and never read.
+repeat those fields. A version-2 workspace is the defined direct predecessor
+for this migration; version 1 remains readable as a historical snapshot, but
+has no cumulative version-1-to-3 migration contract. A workspace without the
+authority may also be recognized from its legacy resource markers. Every
+migratable predecessor remains read-only until `engr migrate` is explicitly
+run. Unknown, newer, and not-directly-migratable workspace versions are never
+mutated and never read as current authority.
 
 ### What the admitting path may do
 
@@ -2201,7 +2203,8 @@ rather than left for a later write to refuse.
 A migration to version 3 activates mixed Section authority, `admitted_at`, exact
 Section encoding, Section and Object integrity, selective Ref digests, Candidate
 generation 3 and Event generation 2 as one contract. None is activated lazily
-per Object.
+per Object. Its direct predecessor is workspace version 2; this migration does
+not infer a cumulative version-1-to-3 conversion.
 
 Before writing one authoritative Object, migration MUST preflight the whole
 workspace: predecessor Object and Event reconstruction, every predecessor

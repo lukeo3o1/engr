@@ -1230,9 +1230,10 @@ impl Event {
 
 /// Apply only the event suffix newer than the persisted projection.
 ///
-/// Retained history may have been purged at its beginning, so events at or
-/// below the projection revision are evidence rather than replay input. Once a
-/// newer event exists, though, it must begin at the next revision and continue
+/// Events at or below the projection revision are audit evidence rather than
+/// replay input. The store requires complete, append-only history separately;
+/// this reducer only decides whether its suffix can advance the projection.
+/// Once a newer event exists, it must begin at the next revision and continue
 /// without a gap: otherwise a later confirmation could be inserted before an
 /// unreachable future event.
 pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(Object, bool)> {

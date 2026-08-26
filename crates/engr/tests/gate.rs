@@ -2319,6 +2319,124 @@ fn event_revisions_start_at_one() {
     assert!(error.message.contains("start at 1"), "{error}");
 }
 
+/// The Event file is the complete audit trail, not merely a suffix that can be
+/// replayed over the current projection. Losing its first records must not be
+/// blessed by a later append or reconciliation.
+#[test]
+fn a_purged_event_prefix_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "complete history");
+    gate::confirm(
+        &root,
+        &format!(
+            "CONFIRM {}",
+            gate::prepare(&root, payload(Action::SectionAdded, &id, "second record"))
+                .expect("prepare")
+                .candidate
+                .challenge
+        ),
+    )
+    .expect("confirm");
+
+    let path = store::events_path(&root, &id);
+    let retained = std::fs::read_to_string(&path)
+        .expect("history")
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{retained}\n")).expect("truncate prefix");
+
+    let error = store::load_events(&root, &id).expect_err("a prefix was lost");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("starts at revision"), "{error}");
+    assert_eq!(
+        ops::reconcile(&root, &id).expect_err("recovery cannot accept it").code,
+        engr::EXIT_SCHEMA
+    );
+}
+
+/// A retained v1 Event may precede v2, but never follow it: no current writer
+/// can produce that regression and replaying it would reintroduce old authority
+/// after mixed-authority history began.
+#[test]
+fn retained_event_v1_cannot_follow_event_v2() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "event generations");
+    let path = store::events_path(&root, &id);
+    let v2 = std::fs::read_to_string(&path).expect("v2 creation");
+    let old_payload = payload(Action::SectionAdded, &id, "old generation tail");
+    let v1 = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-27T00:00:00Z".to_owned(),
+        payload: old_payload.clone(),
+        provenance: Provenance::confirmed("234567", old_payload.sha256().expect("hash")),
+    };
+    std::fs::write(
+        &path,
+        format!("{}{}\n", v2, serde_json::to_string(&v1).expect("v1")),
+    )
+    .expect("append retained generation");
+
+    let error = store::load_events(&root, &id).expect_err("generation cannot go backward");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("cannot follow generation 2"), "{error}");
+}
+
+/// Candidate envelopes are deleted after confirmation, but their digest remains
+/// durable evidence. It is recomputed from Event history rather than accepted
+/// as a syntactically plausible long-lived label.
+#[test]
+fn a_human_event_candidate_digest_is_rechecked_from_history() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "durable candidate proof");
+    let path = store::events_path(&root, &id);
+    let mut event: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .expect("history")
+            .lines()
+            .next()
+            .expect("creation"),
+    )
+    .expect("event");
+    event["admission"]["confirmation"]["candidate_digest"] =
+        serde_json::Value::String(format!("1:{}", "b".repeat(64)));
+    write_raw(&path, &event).expect("replace with canonical forged event");
+
+    let error = store::load_events(&root, &id).expect_err("digest was not admitted");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("candidate digest"), "{error}");
+    assert_eq!(
+        ops::effective(&root, &id)
+            .expect_err("authority cannot use forged Event evidence")
+            .code,
+        engr::EXIT_SCHEMA
+    );
+}
+
+#[test]
+fn a_historical_v3_format_must_be_jcs() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "historical format");
+    let format = store::engr_dir(&root).join("format.json");
+    let canonical = std::fs::read(&format).expect("canonical format");
+    std::fs::write(
+        &format,
+        "{ \"version\": 3, \"format\": \"engr-workspace\" }",
+    )
+    .expect("noncanonical v3 format");
+    let commit = commit_all(&root, "noncanonical historical v3 format");
+    std::fs::write(&format, canonical).expect("restore working format");
+
+    let error = engr::git::object_at(&root, &commit, &id)
+        .expect_err("historical v3 format must have its generation spelling");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("not persisted as JCS"), "{error}");
+}
+
 /// A transition whose numbers no identity can carry is refused before anything
 /// is minted.
 ///

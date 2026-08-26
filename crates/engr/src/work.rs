@@ -215,6 +215,11 @@ impl Work {
 
     fn take_id(&mut self) -> Result<u64> {
         let id = self.next_item_id;
+        ensure!(
+            id < crate::proof::MAX_SAFE_INTEGER,
+            EXIT_USAGE,
+            "this sidecar has no remaining item ids in the shared safe-integer domain"
+        );
         self.next_item_id = self
             .next_item_id
             .checked_add(1)
@@ -406,6 +411,9 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     );
     let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_items(&path, &work)?;
+    }
     // The owner invariant, held on the way *out* as well as on the way in. A
     // sidecar names its Object in its filename, so a copied file can name one
     // that never existed — and a check that only runs on the write path would
@@ -438,17 +446,55 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     Ok(work)
 }
 
-/// Validate one retained sidecar during a coordinated workspace migration.
-///
-/// The caller validates ownership against the complete preflight Object set.
-/// Ordinary reads use [`load`], whose ownership check goes through current
-/// Object authority and therefore cannot run while the predecessor generation
-/// is deliberately read-only.
-pub(crate) fn load_for_migration(root: &Path, object: &str) -> Result<Work> {
-    let path = path(root, object);
-    let work: Work = store::read_resource(root, &path)?;
+/// Decode predecessor bytes already captured by coordinated migration.
+pub(crate) fn decode_for_migration(path: &Path, object: &str, text: &str) -> Result<Work> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let work: Work = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     work.validate()?;
+    // The filename is the sidecar owner. `Work` does not duplicate that id,
+    // so the caller supplies it and validates ownership against its plan.
+    crate::model::validate_object_id(object).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{}: work sidecar owner {:?} is invalid: {}",
+                path.display(),
+                object,
+                error.message
+            ),
+        )
+    })?;
     Ok(work)
+}
+
+/// Validate a staged Work artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(path: &Path, object: &str, text: &str) -> Result<Work> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let work = decode_for_migration(path, object, text)?;
+    check_canonical_items(path, &work)?;
+    Ok(work)
+}
+
+/// The current writer's one representation for its ordered child list.
+pub(crate) fn canonicalize_items(work: &mut Work) {
+    work.items.sort_by_key(|item| item.id);
+}
+
+fn check_canonical_items(path: &Path, work: &Work) -> Result<()> {
+    let mut canonical = work.clone();
+    canonicalize_items(&mut canonical);
+    ensure!(
+        canonical == *work,
+        EXIT_SCHEMA,
+        "{}: work items are stored in increasing id order",
+        path.display()
+    );
+    Ok(())
 }
 
 /// The sidecar if there is one, and no complaint if there is not.
@@ -533,7 +579,7 @@ fn edit<T>(
         require_object(root, object)?;
         let mut work = load(root, object)?;
         let outcome = body(&mut work)?;
-        work.items.sort_by_key(|item| item.id);
+        canonicalize_items(&mut work);
         work.updated_at = now();
         save(root, object, &work)?;
         Ok(outcome)

@@ -278,6 +278,12 @@ fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
 }
 
 fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
+    ensure!(
+        migratable_source_version(source_version),
+        EXIT_SCHEMA,
+        "workspace version {source_version} has no defined migration to version {}",
+        crate::WORKSPACE_VERSION
+    );
     let mut source = BTreeMap::new();
     let mut predecessor = BTreeMap::new();
     for id in store::object_ids(root)? {
@@ -315,7 +321,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
             })?;
             stored_within_safe_integers(&value, &format!("{}:{}", path.display(), index + 1))?;
         }
-        let events = store::load_events(root, id)?;
+        let events = store::decode_events(root, &path, id, &text)?;
         for event in &events {
             ensure!(
                 event.version == crate::EVENT_ENVELOPE_VERSION_V0
@@ -454,29 +460,30 @@ fn validate_retained_resources(
     let mut rewrites = BTreeMap::new();
     for id in crate::backlog::ids(root)? {
         let path = crate::backlog::item_path(root, &id);
-        validate_json_file(root, &path, source)?;
-        let mut item = crate::backlog::load(root, &id)?;
+        let text = capture(source, root, &path)?;
+        let mut item = crate::backlog::decode_for_migration(&path, &id, &text)?;
         crate::backlog::canonicalize_sets(&mut item)?;
         let canonical = crate::proof::canonical_bytes(&item, "backlog item")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
     for id in crate::collection::ids(root)? {
         let path = crate::collection::path(root, &id);
-        validate_json_file(root, &path, source)?;
-        let mut collection = crate::collection::load(root, &id)?;
+        let text = capture(source, root, &path)?;
+        let mut collection = crate::collection::decode_for_migration(&path, &id, &text)?;
         crate::collection::canonicalize_members(&mut collection)?;
         let canonical = crate::proof::canonical_bytes(&collection, "collection")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
     for id in crate::work::ids(root)? {
         let path = crate::work::path(root, &id);
-        validate_json_file(root, &path, source)?;
-        let work = crate::work::load_for_migration(root, &id)?;
+        let text = capture(source, root, &path)?;
+        let mut work = crate::work::decode_for_migration(&path, &id, &text)?;
         ensure!(
             objects.contains_key(&id),
             EXIT_SCHEMA,
             "work sidecar {id} belongs to no Object in the migrated projection"
         );
+        crate::work::canonicalize_items(&mut work);
         let canonical = crate::proof::canonical_bytes(&work, "work")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
@@ -528,15 +535,11 @@ fn plan_rewrite(
     Ok(())
 }
 
-fn validate_json_file(
-    root: &Path,
-    path: &Path,
-    source: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let text = capture(source, root, path)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    stored_within_safe_integers(&value, &path.display().to_string())
+fn migratable_source_version(version: u32) -> bool {
+    // Format-less legacy workspaces carry a representation explicitly handled
+    // by this converter. The governed Phase-3 migration itself is frozen as
+    // v2 -> v3; accepting v1 here would silently invent a cumulative contract.
+    version == 0 || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version)
 }
 
 fn check_legacy_object(object: &Object) -> Result<()> {
@@ -597,6 +600,202 @@ fn ensure_lower_sha256(value: &str, what: &str) -> Result<()> {
 fn staged_object_id(path: &str) -> Option<&str> {
     path.strip_prefix("objects/")
         .and_then(|rest| rest.strip_suffix(".json"))
+}
+
+/// The only retained resources a v3 stage may publish. A manifest is durable
+/// operational input, so its map keys are never paths by convention: they are
+/// parsed capabilities before either staging or workspace paths are built.
+enum RetainedResource {
+    Backlog(String),
+    Collection(String),
+    Work(String),
+}
+
+fn retained_resource(relative: &str) -> Result<RetainedResource> {
+    ensure!(
+        !relative.contains('\\'),
+        EXIT_SCHEMA,
+        "staged retained resource {relative:?} is not an .engr-relative path"
+    );
+    let pieces: Vec<_> = relative.split('/').collect();
+    let file_id = |name: &str| -> Result<String> {
+        let id = name.strip_suffix(".json").ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("staged retained resource {relative:?} is not a JSON resource"),
+            )
+        })?;
+        ensure!(
+            !id.is_empty() && id != "." && id != "..",
+            EXIT_SCHEMA,
+            "staged retained resource {relative:?} has no valid resource identity"
+        );
+        Ok(id.to_owned())
+    };
+    match pieces.as_slice() {
+        ["backlog", name] => Ok(RetainedResource::Backlog(file_id(name)?)),
+        ["collections", name] => Ok(RetainedResource::Collection(file_id(name)?)),
+        ["work", "objects", name] => Ok(RetainedResource::Work(file_id(name)?)),
+        _ => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "staged retained resource {relative:?} is not a known .engr resource path"
+            ),
+        )),
+    }
+}
+
+impl RetainedResource {
+    fn staged_path(&self, stage: &Path) -> PathBuf {
+        match self {
+            Self::Backlog(id) => stage
+                .join("resources")
+                .join("backlog")
+                .join(format!("{id}.json")),
+            Self::Collection(id) => stage
+                .join("resources")
+                .join("collections")
+                .join(format!("{id}.json")),
+            Self::Work(id) => stage
+                .join("resources")
+                .join("work")
+                .join("objects")
+                .join(format!("{id}.json")),
+        }
+    }
+
+    fn destination(&self, root: &Path) -> PathBuf {
+        match self {
+            Self::Backlog(id) => crate::backlog::item_path(root, id),
+            Self::Collection(id) => crate::collection::path(root, id),
+            Self::Work(id) => crate::work::path(root, id),
+        }
+    }
+
+    fn validate_staged(
+        &self,
+        staged: &Path,
+        text: &str,
+        objects: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        match self {
+            Self::Backlog(id) => {
+                crate::backlog::decode_current_staged(staged, id, text)?;
+            }
+            Self::Collection(id) => {
+                crate::collection::decode_current_staged(staged, id, text)?;
+            }
+            Self::Work(id) => {
+                ensure!(
+                    objects.contains_key(id),
+                    EXIT_SCHEMA,
+                    "staged work sidecar {id} belongs to no Object in the migration plan"
+                );
+                crate::work::decode_current_staged(staged, id, text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A resource digest alone proves only that staged bytes and the manifest
+    /// agree. Rebuild the deterministic v3 spelling from the captured
+    /// predecessor too, so editing both staged bytes and their digest cannot
+    /// replace the migration plan with a different valid resource.
+    fn verify_derivation(
+        &self,
+        root: &Path,
+        relative: &str,
+        staged: &str,
+        manifest: &Manifest,
+    ) -> Result<()> {
+        let source_path = self.destination(root);
+        let source = fs::read_to_string(&source_path)
+            .map_err(|error| tool_error(source_path.display(), error))?;
+        let expected_source = manifest.source.get(relative).ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("staged retained resource {relative:?} was not captured at preflight"),
+            )
+        })?;
+        let staged_digest = manifest.resources.get(relative).ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("staged retained resource {relative:?} has no staged digest"),
+            )
+        })?;
+        let source_digest = sha256_of(&source);
+        if source_digest == *staged_digest {
+            return Ok(());
+        }
+        ensure!(
+            source_digest == *expected_source,
+            EXIT_INVARIANT,
+            "{relative} changed after migration preflight"
+        );
+        let canonical = match self {
+            Self::Backlog(id) => {
+                let mut item =
+                    crate::backlog::decode_for_migration(&source_path, id, &source)?;
+                crate::backlog::canonicalize_sets(&mut item)?;
+                crate::proof::canonical_bytes(&item, "backlog item")?
+            }
+            Self::Collection(id) => {
+                let mut collection =
+                    crate::collection::decode_for_migration(&source_path, id, &source)?;
+                crate::collection::canonicalize_members(&mut collection)?;
+                crate::proof::canonical_bytes(&collection, "collection")?
+            }
+            Self::Work(id) => {
+                ensure!(
+                    manifest.objects.contains_key(id),
+                    EXIT_SCHEMA,
+                    "staged work sidecar {id} belongs to no Object in the migration plan"
+                );
+                let mut work = crate::work::decode_for_migration(&source_path, id, &source)?;
+                crate::work::canonicalize_items(&mut work);
+                crate::proof::canonical_bytes(&work, "work")?
+            }
+        };
+        ensure!(
+            canonical == staged,
+            EXIT_INVARIANT,
+            "{relative} staged bytes are not the canonical migration of the captured predecessor"
+        );
+        Ok(())
+    }
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<()> {
+    ensure!(
+        migratable_source_version(manifest.source_version),
+        EXIT_SCHEMA,
+        "staged migration source version {} has no defined migration to version {}",
+        manifest.source_version,
+        crate::WORKSPACE_VERSION
+    );
+    for id in manifest.objects.keys() {
+        crate::model::validate_object_id(id).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("staged migration object id {id:?} is invalid: {}", error.message),
+            )
+        })?;
+    }
+    for (relative, digest) in &manifest.resources {
+        retained_resource(relative)?;
+        let source = manifest.source.get(relative).ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("staged retained resource {relative:?} was not captured at preflight"),
+            )
+        })?;
+        ensure!(
+            source != digest,
+            EXIT_SCHEMA,
+            "staged retained resource {relative:?} does not rewrite its captured predecessor"
+        );
+    }
+    Ok(())
 }
 fn stage_dir(root: &Path) -> PathBuf {
     store::engr_dir(root).join(STAGE)
@@ -669,7 +868,7 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         "{} is not a migration staging directory",
         stage.display()
     );
-    let manifest: Manifest = store::read_json(&stage.join(MANIFEST))?;
+    let manifest: Manifest = store::read_current_json(&stage.join(MANIFEST))?;
     ensure!(
         manifest.target_version == crate::WORKSPACE_VERSION,
         EXIT_SCHEMA,
@@ -677,6 +876,7 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         manifest.target_version,
         crate::WORKSPACE_VERSION
     );
+    validate_manifest(&manifest)?;
     let workspace_version = store::declared_workspace_version(root)?.unwrap_or(0);
     ensure!(
         workspace_version == manifest.source_version
@@ -707,11 +907,16 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             "{id} appeared after migration preflight"
         );
     }
-    for id in manifest
-        .source
-        .keys()
-        .filter_map(|path| staged_object_id(path))
-    {
+    for id in manifest.source.keys().filter_map(|path| staged_object_id(path)) {
+        crate::model::validate_object_id(id).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "staged migration source object id {id:?} is invalid: {}",
+                    error.message
+                ),
+            )
+        })?;
         ensure!(
             current_ids.iter().any(|current| current == id),
             EXIT_INVARIANT,
@@ -777,7 +982,8 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         publish.push((store::object_path(root, id), bytes));
     }
     for (relative, expected) in &manifest.resources {
-        let staged = stage.join("resources").join(relative);
+        let resource = retained_resource(relative)?;
+        let staged = resource.staged_path(stage);
         ensure_regular_file(&staged)?;
         let bytes =
             fs::read_to_string(&staged).map_err(|error| tool_error(staged.display(), error))?;
@@ -787,7 +993,11 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             "{} changed after migration preflight",
             staged.display()
         );
-        publish.push((store::engr_dir(root).join(relative), bytes));
+        resource.validate_staged(&staged, &bytes, &manifest.objects)?;
+        if workspace_version == manifest.source_version {
+            resource.verify_derivation(root, relative, &bytes, &manifest)?;
+        }
+        publish.push((resource.destination(root), bytes));
     }
     for (path, bytes) in publish {
         store::write_text(&path, &bytes)?;

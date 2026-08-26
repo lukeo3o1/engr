@@ -60,6 +60,31 @@ fn rewrite(root: &Path, object: &str, edit: impl FnOnce(&mut Value)) {
     write_raw(&path, &value).expect("write");
 }
 
+#[test]
+fn work_item_order_and_allocation_ceiling_are_current_boundaries() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "work ordering");
+    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::add_item(&root, &id, "first", engr::rules::Attempt::FIRST).expect("first");
+    work::add_item(&root, &id, "second", engr::rules::Attempt::FIRST).expect("second");
+
+    rewrite(&root, &id, |value| value["items"].as_array_mut().expect("items").reverse());
+    let error = work::load(&root, &id).expect_err("writer-only ordering is not accepted");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    rewrite(&root, &id, |value| {
+        value["items"].as_array_mut().expect("items").reverse();
+        value["next_item_id"] = json!(engr::proof::MAX_SAFE_INTEGER);
+    });
+    let path = work::path(&root, &id);
+    let before = std::fs::read(&path).expect("before");
+    let error = work::add_item(&root, &id, "one too far", engr::rules::Attempt::FIRST)
+        .expect_err("allocation beyond the safe domain");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(error.message.contains("safe-integer"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("after"), before, "no write occurred");
+}
+
 /// A sidecar belongs to an Object, and only to one that exists.
 ///
 /// It is not a resource: nothing addresses it, nothing points at it, and it has

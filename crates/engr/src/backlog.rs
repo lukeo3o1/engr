@@ -587,6 +587,10 @@ pub fn ids(root: &Path) -> Result<Vec<String>> {
 /// a change, so a caller writing them another way round has not proposed
 /// anything different and should not be refused for it.
 pub(crate) fn canonicalize_sets(item: &mut Item) -> Result<()> {
+    // Sections are an ordered child list, and their persistent order is their
+    // allocated id order. Keeping this beside the set normalization means the
+    // migration and ordinary writer share the one representation they publish.
+    item.sections.sort_by_key(|section| section.id);
     for section in &mut item.sections {
         crate::proof::canonical_set(&mut section.subjects, "subject")?;
         crate::proof::canonical_set(&mut section.produced, "produced outcome")?;
@@ -601,7 +605,7 @@ fn check_canonical_sets(path: &Path, item: &Item) -> Result<()> {
     ensure!(
         canonical == *item,
         EXIT_SCHEMA,
-        "{}: subjects and produced outcomes are stored in canonical set order",
+        "{}: sections, subjects and produced outcomes are stored in their canonical order",
         path.display()
     );
     Ok(())
@@ -625,6 +629,38 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
         path.display(),
         item.id
     );
+    Ok(item)
+}
+
+/// Decode predecessor bytes already captured by coordinated migration.
+///
+/// The ordinary loader deliberately reads the workspace itself so it can choose
+/// the live generation. Migration must not do that second read: its plan and
+/// manifest have to derive from the same bytes.
+pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Item> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let item: Item = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    item.validate()?;
+    ensure!(
+        item.id == id,
+        EXIT_SCHEMA,
+        "{}: backlog id {:?} does not match its filename",
+        path.display(),
+        item.id
+    );
+    Ok(item)
+}
+
+/// Validate a staged Backlog artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Item> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let item = decode_for_migration(path, id, text)?;
+    check_canonical_sets(path, &item)?;
     Ok(item)
 }
 
@@ -1048,6 +1084,12 @@ fn stale(what: &str) -> Result<()> {
 
 fn take_id(item: &mut Item) -> Result<u64> {
     let id = item.next_section_id;
+    ensure!(
+        id < crate::proof::MAX_SAFE_INTEGER,
+        EXIT_USAGE,
+        "{} has no remaining section ids in the shared safe-integer domain",
+        item.id
+    );
     item.next_section_id = item.next_section_id.checked_add(1).ok_or_else(|| {
         Error::new(
             EXIT_INVARIANT,

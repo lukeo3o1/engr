@@ -419,6 +419,38 @@ pub fn load(root: &Path, id: &str) -> Result<Collection> {
     Ok(collection)
 }
 
+/// Decode predecessor bytes already captured by coordinated migration.
+pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Collection> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let collection: Collection = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    collection.validate()?;
+    ensure!(
+        collection.id == id,
+        EXIT_SCHEMA,
+        "{} says it is collection {}, and a plan has one identity",
+        path.display(),
+        collection.id
+    );
+    Ok(collection)
+}
+
+/// Validate a staged Collection artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(
+    path: &Path,
+    id: &str,
+    text: &str,
+) -> Result<Collection> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let collection = decode_for_migration(path, id, text)?;
+    check_canonical_members(path, &collection)?;
+    Ok(collection)
+}
+
 fn save(root: &Path, collection: &Collection) -> Result<()> {
     collection.validate()?;
     let mut collection = collection.clone();
