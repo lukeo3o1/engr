@@ -2035,11 +2035,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     );
     let id = engr::backlog::ids(root).expect("ids").remove(0);
 
-    assert!(
-        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "second point",
+            "--expect",
+            &add_token(root, &id)
+        ]
+    )
+    .status
+    .success());
     assert!(run_engr(
         root,
         &[
@@ -2049,7 +2058,9 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "--section",
             "2",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
@@ -2062,19 +2073,32 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
-            "one point"
+            "one point",
+            "--expect",
+            &expect_token(root, &id, Some(1)),
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
     .success());
-    assert!(
-        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "rename",
+            &id,
+            "--topic",
+            "refresh",
+            "--expect",
+            &expect_token(root, &id, None)
+        ]
+    )
+    .status
+    .success());
 
     let item = engr::backlog::load(root, &id).expect("item");
     assert_eq!(item.topic, "refresh");
@@ -2101,6 +2125,8 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "concerns dirty source",
             "--subject-file",
             "session.rs",
+            "--expect",
+            &add_token(root, &id),
         ],
     );
     assert!(
@@ -2129,9 +2155,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         "the dirty subject was staged as its own point"
     );
     assert!(
-        run_engr(root, &["backlog", "consume", &id, "--section", "3"])
-            .status
-            .success()
+        run_engr(
+            root,
+            &[
+                "backlog",
+                "consume",
+                &id,
+                "--section",
+                "3",
+                "--expect",
+                &expect_token(root, &id, Some(3))
+            ]
+        )
+        .status
+        .success()
     );
     assert_eq!(
         engr::backlog::load(root, &id).expect("item").sections.len(),
@@ -2141,7 +2178,15 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
     assert!(run_engr(
         root,
-        &["backlog", "consume", &id, "--section", &last.to_string()]
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            &last.to_string(),
+            "--expect",
+            &expect_token(root, &id, Some(last))
+        ]
     )
     .status
     .success());
@@ -3907,7 +3952,9 @@ fn backlog_json_sections_do_not_repeat_a_key() {
         &item.id,
         "a second point",
         Vec::new(),
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first().against(
+            engr::backlog::Precondition::section_absent(root, &item.id).expect("observe"),
+        ),
     )
     .expect("second");
 
@@ -4416,6 +4463,15 @@ fn governed_backlog(root: &Path, max_attempts: u32) -> String {
 }
 
 /// What `backlog show --json` says to hand back for a given point.
+/// The `expect` value for adding a point: the topic plus the id the add will
+/// receive.
+fn add_token(root: &Path, id: &str) -> String {
+    let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    shown["expect"]["add"].as_str().expect("add").to_owned()
+}
+
 fn expect_token(root: &Path, id: &str, section: Option<u64>) -> String {
     let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
     assert!(shown.status.success());
@@ -4649,9 +4705,9 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
     .success());
 }
 
-/// A merge carries one predecessor per point it touches.
+/// A merge carries one predecessor for each of the two points it touches.
 #[test]
-fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
+fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4678,7 +4734,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4696,7 +4752,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4713,9 +4769,14 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
     assert_eq!(stored.section(1).expect("§1").text, "one point");
 }
 
-/// With no rule governing backlog there is no review, so nothing to anchor.
+/// Stale-write protection does not depend on a rule being configured.
+///
+/// A rule decides whether there is a *review*; it does not decide whether
+/// somebody else's write can land between a caller's reading and their writing.
+/// With the two conflated, the ungoverned workspace — the one nobody has
+/// thought about concurrency in — was the one with no protection at all.
 #[test]
-fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
+fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4727,7 +4788,34 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
+    assert!(
+        engr::rules::applicable(root, engr::rules::Domain::Backlog)
+            .expect("rules")
+            .is_empty(),
+        "nothing governs backlog here"
+    );
 
+    let bare = run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &item.id,
+            "--section",
+            "1",
+            "--text",
+            "reworded",
+        ],
+    );
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("--expect"));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "an unresolved point",
+        "the refused write left the newer wording alone"
+    );
+
+    let current = expect_token(root, &item.id, Some(1));
     assert!(run_engr(
         root,
         &[
@@ -4737,20 +4825,23 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
             "--section",
             "1",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &current
         ]
     )
     .status
     .success());
 
-    // And one may still be given, in which case it is held to.
+    // And a predecessor that has moved is held to, with no rule in sight.
     let stale = expect_token(root, &item.id, Some(1));
     engr::backlog::revise_section(
         root,
         &item.id,
         1,
         "moved",
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(root, &item.id, 1).expect("observe")),
     )
     .expect("concurrent");
     let refused = run_engr(
@@ -4768,6 +4859,19 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_STALE));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "moved",
+        "the stale write left the newer wording untouched"
+    );
+
+    // Destructive consumption is held to the same rule.
+    let bare = run_engr(root, &["backlog", "consume", &item.id, "--section", "1"]);
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        !engr::backlog::ids(root).expect("ids").is_empty(),
+        "an unresolved point is not consumed on a reading nobody bound"
+    );
 }
 
 /// A rule about unresolved points must not make unresolved points uncreatable.

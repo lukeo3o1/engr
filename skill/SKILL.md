@@ -244,23 +244,25 @@ the abbreviation for you.
 
 ## When a section is marked
 
-`show` marks four things, and tells you what to do about each:
+`show` marks five things, and tells you what to do about each:
 
 | Marking | What happened |
 | --- | --- |
 | `TAMPERED` / `tampered` | This Section or its Object aggregate does not match its stored integrity seal |
 | `REF TAMPERED` / `ref_tampered` | A current or historical dependency fails integrity; the detail names the side |
 | `REF UNREADABLE` / `ref_unreadable` | A section this one stands on will not load at all — malformed authority, not a missing one |
+| `REF MISSING` / `ref_missing` | A section this one stands on is gone: the authority it rests on no longer exists |
 | `basis moved` / `stale_basis` | Real changes landed since the commit this wording was written against |
 | `refs moved` / `stale_refs` | One or more selected dependency fields moved through an admission path |
 
-The first three are a different kind of problem from the last two, and they are
-not something to work around. **Stop and tell the human.** Someone edited the
-stored file directly rather than going through the gate, so nothing about that
-wording was agreed to by anyone. `show` hands you `git show <commit>:<path>` —
-run it, and report what the record said before the edit. `engr show` and
-`engr verify` exit non-zero here; `engr ls` still exits 0 so a survey of many
-objects is not cut short.
+The first four are a different kind of problem from the last two, and they are
+not something to work around. **Stop and tell the human.** Either someone edited
+the stored file directly rather than going through the gate, or authority this
+wording explicitly rests on has vanished — so nothing about that wording was
+agreed to by anyone, or what was agreed to can no longer be checked. `show`
+hands you `git show <commit>:<path>` — run it, and report what the record said
+before the edit. `engr show` and `engr verify` exit non-zero here; `engr ls`
+still exits 0 so a survey of many objects is not cut short.
 
 For the last two: **do not quietly reason from a drifted section.** Take the
 `git show` command `show` hands you, read what the dependency used to say, and
@@ -283,14 +285,16 @@ engr backlog show <id>                   # points, subjects, outcomes so far
 engr backlog new --topic "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
-engr backlog merge <id> --into 2 --sections 5 --text "one point after all"
+engr backlog merge <id> --into 2 --section 5 --text "one point after all"
 engr backlog produced <id> --section 2 --target engr:obj:<id>:3
 engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
 
-`merge` keeps the destination you name and removes the sources; it never mints a
-third section, so anything already pointing at `--into` still points at it. What
-the sources produced comes along.
+`merge` names one destination and one source. It keeps the destination and
+removes the source; it never mints a third section, so anything already pointing
+at `--into` still points at it. What the source produced comes along. Two points
+to fold in is two merges, because each consumption is its own judgement against
+its own predecessor.
 
 Before every existing-state backlog mutation, read before you write and say
 what you read. This stale-write protection is independent of whether a Rule
@@ -301,10 +305,11 @@ engr backlog show <id> --format json    # each point carries an `expect` value
 ```
 
 Pass it back as `--expect <token>` on the mutation — once per point, so a merge
-passes two. If it no longer matches, the point moved between your reading it and
-your changing it, and you get told to read it again rather than landing a change
-on wording you never saw. Creation is the sole exception because engr allocates
-the new identity atomically and there is no predecessor to supply.
+passes two: the destination and its source. If it no longer matches, the point
+moved between your reading it and your changing it, and you get told to read it
+again rather than landing a change on wording you never saw. Creation is the
+sole exception, because engr allocates the new identity atomically and there is
+no predecessor to supply.
 
 Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.

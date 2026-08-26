@@ -187,9 +187,9 @@ enum Backlog {
         /// The point that survives, keeping its id and taking the merged wording
         #[arg(long = "into", value_name = "SECTION")]
         into: u64,
-        /// The points merged into it. They are removed, and their ids not reused
-        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-        sections: Vec<u64>,
+        /// The point merged into it. It is removed, and its id not reused
+        #[arg(long, value_name = "SECTION")]
+        section: u64,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
@@ -272,22 +272,19 @@ impl ReviewArg {
 
     fn prepared(
         &self,
-        governed: bool,
         binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
     ) -> Result<backlog::Prepared> {
         let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
-        if self.expect.is_empty() {
-            // Only where a review was actually required. With no applicable rule
-            // there is no review for a predecessor to anchor, and demanding one
-            // would be ceremony; with one, an unanchored mutation is a review of
-            // something nobody can show was what got applied.
-            ensure!(
-                !governed,
-                engr::EXIT_USAGE,
-                "a project rule governs backlog, so this needs --expect: run `engr backlog show <item> --json`, review what you read, and pass its expect value back"
-            );
-            return Ok(prepared);
-        }
+        // Every existing-state mutation, whether or not a Rule governs backlog.
+        // A rule decides whether there is a *review* to anchor; it does not
+        // decide whether someone else's write can land between your reading and
+        // yours. Making this conditional meant stale-write protection was
+        // switched off in exactly the workspaces nobody had configured.
+        ensure!(
+            !self.expect.is_empty(),
+            engr::EXIT_USAGE,
+            "this needs --expect: run `engr backlog show <item> --json`, read the point, and pass its expect value back"
+        );
         let bound = binds()?;
         let mut wanted = Vec::new();
         for precondition in &bound {
@@ -938,12 +935,6 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Whether a project rule governs backlog here, and so whether a review was
-/// required at all.
-fn governed(root: &Path) -> Result<bool> {
-    Ok(!rules::applicable(root, rules::Domain::Backlog)?.is_empty())
-}
-
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
     match command {
         Backlog::New {
@@ -993,7 +984,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
+            let prepared = review.prepared(|| {
                 Ok(vec![backlog::Precondition::topic(root, &id)?])
             })?;
             let item = backlog::rename(root, &id, &topic, &prepared)?;
@@ -1012,7 +1003,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &id,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(governed(root)?, || {
+                &review.prepared(|| {
                     Ok(vec![backlog::Precondition::section_absent(root, &id)?])
                 })?,
             )?;
@@ -1026,7 +1017,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
+            let prepared = review.prepared(|| {
                 Ok(vec![backlog::Precondition::section(root, &id, section)?])
             })?;
             backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
@@ -1042,7 +1033,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            let prepared = review.prepared(governed(root)?, || {
+            let prepared = review.prepared(|| {
                 Ok(vec![backlog::Precondition::section(root, &id, section)?])
             })?;
             backlog::set_subjects(root, &id, section, subjects, &prepared)?;
@@ -1052,7 +1043,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
         Backlog::Merge {
             item,
             into,
-            sections,
+            section,
             text,
             subjects,
             review,
@@ -1062,23 +1053,17 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 root,
                 &id,
                 into,
-                &sections,
+                section,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(governed(root)?, || {
-                    let mut bound = vec![backlog::Precondition::section(root, &id, into)?];
-                    for source in &sections {
-                        bound.push(backlog::Precondition::section(root, &id, *source)?);
-                    }
-                    Ok(bound)
+                &review.prepared(|| {
+                    Ok(vec![
+                        backlog::Precondition::section(root, &id, into)?,
+                        backlog::Precondition::section(root, &id, section)?,
+                    ])
                 })?,
             )?;
-            let absorbed = sections
-                .iter()
-                .map(|section| format!("§{section}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("merged {absorbed} into §{into}");
+            println!("merged §{section} into §{into}");
             Ok(())
         }
         Backlog::Produced {
@@ -1089,7 +1074,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
+            let prepared = review.prepared(|| {
                 Ok(vec![backlog::Precondition::section(root, &id, section)?])
             })?;
             let outcome = backlog::Produced::object(
@@ -1114,7 +1099,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
+            let prepared = review.prepared(|| {
                 Ok(vec![backlog::Precondition::section(root, &id, section)?])
             })?;
             if backlog::consume_section(root, &id, section, &prepared)? {

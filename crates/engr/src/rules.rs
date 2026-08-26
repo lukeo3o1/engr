@@ -583,6 +583,18 @@ pub struct Rule {
     /// Where it was found. Not part of identity and not hashed.
     #[serde(skip)]
     pub source: PathBuf,
+    /// The exact bytes this Rule was parsed from.
+    ///
+    /// Kept rather than re-read. `.engr/rules/` is deliberately editable
+    /// outside the workspace lock, so parsing the file and then reopening it
+    /// for provenance is two reads of a moving target: the binding would name
+    /// one file's semantics while claiming the next file's `content_sha256` and
+    /// commit. Artifact-exact Rule identity means the provenance identifies the
+    /// exact artifact whose semantics were reviewed, which is only true if both
+    /// come from one read. Not part of identity and not hashed — the fields
+    /// derived from it are.
+    #[serde(skip)]
+    pub raw: String,
 }
 
 impl Rule {
@@ -893,6 +905,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         review,
         body: body.to_owned(),
         source: path.to_path_buf(),
+        raw: raw.to_owned(),
     })
 }
 
@@ -1595,25 +1608,21 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
         canonical_set(&mut domains, "domain")?;
-        // The Rule's own provenance, by the same rule as its bases. The file is
-        // read either way: `content_sha256` identifies the exact Rule-file
-        // bytes, and only the *commit lookup* depends on the file being inside
+        // The Rule's own provenance, from the same bytes the semantics above
+        // were parsed from. Not a second `read_to_string` of the locator:
+        // `.engr/rules/` is editable outside the workspace lock, so a second
+        // read can return a different artifact, and the binding would then name
+        // one file's normative text while claiming the other file's
+        // `content_sha256` and commit. Artifact-exact identity means the
+        // provenance identifies the exact artifact whose semantics were
+        // reviewed. Only the *commit lookup* depends on the file being inside
         // the repository.
         //
         // It hashed `rule.body` when there was no repository path, which
         // dropped the front matter from the artifact identity — two Rule files
         // with one body and different front matter would have shared an
         // identity, and this member is supposed to say which file was read.
-        let text = std::fs::read_to_string(&rule.source).map_err(|error| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!(
-                    "rule {}: {} could not be read: {error}",
-                    rule.id,
-                    rule.source.display()
-                ),
-            )
-        })?;
+        let text = rule.raw;
         let provenance = match rule_relative_path(root, &rule.source) {
             Some(path) => Provenance::of(root, &path, &text),
             // Outside the repository entirely, so no commit can hold it. Not a

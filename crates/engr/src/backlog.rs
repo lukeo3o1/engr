@@ -820,13 +820,14 @@ impl Precondition {
         Self::of_section(&load(root, item)?, section)
     }
 
-    /// Read the current predecessor for a merge over several Sections.
-    pub fn merge(root: &Path, item: &str, sections: &[u64]) -> Result<Self> {
+    /// Read the current predecessor for a merge: the destination and its one
+    /// source, both complete, under their parent topic.
+    pub fn merge(root: &Path, item: &str, destination: u64, source: u64) -> Result<Self> {
         let loaded = load(root, item)?;
-        let mut bound = Vec::new();
-        for id in sections {
-            bound.push(loaded.section(*id)?.clone());
-        }
+        let mut bound = vec![
+            loaded.section(destination)?.clone(),
+            loaded.section(source)?.clone(),
+        ];
         bound.sort_by_key(|section| section.id);
         Ok(Self::Merge {
             item: loaded.id.clone(),
@@ -1068,27 +1069,19 @@ impl Prepared {
 /// exactly the rule change that would have altered the verdict.
 struct Reviewed {
     marker: Option<crate::rules::RuleReview>,
-    /// Whether any project rule governed this mutation at all — and so whether
-    /// a review was required, and a predecessor with it.
-    governed: bool,
 }
 
 impl Reviewed {
     fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
         // One read of policy for both answers. Asking twice lets a rule appear
         // between them and leaves this mutation acting on two pictures at once.
-        let (governed, verdict) =
-            crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
+        let (_, verdict) = crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
         match verdict {
             // No applicable rule, or none of them out of attempts. Either way
             // there is no diagnostic to carry.
-            crate::rules::Exhaustion::NotReached => Ok(Self {
-                marker: None,
-                governed,
-            }),
+            crate::rules::Exhaustion::NotReached => Ok(Self { marker: None }),
             crate::rules::Exhaustion::Exhausted(marker) => Ok(Self {
                 marker: Some(marker),
-                governed,
             }),
             // The Object verdicts. Reaching one here would mean the composition
             // answered for the wrong domain, and the failure mode — a Backlog
@@ -1111,19 +1104,28 @@ impl Reviewed {
         section.rule_review = self.marker;
     }
 
-    /// A reviewed mutation must carry what it was reviewed against.
+    /// Every existing-state mutation must carry what it was prepared against.
+    ///
+    /// Not only a governed one. Rule presence decides whether a *review*
+    /// applies; it does not decide whether a concurrent write can land under
+    /// this one. Conflating the two meant that in a workspace with no
+    /// applicable Backlog Rule a caller holding a stale reading could reword,
+    /// re-subject, rename or destructively consume a point that had moved since
+    /// — the exact stale write the exact-predecessor contract exists to refuse,
+    /// available precisely where nobody had configured a policy.
     ///
     /// Here rather than only at the command line, because the library exposes
     /// the same semantic mutation. `Prepared::first()` is a perfectly ordinary
-    /// constructor, and without this a direct caller could reword — or
-    /// destructively consume — a governed point having reviewed nothing, while
-    /// every check that does run passes. Enforcement that lives one layer above
-    /// the thing it protects is enforcement of the layer, not of the thing.
-    fn needs_predecessor(&self, precondition: Option<&Precondition>) -> Result<()> {
+    /// constructor, and enforcement that lives one layer above the thing it
+    /// protects is enforcement of the layer, not of the thing.
+    ///
+    /// Creation is the sole exception, and it is one because engr mints the id
+    /// atomically: there is no predecessor to name.
+    fn needs_predecessor(precondition: Option<&Precondition>) -> Result<()> {
         ensure!(
-            !self.governed || precondition.is_some(),
+            precondition.is_some(),
             EXIT_INVARIANT,
-            "a project rule governs backlog, so this mutation must carry the predecessor it was reviewed against"
+            "this mutation must carry the exact predecessor it was prepared against; read the point again and pass what you read"
         );
         Ok(())
     }
@@ -1158,18 +1160,15 @@ impl Reviewed {
 /// without this, a caller holding a perfectly valid predecessor for one item can
 /// apply it to another, or bind §1 and consume §5, and the exact-predecessor
 /// guarantee is gone precisely where it looks satisfied.
-enum Binds<'a> {
+enum Binds {
     /// The topic, and therefore the complete item.
     Topic,
     /// The Section id an add is about to receive.
     NewSection,
     /// One whole Section, by id.
     Section(u64),
-    /// A merge: the destination and every source, and nothing else.
-    Merge {
-        destination: u64,
-        sources: &'a [u64],
-    },
+    /// A merge: the destination and its one source, and nothing else.
+    Merge { destination: u64, source: u64 },
 }
 
 impl Precondition {
@@ -1195,13 +1194,11 @@ impl Precondition {
                 Self::Merge { sections, .. },
                 Binds::Merge {
                     destination,
-                    sources,
+                    source,
                 },
             ) => {
                 let bound: BTreeSet<u64> = sections.iter().map(|section| section.id).collect();
-                let touched: BTreeSet<u64> = std::iter::once(*destination)
-                    .chain(sources.iter().copied())
-                    .collect();
+                let touched: BTreeSet<u64> = [*destination, *source].into_iter().collect();
                 bound == touched
             }
             _ => false,
@@ -1251,12 +1248,12 @@ fn edit<T>(
     body: impl FnOnce(&mut Item, &Reviewed) -> Result<T>,
 ) -> Result<T> {
     locked(root, || {
+        Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
             precondition.authorizes(id, &binds)?;
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
-        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
         let mut item = load(root, id)?;
         let outcome = body(&mut item, &reviewed)?;
         item.sections.sort_by_key(|section| section.id);
@@ -1595,27 +1592,21 @@ pub fn merge_into(
     root: &Path,
     id: &str,
     destination: u64,
-    sources: &[u64],
+    source: u64,
     text: &str,
     subjects: Vec<Subject>,
     prepared: &Prepared,
 ) -> Result<()> {
     check_text(text)?;
-    let mut unique = sources.to_vec();
-    unique.sort_unstable();
-    unique.dedup();
+    // Exactly one source. The owning contract names one destination Section and
+    // one source Section, and the precondition it froze is the parent topic plus
+    // those two complete predecessors. Taking any number of sources is not an
+    // ergonomic shorthand for repeating that: one review and one atomic apply
+    // would consume several unresolved identities at once, against a different
+    // predecessor and a different Rule Review subject than the one that was
+    // frozen.
     ensure!(
-        !sources.is_empty(),
-        EXIT_INVARIANT,
-        "a merge needs at least one section to merge into the destination"
-    );
-    ensure!(
-        unique.len() == sources.len(),
-        EXIT_INVARIANT,
-        "a merge cannot take the same section twice"
-    );
-    ensure!(
-        !sources.contains(&destination),
+        source != destination,
         EXIT_INVARIANT,
         "§{destination} is the destination, so it cannot also be merged into itself"
     );
@@ -1625,28 +1616,25 @@ pub fn merge_into(
         prepared,
         Binds::Merge {
             destination,
-            sources,
+            source,
         },
         |item, reviewed| {
-            // A merge removes the sources, and a Section leaves only through a
+            // A merge removes the source, and a Section leaves only through a
             // review that passed — a consume, or atomically as the source of a
             // merge. Soft-admission is for mutations that keep the unresolved point
-            // available, and the sources' own wording does not survive this one.
+            // available, and the source's own wording does not survive this one.
             reviewed.must_have_passed(
-            "a merge removes its sources, and an unresolved point is not removed on an exhausted review",
+            "a merge removes its source, and an unresolved point is not removed on an exhausted review",
         )?;
-            // Every participant is checked before anything moves, so a merge naming
-            // a section that is not there changes nothing at all.
+            // Both participants are checked before anything moves, so a merge
+            // naming a section that is not there changes nothing at all.
             let mut produced = item.section(destination)?.produced.clone();
-            for source in sources {
-                for outcome in &item.section(*source)?.produced {
-                    if !produced.contains(outcome) {
-                        produced.push(outcome.clone());
-                    }
+            for outcome in &item.section(source)?.produced {
+                if !produced.contains(outcome) {
+                    produced.push(outcome.clone());
                 }
             }
-            item.sections
-                .retain(|section| !sources.contains(&section.id));
+            item.sections.retain(|section| section.id != source);
             let slot = item
                 .sections
                 .iter_mut()
@@ -1685,12 +1673,12 @@ pub fn merge_into(
 /// no marker is written, because nothing was admitted for one to describe.
 pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared) -> Result<bool> {
     locked(root, || {
+        Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
             precondition.authorizes(id, &Binds::Section(section))?;
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
-        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
         reviewed.must_have_passed(
             "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
         )?;

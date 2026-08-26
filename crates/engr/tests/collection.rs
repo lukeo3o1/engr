@@ -396,7 +396,14 @@ fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
     collection::add_member(&root, &plan.id, &target, Some(10), None).expect("add");
 
     // The point is settled and removed from staging.
-    backlog::consume_section(&root, &item.id, 1, &Prepared::first()).expect("consume");
+    backlog::consume_section(
+        &root,
+        &item.id,
+        1,
+        &Prepared::first()
+            .against(backlog::Precondition::section(&root, &item.id, 1).expect("observe")),
+    )
+    .expect("consume");
     assert!(backlog::load(&root, &item.id).is_err());
 
     // The plan still says what it said. Nothing was rewritten.
