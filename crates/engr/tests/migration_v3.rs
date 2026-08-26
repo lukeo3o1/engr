@@ -182,7 +182,7 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
         id.to_owned(),
         Value::String(engr::proof::sha256_of(&migrated)),
     );
-    store::write_json(
+    write_raw(
         &stage.join("manifest.json"),
         &json!({
             "source_version": 2,
@@ -330,4 +330,15 @@ fn legacy_refs_become_full_selective_refs_without_gaining_admission() {
         .expect("dependency"),
         engr::dependency::Dependency::Unchanged
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }

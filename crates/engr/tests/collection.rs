@@ -69,7 +69,7 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = collection::path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// A plan has an identity of its own, and it says nothing.
@@ -671,7 +671,7 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
 
     let sound: Value = store::read_json(&collection::path(&root, &item.id)).expect("read");
     for (what, corrupt) in corruptions {
-        store::write_json(&collection::path(&root, &item.id), &sound).expect("restore");
+        write_raw(&collection::path(&root, &item.id), &sound).expect("restore");
         rewrite(&root, &item.id, corrupt);
         let error = collection::load(&root, &item.id).expect_err(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
@@ -843,4 +843,15 @@ fn a_target_consumed_before_the_membership_is_written_is_not_admitted() {
             .is_empty(),
         "nothing that was never admissible may be persisted"
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }

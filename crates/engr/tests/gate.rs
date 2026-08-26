@@ -70,6 +70,17 @@ fn candidate_event(candidate: &gate::Candidate) -> engr::model::Event {
         },
     }
 }
+/// A Human Event for a change that really was prepared.
+///
+/// The durable boundary admits one only against the candidate it was prepared
+/// as, which is what makes the challenge unforgeable — so a direct caller that
+/// wants to reach that boundary goes through `prepare`, exactly as `confirm`
+/// does. [`direct_human_event`] stays for records that must be refused before
+/// the admission proof is ever reached.
+fn admissible_human_event(root: &Path, payload: Payload) -> engr::model::Event {
+    let prepared = gate::prepare(root, payload).expect("prepare");
+    candidate_event(&prepared.candidate)
+}
 
 fn direct_human_event(root: &Path, id: &str, payload: Payload, rev: u64) -> engr::model::Event {
     let confirmation = store::load_events(root, id)
@@ -870,7 +881,7 @@ fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
         .as_object_mut()
         .expect("candidate object")
         .remove("previous_semantics_recorded");
-    store::write_json(&path, &stored).expect("legacy candidate");
+    write_raw(&path, &stored).expect("legacy candidate");
 
     let error = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
         .expect_err("semantic history is required");
@@ -1020,7 +1031,7 @@ fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission()
 
         let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
         tamper(&mut stored);
-        store::write_json(&path, &stored).expect("rewrite candidate");
+        write_raw(&path, &stored).expect("rewrite candidate");
 
         let error = gate::find(&root, &code).expect_err(name);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
@@ -1052,7 +1063,7 @@ fn a_candidate_envelope_without_integrity_is_refused_rather_than_trusted() {
     let stored_object = stored.as_object_mut().expect("candidate object");
     stored_object.insert("version".to_owned(), serde_json::json!(1));
     stored_object.remove("integrity_sha256");
-    store::write_json(&path, &stored).expect("legacy candidate");
+    write_raw(&path, &stored).expect("legacy candidate");
 
     let error =
         gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("no integrity, no admission");
@@ -1083,7 +1094,7 @@ fn a_candidate_cannot_redirect_a_human_to_another_candidates_code() {
     let a_path = store::candidate_path(&root, &a_code).expect("path");
     let mut stored: serde_json::Value = store::read_json(&a_path).expect("candidate A");
     stored["challenge"] = serde_json::json!(b_code);
-    store::write_json(&a_path, &stored).expect("redirect A at B");
+    write_raw(&a_path, &stored).expect("redirect A at B");
 
     // A cannot be rendered, so no screen can ever pair A's change with B's code.
     let error = gate::find(&root, &a_code).expect_err("a redirect is not a candidate");
@@ -1141,7 +1152,7 @@ fn a_refused_candidate_does_not_block_the_rest_of_the_workspace() {
     let stored_object = stored.as_object_mut().expect("candidate object");
     stored_object.insert("version".to_owned(), serde_json::json!(1));
     stored_object.remove("integrity_sha256");
-    store::write_json(&path, &stored).expect("legacy candidate");
+    write_raw(&path, &stored).expect("legacy candidate");
 
     // Preparing something else works, and does not reuse the stranded code.
     let other = gate::prepare(
@@ -1184,7 +1195,7 @@ fn candidate_integrity_does_not_break_the_idempotent_cleanup_retry() {
         gate::prepare(&root, payload(Action::SectionAdded, &id, "apply once")).expect("prepare");
     let code = prepared.candidate.challenge.clone();
     gate::confirm(&root, &format!("CONFIRM {code}")).expect("apply");
-    store::write_json(
+    write_raw(
         &store::candidate_path(&root, &code).expect("path"),
         &prepared.candidate,
     )
@@ -1397,7 +1408,7 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
 
     // Reinstate the candidate to stand in for a crash between saving the
     // projection and clearing it.
-    store::write_json(
+    write_raw(
         &store::candidate_path(&root, &code).expect("candidate path"),
         &prepared.candidate,
     )
@@ -1562,7 +1573,7 @@ fn a_candidate_that_still_declares_backlog_material_is_refused_not_reinterpreted
     let object = stored.as_object_mut().expect("object");
     object.insert("backlog".to_owned(), backlog);
     object.insert("version".to_owned(), serde_json::json!(2));
-    store::write_json(&path, &stored).expect("rewrite as the earlier build");
+    write_raw(&path, &stored).expect("rewrite as the earlier build");
 
     let error = gate::find(&root, &challenge).expect_err("prepared under a different contract");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
@@ -1620,24 +1631,37 @@ fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
     store::load_events(&root, &id).expect("and the history is still readable");
 }
 
-/// Direct Object writes cannot reseal an authority change they did not admit.
+/// There is no public writer for a persisted Object, and every read says so.
+///
+/// The library used to expose one that validated: a caller could hand it an
+/// arbitrary current-shape Object and, so long as the seals were freshly
+/// consistent, have it published. Locking that call closed a race, not the
+/// authority boundary — nothing about a self-consistent resealed projection
+/// says any Event, Human Gate or Rule Review produced it. So the primitive is
+/// gone from the public surface, and what remains for a direct caller is
+/// writing bytes from outside, which every trust surface then reports.
 #[test]
-fn the_object_write_boundary_refuses_an_unsealed_authority_change() {
+fn there_is_no_public_write_boundary_that_could_promote_authority() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "authority boundary");
     admit(&root, payload(Action::SectionAdded, &id, "wording"));
 
     let mut object = store::load_object(&root, &id).expect("object");
     object.sections[0].admission = engr::semantics::Admission::Agent;
-    let error = store::save_object(&root, &object)
-        .expect_err("a direct write cannot promote or demote authority");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    save_raw(&root, &object).expect("bytes can always be put on disk from outside");
 
-    let reloaded = store::load_object(&root, &id).expect("object");
-    assert_eq!(
-        reloaded.sections[0].admission,
-        engr::semantics::Admission::Human,
-        "and nothing on disk changed"
+    let report = engr::ops::verify(&root, &id).expect("verify");
+    assert!(
+        !report.passed(),
+        "a change nothing admitted is a broken record"
+    );
+    assert!(report.object_tampered || !report.tampered.is_empty());
+    assert!(
+        engr::integrity::check_stored_object_integrity(
+            &store::load_object(&root, &id).expect("still loads")
+        )
+        .is_err(),
+        "the seal admitted at the gate does not cover this"
     );
 }
 
@@ -1880,7 +1904,7 @@ fn appending_an_event_enforces_the_contract_its_own_read_applies() {
     let before = std::fs::read(&path).expect("events");
 
     let added = payload(Action::SectionAdded, &id, "wording");
-    let sound = direct_human_event(&root, &id, added, 2);
+    let sound = admissible_human_event(&root, added);
 
     let mut wrong_format = sound.clone();
     wrong_format.format = "not-an-engr-event".to_owned();
@@ -1937,18 +1961,17 @@ impl NoteErr for engr::Result<()> {
 fn two_direct_callers_cannot_both_append_the_same_revision() {
     let (dir, root) = workspace();
     let id = new_object(&root, "one predecessor");
-    let after = |rev: u64| {
-        let added = payload(Action::SectionAdded, &id, "wording");
-        direct_human_event(&root, &id, added, rev)
-    };
-
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    // One prepared candidate, two callers holding the same admissible record.
+    // The lock decides which of them takes the predecessor; the other finds the
+    // revision already spent.
+    let event = admissible_human_event(&root, payload(Action::SectionAdded, &id, "wording"));
     let outcomes: Vec<bool> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let barrier = std::sync::Arc::clone(&barrier);
                 let root = root.clone();
-                let event = after(2);
+                let event = event.clone();
                 scope.spawn(move || {
                     barrier.wait();
                     store::append_event(&root, &event).is_ok()
@@ -2081,4 +2104,139 @@ fn retained_event_generation_cannot_carry_tagged_admission() {
     std::fs::write(&path, history).expect("write");
     let error = store::load_events(&root, &id).expect_err("nor read under this generation");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// A well-formed Event is not an admitted one.
+///
+/// Every shape check can pass on a record a caller assembled: the schema is
+/// exact, the revision follows, the reducer can replay it, and the provenance
+/// scalars are syntactically perfect. None of that says a person was shown
+/// anything or that any Rule was read. Without a proof at this boundary, a
+/// direct library caller appends the record and lets recovery project it into
+/// current authority — which is the whole admission model, bypassed by the one
+/// door that writes durable history.
+#[test]
+fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "forged human provenance");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    // Prepared for real, then the challenge swapped for one that was never
+    // minted. Everything else about the record is exactly right.
+    let admissible = admissible_human_event(&root, payload(Action::SectionAdded, &id, "wording"));
+    let mut forged = admissible.clone();
+    if let Provenance::Tagged { admission } = &mut forged.provenance {
+        admission.confirmation = Some(HumanConfirmation {
+            challenge: "ZZZZZZ".to_owned(),
+            candidate_digest: admissible
+                .human_confirmation()
+                .expect("confirmation")
+                .candidate_digest
+                .clone(),
+        });
+    }
+    let error =
+        store::append_event(&root, &forged).expect_err("a challenge nobody minted admits nothing");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("not admitted through the gate"),
+        "{error}"
+    );
+
+    // And the digest, against the real challenge: the pair is what the Event
+    // persists, so neither half stands on its own.
+    let mut swapped = admissible.clone();
+    if let Provenance::Tagged { admission } = &mut swapped.provenance {
+        admission.confirmation = Some(HumanConfirmation {
+            challenge: admissible
+                .human_confirmation()
+                .expect("confirmation")
+                .challenge
+                .clone(),
+            candidate_digest: format!("1:{}", "b".repeat(64)),
+        });
+    }
+    let error = store::append_event(&root, &swapped)
+        .expect_err("a candidate digest nothing produced admits nothing");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "neither forgery was written"
+    );
+    store::append_event(&root, &admissible).expect("the prepared record still appends");
+}
+
+/// The same, for the Agent door.
+///
+/// `Provenance::validate` reads a ReviewDigest for spelling. It cannot tell an
+/// attestation made against a Rule set somebody read from sixty-four invented
+/// hex characters, so the digest is recomputed here against the live applicable
+/// Rules for exactly this mutation.
+#[test]
+fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "forged agent provenance");
+    let path = store::events_path(&root, &id);
+    let before = std::fs::read(&path).expect("events");
+
+    let forged = engr::model::Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: 2,
+        time: "2026-08-25T00:00:00Z".to_owned(),
+        payload: payload(Action::SectionAdded, &id, "admitted by nobody"),
+        provenance: Provenance::Tagged {
+            admission: TaggedAdmission {
+                kind: engr::semantics::Admission::Agent,
+                confirmation: None,
+                rule_review: Some(engr::model::ReviewProvenance {
+                    outcome: engr::model::ReviewOutcome::Passed,
+                    review_digest: format!("1:{}", "c".repeat(64)),
+                }),
+            },
+        },
+    };
+    let error =
+        store::append_event(&root, &forged).expect_err("an invented review digest admits nothing");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("Rule Review that is not the one"),
+        "{error}"
+    );
+
+    // And with no review at all: semantic Agent admission needs an applicable
+    // usable Object Rule, and a title is the sole exception.
+    let mut bare = forged.clone();
+    if let Provenance::Tagged { admission } = &mut bare.provenance {
+        admission.rule_review = None;
+    }
+    let error =
+        store::append_event(&root, &bare).expect_err("no Rule Review, no semantic Agent admission");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    assert_eq!(
+        std::fs::read(&path).expect("events"),
+        before,
+        "neither forgery was written"
+    );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
 }

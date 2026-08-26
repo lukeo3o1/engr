@@ -601,7 +601,7 @@ mod against_a_workspace {
         object.sections = vec![section];
         let (mut object, seal) = phase_three_seals(&object);
         object.sha256 = Some(seal);
-        engr::store::save_object(&root, &object).expect("save");
+        save_raw(&root, &object).expect("save");
 
         let commit = commit_all(&root, "record");
         (dir, root, object, commit)
@@ -990,7 +990,7 @@ mod against_a_workspace {
         let historical = commit_all(&root, "legacy reference");
 
         // Evaluation compares that retained snapshot with a current v3 target.
-        engr::store::write_json(&path, &object).expect("restore current object");
+        write_raw(&path, &object).expect("restore current object");
         std::fs::write(
             &format_path,
             format!(
@@ -1337,4 +1337,20 @@ fn a_target_has_exactly_one_canonical_spelling() {
         let emitted = engr::proof::section_target(&id, section);
         assert_eq!(parse_target(&emitted).expect("round trip").1, section);
     }
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
 }

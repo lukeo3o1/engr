@@ -12,6 +12,29 @@
 //!   work/objects/<uuid>.json execution memory, owned by an object, admitted by nobody
 //!   collections/<id>.json    planning metadata, admitted by nobody
 //! ```
+//!
+//! There is no public writer here, and that is a contract rather than an
+//! oversight. A raw serializer or an Object save that validates shape is not an
+//! admission boundary: a self-consistent, correctly resealed Object says
+//! nothing about whether any Event, Human Gate or Rule Review produced it, and
+//! holding the writer lock closes a race rather than that question. So the
+//! primitives are crate-private, and a consumer reaches durable state only
+//! through a domain API that owns its own authority contract.
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn publish(root: &Path, object: &engr::model::Object) {
+//!     engr::store::save_object(root, object).expect("no such public writer");
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn publish(root: &Path, object: &engr::model::Object) {
+//!     let path = engr::store::object_path(root, &object.id);
+//!     engr::store::write_json(&path, object).expect("no such public writer");
+//! }
+//! ```
 
 use crate::model::{
     replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
@@ -665,7 +688,7 @@ pub(crate) fn read_resource<T: DeserializeOwned>(root: &Path, path: &Path) -> Re
 }
 
 /// Write via a temporary file and rename, so a reader never sees half a file.
-pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
@@ -714,7 +737,7 @@ pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     decode_object_for_version(&path, id, value, version)
 }
 
-pub fn save_object(root: &Path, object: &Object) -> Result<()> {
+pub(crate) fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
     ensure!(
@@ -1229,6 +1252,10 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
         Err(error) => return Err(error),
     };
     validate_recoverable_tail(id, object, &tail)?;
+    // Last, and only for a record that is otherwise sound: a malformed Event
+    // should be refused for being malformed, not for failing a proof about a
+    // shape nothing could admit anyway.
+    crate::gate::check_admission(root, event)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }

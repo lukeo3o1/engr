@@ -57,7 +57,7 @@ fn rewrite(root: &Path, object: &str, edit: impl FnOnce(&mut Value)) {
     let path = work::path(root, object);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// A sidecar belongs to an Object, and only to one that exists.
@@ -630,7 +630,7 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
 
     let sound = store::read_json::<Value>(&work::path(&root, &id)).expect("read");
     for (what, corrupt) in corruptions {
-        store::write_json(&work::path(&root, &id), &sound).expect("restore");
+        write_raw(&work::path(&root, &id), &sound).expect("restore");
         rewrite(&root, &id, corrupt);
         let error = work::load(&root, &id).expect_err(what);
         // Schema, not usage, and not "either". Accepting both would hide the
@@ -661,7 +661,7 @@ fn an_orphan_sidecar_is_refused_rather_than_listed() {
     // Copied to a filename naming an Object that was never created.
     let orphan = engr::model::new_id();
     let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
-    store::write_json(&work::path(&root, &orphan), &sound).expect("write");
+    write_raw(&work::path(&root, &orphan), &sound).expect("write");
 
     let error = work::load(&root, &orphan).expect_err("a sidecar for nothing");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
@@ -695,7 +695,7 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     .expect("commit");
     work::add_dependency(&root, &id, &target, None, engr::rules::Attempt::FIRST).expect("depend");
     let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
-    let restore = || store::write_json(&work::path(&root, &id), &sound).expect("restore");
+    let restore = || write_raw(&work::path(&root, &id), &sound).expect("restore");
 
     // `dependencies`, `blockers`, `items` and `items[].commits` are required and
     // may be empty. Omitted is a third spelling the write path never produces.
@@ -915,7 +915,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     let path = store::object_path(&root, &object);
     let mut stored: serde_json::Value = store::read_json(&path).expect("read");
     stored["state"] = serde_json::json!("not-a-state");
-    store::write_json(&path, &stored).expect("write");
+    write_raw(&path, &stored).expect("write");
 
     let error = work::load(&root, &object).expect_err("the owner will not load");
     assert!(
@@ -933,4 +933,15 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     std::fs::remove_file(store::events_path(&root, &object)).expect("remove events");
     let error = work::load(&root, &object).expect_err("the owner is gone");
     assert!(error.message.contains("does not exist"), "{error}");
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }

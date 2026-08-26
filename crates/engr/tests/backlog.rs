@@ -383,14 +383,14 @@ fn a_stored_item_with_duplicate_or_impossible_section_ids_is_refused() {
     ] {
         let mut value = pristine.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write corrupt item");
+        write_raw(&path, &value).expect("write corrupt item");
         let error = backlog::load(&root, &id).expect_err(name);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
     }
 
     let mut value = pristine;
     value["id"] = serde_json::json!(engr::model::new_id());
-    store::write_json(&path, &value).expect("write mismatched id");
+    write_raw(&path, &value).expect("write mismatched id");
     let error = backlog::load(&root, &id).expect_err("id must match its filename");
     assert!(error.message.contains("does not match its filename"));
 }
@@ -447,7 +447,7 @@ fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
     ] {
         let mut value = pristine.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write corrupt item");
+        write_raw(&path, &value).expect("write corrupt item");
         let error = backlog::load(&root, &id).expect_err(name);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
     }
@@ -455,7 +455,7 @@ fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
     // A topic exactly at the limit is fine; the boundary is not off by one.
     let mut value = pristine;
     value["topic"] = serde_json::json!("x".repeat(120));
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
     backlog::load(&root, &id).expect("120 characters is a topic, not a body");
 }
 
@@ -485,7 +485,7 @@ fn stored_backlog_data_outside_the_schema_is_refused_rather_than_dropped() {
     let mut pristine: serde_json::Value = store::read_json(&path).expect("item");
     pristine["sections"][0]["produced"] =
         serde_json::json!([{ "target": { "kind": "engr", "ref": reference } }]);
-    store::write_json(&path, &pristine).expect("write");
+    write_raw(&path, &pristine).expect("write");
     backlog::load(&root, &id).expect("the seeded shape is the one the writer produces");
 
     for (name, corrupt) in [
@@ -537,7 +537,7 @@ fn stored_backlog_data_outside_the_schema_is_refused_rather_than_dropped() {
     ] {
         let mut value = pristine.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write corrupt item");
+        write_raw(&path, &value).expect("write corrupt item");
         let error = backlog::load(&root, &id).expect_err(name);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
     }
@@ -598,7 +598,7 @@ fn a_legacy_workspace_refuses_backlog_mutation_until_it_is_migrated() {
     let object = value.as_object_mut().expect("object");
     let state = object.remove("state").expect("state");
     object.insert("status".to_owned(), state);
-    store::write_json(&path, &value).expect("legacy object");
+    write_raw(&path, &value).expect("legacy object");
 
     let error = backlog::create(&root, "topic", "unresolved", Vec::new(), &Prepared::first())
         .expect_err("a legacy workspace is read-only until migration");
@@ -892,7 +892,7 @@ fn staged(root: &Path, id: &str, topic: &str, sections: serde_json::Value) {
         "next_section_id": sections.as_array().expect("sections").len() + 1,
         "sections": sections,
     });
-    store::write_json(&backlog::item_path(root, id), &item).expect("stage");
+    write_raw(&backlog::item_path(root, id), &item).expect("stage");
 }
 
 /// RFC3339 carries an offset, and offset timestamps do not sort as text.
@@ -1127,7 +1127,7 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
         Produced::object(format!("obj:{object}:1")),
         Produced::object(format!("obj:{object}:2")),
     ];
-    store::write_json(&backlog::item_path(&root, &staging), &stored).expect("seed outcomes");
+    write_raw(&backlog::item_path(&root, &staging), &stored).expect("seed outcomes");
 
     backlog::merge_into(
         &root,
@@ -2354,7 +2354,7 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
     ] {
         let mut corrupt = pristine.clone();
         corrupt["sections"][0]["rule_review"] = marker;
-        store::write_json(&path, &corrupt).expect("hand edit");
+        write_raw(&path, &corrupt).expect("hand edit");
         let error = backlog::load(&root, &id).unwrap_err();
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
     }
@@ -2362,7 +2362,7 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
     // The shape an exhausted review does produce still loads.
     let mut fine = pristine;
     fine["sections"][0]["rule_review"] = serde_json::json!({"attempts": 6, "limit": 5});
-    store::write_json(&path, &fine).expect("hand edit");
+    write_raw(&path, &fine).expect("hand edit");
     backlog::load(&root, &id).expect("a real diagnostic");
 }
 
@@ -2486,7 +2486,7 @@ fn the_same_target_cannot_appear_twice_by_differing_only_in_dirty() {
         { "kind": "file", "path": "session.rs", "commit": commit },
         { "kind": "file", "path": "session.rs", "commit": commit, "dirty": true },
     ]);
-    store::write_json(&path, &stored).expect("hand edit");
+    write_raw(&path, &stored).expect("hand edit");
 
     let error = backlog::load(&root, &id).expect_err("that is one subject listed twice");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
@@ -2649,7 +2649,7 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
 
     // Put it back, and the same claim is admissible.
     tampered.state = engr::semantics::State::Open;
-    store::save_object(&root, &tampered).expect("restore");
+    save_raw(&root, &tampered).expect("restore");
     assert!(backlog::record_produced(
         &root,
         &id,
@@ -2752,4 +2752,20 @@ fn a_produced_target_that_cannot_be_read_is_not_reported_as_missing() {
         "{}",
         error.message
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
 }

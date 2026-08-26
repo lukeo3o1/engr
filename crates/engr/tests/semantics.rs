@@ -130,7 +130,7 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// Adding semantic fields must not have moved any digest that already exists.
@@ -951,7 +951,7 @@ fn a_candidate_bound_to_a_classification_dies_when_the_object_moves() {
             wording("work happened meanwhile"),
         ),
     );
-    store::write_json(
+    write_raw(
         &store::candidate_path(&root, &code).expect("candidate path"),
         &prepared.candidate,
     )
@@ -1061,7 +1061,7 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
         let path = store::object_path(&root, &id);
         let mut value = seed.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write");
+        write_raw(&path, &value).expect("write");
         let error = store::load_object(&root, &id).expect_err(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {}", error.message);
     }
@@ -1758,7 +1758,9 @@ fn a_replacement_that_cannot_be_established_stops_the_source_reading_clean() {
     assert!(!report.passed(), "the forward link leads nowhere");
     assert_eq!(report.broken_replacements.len(), 1);
     assert!(
-        report.broken_replacements[0].reason.contains("no longer exists"),
+        report.broken_replacements[0]
+            .reason
+            .contains("no longer exists"),
         "{:?}",
         report.broken_replacements[0]
     );
@@ -1815,4 +1817,15 @@ fn classifying_an_object_into_the_state_it_already_holds_is_refused() {
         before + 1,
         "and the refusal spent nothing"
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }

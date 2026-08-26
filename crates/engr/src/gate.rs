@@ -550,6 +550,102 @@ fn check_projection_is_representable(projected: &Object) -> Result<()> {
     crate::proof::within_safe_integers(&value, &format!("object {}", projected.id))
 }
 
+/// Prove that this durable Event came from an admission path, not from a caller
+/// who assembled a well-formed record.
+///
+/// The shape checks above establish that a record is schema-exact, contiguous
+/// and replayable. None of that is admission. `Provenance::validate` reads the
+/// ReviewDigest and CandidateDigest scalars for *syntax*; it cannot tell an
+/// attested review from an invented sixty-four hex characters, and it cannot
+/// tell a confirmation a person gave from one nobody was ever shown. Without
+/// this, a direct library caller could append `kind: agent, outcome: passed`
+/// with a plausible digest, or a Human record naming a challenge that was never
+/// minted, and let recovery project either into current authority.
+///
+/// Asked here rather than at the two callers, because the point is the boundary
+/// and not the route to it — and asked under the writer lock, so the material it
+/// recomputes against is the material the append lands on.
+pub(crate) fn check_admission(root: &Path, event: &Event) -> Result<()> {
+    let Provenance::Tagged { admission } = &event.provenance else {
+        // The retained generation cannot be appended by this build at all, and
+        // the generation check above has already said so.
+        return Ok(());
+    };
+    match admission.kind {
+        Admission::Human => {
+            let confirmation = admission.confirmation.as_ref().ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    "a human Event carries the confirmation it was admitted by".to_owned(),
+                )
+            })?;
+            // The candidate is still on disk here: `confirm` appends before it
+            // discards, precisely so this window exists. A challenge is minted
+            // by `prepare` and is the one thing a caller cannot invent, so
+            // requiring the exact prepared envelope is what makes a Human Event
+            // unforgeable rather than merely well spelled.
+            let candidate = find(root, &confirmation.challenge).map_err(|error| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    format!(
+                        "no prepared candidate stands for challenge {}, so this Event was not admitted through the gate: {}",
+                        confirmation.challenge, error.message
+                    ),
+                )
+            })?;
+            ensure!(
+                is_admission_of(event, &candidate, event.rev),
+                EXIT_INVARIANT,
+                "candidate {} does not describe the transition this Event admits",
+                confirmation.challenge
+            );
+            Ok(())
+        }
+        Admission::Agent => {
+            let before = match ops::effective(root, &event.payload.object) {
+                Ok(object) => object,
+                Err(error) if error.code == EXIT_NOT_FOUND => {
+                    Object::new(event.payload.object.clone(), String::new())?
+                }
+                Err(error) => return Err(error),
+            };
+            let mut after = before.clone();
+            project(&mut after, event)?;
+            let review = admission.rule_review.as_ref();
+            let Some(review) = review else {
+                // The one non-authoritative exception, and it is narrow: a title
+                // asserts nothing about the project, so there is no policy for a
+                // review to be of.
+                ensure!(
+                    matches!(
+                        event.payload.action,
+                        Action::ObjectCreated | Action::ObjectRenamed
+                    ),
+                    EXIT_INVARIANT,
+                    "Agent semantic Object admission needs at least one applicable usable Object Rule"
+                );
+                return Ok(());
+            };
+            ensure!(
+                review.outcome == crate::model::ReviewOutcome::Passed,
+                EXIT_INVARIANT,
+                "an Agent mutation is admitted only by a passing Rule Review"
+            );
+            // Recomputed against the live applicable Rule set for exactly this
+            // mutation. A digest that names anything else names a review of
+            // something other than what is being written.
+            let mutation = crate::proof::object_review_mutation(&before, &after, &event.payload)?;
+            let live = crate::rules::bind_object(root, &mutation, before.rev)?;
+            ensure!(
+                live.digest()?.to_string() == review.review_digest,
+                EXIT_INVARIANT,
+                "this Event names a Rule Review that is not the one its mutation would get"
+            );
+            Ok(())
+        }
+    }
+}
+
 fn human_event(payload: &Payload, rev: u64, challenge: &str, candidate_digest: &str) -> Event {
     Event {
         format: EVENT_FORMAT.to_owned(),

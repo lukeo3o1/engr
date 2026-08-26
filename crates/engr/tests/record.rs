@@ -87,7 +87,7 @@ fn tamper(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     let path = store::object_path(&root, &target);
     let mut raw: serde_json::Value = store::read_json(&path).expect("read");
     raw["state"] = serde_json::json!("not-a-state");
-    store::write_json(&path, &raw).expect("write");
+    write_raw(&path, &raw).expect("write");
     assert!(
         ops::effective(&root, &target).is_err(),
         "the target must genuinely fail to load"
@@ -535,7 +535,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     // A target that is genuinely absent is the other answer, and stays drift.
     // Its events go too: a projection alone is not the authority, and while the
     // durable tail survives, the target is recoverable rather than gone.
-    store::write_json(&path, &raw).expect("restore the broken file");
+    write_raw(&path, &raw).expect("restore the broken file");
     std::fs::remove_file(&path).expect("remove");
     std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
     let object = ops::effective(&root, &source).expect("source");
@@ -582,7 +582,7 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     let sound: Value = store::read_json(&path).expect("read");
     let mut broken = sound.clone();
     broken["state"] = Value::String("not-a-state".into());
-    store::write_json(&path, &broken).expect("write");
+    write_raw(&path, &broken).expect("write");
 
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed(), "unreadable authority is not a pass");
@@ -609,10 +609,10 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     assert!(report.standing_on_unreadable.is_empty());
 
     // (c) the target loads, but the referenced section is not in it.
-    store::write_json(&path, &sound).expect("restore");
+    write_raw(&path, &sound).expect("restore");
     let mut without: Value = store::read_json(&path).expect("read");
     without["sections"] = serde_json::json!([]);
-    store::write_json(&path, &without).expect("write");
+    write_raw(&path, &without).expect("write");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
     assert_eq!(
@@ -835,4 +835,15 @@ fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
     let report = ops::verify(&root, &source).expect("verify");
     assert!(!report.passed());
     assert_eq!(report.standing_on_missing.len(), 1);
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }
