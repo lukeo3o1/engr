@@ -536,3 +536,47 @@ fn staged_plan(root: &Path, reference: &Path, id: &str) -> std::path::PathBuf {
     .expect("manifest");
     stage
 }
+
+/// A predecessor Event carrying a number JCS cannot hold stops the migration.
+///
+/// The record contract's own numeric-domain walk is a generation-2 rule, so it
+/// never looks at retained v1 history. Preflight is therefore the only place
+/// that asks, and it has to ask before the workspace advances — afterwards the
+/// log is append-only history nobody can take back, and every read that
+/// reconstructs the Object trips over it.
+#[test]
+fn a_predecessor_event_outside_the_shared_integer_domain_fails_preflight() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "history with an impossible number")]);
+
+    let path = store::events_path(root, id);
+    let history = std::fs::read_to_string(&path).expect("history");
+    let beyond = engr::proof::MAX_SAFE_INTEGER + 1;
+    let rewritten: Vec<String> = history
+        .lines()
+        .map(|line| line.replacen(r#""rev":1"#, &format!(r#""rev":{beyond}"#), 1))
+        .collect();
+    assert_ne!(
+        rewritten.join("\n"),
+        history.trim_end(),
+        "the fixture must actually plant the number"
+    );
+    std::fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("plant it");
+    let before = std::fs::read(store::object_path(root, id)).expect("before");
+
+    let error = store::migrate(root).expect_err("JCS cannot carry that number");
+    assert!(error.message.contains("safe integer"), "{error}");
+    assert_eq!(
+        std::fs::read(store::object_path(root, id)).expect("after"),
+        before,
+        "and nothing was written"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(root).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}

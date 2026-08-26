@@ -296,7 +296,25 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
     // projection after the generation has advanced.
     let event_ids = store::event_ids(root)?;
     for id in &event_ids {
-        capture(&mut source, root, &store::events_path(root, id))?;
+        // The captured text serves both purposes: it is the digest the manifest
+        // records, and it is what the numeric-domain walk reads. A predecessor
+        // Event is generation 1, so the record contract's own safe-integer walk
+        // — which is a v2 rule — never sees it, and a number JCS cannot carry
+        // would otherwise be found only after the workspace had advanced.
+        let text = capture(&mut source, root, &store::events_path(root, id))?;
+        let path = store::events_path(root, id);
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{}:{}: {error}", path.display(), index + 1),
+                )
+            })?;
+            stored_within_safe_integers(&value, &format!("{}:{}", path.display(), index + 1))?;
+        }
         let events = store::load_events(root, id)?;
         for event in &events {
             ensure!(
