@@ -2035,13 +2035,15 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_tail_allows_purged_history_but_rejects_future_gaps() {
+    fn the_reducer_skips_old_evidence_and_rejects_future_gaps() {
         let id = new_id();
         let mut completed = Object::new(id.clone(), "completed".to_owned()).expect("object");
         completed.rev = 2;
         assert!(
             replay_recoverable_tail(completed, &[section_added(&id, 2, "old evidence")]).is_ok(),
-            "retained evidence at or below the projection may have a missing prefix"
+            "evidence at or below the projection is old news to the reducer; whether the
+             history is complete is the store boundary's question, and it requires
+             a non-empty history to begin at revision 1"
         );
 
         let mut crashed = Object::new(id.clone(), "crashed".to_owned()).expect("object");
