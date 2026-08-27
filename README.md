@@ -14,9 +14,12 @@ the record stay strict: exploratory material has somewhere to live that does not
 cost a confirmation or dilute what a recorded section means.
 
 Current workspaces use `.engr/format.json` as their sole schema authority.
-Legacy v0 and version 1/2 workspaces remain read-only; run `engr migrate`
+Legacy v0 and version 2 workspaces remain read-only; run `engr migrate`
 explicitly to perform the whole-workspace v3 transition before changing them.
-engr refuses to mutate unknown or newer versions.
+Version 2 is the defined direct predecessor of version 3. Version 1 is
+recognized as history only — this build has no v1 to v3 migration contract, so
+a live version 1 workspace is refused rather than migrated. engr refuses to
+mutate unknown or newer versions.
 
 Canonical Object references are `engr:obj:<compact-id>`. The compact ID is the
 UUID's exact 128 bits encoded as 26 lowercase Crockford Base32 characters;

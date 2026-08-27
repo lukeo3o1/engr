@@ -691,6 +691,78 @@ fn staged_manifest_resources_are_not_filesystem_capabilities() {
     assert!(!victim.exists(), "nothing was published outside .engr");
 }
 
+/// A stage that agrees with itself is not evidence of anything.
+///
+/// The staging directory is operational data that outlives a crash, sitting in
+/// the repository where anyone who can reach the workspace can edit it. Section
+/// and aggregate seals are unkeyed, so a staged Object can be rewritten and
+/// resealed into a file that decodes as current v3 and verifies its own
+/// integrity; point `manifest.objects[id]` at it and the stage is consistent at
+/// every place resume looked. Meanwhile the predecessor Object and the history
+/// that derives it have not moved at all — preflight never produced this target
+/// and never could have.
+///
+/// Refusing it is what stops an interrupted migration from being a way to write
+/// authority, which is #31's rule that migration must not legitimize state
+/// merely by resealing it.
+#[test]
+fn a_staged_object_agreeing_with_its_own_manifest_is_still_not_authority() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    for root in [interrupted.path(), completed.path()] {
+        predecessor(root, &[object(id, "object derivation")]);
+    }
+    let before = std::fs::read(store::object_path(interrupted.path(), id)).expect("predecessor");
+    let history = std::fs::read(store::events_path(interrupted.path(), id)).expect("history");
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+
+    // Rewrite the staged Object and reseal it properly. Seals are unkeyed, so
+    // this is something anyone who can reach the staging directory can do, and
+    // the result is a genuinely valid current-v3 Object rather than corruption.
+    let staged_path = stage.join("objects").join(format!("{id}.json"));
+    let migrated = std::fs::read_to_string(&staged_path).expect("staged object");
+    let staged_object: engr::model::Object =
+        serde_json::from_str(&migrated).expect("the stage holds a current v3 Object");
+    let expected = staged_object.sha256.clone().expect("aggregate seal");
+    let forged = integrity::mutate(&staged_object, &expected, |next| {
+        next.title = "an Object nobody admitted".to_owned();
+        Ok(())
+    })
+    .expect("reseal")
+    .object;
+    integrity::check_stored_object_integrity(&forged)
+        .expect("the substitution is self-consistent, which is the point");
+    let forged = engr::proof::canonical_bytes(&forged, "forged object").expect("canonical");
+    std::fs::write(&staged_path, &forged).expect("swap the staged object");
+
+    // ...and make the manifest agree with it, so every check resume used to
+    // make on a staged Object now passes.
+    let manifest_path = stage.join("manifest.json");
+    let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+    manifest["objects"][id] = Value::String(engr::proof::sha256_of(&forged));
+    write_raw(&manifest_path, &manifest).expect("consistent forged pair");
+
+    let error = store::migrate(interrupted.path())
+        .expect_err("a resealed stage cannot become current state");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("not the canonical migration"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(store::object_path(interrupted.path(), id)).expect("after"),
+        before,
+        "the predecessor it claimed to come from never moved"
+    );
+    assert_eq!(
+        std::fs::read(store::events_path(interrupted.path(), id)).expect("after"),
+        history,
+        "and neither did the history that derives it"
+    );
+}
+
+/// The same protection, for the resources that already had it.
 #[test]
 fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
     let interrupted = tempfile::tempdir().expect("interrupted");

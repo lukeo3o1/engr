@@ -279,6 +279,116 @@ fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
         })
 }
 
+/// The predecessor projection for one Object, from the exact bytes it is built
+/// out of.
+///
+/// Preflight passes the bytes it captures; resume passes the bytes the manifest
+/// says preflight captured. Both get the same rules from here, because a second
+/// copy of them kept in step by hand is how the resume path and the plan start
+/// disagreeing about what the predecessor was.
+fn predecessor_projection(
+    root: &Path,
+    id: &str,
+    source_version: u32,
+    stored: Option<&str>,
+    history: &str,
+) -> Result<Object> {
+    let path = store::object_path(root, id);
+    let stored = match stored {
+        Some(text) => {
+            let value: serde_json::Value = serde_json::from_str(text)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+            stored_within_safe_integers(&value, &path.display().to_string())?;
+            let object = store::decode_object_for_version(&path, id, value, source_version)?;
+            check_legacy_object(&object)?;
+            Some(object)
+        }
+        None => None,
+    };
+
+    let events_path = store::events_path(root, id);
+    let events = store::decode_events(root, &events_path, id, history)?;
+    for event in &events {
+        ensure!(
+            event.version == crate::EVENT_ENVELOPE_VERSION_V0
+                && matches!(event.provenance, Provenance::Confirmed { .. }),
+            EXIT_SCHEMA,
+            "a predecessor workspace carries only Event generation 1"
+        );
+        ensure_legacy_refs(&event.payload.content.refs)?;
+    }
+    if stored.is_none() {
+        ensure!(
+            events.first().is_some_and(|event| event.rev == 1
+                && matches!(event.payload.action, crate::model::Action::ObjectCreated)),
+            EXIT_SCHEMA,
+            "{id}: event rev 1 cannot reconstruct a missing object"
+        );
+    }
+    let (reconciled, _) =
+        crate::model::replay_recoverable_tail(Object::new(id.to_owned(), String::new())?, &events)
+            .map_err(|error| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!(
+                        "{id}: predecessor event tail cannot reconcile: {}",
+                        error.message
+                    ),
+                )
+            })?;
+    if let Some(stored) = stored {
+        ensure!(
+            stored.title == reconciled.title
+                && stored.object_type == reconciled.object_type
+                && stored.state == reconciled.state
+                && stored.rev == reconciled.rev
+                && stored.next_section_id == reconciled.next_section_id
+                && stored.sections == reconciled.sections,
+            EXIT_INVARIANT,
+            "{id}: predecessor Object projection is not exactly derivable from admitted history"
+        );
+    }
+    check_legacy_object(&reconciled)?;
+    Ok(reconciled)
+}
+
+/// The deterministic v3 conversion of one predecessor projection.
+///
+/// This is the migration's actual target for an Object. Preflight derives the
+/// plan with it and resume re-derives the same answer with it, so what the
+/// stage claims is never the only thing saying what should be published.
+fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Result<Object> {
+    object.legacy_format = None;
+    object.legacy_version = None;
+    object.sections.sort_by_key(|section| section.id);
+    let mut sections = Vec::with_capacity(object.sections.len());
+    for section in object.sections {
+        let mut section = closure.convert_section(section)?;
+        // The current generation persists one order for a set, so the
+        // migrated bytes have to be in it. Sealing canonicalizes a clone
+        // either way; what changes here is the representation on disk.
+        crate::proof::canonical_set(&mut section.refs, "reference")?;
+        crate::proof::canonical_set(&mut section.relations, "relation")?;
+        sections.push(section);
+    }
+    object.sections = sections;
+    object.sha256 = None;
+    object.validate()?;
+    // Before the seal, not after it. Sealing runs this same walk on its way
+    // through `canonical_bytes`, but that one reports a *usage* fault — and
+    // a number reaching here came out of a predecessor file, not off
+    // somebody's command line. Checking first keeps the fault class honest
+    // about where the value was found, and refuses it before a seal is
+    // computed over bytes JCS would have silently rounded.
+    let value = serde_json::to_value(&object)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {id}: {error}")))?;
+    stored_within_safe_integers(&value, &format!("object {id}"))?;
+    let resealed = crate::integrity::seal_migrated(object)?;
+    resealed.object.validate()?;
+    crate::integrity::check_stored_object_integrity(&resealed.object)?;
+    Ok(resealed.object)
+}
+
 fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
     ensure!(
         migratable_source_version(source_version),
@@ -287,22 +397,34 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         crate::WORKSPACE_VERSION
     );
     let mut source = BTreeMap::new();
-    let mut predecessor = BTreeMap::new();
+    let mut stored = BTreeMap::new();
     for id in store::object_ids(root)? {
         let path = store::object_path(root, &id);
         let text = capture(&mut source, root, &path)?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-        stored_within_safe_integers(&value, &path.display().to_string())?;
-        let object = store::decode_object_for_version(&path, &id, value, source_version)?;
-        check_legacy_object(&object)?;
-        predecessor.insert(id, object);
+        stored.insert(id, text);
+    }
+
+    // An Object with no Event file was never compared against admitted history
+    // at all: the loop below only reaches ids the EventStore knows. Its legacy
+    // Section seals say nothing about the Object level — title, type, state,
+    // revision, counter, Section membership — so granting it the first v3
+    // aggregate seal would launder an unverifiable projection into current
+    // authority. Under the retained EventStore contract every stored Object has
+    // an admitted creation, so absence here is a broken predecessor rather than
+    // a shape this generation has to accommodate.
+    let event_ids = store::event_ids(root)?;
+    for id in stored.keys() {
+        ensure!(
+            event_ids.contains(id),
+            EXIT_INVARIANT,
+            "{id}: no admitted history, so its projection cannot be proven before it is sealed"
+        );
     }
 
     // Validate every Event record and apply only a recoverable tail before
     // converting representation. No v1 Event is ever replayed into a v3
     // projection after the generation has advanced.
-    let event_ids = store::event_ids(root)?;
+    let mut predecessor = BTreeMap::new();
     for id in &event_ids {
         // Retained Event-v1 history stays under the contract that wrote it.
         // #35 scopes the Phase-3 numeric domain to values participating in
@@ -319,104 +441,24 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         // below. An out-of-domain number in either position fails replay or
         // fails that walk — it does not need a third check that would also
         // refuse history for numbers current state never reads.
-        let text = capture(&mut source, root, &store::events_path(root, id))?;
-        let path = store::events_path(root, id);
-        let events = store::decode_events(root, &path, id, &text)?;
-        for event in &events {
-            ensure!(
-                event.version == crate::EVENT_ENVELOPE_VERSION_V0
-                    && matches!(event.provenance, Provenance::Confirmed { .. }),
-                EXIT_SCHEMA,
-                "a predecessor workspace carries only Event generation 1"
-            );
-            ensure_legacy_refs(&event.payload.content.refs)?;
-        }
-        let stored = predecessor.remove(id);
-        if stored.is_none() {
-            ensure!(
-                events.first().is_some_and(|event| event.rev == 1
-                    && matches!(event.payload.action, crate::model::Action::ObjectCreated)),
-                EXIT_SCHEMA,
-                "{id}: event rev 1 cannot reconstruct a missing object"
-            );
-        }
-        let (reconciled, _) =
-            crate::model::replay_recoverable_tail(Object::new(id.clone(), String::new())?, &events)
-                .map_err(|error| {
-                    Error::new(
-                        EXIT_SCHEMA,
-                        format!(
-                            "{id}: predecessor event tail cannot reconcile: {}",
-                            error.message
-                        ),
-                    )
-                })?;
-        if let Some(stored) = stored {
-            ensure!(
-                stored.title == reconciled.title
-                    && stored.object_type == reconciled.object_type
-                    && stored.state == reconciled.state
-                    && stored.rev == reconciled.rev
-                    && stored.next_section_id == reconciled.next_section_id
-                    && stored.sections == reconciled.sections,
-                EXIT_INVARIANT,
-                "{id}: predecessor Object projection is not exactly derivable from admitted history"
-            );
-        }
-        check_legacy_object(&reconciled)?;
-        predecessor.insert(id.clone(), reconciled);
-    }
-
-    // An Object with no Event file was never compared against admitted history
-    // at all: the loop above only reaches ids the EventStore knows. Its legacy
-    // Section seals say nothing about the Object level — title, type, state,
-    // revision, counter, Section membership — so granting it the first v3
-    // aggregate seal would launder an unverifiable projection into current
-    // authority. Under the retained EventStore contract every stored Object has
-    // an admitted creation, so absence here is a broken predecessor rather than
-    // a shape this generation has to accommodate.
-    for id in predecessor.keys() {
-        ensure!(
-            event_ids.contains(id),
-            EXIT_INVARIANT,
-            "{id}: no admitted history, so its projection cannot be proven before it is sealed"
-        );
+        let history = capture(&mut source, root, &store::events_path(root, id))?;
+        let projection = predecessor_projection(
+            root,
+            id,
+            source_version,
+            stored.get(id).map(String::as_str),
+            &history,
+        )?;
+        predecessor.insert(id.clone(), projection);
     }
 
     let resources = validate_retained_resources(root, &predecessor, &mut source)?;
 
     let mut closure = RefClosure::new(root);
     let mut migrated = BTreeMap::new();
-    for (id, mut object) in predecessor {
-        object.legacy_format = None;
-        object.legacy_version = None;
-        object.sections.sort_by_key(|section| section.id);
-        let mut sections = Vec::with_capacity(object.sections.len());
-        for section in object.sections {
-            let mut section = closure.convert_section(section)?;
-            // The current generation persists one order for a set, so the
-            // migrated bytes have to be in it. Sealing canonicalizes a clone
-            // either way; what changes here is the representation on disk.
-            crate::proof::canonical_set(&mut section.refs, "reference")?;
-            crate::proof::canonical_set(&mut section.relations, "relation")?;
-            sections.push(section);
-        }
-        object.sections = sections;
-        object.sha256 = None;
-        object.validate()?;
-        // Before the seal, not after it. Sealing runs this same walk on its way
-        // through `canonical_bytes`, but that one reports a *usage* fault — and
-        // a number reaching here came out of a predecessor file, not off
-        // somebody's command line. Checking first keeps the fault class honest
-        // about where the value was found, and refuses it before a seal is
-        // computed over bytes JCS would have silently rounded.
-        let value = serde_json::to_value(&object)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {id}: {error}")))?;
-        stored_within_safe_integers(&value, &format!("object {id}"))?;
-        let resealed = crate::integrity::seal_migrated(object)?;
-        resealed.object.validate()?;
-        crate::integrity::check_stored_object_integrity(&resealed.object)?;
-        migrated.insert(id, resealed.object);
+    for (id, object) in predecessor {
+        let object = migrate_object(&mut closure, &id, object)?;
+        migrated.insert(id, object);
     }
     // Everything preflight read is confirmed unchanged, and nothing else may be
     // in the set. The closing walk used to *become* `Plan.source`, so a file
@@ -768,6 +810,111 @@ impl RetainedResource {
     }
 }
 
+/// A staged Object digest proves only that the stage agrees with itself.
+///
+/// Retained resources are re-derived from the captured predecessor on resume,
+/// so editing staged bytes *and* their manifest digest cannot quietly swap in a
+/// different resource. Objects carry more authority than any of them and had no
+/// equivalent: a crash leaves a stage whose Object can be rewritten, resealed —
+/// Section and aggregate seals are unkeyed, so whoever can edit the file can
+/// compute valid ones — and re-digested into a plan that agrees with itself
+/// everywhere resume looked, while the predecessor bytes it supposedly came
+/// from sit unchanged on disk. That makes operational staging a way to write
+/// authority. #31 requires each required conversion to be deterministic and says
+/// migration must not legitimize state merely by resealing it, so the target has
+/// to be the derivation rather than whatever the manifest currently claims.
+fn verify_object_derivation(
+    root: &Path,
+    closure: &mut RefClosure,
+    id: &str,
+    staged: &str,
+    manifest: &Manifest,
+) -> Result<()> {
+    let path = store::object_path(root, id);
+    let relative = relative_to_engr(root, &path)?;
+    let staged_digest = manifest.objects.get(id).ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("staged object {id} has no staged digest"),
+        )
+    })?;
+    let live = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    // An interrupted commit already published this one. The live bytes are the
+    // target, and the predecessor they were derived from is no longer on disk
+    // to derive from again.
+    if live
+        .as_deref()
+        .is_some_and(|text| sha256_of(text) == *staged_digest)
+    {
+        return Ok(());
+    }
+    let stored = match manifest.source.get(&relative) {
+        Some(expected) => {
+            let text = live.ok_or_else(|| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    format!("{relative} disappeared after migration preflight"),
+                )
+            })?;
+            ensure!(
+                sha256_of(&text) == *expected,
+                EXIT_INVARIANT,
+                "{relative} changed after migration preflight"
+            );
+            Some(text)
+        }
+        // Preflight captured no projection for it, so it is the recovery case:
+        // an Object whose admitted history reconstructs it. Anything on disk
+        // here is neither the predecessor nor the published target.
+        None => {
+            ensure!(
+                live.is_none(),
+                EXIT_INVARIANT,
+                "{relative} appeared after migration preflight"
+            );
+            None
+        }
+    };
+
+    let events_path = store::events_path(root, id);
+    let events_relative = relative_to_engr(root, &events_path)?;
+    let expected = manifest.source.get(&events_relative).ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!("{id}: no admitted history was captured to derive its migration from"),
+        )
+    })?;
+    let history = fs::read_to_string(&events_path)
+        .map_err(|error| tool_error(events_path.display(), error))?;
+    ensure!(
+        sha256_of(&history) == *expected,
+        EXIT_INVARIANT,
+        "{events_relative} changed after migration preflight"
+    );
+
+    let projection = predecessor_projection(
+        root,
+        id,
+        manifest.source_version,
+        stored.as_deref(),
+        &history,
+    )?;
+    let canonical = crate::proof::canonical_bytes(
+        &migrate_object(closure, id, projection)?,
+        &format!("object {id}"),
+    )?;
+    ensure!(
+        canonical == staged,
+        EXIT_INVARIANT,
+        "{relative} staged bytes are not the canonical migration of the captured predecessor"
+    );
+    Ok(())
+}
+
 fn validate_manifest(manifest: &Manifest) -> Result<()> {
     ensure!(
         migratable_source_version(manifest.source_version),
@@ -1046,6 +1193,7 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
     // not make immutable — so the validated artifact and the published artifact
     // are the same value here, held in memory between the two.
     let mut publish: Vec<(PathBuf, String)> = Vec::new();
+    let mut closure = RefClosure::new(root);
     for (id, expected) in &manifest.objects {
         let staged = stage.join("objects").join(format!("{id}.json"));
         ensure_regular_file(&staged)?;
@@ -1061,6 +1209,9 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", staged.display())))?;
         let object = store::decode_object(&staged, id, value)?;
         crate::integrity::check_stored_object_integrity(&object)?;
+        if workspace_version == manifest.source_version {
+            verify_object_derivation(root, &mut closure, id, &bytes, &manifest)?;
+        }
         publish.push((store::object_path(root, id), bytes));
     }
     for (relative, expected) in &manifest.resources {
