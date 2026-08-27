@@ -1301,3 +1301,111 @@ fn a_stale_candidate_that_hashes_the_lost_section_still_fails_closed() {
         "the refusal names the provenance it could not reach: {error}"
     );
 }
+
+fn object_rule(root: &Path) {
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("object-policy.md"),
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+    )
+    .expect("rule");
+}
+
+/// The exact Rule Review a Human would have been shown for this mutation.
+fn attestation(root: &Path, payload: &Payload) -> engr::gate::ReviewAttestation {
+    let before = store::load_object(root, &payload.object).expect("before");
+    let mut after = before.clone();
+    let event = Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: before.rev + 1,
+        time: "2026-08-25T00:00:00Z".to_owned(),
+        payload: payload.clone(),
+        provenance: Provenance::Tagged {
+            admission: engr::model::TaggedAdmission {
+                kind: engr::semantics::Admission::Human,
+                confirmation: Some(engr::model::HumanConfirmation {
+                    challenge: "ABCD-EFGH".to_owned(),
+                    candidate_digest: format!("1:{}", "0".repeat(64)),
+                }),
+                rule_review: None,
+            },
+        },
+    };
+    engr::model::project(&mut after, &event).expect("project");
+    let mutation = engr::proof::object_review_mutation(&before, &after, payload).expect("mutation");
+    let binding = engr::rules::bind_object(root, &mutation, before.rev).expect("binding");
+    engr::gate::ReviewAttestation {
+        review_digest: binding.digest().expect("digest").to_string(),
+        reviewed_rules: binding.rule_ids(),
+        attempt: 1,
+        result: engr::proof::ReviewResult::Passed,
+        explanation: None,
+    }
+}
+
+/// A *reviewed* stale candidate is scoped exactly like an unreviewed one.
+///
+/// `object_review_mutation` builds its mutation from `candidate_subject`, so a
+/// frozen ReviewDigest reads the same operation-defined projection the
+/// CandidateDigest does — #25 defines it as that projection plus `expected_rev`,
+/// not a whole-Object snapshot. Widening reviewed candidates therefore bought
+/// nothing and cost the same thing the unreviewed case had already lost: an
+/// unrelated Section's legacy Ref deciding whether the candidate can be read.
+#[test]
+fn a_reviewed_stale_candidate_ignores_unrelated_lost_provenance() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let (_, source, commit) = migrated_with_legacy_ref(root);
+    object_rule(root);
+
+    let payload = Payload {
+        action: Action::ObjectRenamed,
+        object: source.to_owned(),
+        becomes: None,
+        content: Content {
+            text: "a reviewed rename the human was shown".to_owned(),
+            ..Content::default()
+        },
+    };
+    let review = attestation(root, &payload);
+    let prepared =
+        engr::gate::prepare_reviewed(root, payload, engr::gate::Allowance::Normal, review)
+            .expect("prepare reviewed");
+    assert!(
+        prepared.candidate.context.rule_review.is_some(),
+        "the fixture must actually carry a stored Rule Review"
+    );
+
+    engr::gate::admit_agent(
+        root,
+        Payload {
+            action: Action::ObjectRenamed,
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "an agent advanced the title first".to_owned(),
+                ..Content::default()
+            },
+        },
+        Some(attestation(
+            root,
+            &Payload {
+                action: Action::ObjectRenamed,
+                object: source.to_owned(),
+                becomes: None,
+                content: Content {
+                    text: "an agent advanced the title first".to_owned(),
+                    ..Content::default()
+                },
+            },
+        )),
+    )
+    .expect("agent rename");
+    forget_commit(root, &commit);
+
+    let candidate = engr::gate::find(root, &prepared.candidate.challenge)
+        .expect("a reviewed stale candidate still explains itself");
+    assert!(candidate.context.rule_review.is_some());
+}

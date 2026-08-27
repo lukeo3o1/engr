@@ -497,17 +497,14 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
     // candidate, and one unrelated pinned commit going away makes a candidate
     // whose own inputs are all present unreadable.
     //
-    // A stored Rule Review is the exception, and only because
-    // `object_review_mutation` below projects the whole Object. That is a real
-    // requirement of the frozen ReviewDigest, not of the CandidateDigest, so it
-    // widens this one case rather than all of them.
-    let wanted = if candidate.context.rule_review.is_some() {
-        crate::migration::Migrated::Whole
-    } else {
-        let mut wanted = crate::migration::Migrated::nothing();
-        wanted.widen(&candidate.payload.action);
-        wanted
-    };
+    // A stored Rule Review does not widen this. `object_review_mutation` below
+    // builds its mutation from `candidate_subject`, so the frozen ReviewDigest
+    // reads the same operation-defined projection the CandidateDigest does —
+    // #25 defines it as that projection plus `expected_rev`, not a whole-Object
+    // snapshot. An operation that genuinely needs every Section says so through
+    // the widening rule itself, which is where merge and supersession get it.
+    let mut wanted = crate::migration::Migrated::nothing();
+    wanted.widen(&candidate.payload.action);
     let historical = crate::migration::migrated_replay(root, historical, &wanted)?;
     let mut historical_after = historical.clone();
     project(
