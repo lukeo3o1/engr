@@ -750,15 +750,57 @@ fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
     );
 }
 
-/// A predecessor Event carrying a number JCS cannot hold stops the migration.
+/// A number that has to *become* current v3 state stops the migration.
 ///
-/// The record contract's own numeric-domain walk is a generation-2 rule, so it
-/// never looks at retained v1 history. Preflight is therefore the only place
-/// that asks, and it has to ask before the workspace advances — afterwards the
-/// log is append-only history nobody can take back, and every read that
-/// reconstructs the Object trips over it.
+/// This is the case #35 names: §11 fails migration on "a required current-state
+/// JSON integer" outside the shared domain, and acceptance criterion 21 scopes
+/// the bound to integers "participating in current Section/Ref state or their
+/// JCS integrity/digest projections". `next_section_id` is exactly that — it is
+/// carried into the migrated Object and sealed with it — so it is refused, and
+/// refused as a *schema* fault, because the number was found in a file rather
+/// than typed at a command line.
 #[test]
-fn a_predecessor_event_outside_the_shared_integer_domain_fails_preflight() {
+fn a_required_current_state_number_outside_the_shared_domain_fails_preflight() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let mut projection = object(id, "a counter no implementation shares");
+    projection["next_section_id"] = json!(engr::proof::MAX_SAFE_INTEGER + 1);
+    predecessor(root, &[projection]);
+    let before = std::fs::read(store::object_path(root, id)).expect("before");
+
+    let error = store::migrate(root).expect_err("JCS cannot carry that number");
+    assert!(error.message.contains("safe integer"), "{error}");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        std::fs::read(store::object_path(root, id)).expect("after"),
+        before,
+        "and nothing was written"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(root).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}
+
+/// Retained Event-v1 history is not walked for the Phase-3 numeric domain, and
+/// nothing escapes because of it.
+///
+/// #35 scopes that domain to current state, so preflight does not re-interpret
+/// immutable history under a rule written for a later generation. The reason
+/// that costs no safety is structural rather than a second check: an Event's
+/// only numbers are its `rev` and the Section ids an action names, and neither
+/// can be out of domain in a workspace that still migrates. `rev` is replayed
+/// contiguously from 1, so an out-of-domain one is not history the migration
+/// declines to read — it is a tail that cannot reconcile at all.
+///
+/// So this pins the *absence* of a historical-only case. A v1 record carrying
+/// such a number is refused on its own terms, and the workspace stays where it
+/// was.
+#[test]
+fn an_out_of_domain_event_number_cannot_be_history_the_projection_never_reads() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
     let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
@@ -779,8 +821,15 @@ fn a_predecessor_event_outside_the_shared_integer_domain_fails_preflight() {
     std::fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("plant it");
     let before = std::fs::read(store::object_path(root, id)).expect("before");
 
-    let error = store::migrate(root).expect_err("JCS cannot carry that number");
-    assert!(error.message.contains("safe integer"), "{error}");
+    let error = store::migrate(root).expect_err("that rev cannot be replayed");
+    assert!(
+        !error.message.contains("safe integer"),
+        "history is no longer walked for the current-state domain: {error}"
+    );
+    assert!(
+        error.message.contains("does not immediately follow"),
+        "it is refused as a revision tail that cannot reconcile: {error}"
+    );
     assert_eq!(
         std::fs::read(store::object_path(root, id)).expect("after"),
         before,
