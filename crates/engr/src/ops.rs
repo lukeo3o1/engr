@@ -1,6 +1,6 @@
 //! Maintenance: crash reconciliation and verify.
 
-use crate::model::{replay_recoverable_tail, Action, Object, Section};
+use crate::model::{project, replay_recoverable_tail, Action, Object, Section};
 use crate::{ensure, git, store, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use std::path::Path;
 
@@ -175,6 +175,59 @@ fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
 /// valid old workspace unreadable before its explicit migration.
 pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
     store::with_lock(root, || reconcile_locked(root, id))
+}
+
+/// The last provable admitted projection, rebuilt from history alone.
+///
+/// Deliberately not [`reconcile`]. That one starts from the stored Object and
+/// requires its seal to verify — which is precisely what has failed by the time
+/// anyone needs this. Repair has to reach a state the stored bytes contribute
+/// nothing to, or it would be restoring authority partly from the material that
+/// lost its authority.
+///
+/// #35's ruling makes the exactness the whole contract: repair may restore only
+/// what admitted history derives, so if history cannot derive it this fails
+/// closed rather than guessing. A log that does not begin with a creation
+/// cannot reconstruct an Object, and that is a different failure from a damaged
+/// current projection — it is not repairable through this path.
+pub fn provable(root: &Path, id: &str) -> Result<Object> {
+    let events = store::load_events(root, id)?;
+    ensure!(
+        events.first().is_some_and(|event| event.rev == 1
+            && matches!(event.payload.action, Action::ObjectCreated)),
+        EXIT_INVARIANT,
+        "{id}: admitted history does not begin with a creation, so no provable projection can be rebuilt from it"
+    );
+    let mut object = Object::new(id.to_owned(), String::new())?;
+    let mut migrated = false;
+    for event in &events {
+        // The same generation boundary the durable recheck crosses: retained
+        // Event-v1 records are read under their own contract, so replaying them
+        // reproduces the predecessor in its legacy spelling. Repair publishes
+        // current authority, so it has to convert before it goes on.
+        if event.version == crate::EVENT_ENVELOPE_VERSION && !migrated {
+            object = crate::migration::migrated_replay(
+                root,
+                object,
+                &crate::migration::Migrated::Whole,
+            )?;
+            migrated = true;
+        }
+        project(&mut object, event).map_err(|error| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "{id}: admitted history cannot be replayed: {}",
+                    error.message
+                ),
+            )
+        })?;
+    }
+    if !migrated {
+        object =
+            crate::migration::migrated_replay(root, object, &crate::migration::Migrated::Whole)?;
+    }
+    Ok(object)
 }
 
 pub(crate) fn reconcile_locked(root: &Path, id: &str) -> Result<Object> {

@@ -58,6 +58,16 @@ enum Command {
     },
     /// Verify Object and Section integrity plus dependencies
     Verify { object: Option<String> },
+    /// Propose restoring an Object whose stored integrity has failed
+    ///
+    /// Prepares a Human candidate that restores exactly what admitted history
+    /// proves. It carries no changes of its own: confirm it, then make any
+    /// wanted change the normal way.
+    Repair {
+        object: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
     Work {
         /// Which attempt of your own review this is, counted from 1. Needed
@@ -828,6 +838,37 @@ fn main() {
     }
 }
 
+/// Propose restoring an Object whose stored integrity has failed.
+///
+/// The recovery half of #35 §10, and the reason it needs a command of its own:
+/// ordinary mutation is refused on integrity-invalid authority, so without this
+/// the only way back was editing `.engr` by hand — which is not an authority
+/// path, and is the behaviour the refusal exists to discourage.
+///
+/// It proposes only what admitted history proves. Anything worth keeping from
+/// the invalid bytes is a separate, ordinary change made after the repair, so
+/// the record shows both acts instead of one that quietly did both.
+fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
+    store::require_current(root)?;
+    let prepared = gate::prepare_repair(root, object)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&prepared.candidate)
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    print!(
+        "{}",
+        render_candidate(root, &prepared.candidate, &prepared.notes)
+    );
+    for code in &prepared.superseded {
+        println!("(candidate {code} was superseded by this one)");
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<()> {
     // Before the workspace is located, like `init`: the protocol is what you
     // read to decide whether to adopt engr at all, so needing an adopted
@@ -945,6 +986,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
+        Command::Repair { object, json } => repair(&root, &object, json),
         Command::Backlog(command) => backlog_command(&root, command),
         Command::Rules(command) => rules_command(&root, command),
         Command::Work { attempt, command } => {

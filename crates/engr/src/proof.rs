@@ -514,6 +514,25 @@ pub fn candidate_subject(
                 json(&ObjectInvariant::of(after)?)?,
             )
         }
+        // The whole Object either side, and no parameters at all.
+        //
+        // Both sides are the replay-derived projection: repair restores exactly
+        // that, so what the Human confirms is "this Object becomes precisely
+        // what its admitted history says". The integrity-invalid stored bytes
+        // are deliberately **not** an input. They are diagnostic material shown
+        // beside the proposal, and a digest that bound them could not be
+        // recomputed from history later — which is the one thing every durable
+        // CandidateDigest has to survive.
+        //
+        // No parameters, because repair takes none. A parameter here would be
+        // somewhere for a repair to carry an instruction, and #35's ruling is
+        // that it carries none.
+        Action::ObjectRepaired => (
+            object_target(id),
+            serde_json::json!({}),
+            json(&ObjectInvariant::of(before)?)?,
+            json(&ObjectInvariant::of(after)?)?,
+        ),
     };
 
     // And the formatted target parses back as the identity it claims to be.

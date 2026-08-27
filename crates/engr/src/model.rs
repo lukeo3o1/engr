@@ -829,6 +829,21 @@ pub enum Action {
     /// easier to implement and would mean a record can sit in the state where it
     /// says it was replaced and cannot say by what.
     ObjectSuperseded,
+    /// Restore a current projection that failed integrity to what admitted
+    /// history derives.
+    ///
+    /// A distinct action rather than an ordinary mutation with a flag, because
+    /// it means something an ordinary edit never means: the stored authority had
+    /// stopped being trustworthy, and was put back from previously provable
+    /// history. #35's ruling requires that to stay visible in immutable history
+    /// rather than reading as a normal revision.
+    ///
+    /// It carries no parameters because it cannot: repair restores *exactly* the
+    /// replay-derived projection and nothing else. Anything a person wants to
+    /// change afterwards goes through the normal admission path, so the record
+    /// reads `object_repaired` then `section_revised` rather than letting one
+    /// repair quietly legitimize semantics nobody admitted.
+    ObjectRepaired,
 }
 
 impl Action {
@@ -844,6 +859,7 @@ impl Action {
             Action::ObjectReopened => "object.reopened",
             Action::ObjectClassified { .. } => "object.classified",
             Action::ObjectSuperseded => "object.superseded",
+            Action::ObjectRepaired => "object.repaired",
         }
     }
 
@@ -1456,6 +1472,20 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             object.sections.push(section_from(id, admitted_by, event)?);
             object.state = State::Superseded;
         }
+        // Nothing, and that is the whole point of it.
+        //
+        // Replay arrives here already holding the last provable admitted
+        // projection, because these same events built it. So a repair says
+        // something about the *stored file*, not about the history: the bytes on
+        // disk had failed integrity and were put back to what this history
+        // derives. Being a semantic no-op is what makes it safe to record —
+        // `object_repaired` cannot smuggle a change, because applying it does
+        // nothing but advance the revision.
+        //
+        // No attention check either. Integrity failure is not a semantic change
+        // and does not wait for the Object to be in the listing; a closed record
+        // whose bytes were edited is exactly the one that needs this.
+        Action::ObjectRepaired => {}
     }
     object.sections.sort_by_key(|section| section.id);
     object.rev = event.rev;

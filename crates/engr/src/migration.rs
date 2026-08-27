@@ -268,7 +268,11 @@ impl Migrated {
             return;
         };
         match action {
-            Action::SectionMerged { .. } | Action::ObjectSuperseded => *self = Migrated::Whole,
+            // Repair joins these: its projection is `ObjectInvariant` too, so
+            // every Section's semantics are one of its digest inputs.
+            Action::SectionMerged { .. } | Action::ObjectSuperseded | Action::ObjectRepaired => {
+                *self = Migrated::Whole
+            }
             Action::SectionRevised { section } | Action::SectionDeleted { section } => {
                 ids.insert(*section);
             }

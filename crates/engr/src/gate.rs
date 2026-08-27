@@ -415,12 +415,21 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
         review_digest.as_deref(),
     )?;
 
-    let current = match ops::effective(root, &candidate.payload.object) {
-        Ok(object) => object,
-        Err(error) if error.code == EXIT_NOT_FOUND && candidate.binding.expected_rev == 0 => {
-            Object::new(candidate.payload.object.clone(), String::new())?
+    // A repair's predecessor is the provable projection, never the stored bytes.
+    // `effective` hands those back unchanged precisely when integrity fails —
+    // which is the only situation a repair candidate exists in — so validating
+    // one against them would compare the proposal with the damage it is there
+    // to undo.
+    let current = if matches!(candidate.payload.action, Action::ObjectRepaired) {
+        ops::provable(root, &candidate.payload.object)?
+    } else {
+        match ops::effective(root, &candidate.payload.object) {
+            Ok(object) => object,
+            Err(error) if error.code == EXIT_NOT_FOUND && candidate.binding.expected_rev == 0 => {
+                Object::new(candidate.payload.object.clone(), String::new())?
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
     if current.rev == candidate.binding.expected_rev {
         let mut after = current.clone();
@@ -1009,6 +1018,113 @@ pub fn prepare(root: &Path, payload: Payload) -> Result<Prepared> {
 /// was already refused.
 pub fn prepare_oversize(root: &Path, payload: Payload) -> Result<Prepared> {
     prepare_admitting(root, payload, Allowance::Oversize, None)
+}
+
+/// Prepare the repair of an Object whose stored projection failed integrity.
+///
+/// The recovery half of #35 §10. Ordinary mutation refuses an integrity-invalid
+/// Object — correctly, or unrelated work would launder an out-of-band edit into
+/// valid authority — and without this there is no way back at all: one hand
+/// edit would freeze a record permanently, which pushes people toward more hand
+/// editing.
+///
+/// Four things about it are the ruling's, not this function's:
+///
+/// - **Human Gate only.** Repair mints a challenge like any other Human
+///   proposal, whatever admission class the Sections being restored carry. An
+///   Agent does not re-establish authority that stopped verifying.
+/// - **Exactly the replay-derived projection.** The proposal is
+///   [`ops::provable`] and nothing else, so repair cannot carry a change.
+///   Anything a person wants to keep from the invalid bytes goes through the
+///   normal path *after* the repair, leaving `object_repaired` then
+///   `section_revised` in the record instead of one event that quietly admitted
+///   both.
+/// - **The invalid bytes are diagnostic, not the proposal.** They are not an
+///   input to the CandidateDigest — a digest binding them could never be
+///   recomputed from history, and every durable candidate digest has to survive
+///   exactly that.
+/// - **Fails closed.** If history cannot rebuild the projection, this refuses
+///   rather than guessing; that is a different damage class and not this path's
+///   to repair.
+pub fn prepare_repair(root: &Path, id: &str) -> Result<Prepared> {
+    store::require_current(root)?;
+    store::with_lock(root, move || prepare_repair_locked(root, id))
+}
+
+fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
+    store::require_current(root)?;
+    crate::model::validate_object_id(id)?;
+    let stored = store::load_object(root, id)?;
+    // Nothing to repair is a refusal, not a no-op. Repair is an exceptional
+    // boundary, and one that ran on sound authority would be a general-purpose
+    // rewrite with a special name.
+    ensure!(
+        crate::integrity::check_stored_object_integrity(&stored).is_err(),
+        EXIT_INVARIANT,
+        "{id} verifies, so there is nothing to repair; ordinary changes go through the normal path"
+    );
+
+    let before = ops::provable(root, id)?;
+    let payload = Payload {
+        action: Action::ObjectRepaired,
+        object: id.to_owned(),
+        becomes: None,
+        content: crate::model::Content::default(),
+    };
+    let projected = {
+        let mut trial = before.clone();
+        let probe = human_event(
+            &payload,
+            trial.rev + 1,
+            "",
+            &format!("1:{}", "0".repeat(64)),
+        );
+        project(&mut trial, &probe)?;
+        check_projection_is_representable(&trial)?;
+        trial
+    };
+
+    let expected_rev = before.rev;
+    // A repair restores; it does not propose semantics for a Rule to judge, and
+    // the projection either side is identical. Binding a review here would ask
+    // the Rule set about a change that is not one.
+    let candidate_digest =
+        crate::proof::candidate_subject(&before, &projected, &payload, None)?.digest()?;
+    let taken = pending_codes(root)?;
+    let mut candidate = Candidate {
+        format: CANDIDATE_FORMAT.to_owned(),
+        version: CANDIDATE_ENVELOPE_VERSION,
+        challenge: crate::confirmation::mint(&taken),
+        created_at: now(),
+        binding: ObjectBinding { expected_rev },
+        payload,
+        candidate_digest,
+        integrity_sha256: String::new(),
+        context: PreparedContext {
+            object_title: Some(before.title.clone()).filter(|title| !title.is_empty()),
+            ..PreparedContext::default()
+        },
+    };
+    candidate.integrity_sha256 = candidate.envelope_integrity().digest()?;
+
+    let mut superseded = Vec::new();
+    for code in pending_codes(root)? {
+        if code != candidate.challenge && candidate_object(root, &code).as_deref() == Some(id) {
+            fs::remove_file(store::candidate_path(root, &code)?)
+                .map_err(|error| tool_error("discarding a superseded candidate", error))?;
+            superseded.push(code);
+        }
+    }
+    store::write_json(
+        &store::candidate_path(root, &candidate.challenge)?,
+        &candidate,
+    )?;
+    let notes = notes_for(root, &candidate);
+    Ok(Prepared {
+        candidate,
+        superseded,
+        notes,
+    })
 }
 
 /// Prepare a Human candidate carrying the exact Rule Review the Human saw.
@@ -1949,6 +2065,13 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
                 "the object revision",
             )?;
             unreachable!("a stale candidate cannot be admitted")
+        }
+        // Repair cannot come through reconciliation. That path requires the
+        // stored seal to verify, which is the condition repair exists to leave —
+        // so it rebuilds the predecessor from admitted history instead, and the
+        // invalid bytes on disk contribute nothing to what gets admitted.
+        CandidateState::Pending if matches!(candidate.payload.action, Action::ObjectRepaired) => {
+            ops::provable(root, &candidate.payload.object)?
         }
         CandidateState::Pending => match ops::reconcile_locked(root, &candidate.payload.object) {
             Ok(object) => object,

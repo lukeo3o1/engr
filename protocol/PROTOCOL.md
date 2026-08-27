@@ -105,8 +105,8 @@ where `max(existing) + 1` would hand out a deleted id.
 
 ## Actions
 
-Ten. Human use is gated; the authority matrix below defines which Agent-reviewed
-uses may be admitted directly.
+Eleven. Human use is gated; the authority matrix below defines which
+Agent-reviewed uses may be admitted directly.
 
 | Action | Data | Effect |
 | --- | --- | --- |
@@ -120,11 +120,34 @@ uses may be admitted directly.
 | `object_reopened` | — | `state` → `open`; untyped objects only |
 | `object_classified` | `type?`, `state` | Sets both, explicitly |
 | `object_superseded` | — | Appends the reason, records the replacement, `state` → `superseded` |
+| `object_repaired` | — | Restores the projection admitted history derives; changes no semantics |
 
 `object_created`, `object_renamed`, `section_added`, `section_revised`,
 `section_merged` and `object_superseded` carry content; the others must carry
 none — no text, no basis, no refs, no role, no supplementary content, no
 relations.
+
+`object_repaired` is the recovery half of the integrity contract, and it is the
+one action that changes nothing. An Object whose stored projection fails
+integrity refuses ordinary mutation, so that unrelated work cannot reseal an
+out-of-band edit into valid authority; `object_repaired` is how it comes back.
+
+```text
+integrity verification fails
+  -> ordinary Human and Agent mutation rejected
+  -> repair proposed through the Human Gate, never admitted by an Agent
+  -> the restored state is exactly what admitted history derives
+  -> only then are new seals written
+```
+
+Replaying it is a no-op, and that is what makes it safe to record: history
+already holds the projection being restored, so a repair states a fact about the
+stored bytes rather than about the record. It therefore cannot carry a change.
+Anything worth keeping from the invalid material is admitted afterwards through
+the ordinary path, leaving `object_repaired` and then the real change in the
+log rather than one event that quietly did both. Where history cannot rebuild
+the projection, repair refuses — that is a different damage class and is not
+guessed at here.
 
 An object that **does not need attention refuses every section action, and a
 rename**. Move it back into the attention set first. The friction is deliberate:
