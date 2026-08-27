@@ -926,9 +926,14 @@ fn run(cli: Cli) -> Result<()> {
                 .iter()
                 .filter(|(_, status)| status.forged())
                 .count();
-            let object_forged = object.sha256.as_deref().is_some_and(|seal| {
-                engr::integrity::check_object_integrity(&object, seal).is_err()
-            });
+            // Same rule as `verify`: in a current workspace a missing aggregate
+            // seal is a failure, not an absence of anything to check.
+            let object_forged = match object.sha256.as_deref() {
+                Some(seal) => engr::integrity::check_object_integrity(&object, seal).is_err(),
+                None => {
+                    engr::store::validate_format(&root)? == engr::store::WorkspaceFormat::Current
+                }
+            };
             if forged > 0 || object_forged {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,

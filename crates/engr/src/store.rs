@@ -418,6 +418,29 @@ pub(crate) fn decode_object_for_version(
     Ok(object)
 }
 
+/// A current aggregate seal is a digest, not merely a member that is there.
+fn check_current_seal(path: &Path, value: Option<&serde_json::Value>) -> Result<()> {
+    let seal = value.and_then(serde_json::Value::as_str).ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{}: a current Object carries an aggregate seal, not a null one",
+                path.display()
+            ),
+        )
+    })?;
+    ensure!(
+        seal.len() == 64
+            && seal
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        EXIT_SCHEMA,
+        "{}: aggregate seal {seal:?} is not 64 lowercase hex characters",
+        path.display()
+    );
+    Ok(())
+}
+
 fn exact_members(
     path: &Path,
     what: &str,
@@ -459,6 +482,16 @@ fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<
             "sha256",
         ],
     )?;
+    // Present is not the same as sealed. `Object.sha256` is an `Option` only so
+    // historical v1/v2 material still decodes, and `exact_members` above is
+    // satisfied by the member existing — so `"sha256": null` decoded to `None`
+    // and passed this boundary, producing a current Object in a shape
+    // [`save_object`] refuses to write. That is a second current schema no
+    // writer can produce, and the read side is where it did damage: every trust
+    // diagnostic asks `sha256.as_deref().is_some_and(...)`, and `None` answers
+    // false — so an Object with no Sections and its aggregate replaced by null
+    // verified as healthy.
+    check_current_seal(path, object.get("sha256"))?;
     let sections = object
         .get("sections")
         .and_then(serde_json::Value::as_array)
@@ -1452,27 +1485,14 @@ fn check_event_history(root: &Path, path: &Path, id: &str, events: &[Event]) -> 
 /// before the boundary — and the before-state of an add names no Section, so
 /// `section.added` needs nothing converted.
 fn sections_the_rechecks_read(events: &[Event]) -> crate::migration::Migrated {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut wanted = crate::migration::Migrated::nothing();
     for event in events {
         if event.version != EVENT_ENVELOPE_VERSION || event.human_confirmation().is_none() {
             continue;
         }
-        match &event.payload.action {
-            Action::SectionMerged { .. } | Action::ObjectSuperseded => {
-                return crate::migration::Migrated::Whole
-            }
-            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
-                ids.insert(*section);
-            }
-            Action::SectionAdded
-            | Action::ObjectCreated
-            | Action::ObjectRenamed
-            | Action::ObjectClosed
-            | Action::ObjectReopened
-            | Action::ObjectClassified { .. } => {}
-        }
+        wanted.widen(&event.payload.action);
     }
-    crate::migration::Migrated::Sections(ids)
+    wanted
 }
 
 /// Event-v2 keeps a Human candidate digest after its short-lived envelope is

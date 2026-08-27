@@ -338,10 +338,16 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let recovered = effective(root, id)?;
     let object = persisted.as_ref().unwrap_or(&recovered);
     let projection_rev = persisted.as_ref().map_or(0, |object| object.rev);
-    let object_tampered = object
-        .sha256
-        .as_deref()
-        .is_some_and(|seal| crate::integrity::check_object_integrity(object, seal).is_err());
+    // Absent is not "nothing to check" in a current workspace. The decode
+    // boundary refuses a current Object without an aggregate seal, so this is
+    // defence in depth for a value arriving another way — but answering `false`
+    // is precisely how an unsealed Object with no Sections reported as healthy,
+    // because every other field of the report was empty too.
+    let current = store::validate_format(root)? == store::WorkspaceFormat::Current;
+    let object_tampered = match object.sha256.as_deref() {
+        Some(seal) => crate::integrity::check_object_integrity(object, seal).is_err(),
+        None => current,
+    };
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     let mut standing_on_missing = Vec::new();

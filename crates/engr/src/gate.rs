@@ -487,14 +487,28 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
     // over the migrated representation is comparing two spellings of one thing.
     // Apply exactly the conversion migration applied, so the reconstruction is
     // the predecessor as this generation reads it.
-    // `Whole` here, deliberately. The read path converts only the Sections a
-    // recheck reads, because a lost commit must not make a sound Object
-    // unreadable. Admission is the other direction: `object_review_mutation`
-    // below projects the whole Object, and refusing to admit something new
-    // while part of the predecessor cannot be reconstructed is the safe answer
-    // rather than a surprising one.
-    let historical =
-        crate::migration::migrated_replay(root, historical, &crate::migration::Migrated::Whole)?;
+    // Only as much of the predecessor as this candidate has to self-authenticate.
+    //
+    // A stale candidate is kept readable on purpose — the invariant recorded at
+    // the end of this function is that it remains a valid historical description
+    // of what the Human was shown, so the candidate surface can explain why it is
+    // dead. Converting the whole Object would have contradicted that: every
+    // legacy Ref anywhere in it becomes a precondition for rendering the
+    // candidate, and one unrelated pinned commit going away makes a candidate
+    // whose own inputs are all present unreadable.
+    //
+    // A stored Rule Review is the exception, and only because
+    // `object_review_mutation` below projects the whole Object. That is a real
+    // requirement of the frozen ReviewDigest, not of the CandidateDigest, so it
+    // widens this one case rather than all of them.
+    let wanted = if candidate.context.rule_review.is_some() {
+        crate::migration::Migrated::Whole
+    } else {
+        let mut wanted = crate::migration::Migrated::nothing();
+        wanted.widen(&candidate.payload.action);
+        wanted
+    };
+    let historical = crate::migration::migrated_replay(root, historical, &wanted)?;
     let mut historical_after = historical.clone();
     project(
         &mut historical_after,

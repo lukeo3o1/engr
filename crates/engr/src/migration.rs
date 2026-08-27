@@ -244,6 +244,43 @@ pub(crate) enum Migrated {
 }
 
 impl Migrated {
+    /// Nothing yet. Widen it with the operations that will actually be proved.
+    pub(crate) fn nothing() -> Self {
+        Migrated::Sections(std::collections::BTreeSet::new())
+    }
+
+    /// Add whatever one operation's CandidateDigest projection reads.
+    ///
+    /// The arms are the arms of [`crate::proof::candidate_subject`], and they
+    /// have to stay that way: this decides what gets reconstructed, and that
+    /// function decides what gets hashed. `object.renamed` and the lifecycle
+    /// operations project title and state and name no Section. A Section
+    /// operation names its own participants. Only `section_merged` and
+    /// `object.superseded` need everything, because `ObjectInvariant` carries
+    /// every Section's semantics.
+    ///
+    /// `section.added` needs nothing: its before-state names no Section, and the
+    /// Section it produces is created after the boundary, so it cannot be
+    /// carrying a legacy Ref.
+    pub(crate) fn widen(&mut self, action: &crate::model::Action) {
+        use crate::model::Action;
+        let Migrated::Sections(ids) = self else {
+            return;
+        };
+        match action {
+            Action::SectionMerged { .. } | Action::ObjectSuperseded => *self = Migrated::Whole,
+            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+                ids.insert(*section);
+            }
+            Action::SectionAdded
+            | Action::ObjectCreated
+            | Action::ObjectRenamed
+            | Action::ObjectClosed
+            | Action::ObjectReopened
+            | Action::ObjectClassified { .. } => {}
+        }
+    }
+
     fn includes(&self, section: u64) -> bool {
         match self {
             Migrated::Whole => true,

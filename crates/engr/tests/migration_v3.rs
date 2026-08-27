@@ -1178,3 +1178,65 @@ fn an_operation_whose_digest_needs_the_lost_commit_still_refuses() {
         "and it is not reported as the Object being absent: {error}"
     );
 }
+
+/// A stale candidate stays readable when unrelated provenance disappears.
+///
+/// `validate_candidate` reconstructs the predecessor a pending candidate was
+/// written against, and it kept converting the whole migrated Object to do it.
+/// That contradicted the invariant the same function records at its end: a stale
+/// candidate is a valid historical description of what the Human was shown, and
+/// is deliberately kept readable so the candidate surface can say why it is
+/// dead. Converting everything made one unrelated legacy Ref's pinned commit a
+/// precondition for rendering it.
+///
+/// `object.renamed` proves itself from `TitleLifecycle`. With no stored Rule
+/// Review there is no whole-Object projection in play either, so nothing this
+/// candidate must self-authenticate lives in that Section.
+#[test]
+fn a_stale_candidate_is_still_renderable_after_an_unrelated_commit_is_lost() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let (_, source, commit) = migrated_with_legacy_ref(root);
+
+    let prepared = engr::gate::prepare(
+        root,
+        Payload {
+            action: Action::ObjectRenamed,
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "the name the human was shown".to_owned(),
+                ..Content::default()
+            },
+        },
+    )
+    .expect("prepare");
+    let challenge = prepared.candidate.challenge.clone();
+    assert!(
+        prepared.candidate.context.rule_review.is_none(),
+        "no applicable Object Rule, so no whole-Object review projection"
+    );
+
+    // An Agent rename gets there first, so the pending candidate goes stale on
+    // its own binding. Confirming another *Human* one would supersede and
+    // discard it instead, and then there would be nothing left to render.
+    engr::gate::admit_agent(
+        root,
+        Payload {
+            action: Action::ObjectRenamed,
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "a different rename got there first".to_owned(),
+                ..Content::default()
+            },
+        },
+        None,
+    )
+    .expect("agent rename");
+    forget_commit(root, &commit);
+
+    let candidate =
+        engr::gate::find(root, &challenge).expect("a stale candidate can still explain itself");
+    assert_eq!(candidate.challenge, challenge);
+}

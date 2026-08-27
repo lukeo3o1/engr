@@ -5154,3 +5154,53 @@ fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
     existing.push('\n');
     std::fs::write(&path, existing).expect("write event");
 }
+
+/// A current Object with a null aggregate seal is refused, not called healthy.
+///
+/// `Object.sha256` is an `Option` only so historical v1/v2 material still
+/// decodes. The current read boundary checked that the member was *present*,
+/// which `"sha256": null` satisfies — and then every trust diagnostic asks
+/// `sha256.as_deref().is_some_and(...)`, where `None` answers false. Give it an
+/// Object with no Sections and there is nothing else for a report to fail on,
+/// so unsealed authority came back sound from both surfaces.
+///
+/// No writer can produce this: `save_object` requires the seal. A shape only a
+/// hand edit reaches, which then reads as sound, is exactly the shape to refuse.
+#[test]
+fn a_current_object_without_an_aggregate_seal_is_not_reported_healthy() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "unsealed authority"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+
+    let path = store::object_path(root, id);
+    let mut stored: Value = store::read_json(&path).expect("stored object");
+    assert!(
+        stored["sections"].as_array().expect("sections").is_empty(),
+        "the fixture needs an Object whose aggregate is all its integrity"
+    );
+    assert!(
+        ops::verify(root, id).expect("verify").passed(),
+        "sound first"
+    );
+    stored["sha256"] = Value::Null;
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&stored, "unsealed object").expect("canonical"),
+    )
+    .expect("plant the null seal");
+
+    store::load_object(root, id).expect_err("a current Object carries an aggregate seal");
+    let verified = ops::verify(root, id);
+    assert!(
+        verified.as_ref().err().is_some() || !verified.expect("report").passed(),
+        "verification must not call unsealed authority healthy"
+    );
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        !shown.status.success(),
+        "show must not exit 0 on unsealed authority"
+    );
+}
