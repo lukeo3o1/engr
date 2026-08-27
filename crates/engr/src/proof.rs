@@ -54,6 +54,21 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// range of its own keeps it — this is the ceiling every field shares, never a
 /// licence to widen one.
 pub fn within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()> {
+    walk_safe_integers(EXIT_USAGE, value, what)
+}
+
+/// The same walk over material that was already **stored**.
+///
+/// One traversal, two fault classes. A number a caller just typed is a usage
+/// error; the identical number found inside a persisted Object, Event, Backlog
+/// item, Collection or Work sidecar is not something the caller did. It is a
+/// file outside the schema, and saying "usage" there sends a reader to fix
+/// their command line instead of the record.
+pub fn stored_within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()> {
+    walk_safe_integers(EXIT_SCHEMA, value, what)
+}
+
+fn walk_safe_integers(code: i32, value: &serde_json::Value, what: &str) -> Result<()> {
     match value {
         serde_json::Value::Number(number) => {
             let magnitude = match (number.as_u64(), number.as_i64()) {
@@ -65,20 +80,20 @@ pub fn within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()>
             };
             ensure!(
                 magnitude <= MAX_SAFE_INTEGER,
-                EXIT_USAGE,
+                code,
                 "{what}: {number} is outside the safe integer range every implementation shares, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
             );
             Ok(())
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                within_safe_integers(item, what)?;
+                walk_safe_integers(code, item, what)?;
             }
             Ok(())
         }
         serde_json::Value::Object(entries) => {
             for entry in entries.values() {
-                within_safe_integers(entry, what)?;
+                walk_safe_integers(code, entry, what)?;
             }
             Ok(())
         }
@@ -1184,6 +1199,13 @@ mod envelope_tests {
 /// the candidate's own bytes. Recomputing the review *identity* additionally
 /// needs the mutation descriptor projection, which is [`check_review_identity`].
 pub fn check_review_report(review: &CandidateReview) -> Result<()> {
+    let mut canonical_rules = review.rules.clone();
+    canonical_set(&mut canonical_rules, "rule")?;
+    ensure!(
+        canonical_rules == review.rules,
+        EXIT_SCHEMA,
+        "candidate Rule snapshots must use canonical set order"
+    );
     // Reject attempt 0 through the same type the rest of the crate counts
     // attempts with, so the candidate cannot carry a number no policy question
     // has an answer for.

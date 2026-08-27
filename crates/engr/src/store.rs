@@ -12,9 +12,51 @@
 //!   work/objects/<uuid>.json execution memory, owned by an object, admitted by nobody
 //!   collections/<id>.json    planning metadata, admitted by nobody
 //! ```
+//!
+//! There is no public writer here, and that is a contract rather than an
+//! oversight. A raw serializer or an Object save that validates shape is not an
+//! admission boundary: a self-consistent, correctly resealed Object says
+//! nothing about whether any Event, Human Gate or Rule Review produced it, and
+//! holding the writer lock closes a race rather than that question. So the
+//! primitives are crate-private, and a consumer reaches durable state only
+//! through a domain API that owns its own authority contract.
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn publish(root: &Path, object: &engr::model::Object) {
+//!     engr::store::save_object(root, object).expect("no such public writer");
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn publish(root: &Path, object: &engr::model::Object) {
+//!     let path = engr::store::object_path(root, &object.id);
+//!     engr::store::write_json(&path, object).expect("no such public writer");
+//! }
+//! ```
+//!
+//! The durable Event append is closed for a further reason, and not for
+//! visibility's own sake. Event provenance is deliberately minimal — the
+//! review's outcome and digest, and none of the transient inputs the decision
+//! was made from. The attempt is the one that matters: every mutation carries
+//! one Agent-attested attempt, each applicable Rule judges it against its own
+//! ceiling, and past any ceiling autonomous admission stops. None of that
+//! survives into the record, so re-deriving what the record *does* carry can
+//! never ask the question, and a public raw append would be a second Agent
+//! admission API holding strictly less state than the gate. [`check_appendable`]
+//! is the read-only half.
+//!
+//! ```compile_fail
+//! # use std::path::Path;
+//! fn admit(root: &Path, event: &engr::model::Event) {
+//!     engr::store::append_event(root, event).expect("no such public writer");
+//! }
+//! ```
 
 use crate::model::{
-    replay_recoverable_tail, Action, Event, Merge, Object, Provenance, EVENT_FORMAT,
+    project, replay_recoverable_tail, Action, Event, Merge, Object, Provenance, ReviewOutcome,
+    EVENT_FORMAT,
 };
 use crate::{
     ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION, EVENT_ENVELOPE_VERSION_V0,
@@ -104,6 +146,7 @@ pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Format {
     format: String,
     version: u32,
@@ -114,11 +157,10 @@ pub enum WorkspaceFormat {
     LegacyV0,
     /// A recognized workspace at an older version of the authority.
     ///
-    /// Distinct from [`Self::LegacyV0`], which predates the authority or still
-    /// spells an Object's lifecycle the old way. This one is well formed and
-    /// says exactly what it is; what it is is not what this build writes. Both
-    /// are read-only until `engr migrate`, and they say different things to
-    /// whoever is reading the error.
+    /// Distinct from [`Self::LegacyV0`], which has no workspace authority at
+    /// all. This one is well formed and says exactly what it is; what it is is
+    /// not what this build writes. Both are read-only until `engr migrate`, and
+    /// they say different things to whoever is reading the error.
     OlderVersion(u32),
     Current,
 }
@@ -133,11 +175,15 @@ const GITIGNORE: &str = "\
 # recovered from. events/ is safe to commit too: any challenge codes in it have
 # already been spent, and a spent code resolves to nothing.
 #
-# These two are local only:
+# These four are local only:
 #   lock         a mutex for this machine, nothing to share
 #   candidates/  each file is named after a *live* challenge code
+#   migration-v3/     resumable migration plan for this machine
+#   migration-v3.tmp/ plan before its atomic installation
 /lock
 /candidates/
+/migration-v3/
+/migration-v3.tmp/
 ";
 
 pub fn init(root: &Path) -> Result<PathBuf> {
@@ -168,6 +214,33 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     let ignore = dir.join(".gitignore");
     fs::write(&ignore, GITIGNORE).map_err(|error| tool_error(ignore.display(), error))?;
     Ok(dir)
+}
+
+/// A v3 migration plan is resumable local state, like the lock and live
+/// candidates. Existing predecessor workspaces did not know its name, so
+/// migration adds the two ignores without replacing any local ignore policy.
+pub(crate) fn ensure_migration_ignored(root: &Path) -> Result<()> {
+    let path = engr_dir(root).join(".gitignore");
+    let mut text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    let missing: Vec<_> = ["/migration-v3/", "/migration-v3.tmp/"]
+        .into_iter()
+        .filter(|entry| !text.lines().any(|line| line.trim() == *entry))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for entry in missing {
+        text.push_str(entry);
+        text.push('\n');
+    }
+    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
 }
 
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
@@ -204,9 +277,6 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         );
         return Ok(WorkspaceFormat::OlderVersion(version));
     }
-    if contains_legacy_objects(root)? {
-        return Ok(WorkspaceFormat::LegacyV0);
-    }
     Ok(WorkspaceFormat::Current)
 }
 
@@ -218,7 +288,21 @@ pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
     }
-    let format: Format = read_json(&path)?;
+    // The schema authority is a current resource too, and it is the one every
+    // other decoder consults to choose its generation — so it cannot be the one
+    // file exempt from the generation's own persisted representation. Checked
+    // after parsing rather than before, because the version it declares is what
+    // says whether the rule applies at all, and a predecessor `format.json` is
+    // read under its own contract. `check_canonical_bytes` does not consult the
+    // workspace version, so there is no recursion.
+    let text = read_text(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    let format: Format = serde_json::from_value(value.clone())
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    if format.version >= WORKSPACE_VERSION {
+        check_canonical_bytes(&path, &text, &value)?;
+    }
     ensure!(
         format.format == WORKSPACE_FORMAT,
         EXIT_SCHEMA,
@@ -243,42 +327,6 @@ fn detect_legacy(root: &Path) -> Result<bool> {
         }
     }
     Ok(true)
-}
-
-/// Does any Object here still use the legacy `status` spelling?
-///
-/// Asked of every command, in every domain, because the answer decides whether
-/// the workspace may be mutated at all. That reach is why it must not fail on a
-/// file it cannot read: one malformed Object used to make `backlog ls`, every
-/// Work command and every Collection command exit with a parse error about a
-/// file none of them were going to touch — a single bad byte disabling three
-/// domains that do not depend on it.
-///
-/// So a file that will not read is not evidence of anything here, and is not an
-/// error here either. It stays an error where it matters: `decode_object`
-/// refuses it the moment something actually loads that Object, `verify` reports
-/// it, and `preflight_migration` still validates every retained representation
-/// before moving any of them. Failing closed on Object authority and staying
-/// out of the way of the other domains are the same rule, applied where each
-/// belongs.
-fn contains_legacy_objects(root: &Path) -> Result<bool> {
-    let mut legacy = false;
-    for id in object_ids(root)? {
-        let Ok(value) = read_json::<serde_json::Value>(&object_path(root, &id)) else {
-            continue;
-        };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        // A file claiming both spellings cannot say which it means, so it is not
-        // counted as legacy on the strength of the one that happens to be there.
-        // `decode_object` refuses it when it is loaded.
-        if object.contains_key("state") {
-            continue;
-        }
-        legacy |= object.contains_key("status");
-    }
-    Ok(legacy)
 }
 
 pub fn require_current(root: &Path) -> Result<()> {
@@ -342,7 +390,7 @@ pub(crate) fn decode_object_for_version(
     version: u32,
 ) -> Result<Object> {
     if version >= 3 {
-        crate::proof::within_safe_integers(&value, &path.display().to_string())?;
+        crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
         check_current_object_shape(path, &value)?;
     } else {
         check_predecessor_object_shape(path, version, &value)?;
@@ -460,6 +508,31 @@ fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<
             "{}: current Sections are stored in increasing id order",
             path.display()
         );
+        // Set-valued arrays have one persisted order too, and it is the shared
+        // one: JCS each element, then order by those bytes. The canonical-bytes
+        // check cannot see this — JCS fixes member order inside an object and
+        // leaves arrays exactly as written — so without it a stored set can be
+        // reordered, keep valid seals, and load: two accepted encodings for one
+        // v3 value, which is the thing this generation says it does not have.
+        for field in ["refs", "relations"] {
+            let items = section
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!("{}: §{id} {field} must be an array", path.display()),
+                    )
+                })?;
+            let mut canonical = items.clone();
+            crate::proof::canonical_set(&mut canonical, field)?;
+            ensure!(
+                canonical == *items,
+                EXIT_SCHEMA,
+                "{}: §{id} {field} must be in canonical set order",
+                path.display()
+            );
+        }
         previous = Some(id);
     }
     Ok(())
@@ -564,25 +637,134 @@ pub fn with_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> 
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).map_err(|error| {
+    let text = read_text(path)?;
+    serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
+}
+
+fn read_text(path: &Path) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(EXIT_NOT_FOUND, format!("{}: not found", path.display()))
         } else {
             tool_error(path.display(), error)
         }
-    })?;
-    serde_json::from_str(&text)
+    })
+}
+
+/// [`read_json`] for a resource of the **current** generation, whose persisted
+/// bytes are one exact representation rather than a family of equivalent ones.
+///
+/// Three properties, and they are one check. The bytes have to be the RFC 8785
+/// serialization of the value they parse to — which fixes member order, number
+/// formatting and insignificant whitespace, and also settles duplicate member
+/// names for free: a repeated key collapses during parsing, so the value
+/// re-serializes with one occurrence and no longer matches the bytes that had
+/// two. That matters beyond tidiness, because a duplicate is where two
+/// conforming JSON stacks are allowed to disagree about what the file says.
+///
+/// On the read path rather than only in the writer, because a current resource
+/// arrives through a git merge, a hand edit, a copy or another implementation
+/// as readily as through this build's own `write_json`. A writer that emits one
+/// representation and a reader that accepts many is not one representation.
+///
+/// Set-valued arrays are the part this cannot answer: JCS fixes member order
+/// inside an object and leaves array order alone. Each resource requires its own
+/// sets to be in the shared canonical order where it validates its shape.
+pub(crate) fn read_current_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let text = read_text(path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    check_canonical_bytes(path, &text, &value)?;
+    serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
 }
 
+/// Current resources have the one spelling their writer emits. JCS alone fixes
+/// JSON member order and number text, but it cannot distinguish an omitted
+/// optional field from an explicit `null`, or an omitted false from `false`.
+pub(crate) fn check_current_resource_shape<T: Serialize>(
+    path: &Path,
+    text: &str,
+    resource: &T,
+) -> Result<()> {
+    ensure!(
+        text == crate::proof::canonical_bytes(resource, &path.display().to_string())?,
+        EXIT_SCHEMA,
+        "{}: a current resource is not in the exact shape its writer emits",
+        path.display()
+    );
+    Ok(())
+}
+
+/// The bytes of a current-generation resource against the one serialization it
+/// is allowed to have. Split out so a caller that already holds both can ask.
+pub(crate) fn check_canonical_bytes(
+    path: &Path,
+    text: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
+    // The numeric domain first, because canonicalizing is what would report it —
+    // and would report it as a caller mistake. A number found inside a stored
+    // file is a fault in the file.
+    crate::proof::stored_within_safe_integers(value, &path.display().to_string())?;
+    ensure!(
+        text == crate::proof::canonical_bytes(value, &path.display().to_string())?,
+        EXIT_SCHEMA,
+        "{}: a current resource is persisted as its canonical JCS bytes, and these are not them",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Read one JSON resource, held to the current generation's canonical
+/// representation exactly when the workspace *is* that generation.
+///
+/// A predecessor workspace is read under its own contract, which did not say
+/// there was one persisted spelling. Refusing those bytes here would make a
+/// valid old workspace unreadable rather than migratable, which is the opposite
+/// of what the generation boundary is for.
+pub(crate) fn read_resource<T: DeserializeOwned + Serialize>(
+    root: &Path,
+    path: &Path,
+) -> Result<T> {
+    if validate_format(root)? == WorkspaceFormat::Current {
+        let text = read_text(path)?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+        check_canonical_bytes(path, &text, &value)?;
+        let resource = serde_json::from_value(value)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+        check_current_resource_shape(path, &text, &resource)?;
+        Ok(resource)
+    } else {
+        read_json(path)
+    }
+}
+
 /// Write via a temporary file and rename, so a reader never sees half a file.
-pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
-    let mut text = serde_json::to_string_pretty(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    text.push('\n');
+    let text = crate::proof::canonical_bytes(value, &path.display().to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, text.as_bytes())
+        .map_err(|error| tool_error(temporary.display(), error))?;
+    fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
+    Ok(())
+}
+
+/// Write exact text via a temporary file and rename.
+///
+/// [`write_json`] serializes; this one publishes bytes that were already
+/// validated as the thing to write. Migration needs that distinction: the
+/// artifact it checked and the artifact it publishes have to be the same value,
+/// not two serializations that ought to agree.
+pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, text.as_bytes())
         .map_err(|error| tool_error(temporary.display(), error))?;
@@ -592,16 +774,25 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     let path = object_path(root, id);
-    let value: serde_json::Value = read_json(&path)?;
+    let text = read_text(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     let version = match validate_format(root)? {
         WorkspaceFormat::LegacyV0 => 0,
         WorkspaceFormat::OlderVersion(version) => version,
         WorkspaceFormat::Current => WORKSPACE_VERSION,
     };
+    // The canonical-bytes rule belongs to the current generation and only to it.
+    // A predecessor Object is read under the contract it was written under, and
+    // that contract did not require one persisted spelling — refusing it here
+    // would make a valid old workspace unreadable instead of migratable.
+    if version >= WORKSPACE_VERSION {
+        check_canonical_bytes(&path, &text, &value)?;
+    }
     decode_object_for_version(&path, id, value, version)
 }
 
-pub fn save_object(root: &Path, object: &Object) -> Result<()> {
+pub(crate) fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
     ensure!(
@@ -627,6 +818,10 @@ pub fn save_object(root: &Path, object: &Object) -> Result<()> {
         );
     }
     crate::integrity::check_stored_object_integrity(object)?;
+    let value = serde_json::to_value(object)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {}: {error}", object.id)))?;
+    check_current_object_shape(&object_path(root, &object.id), &value)?;
+    crate::proof::stored_within_safe_integers(&value, &format!("object {}", object.id))?;
     write_json(&object_path(root, &object.id), object)
 }
 
@@ -685,14 +880,23 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
             Object::new(id.to_owned(), String::new())?
         }
     };
-    replay_recoverable_tail(object, events)
-        .map(|_| ())
-        .map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{id}: event tail cannot reconcile: {}", error.message),
-            )
-        })
+    let (projected, _) = replay_recoverable_tail(object, events).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("{id}: event tail cannot reconcile: {}", error.message),
+        )
+    })?;
+    // Replaying is not the whole question. Some current-state integers are
+    // allocated *by* the replay and appear nowhere in the record: a
+    // `section_added` carries no Section id and no counter, so its own
+    // safe-integer walk passes while `take_id()` advances `next_section_id` past
+    // the shared ceiling. The projection would then be one canonical sealing
+    // refuses, and `.engr/events` is append-only — the tail would be durable
+    // history its own recovery path can never materialize. So the check is over
+    // what the replay produces, not only over what the caller wrote.
+    let value = serde_json::to_value(&projected)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{id}: {error}")))?;
+    crate::proof::stored_within_safe_integers(&value, &format!("{id}: replayed object"))
 }
 
 /// Shortest prefix length at which every id is distinct, floored at 8.
@@ -835,19 +1039,63 @@ fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Resul
 /// it is, so the whole contract moves together rather than the parts of it that
 /// happened to be noticed.
 ///
-/// `stored` is the raw bytes when there are any. Appending has no raw form yet,
-/// and needs none: a value that came from this build's own model cannot be
+/// `stored` is the record as the file actually holds it: the exact record text
+/// alongside the value it parses to. Appending has no stored form yet, and
+/// needs none — a value that came from this build's own model cannot be
 /// carrying a member the model has no place for.
-fn check_event_record(event: &Event, id: &str, stored: Option<&serde_json::Value>) -> Result<()> {
+fn check_event_record(
+    event: &Event,
+    id: &str,
+    stored: Option<(&str, &serde_json::Value)>,
+) -> Result<()> {
     ensure!(
         event.format == EVENT_FORMAT,
         EXIT_SCHEMA,
         "not an engr event"
     );
-    if let Some(stored) = stored {
+    if let Some((raw, stored)) = stored {
         check_nothing_was_dropped(stored, event)?;
+        if event.version == EVENT_ENVELOPE_VERSION {
+            let canonical = serde_json::to_value(event)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+            ensure!(
+                *stored == canonical,
+                EXIT_SCHEMA,
+                "Event v2 is not in its exact canonical shape"
+            );
+            crate::proof::stored_within_safe_integers(stored, "Event v2")?;
+            // The contract is not "parses to the same value". It is that the
+            // persisted record *is* the RFC 8785 bytes. Comparing parsed values
+            // would already have erased member order, insignificant whitespace
+            // and any duplicate member name the parser collapsed, and an
+            // EventStore arrives through git merge, hand edit and copy as
+            // readily as through this build's own append.
+            ensure!(
+                raw == crate::proof::canonical_bytes(event, "Event v2")?,
+                EXIT_SCHEMA,
+                "Event v2 is not persisted as its canonical JCS bytes"
+            );
+        }
     }
     check_event_generation(event)?;
+    if event.version == EVENT_ENVELOPE_VERSION {
+        let value = serde_json::to_value(event)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+        crate::proof::stored_within_safe_integers(&value, "Event v2")?;
+        // Revision zero is the Object before any Event: the first admitted one
+        // advances it to 1. No writer emits it, and adjacency alone cannot
+        // refuse it, because a `0, 1, ...` log is perfectly contiguous.
+        ensure!(event.rev >= 1, EXIT_SCHEMA, "Event v2 revisions start at 1");
+        ensure!(
+            time::OffsetDateTime::parse(
+                &event.time,
+                &time::format_description::well_known::Rfc3339
+            )
+            .is_ok(),
+            EXIT_SCHEMA,
+            "Event v2 time is not RFC3339"
+        );
+    }
     ensure!(
         event.payload.object == id,
         EXIT_SCHEMA,
@@ -961,6 +1209,27 @@ fn check_event_generation(event: &Event) -> Result<()> {
                 "event version {} cannot carry legacy references",
                 event.version
             );
+            event.payload.content.require_canonical_order()?;
+            if let Provenance::Tagged { admission } = &event.provenance {
+                if admission.kind == crate::semantics::Admission::Agent {
+                    ensure!(
+                        event.payload.becomes.is_none(),
+                        EXIT_SCHEMA,
+                        "an Agent Event cannot carry becomes"
+                    );
+                    ensure!(
+                        !matches!(
+                            event.payload.action,
+                            Action::ObjectClosed
+                                | Action::ObjectReopened
+                                | Action::ObjectClassified { .. }
+                                | Action::ObjectSuperseded
+                        ),
+                        EXIT_SCHEMA,
+                        "this lifecycle action requires Human admission"
+                    );
+                }
+            }
             Ok(())
         }
         _ => Err(Error::new(
@@ -970,25 +1239,48 @@ fn check_event_generation(event: &Event) -> Result<()> {
     }
 }
 
-/// Append one admitted Event, taking the workspace writer lock.
+/// Whether this Event would be accepted by the durable boundary, without
+/// writing anything.
 ///
-/// The lock belongs here rather than at the caller because the check this
-/// function performs is about the file it is about to write: it reads the tail
-/// to refuse a revision the next load would reject, and a read-then-append with
-/// nothing held between them is two writers agreeing on the same predecessor and
-/// both appending it. That is the exact durable boundary this path exists to
-/// keep sound, so leaving the serialization to whoever happens to call is
-/// leaving it to chance.
+/// **There is no public append, and that is the contract.** Recomputing what an Event
+/// persists is not the same as proving admission, because Event provenance is
+/// deliberately minimal: it carries the review's outcome and digest and not the
+/// transient inputs the decision was made from. The attempt is the one that
+/// matters — every mutation carries one Agent-attested attempt, each applicable
+/// Rule judges it against its own ceiling, and past any ceiling autonomous
+/// Object admission stops. None of that is in the record, so no amount of
+/// re-derivation at this boundary can ask it, and a public raw append would be a
+/// second Agent admission API holding strictly less state than the gate.
 ///
-/// [`append_event_locked`] is the same work for a caller that already holds the
-/// lock — `confirm` does, and taking it again from the same process would wait
-/// on a lock nothing will release.
-pub fn append_event(root: &Path, event: &Event) -> Result<()> {
-    with_lock(root, || append_event_locked(root, event))
+/// So this is the read-only half and the only half a consumer gets: every check
+/// the append performs, and no capacity to perform the append. A caller that
+/// wants a record in the log goes through the gate, which is where the admission
+/// inputs live. The lock is taken because the checks read the durable tail, and
+/// an answer about a tail that is moving is not an answer.
+pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
+    with_lock(root, || check_appendable_locked(root, event))
 }
 
-/// [`append_event`] for a caller already inside [`with_lock`].
+/// The durable append, for a caller already inside [`with_lock`] — which is
+/// every caller, because the only routes here are `confirm` and `admit_agent`.
 pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
+    check_appendable_locked(root, event)?;
+    let path = events_path(root, &event.payload.object);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
+    let line = crate::proof::canonical_bytes(event, "Event v2")?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| tool_error(path.display(), error))?;
+    use std::io::Write;
+    writeln!(file, "{line}").map_err(|error| tool_error(path.display(), error))
+}
+
+/// Every check the append performs, and none of the writing.
+fn check_appendable_locked(root: &Path, event: &Event) -> Result<()> {
     // The durable Event path is part of the workspace-generation boundary, and a
     // direct library caller reaches it without passing the gate. Asked here as
     // well as there, because "this build may write this workspace" is a property
@@ -1005,7 +1297,6 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
     // as it was rather than advanced past history it could not record.
     check_event_record(event, &event.payload.object, None)?;
     let id = &event.payload.object;
-    let path = events_path(root, id);
     // Continuity against what is already there, which is the one part of the
     // read contract that is about the file rather than the record. Reading the
     // tail is the cost of not being able to append a revision the next load
@@ -1038,27 +1329,33 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
         Err(error) => return Err(error),
     };
     validate_recoverable_tail(id, object, &tail)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-    }
-    let line = serde_json::to_string(event)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| tool_error(path.display(), error))?;
-    use std::io::Write;
-    writeln!(file, "{line}").map_err(|error| tool_error(path.display(), error))?;
-    Ok(())
+    // Last, and only for a record that is otherwise sound: a malformed Event
+    // should be refused for being malformed, not for failing a proof about a
+    // shape nothing could admit anyway.
+    crate::gate::check_admission(root, event)
 }
 
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
     let path = events_path(root, id);
     if !path.exists() {
+        ensure!(
+            !object_path(root, id).exists(),
+            EXIT_SCHEMA,
+            "{} exists but its append-only Event history is missing",
+            object_path(root, id).display()
+        );
         return Ok(Vec::new());
     }
     let text = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+    decode_events(root, &path, id, &text)
+}
+
+/// Decode the one EventStore text a caller already captured.
+///
+/// Migration needs this form because fingerprinting one read and replaying a
+/// second one can derive a plan from bytes the manifest does not name. Ordinary
+/// reads take the same route after obtaining their text from disk.
+pub(crate) fn decode_events(root: &Path, path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -1080,7 +1377,7 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         // so corrupt recovery data must fail before it reaches the reducer — and
         // it fails against the same rules the write boundary applied, rather
         // than a second copy of them kept in step by hand.
-        check_event_record(&event, id, Some(&stored)).map_err(|error| {
+        check_event_record(&event, id, Some((line, &stored))).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}:{}: {}", path.display(), index + 1, error.message),
@@ -1099,5 +1396,83 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         }
         events.push(event);
     }
+    check_event_history(root, path, id, &events)?;
     Ok(events)
+}
+
+/// History is append-only evidence, not a replaceable recovery cache. Its
+/// first admitted transition is therefore always revision 1, and a generation
+/// that introduced mixed authority cannot be followed by the older semantic
+/// generation again.
+fn check_event_history(root: &Path, path: &Path, id: &str, events: &[Event]) -> Result<()> {
+    ensure!(
+        !events.is_empty(),
+        EXIT_SCHEMA,
+        "{} is an empty Event history file",
+        path.display()
+    );
+    ensure!(
+        events[0].rev == 1,
+        EXIT_SCHEMA,
+        "{}: non-empty Event history starts at revision {}, not 1",
+        path.display(),
+        events[0].rev
+    );
+    let mut seen_v2 = false;
+    for event in events {
+        if event.version == EVENT_ENVELOPE_VERSION {
+            seen_v2 = true;
+        } else {
+            ensure!(
+                !seen_v2,
+                EXIT_SCHEMA,
+                "{}: retained Event generation 1 cannot follow generation 2",
+                path.display()
+            );
+        }
+    }
+    check_human_candidate_digests(root, id, events)
+}
+
+/// Event-v2 keeps a Human candidate digest after its short-lived envelope is
+/// deleted. The transition it seals remains reconstructable from immutable
+/// history, so accepting only the digest's scalar syntax would turn durable
+/// admission evidence into an unauthenticated label after confirmation.
+fn check_human_candidate_digests(root: &Path, id: &str, events: &[Event]) -> Result<()> {
+    let mut projection = Object::new(id.to_owned(), String::new())?;
+    let mut migrated = false;
+    for event in events {
+        if event.version == EVENT_ENVELOPE_VERSION && !migrated {
+            projection = crate::migration::migrated_replay(root, projection)?;
+            migrated = true;
+        }
+        let before = projection.clone();
+        project(&mut projection, event).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{id}: Event history cannot reconstruct its transition: {}",
+                    error.message
+                ),
+            )
+        })?;
+        let Some(confirmation) = event.human_confirmation() else {
+            continue;
+        };
+        let review_digest = match &event.provenance {
+            Provenance::Tagged { admission } => admission.rule_review.as_ref().and_then(|review| {
+                (review.outcome == ReviewOutcome::Overridden).then(|| review.review_digest.clone())
+            }),
+            Provenance::Confirmed { .. } => None,
+        };
+        let subject =
+            crate::proof::candidate_subject(&before, &projection, &event.payload, review_digest)?;
+        ensure!(
+            subject.digest()? == confirmation.candidate_digest,
+            EXIT_SCHEMA,
+            "{id}: Event rev {} carries a candidate digest no Human transition produced",
+            event.rev
+        );
+    }
+    Ok(())
 }

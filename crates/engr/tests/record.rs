@@ -87,7 +87,7 @@ fn tamper(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn reconcile_applies_an_event_the_projection_missed() {
     let id = new_object(&root, "reconciliation");
     let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "one"))
         .expect("prepare crash tail");
-    store::append_event(
+    append_admitted_raw(
         &root,
         &engr::model::Event {
             format: engr::model::EVENT_FORMAT.to_owned(),
@@ -180,8 +180,7 @@ fn reconcile_applies_an_event_the_projection_missed() {
                 },
             },
         },
-    )
-    .expect("append without projecting");
+    );
 
     let object_path = store::object_path(&root, &id);
     let events_path = store::events_path(&root, &id);
@@ -496,7 +495,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     let path = store::object_path(&root, &target);
     let mut raw: serde_json::Value = store::read_json(&path).expect("read");
     raw["state"] = serde_json::json!("not-a-state");
-    store::write_json(&path, &raw).expect("write");
+    write_raw(&path, &raw).expect("write");
     assert!(
         ops::effective(&root, &target).is_err(),
         "the target must genuinely fail to load"
@@ -535,7 +534,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     // A target that is genuinely absent is the other answer, and stays drift.
     // Its events go too: a projection alone is not the authority, and while the
     // durable tail survives, the target is recoverable rather than gone.
-    store::write_json(&path, &raw).expect("restore the broken file");
+    write_raw(&path, &raw).expect("restore the broken file");
     std::fs::remove_file(&path).expect("remove");
     std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
     let object = ops::effective(&root, &source).expect("source");
@@ -582,7 +581,7 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     let sound: Value = store::read_json(&path).expect("read");
     let mut broken = sound.clone();
     broken["state"] = Value::String("not-a-state".into());
-    store::write_json(&path, &broken).expect("write");
+    write_raw(&path, &broken).expect("write");
 
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed(), "unreadable authority is not a pass");
@@ -597,9 +596,11 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
         "and it says why"
     );
 
-    // (b) the target is gone entirely.
+    // (b) the target is gone entirely — projection and admitted history both.
+    let history = store::events_path(&root, &target);
+    let history_bytes = std::fs::read(&history).expect("history");
     std::fs::remove_file(&path).expect("remove");
-    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
+    std::fs::remove_file(&history).expect("remove events");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(
         !report.passed(),
@@ -608,11 +609,14 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     assert_eq!(report.standing_on_missing.len(), 1);
     assert!(report.standing_on_unreadable.is_empty());
 
-    // (c) the target loads, but the referenced section is not in it.
-    store::write_json(&path, &sound).expect("restore");
+    // (c) the target loads, with its history, but the referenced section is not
+    // in it. The history goes back too: a projection with no admitted history at
+    // all is its own finding, and it would mask this one.
+    std::fs::write(&history, &history_bytes).expect("restore history");
+    write_raw(&path, &sound).expect("restore");
     let mut without: Value = store::read_json(&path).expect("read");
     without["sections"] = serde_json::json!([]);
-    store::write_json(&path, &without).expect("write");
+    write_raw(&path, &without).expect("write");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
     assert_eq!(
@@ -835,4 +839,75 @@ fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
     let report = ops::verify(&root, &source).expect("verify");
     assert!(!report.passed());
     assert_eq!(report.standing_on_missing.len(), 1);
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A duplicate member is where two conforming JSON readers may disagree.
+///
+/// Parsing into a value collapses a repeated key silently — one slot per name —
+/// so an exact-members check made after parsing can only ever see one. That is
+/// not a tidiness question: another conforming stack may reject the document or
+/// select the other occurrence, so the bytes no longer have one meaning. The
+/// canonical-bytes rule settles it without a second check, because the collapsed
+/// value no longer re-serializes to the bytes that had both.
+#[test]
+fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "one meaning");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+
+    let path = store::object_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("object bytes");
+    store::load_object(&root, &id).expect("the canonical bytes load");
+
+    for (what, rewritten) in [
+        (
+            "a duplicated top-level member",
+            original.replacen('{', r#"{"state":"open","#, 1),
+        ),
+        (
+            "a duplicated Section member",
+            original.replacen(r#""sections":[{"#, r#""sections":[{"id":1,"#, 1),
+        ),
+    ] {
+        assert_ne!(
+            rewritten, original,
+            "{what}: the fixture must change something"
+        );
+        std::fs::write(&path, &rewritten).expect("write");
+        let error = store::load_object(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains("canonical"), "{what}: {error}");
+    }
+
+    std::fs::write(&path, &original).expect("restore");
+    store::load_object(&root, &id).expect("and it reads back");
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }

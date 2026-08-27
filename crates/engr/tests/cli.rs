@@ -287,7 +287,7 @@ fn reference_admission_uses_the_effective_target_projection() {
             },
         },
     };
-    store::append_event(root, &revision_event).expect("append without projection");
+    append_admitted_raw(root, &revision_event);
     let effective = ops::effective_section(root, &target, 1).expect("effective target section");
     assert_ne!(effective.sha256, raw.sha256);
 
@@ -362,7 +362,7 @@ fn reference_admission_uses_the_effective_target_projection() {
         String::from_utf8_lossy(&cli.stderr)
     );
 
-    store::save_object(
+    save_raw(
         root,
         &ops::effective(root, &target).expect("effective object"),
     )
@@ -438,7 +438,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     .expect("prepare retryable candidate");
     let retry_code = retryable.candidate.challenge.clone();
     gate::confirm(root, &format!("CONFIRM {retry_code}")).expect("apply candidate");
-    store::write_json(
+    write_raw(
         &store::candidate_path(root, &retry_code).expect("candidate path"),
         &retryable.candidate,
     )
@@ -503,7 +503,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     .expect("prepare overtaking candidate");
     gate::confirm(root, &format!("CONFIRM {}", overtaking.candidate.challenge))
         .expect("confirm overtaking candidate");
-    store::write_json(
+    write_raw(
         &store::candidate_path(root, &stale_code).expect("candidate path"),
         &stale.candidate,
     )
@@ -1361,7 +1361,7 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
             .seal()
             .expect("object seal"),
     );
-    store::save_object(&root, &object).expect("save object");
+    save_raw(&root, &object).expect("save object");
     let payload = Payload {
         action: Action::SectionAdded,
         object: id,
@@ -1566,7 +1566,7 @@ fn an_object_file_must_match_its_embedded_id() {
 
     let object = Object::new(engr::model::new_id(), "mismatched storage key".to_owned())
         .expect("new object");
-    store::write_json(&store::object_path(root, "wrong"), &object).expect("write object");
+    write_raw(&store::object_path(root, "wrong"), &object).expect("write object");
 
     let output = run_engr(root, &["show", "wrong"]);
     assert_eq!(
@@ -1600,31 +1600,31 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             ..Content::default()
         },
     };
-    store::append_event(
+    // Prepared for real, then appended without the projection: that is exactly
+    // the crash window `show` has to reconcile, and the durable boundary admits
+    // an Event only against the candidate it was prepared as.
+    let prepared = gate::prepare(root, payload).expect("prepare the unprojected change");
+    append_admitted_raw(
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
             version: engr::EVENT_ENVELOPE_VERSION,
             event_id: engr::model::new_id(),
-            rev: 2,
+            rev: prepared.candidate.binding.expected_rev + 1,
             time: "2026-08-13T00:00:00Z".to_owned(),
-            payload,
+            payload: prepared.candidate.payload.clone(),
             provenance: Provenance::Tagged {
                 admission: TaggedAdmission {
                     kind: engr::semantics::Admission::Human,
                     confirmation: Some(HumanConfirmation {
-                        challenge: "234567".to_owned(),
-                        candidate_digest: created["candidate_digest"]
-                            .as_str()
-                            .expect("candidate digest")
-                            .to_owned(),
+                        challenge: prepared.candidate.challenge.clone(),
+                        candidate_digest: prepared.candidate.candidate_digest.clone(),
                     }),
                     rule_review: None,
                 },
             },
         },
-    )
-    .expect("append unprojected event");
+    );
 
     let lock_path = store::engr_dir(root).join("lock");
     let lock = OpenOptions::new()
@@ -1671,7 +1671,8 @@ fn unsupported_event_versions_are_rejected() {
     let id = event.payload.object.clone();
 
     // Refused on the way in, so nothing writes one...
-    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    let error =
+        store::check_appendable(&root, &event).expect_err("this build emits one generation");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(
         !store::events_path(&root, &id).exists(),
@@ -1989,7 +1990,7 @@ fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
     let path = engr::backlog::item_path(root, &item);
     let mut stored: Value = store::read_json(&path).expect("item");
     stored["sections"][0]["updated_at"] = Value::String("last tuesday".to_owned());
-    store::write_json(&path, &stored).expect("corrupt the stored item");
+    write_raw(&path, &stored).expect("corrupt the stored item");
     assert_eq!(
         code(&["backlog", "show", &item]),
         Some(engr::EXIT_SCHEMA),
@@ -2035,11 +2036,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     );
     let id = engr::backlog::ids(root).expect("ids").remove(0);
 
-    assert!(
-        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "second point",
+            "--expect",
+            &add_token(root, &id)
+        ]
+    )
+    .status
+    .success());
     assert!(run_engr(
         root,
         &[
@@ -2049,7 +2059,9 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "--section",
             "2",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
@@ -2062,19 +2074,32 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
-            "one point"
+            "one point",
+            "--expect",
+            &expect_token(root, &id, Some(1)),
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
     .success());
-    assert!(
-        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "rename",
+            &id,
+            "--topic",
+            "refresh",
+            "--expect",
+            &expect_token(root, &id, None)
+        ]
+    )
+    .status
+    .success());
 
     let item = engr::backlog::load(root, &id).expect("item");
     assert_eq!(item.topic, "refresh");
@@ -2101,6 +2126,8 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "concerns dirty source",
             "--subject-file",
             "session.rs",
+            "--expect",
+            &add_token(root, &id),
         ],
     );
     assert!(
@@ -2128,11 +2155,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         remaining, 2,
         "the dirty subject was staged as its own point"
     );
-    assert!(
-        run_engr(root, &["backlog", "consume", &id, "--section", "3"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            "3",
+            "--expect",
+            &expect_token(root, &id, Some(3))
+        ]
+    )
+    .status
+    .success());
     assert_eq!(
         engr::backlog::load(root, &id).expect("item").sections.len(),
         1,
@@ -2141,7 +2177,15 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
     assert!(run_engr(
         root,
-        &["backlog", "consume", &id, "--section", &last.to_string()]
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            &last.to_string(),
+            "--expect",
+            &expect_token(root, &id, Some(last))
+        ]
     )
     .status
     .success());
@@ -2797,7 +2841,7 @@ fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
         Ok(())
     })
     .expect("reseal seeded bodies");
-    store::save_object(root, &resealed.object).expect("save");
+    save_raw(root, &resealed.object).expect("save");
     assert!(
         run_engr(root, &["verify", id]).status.success(),
         "the seeded section must be valid stored authority"
@@ -3907,7 +3951,8 @@ fn backlog_json_sections_do_not_repeat_a_key() {
         &item.id,
         "a second point",
         Vec::new(),
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section_absent(root, &item.id).expect("observe")),
     )
     .expect("second");
 
@@ -3975,7 +4020,7 @@ fn a_pending_candidate_refuses_a_projection_changed_outside_the_gate() {
     let path = store::object_path(root, &id);
     let mut stored: Value = store::read_json(&path).expect("object");
     stored["title"] = Value::String("a record this candidate is not about".into());
-    store::write_json(&path, &stored).expect("rewrite title");
+    write_raw(&path, &stored).expect("rewrite title");
 
     let after = run_engr(root, &["candidate", &code]);
     assert!(
@@ -4043,7 +4088,7 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
     let path = store::object_path(root, &target);
     let mut stored: Value = store::read_json(&path).expect("object");
     stored["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
-    store::write_json(&path, &stored).expect("rewrite");
+    write_raw(&path, &stored).expect("rewrite");
 
     let reference = format!("{target}:1");
     let refused = run_engr(
@@ -4153,8 +4198,15 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
-    engr::work::start(root, &healthy, Some("underway")).expect("work");
-    engr::collection::create(root, "a plan", None, None).expect("collection");
+    engr::work::start(
+        root,
+        &healthy,
+        Some("underway"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("work");
+    engr::collection::create(root, "a plan", None, None, engr::rules::Attempt::FIRST)
+        .expect("collection");
 
     std::fs::write(store::object_path(root, &broken), "not json at all").expect("break it");
 
@@ -4189,7 +4241,7 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     // choose between.
     let mut confused: Value = store::read_json(&store::object_path(root, &healthy)).expect("read");
     confused["status"] = confused["state"].clone();
-    store::write_json(&store::object_path(root, &healthy), &confused).expect("write");
+    write_raw(&store::object_path(root, &healthy), &confused).expect("write");
     let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("Object members"), "{error}");
@@ -4216,16 +4268,16 @@ fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics()
     )
     .expect("rule");
 
-    // Exactly what a version 1 workspace looks like: intact, well formed, and
-    // written by a build that had never heard of `review:`.
+    // Exactly what a version 2 workspace looks like: intact, well formed, and
+    // one explicit command away from being current.
     let format_path = store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let listed = run_engr(root, &["rules", "ls"]);
     assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
     let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
     assert!(
-        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        stderr.contains("version 2") && stderr.contains("engr migrate"),
         "the refusal names the version it found and what to do: {stderr}"
     );
     assert!(
@@ -4416,6 +4468,15 @@ fn governed_backlog(root: &Path, max_attempts: u32) -> String {
 }
 
 /// What `backlog show --json` says to hand back for a given point.
+/// The `expect` value for adding a point: the topic plus the id the add will
+/// receive.
+fn add_token(root: &Path, id: &str) -> String {
+    let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    shown["expect"]["add"].as_str().expect("add").to_owned()
+}
+
 fn expect_token(root: &Path, id: &str, section: Option<u64>) -> String {
     let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
     assert!(shown.status.success());
@@ -4649,9 +4710,9 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
     .success());
 }
 
-/// A merge carries one predecessor per point it touches.
+/// A merge carries one predecessor for each of the two points it touches.
 #[test]
-fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
+fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4678,7 +4739,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4696,7 +4757,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4713,9 +4774,14 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
     assert_eq!(stored.section(1).expect("§1").text, "one point");
 }
 
-/// With no rule governing backlog there is no review, so nothing to anchor.
+/// Stale-write protection does not depend on a rule being configured.
+///
+/// A rule decides whether there is a *review*; it does not decide whether
+/// somebody else's write can land between a caller's reading and their writing.
+/// With the two conflated, the ungoverned workspace — the one nobody has
+/// thought about concurrency in — was the one with no protection at all.
 #[test]
-fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
+fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4727,7 +4793,34 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
+    assert!(
+        engr::rules::applicable(root, engr::rules::Domain::Backlog)
+            .expect("rules")
+            .is_empty(),
+        "nothing governs backlog here"
+    );
 
+    let bare = run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &item.id,
+            "--section",
+            "1",
+            "--text",
+            "reworded",
+        ],
+    );
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("--expect"));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "an unresolved point",
+        "the refused write left the newer wording alone"
+    );
+
+    let current = expect_token(root, &item.id, Some(1));
     assert!(run_engr(
         root,
         &[
@@ -4737,20 +4830,23 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
             "--section",
             "1",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &current
         ]
     )
     .status
     .success());
 
-    // And one may still be given, in which case it is held to.
+    // And a predecessor that has moved is held to, with no rule in sight.
     let stale = expect_token(root, &item.id, Some(1));
     engr::backlog::revise_section(
         root,
         &item.id,
         1,
         "moved",
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(root, &item.id, 1).expect("observe")),
     )
     .expect("concurrent");
     let refused = run_engr(
@@ -4768,6 +4864,19 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_STALE));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "moved",
+        "the stale write left the newer wording untouched"
+    );
+
+    // Destructive consumption is held to the same rule.
+    let bare = run_engr(root, &["backlog", "consume", &item.id, "--section", "1"]);
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        !engr::backlog::ids(root).expect("ids").is_empty(),
+        "an unresolved point is not consumed on a reading nobody bound"
+    );
 }
 
 /// A rule about unresolved points must not make unresolved points uncreatable.
@@ -4957,7 +5066,7 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
 
     // Put the workspace back a generation, leaving the candidate where it is.
     let format_path = engr::store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let migrated = run_engr(root, &["migrate"]);
     assert!(
@@ -4981,4 +5090,36 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
         "{}",
         String::from_utf8_lossy(&confirmed.stderr)
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }

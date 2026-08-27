@@ -394,6 +394,9 @@ impl Item {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("backlog: {error}")))?;
+        crate::proof::stored_within_safe_integers(&value, "backlog")?;
         let id = crate::model::canonical_object_id(&self.id).map_err(|_| {
             Error::new(
                 EXIT_SCHEMA,
@@ -481,19 +484,12 @@ pub fn instant(timestamp: &str) -> Option<time::OffsetDateTime> {
 /// `subjects[]` is a set, so order is not content. Reordering one leaves the
 /// same unresolved thing by design; activity has to agree, or triage
 /// reports work on a point nobody touched.
-/// Compared on identity, which **excludes `dirty`**. That flag records how the
-/// target looked when it was observed, not which target is meant, so a subject
-/// re-observed against a dirty worktree still concerns the same thing and must
-/// not read as fresh work.
+/// Persisted observation metadata participates even though it is not target
+/// identity: changing `dirty` changes the staging state and therefore activity
+/// and Rule Review bookkeeping.
 fn same_subjects(left: &[Subject], right: &[Subject]) -> Result<bool> {
-    let mut left: Vec<String> = left
-        .iter()
-        .map(|subject| canonical_json(&subject.identity()))
-        .collect::<Result<_>>()?;
-    let mut right: Vec<String> = right
-        .iter()
-        .map(|subject| canonical_json(&subject.identity()))
-        .collect::<Result<_>>()?;
+    let mut left: Vec<String> = left.iter().map(canonical_json).collect::<Result<_>>()?;
+    let mut right: Vec<String> = right.iter().map(canonical_json).collect::<Result<_>>()?;
     left.sort();
     right.sort();
     Ok(left == right)
@@ -582,9 +578,71 @@ pub fn ids(root: &Path) -> Result<Vec<String>> {
     Ok(found)
 }
 
+/// The shared canonical order for this item's set-valued arrays.
+///
+/// `subjects[]` and `produced[]` are declared order-insensitive, which means
+/// they have one persisted spelling for the same reason `refs[]` does: two byte
+/// sequences for one value are two things a reader can disagree about. Applied
+/// on the way out rather than demanded of the caller — reordering a set is not
+/// a change, so a caller writing them another way round has not proposed
+/// anything different and should not be refused for it.
+pub(crate) fn canonicalize_sets(item: &mut Item) -> Result<()> {
+    // Sections are an ordered child list, and their persistent order is their
+    // allocated id order. Keeping this beside the set normalization means the
+    // migration and ordinary writer share the one representation they publish.
+    item.sections.sort_by_key(|section| section.id);
+    for section in &mut item.sections {
+        crate::proof::canonical_set(&mut section.subjects, "subject")?;
+        crate::proof::canonical_set(&mut section.produced, "produced outcome")?;
+    }
+    Ok(())
+}
+
+/// Whether this item is already in that order, for a stored file to be held to.
+fn check_canonical_sets(path: &Path, item: &Item) -> Result<()> {
+    let mut canonical = item.clone();
+    canonicalize_sets(&mut canonical)?;
+    ensure!(
+        canonical == *item,
+        EXIT_SCHEMA,
+        "{}: sections, subjects and produced outcomes are stored in their canonical order",
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn load(root: &Path, id: &str) -> Result<Item> {
     let path = item_path(root, id);
-    let item: Item = store::read_json(&path)?;
+    let item: Item = store::read_resource(root, &path)?;
+    item.validate()?;
+    // The one-representation rule belongs to the current generation. A
+    // predecessor workspace kept whatever order its writer produced, and
+    // migration is where those bytes are brought forward — refusing them here
+    // would make a migratable workspace unreadable instead.
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_sets(&path, &item)?;
+    }
+    ensure!(
+        item.id == id,
+        EXIT_SCHEMA,
+        "{}: backlog id {:?} does not match its filename",
+        path.display(),
+        item.id
+    );
+    Ok(item)
+}
+
+/// Decode predecessor bytes already captured by coordinated migration.
+///
+/// The ordinary loader deliberately reads the workspace itself so it can choose
+/// the live generation. Migration must not do that second read: its plan and
+/// manifest have to derive from the same bytes.
+pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Item> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let item: Item = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     item.validate()?;
     ensure!(
         item.id == id,
@@ -596,13 +654,28 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
     Ok(item)
 }
 
+/// Validate a staged Backlog artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Item> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let item = decode_for_migration(path, id, text)?;
+    store::check_current_resource_shape(path, text, &item)?;
+    check_canonical_sets(path, &item)?;
+    Ok(item)
+}
+
 /// Write one item. Callers must already hold the workspace lock: every mutation
 /// here is read-modify-write, and a destructive path additionally needs its
 /// precondition check and its write to be one step.
 fn save(root: &Path, item: &Item) -> Result<()> {
     store::require_current(root)?;
+    // Validated before canonicalizing, so a refusal names the section it is
+    // about rather than reporting a set fault from the shared sorter.
     item.validate()?;
-    store::write_json(&item_path(root, &item.id), item)
+    let mut item = item.clone();
+    canonicalize_sets(&mut item)?;
+    store::write_json(&item_path(root, &item.id), &item)
 }
 
 fn remove(root: &Path, id: &str) -> Result<()> {
@@ -824,13 +897,14 @@ impl Precondition {
         Self::of_section(&load(root, item)?, section)
     }
 
-    /// Read the current predecessor for a merge over several Sections.
-    pub fn merge(root: &Path, item: &str, sections: &[u64]) -> Result<Self> {
+    /// Read the current predecessor for a merge: the destination and its one
+    /// source, both complete, under their parent topic.
+    pub fn merge(root: &Path, item: &str, destination: u64, source: u64) -> Result<Self> {
         let loaded = load(root, item)?;
-        let mut bound = Vec::new();
-        for id in sections {
-            bound.push(loaded.section(*id)?.clone());
-        }
+        let mut bound = vec![
+            loaded.section(destination)?.clone(),
+            loaded.section(source)?.clone(),
+        ];
         bound.sort_by_key(|section| section.id);
         Ok(Self::Merge {
             item: loaded.id.clone(),
@@ -1011,6 +1085,12 @@ fn stale(what: &str) -> Result<()> {
 
 fn take_id(item: &mut Item) -> Result<u64> {
     let id = item.next_section_id;
+    ensure!(
+        id < crate::proof::MAX_SAFE_INTEGER,
+        EXIT_USAGE,
+        "{} has no remaining section ids in the shared safe-integer domain",
+        item.id
+    );
     item.next_section_id = item.next_section_id.checked_add(1).ok_or_else(|| {
         Error::new(
             EXIT_INVARIANT,
@@ -1072,27 +1152,19 @@ impl Prepared {
 /// exactly the rule change that would have altered the verdict.
 struct Reviewed {
     marker: Option<crate::rules::RuleReview>,
-    /// Whether any project rule governed this mutation at all — and so whether
-    /// a review was required, and a predecessor with it.
-    governed: bool,
 }
 
 impl Reviewed {
     fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
         // One read of policy for both answers. Asking twice lets a rule appear
         // between them and leaves this mutation acting on two pictures at once.
-        let (governed, verdict) =
-            crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
+        let (_, verdict) = crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
         match verdict {
             // No applicable rule, or none of them out of attempts. Either way
             // there is no diagnostic to carry.
-            crate::rules::Exhaustion::NotReached => Ok(Self {
-                marker: None,
-                governed,
-            }),
+            crate::rules::Exhaustion::NotReached => Ok(Self { marker: None }),
             crate::rules::Exhaustion::Exhausted(marker) => Ok(Self {
                 marker: Some(marker),
-                governed,
             }),
             // The Object verdicts. Reaching one here would mean the composition
             // answered for the wrong domain, and the failure mode — a Backlog
@@ -1115,19 +1187,28 @@ impl Reviewed {
         section.rule_review = self.marker;
     }
 
-    /// A reviewed mutation must carry what it was reviewed against.
+    /// Every existing-state mutation must carry what it was prepared against.
+    ///
+    /// Not only a governed one. Rule presence decides whether a *review*
+    /// applies; it does not decide whether a concurrent write can land under
+    /// this one. Conflating the two meant that in a workspace with no
+    /// applicable Backlog Rule a caller holding a stale reading could reword,
+    /// re-subject, rename or destructively consume a point that had moved since
+    /// — the exact stale write the exact-predecessor contract exists to refuse,
+    /// available precisely where nobody had configured a policy.
     ///
     /// Here rather than only at the command line, because the library exposes
     /// the same semantic mutation. `Prepared::first()` is a perfectly ordinary
-    /// constructor, and without this a direct caller could reword — or
-    /// destructively consume — a governed point having reviewed nothing, while
-    /// every check that does run passes. Enforcement that lives one layer above
-    /// the thing it protects is enforcement of the layer, not of the thing.
-    fn needs_predecessor(&self, precondition: Option<&Precondition>) -> Result<()> {
+    /// constructor, and enforcement that lives one layer above the thing it
+    /// protects is enforcement of the layer, not of the thing.
+    ///
+    /// Creation is the sole exception, and it is one because engr mints the id
+    /// atomically: there is no predecessor to name.
+    fn needs_predecessor(precondition: Option<&Precondition>) -> Result<()> {
         ensure!(
-            !self.governed || precondition.is_some(),
+            precondition.is_some(),
             EXIT_INVARIANT,
-            "a project rule governs backlog, so this mutation must carry the predecessor it was reviewed against"
+            "this mutation must carry the exact predecessor it was prepared against; read the point again and pass what you read"
         );
         Ok(())
     }
@@ -1162,18 +1243,15 @@ impl Reviewed {
 /// without this, a caller holding a perfectly valid predecessor for one item can
 /// apply it to another, or bind §1 and consume §5, and the exact-predecessor
 /// guarantee is gone precisely where it looks satisfied.
-enum Binds<'a> {
+enum Binds {
     /// The topic, and therefore the complete item.
     Topic,
     /// The Section id an add is about to receive.
     NewSection,
     /// One whole Section, by id.
     Section(u64),
-    /// A merge: the destination and every source, and nothing else.
-    Merge {
-        destination: u64,
-        sources: &'a [u64],
-    },
+    /// A merge: the destination and its one source, and nothing else.
+    Merge { destination: u64, source: u64 },
 }
 
 impl Precondition {
@@ -1199,13 +1277,11 @@ impl Precondition {
                 Self::Merge { sections, .. },
                 Binds::Merge {
                     destination,
-                    sources,
+                    source,
                 },
             ) => {
                 let bound: BTreeSet<u64> = sections.iter().map(|section| section.id).collect();
-                let touched: BTreeSet<u64> = std::iter::once(*destination)
-                    .chain(sources.iter().copied())
-                    .collect();
+                let touched: BTreeSet<u64> = [*destination, *source].into_iter().collect();
                 bound == touched
             }
             _ => false,
@@ -1255,12 +1331,12 @@ fn edit<T>(
     body: impl FnOnce(&mut Item, &Reviewed) -> Result<T>,
 ) -> Result<T> {
     locked(root, || {
+        Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
             precondition.authorizes(id, &binds)?;
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
-        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
         let mut item = load(root, id)?;
         let outcome = body(&mut item, &reviewed)?;
         item.sections.sort_by_key(|section| section.id);
@@ -1599,27 +1675,21 @@ pub fn merge_into(
     root: &Path,
     id: &str,
     destination: u64,
-    sources: &[u64],
+    source: u64,
     text: &str,
     subjects: Vec<Subject>,
     prepared: &Prepared,
 ) -> Result<()> {
     check_text(text)?;
-    let mut unique = sources.to_vec();
-    unique.sort_unstable();
-    unique.dedup();
+    // Exactly one source. The owning contract names one destination Section and
+    // one source Section, and the precondition it froze is the parent topic plus
+    // those two complete predecessors. Taking any number of sources is not an
+    // ergonomic shorthand for repeating that: one review and one atomic apply
+    // would consume several unresolved identities at once, against a different
+    // predecessor and a different Rule Review subject than the one that was
+    // frozen.
     ensure!(
-        !sources.is_empty(),
-        EXIT_INVARIANT,
-        "a merge needs at least one section to merge into the destination"
-    );
-    ensure!(
-        unique.len() == sources.len(),
-        EXIT_INVARIANT,
-        "a merge cannot take the same section twice"
-    );
-    ensure!(
-        !sources.contains(&destination),
+        source != destination,
         EXIT_INVARIANT,
         "§{destination} is the destination, so it cannot also be merged into itself"
     );
@@ -1629,28 +1699,25 @@ pub fn merge_into(
         prepared,
         Binds::Merge {
             destination,
-            sources,
+            source,
         },
         |item, reviewed| {
-            // A merge removes the sources, and a Section leaves only through a
+            // A merge removes the source, and a Section leaves only through a
             // review that passed — a consume, or atomically as the source of a
             // merge. Soft-admission is for mutations that keep the unresolved point
-            // available, and the sources' own wording does not survive this one.
+            // available, and the source's own wording does not survive this one.
             reviewed.must_have_passed(
-            "a merge removes its sources, and an unresolved point is not removed on an exhausted review",
+            "a merge removes its source, and an unresolved point is not removed on an exhausted review",
         )?;
-            // Every participant is checked before anything moves, so a merge naming
-            // a section that is not there changes nothing at all.
+            // Both participants are checked before anything moves, so a merge
+            // naming a section that is not there changes nothing at all.
             let mut produced = item.section(destination)?.produced.clone();
-            for source in sources {
-                for outcome in &item.section(*source)?.produced {
-                    if !produced.contains(outcome) {
-                        produced.push(outcome.clone());
-                    }
+            for outcome in &item.section(source)?.produced {
+                if !produced.contains(outcome) {
+                    produced.push(outcome.clone());
                 }
             }
-            item.sections
-                .retain(|section| !sources.contains(&section.id));
+            item.sections.retain(|section| section.id != source);
             let slot = item
                 .sections
                 .iter_mut()
@@ -1689,12 +1756,12 @@ pub fn merge_into(
 /// no marker is written, because nothing was admitted for one to describe.
 pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared) -> Result<bool> {
     locked(root, || {
+        Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
             precondition.authorizes(id, &Binds::Section(section))?;
             precondition.still_holds(root)?;
         }
         let reviewed = Reviewed::compose(root, prepared.attempt)?;
-        reviewed.needs_predecessor(prepared.precondition.as_ref())?;
         reviewed.must_have_passed(
             "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
         )?;

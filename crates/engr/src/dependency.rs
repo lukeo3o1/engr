@@ -712,7 +712,7 @@ pub fn admit(
     let fields = canonical_fields(fields)?;
     // 4 + 5.
     check_commit_identity(root, commit)?;
-    let then = match historical_section(root, commit, &current.id, section) {
+    let mut then = match historical_section(root, commit, &current.id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => {
             return Err(Error::new(
@@ -740,6 +740,14 @@ pub fn admit(
             ))
         }
     };
+    if fields.contains(&SemanticField::Refs)
+        && then
+            .refs
+            .iter()
+            .any(|r| matches!(r, crate::model::Ref::Legacy(_)))
+    {
+        then = crate::migration::migrated_historical_section(root, commit, &current.id, section)?;
+    }
     // 6 + 7.
     check_not_stale_at_birth(&then, now, &fields)?;
     // 8.
@@ -809,7 +817,7 @@ pub fn evaluate(
     // above. Reporting it as one of §9's states would put a verdict on a
     // reference that does not say what it depends on.
     check_commit_identity(root, &reference.commit)?;
-    let then = match historical_section(root, &reference.commit, &id, section) {
+    let mut then = match historical_section(root, &reference.commit, &id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),
         Historical::SchemaMismatch => return Ok(Dependency::SchemaMismatch),
@@ -827,6 +835,22 @@ pub fn evaluate(
         // finds it at the line that would otherwise lose the distinction.
         Historical::IntegrityFailure => return Ok(Dependency::TargetIntegrityFailure),
     };
+    if reference.fields.contains(&SemanticField::Refs)
+        && then
+            .refs
+            .iter()
+            .any(|r| matches!(r, crate::model::Ref::Legacy(_)))
+    {
+        then = match crate::migration::migrated_historical_section(
+            root,
+            &reference.commit,
+            &id,
+            section,
+        ) {
+            Ok(section) => section,
+            Err(_) => return Ok(Dependency::SchemaMismatch),
+        };
+    }
     // #35 §9: a selected field that cannot be interpreted under the applicable
     // historical *or* current semantic contract is a schema mismatch. Letting
     // the error escape instead would hand the caller a failure where the

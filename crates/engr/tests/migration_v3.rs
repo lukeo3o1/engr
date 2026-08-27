@@ -1,4 +1,4 @@
-use engr::model::Content;
+use engr::model::{Action, Content, Event, Payload, Provenance, EVENT_FORMAT};
 use engr::{integrity, store};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -27,6 +27,69 @@ fn predecessor(root: &Path, objects: &[Value]) {
             format!("{}\n", serde_json::to_string_pretty(object).expect("json")),
         )
         .expect("object");
+        history(root, object);
+    }
+}
+
+/// The admitted history the stored projection is derivable from.
+///
+/// A predecessor Object with no Event file cannot be proven and is refused, so
+/// a fixture standing in for a real v2 workspace has to carry one — which is
+/// what a real v2 workspace has, because the only way an Object got there was
+/// through the gate.
+fn history(root: &Path, object: &Value) {
+    let id = object["id"].as_str().expect("id");
+    let mut records = vec![event(
+        1,
+        Payload {
+            action: Action::ObjectCreated,
+            object: id.to_owned(),
+            becomes: None,
+            content: Content {
+                text: object["title"].as_str().expect("title").to_owned(),
+                ..Content::default()
+            },
+        },
+    )];
+    for (index, section) in object["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .enumerate()
+    {
+        let content: Content =
+            serde_json::from_value(section.clone()).expect("section content is a Content");
+        records.push(event(
+            2 + index as u64,
+            Payload {
+                action: Action::SectionAdded,
+                object: id.to_owned(),
+                becomes: None,
+                content,
+            },
+        ));
+    }
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("event json"))
+        .collect();
+    std::fs::write(
+        store::events_path(root, id),
+        format!("{}\n", lines.join("\n")),
+    )
+    .expect("events");
+}
+
+fn event(rev: u64, payload: Payload) -> Event {
+    let payload_sha256 = payload.sha256().expect("payload hash");
+    Event {
+        format: EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        event_id: engr::model::new_id(),
+        rev,
+        time: "2026-08-25T00:00:00Z".to_owned(),
+        payload,
+        provenance: Provenance::confirmed("234567", payload_sha256),
     }
 }
 
@@ -39,7 +102,7 @@ fn object(id: &str, text: &str) -> Value {
         "id": id,
         "title": "migration",
         "state": "open",
-        "rev": 1,
+        "rev": 2,
         "next_section_id": 2,
         "sections": [{
             "id": 1,
@@ -102,6 +165,10 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
         completed.path(),
         &[object(id, "resume the staged generation")],
     );
+    let predecessor_bytes =
+        std::fs::read_to_string(store::object_path(interrupted.path(), id)).expect("predecessor");
+    let predecessor_events =
+        std::fs::read_to_string(store::events_path(interrupted.path(), id)).expect("history");
     store::migrate(completed.path()).expect("reference migration");
 
     let migrated =
@@ -115,12 +182,17 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
         id.to_owned(),
         Value::String(engr::proof::sha256_of(&migrated)),
     );
-    store::write_json(
+    write_raw(
         &stage.join("manifest.json"),
         &json!({
             "source_version": 2,
             "target_version": engr::WORKSPACE_VERSION,
-            "objects": staged_objects
+            "objects": staged_objects,
+            "resources": {},
+            "source": {
+                format!("objects/{id}.json"): engr::proof::sha256_of(&predecessor_bytes),
+                format!("events/{id}.jsonl"): engr::proof::sha256_of(&predecessor_events)
+            }
         }),
     )
     .expect("manifest");
@@ -141,6 +213,76 @@ fn migration_resumes_after_objects_were_copied_but_before_format_advanced() {
         std::fs::read_to_string(store::object_path(interrupted.path(), id)).expect("resumed"),
         migrated
     );
+}
+
+#[test]
+fn target_version_does_not_discard_an_unpublished_migration_plan() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(
+        interrupted.path(),
+        &[object(id, "target version is not evidence")],
+    );
+    predecessor(
+        completed.path(),
+        &[object(id, "target version is not evidence")],
+    );
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let predecessor = std::fs::read(store::object_path(interrupted.path(), id)).expect("source");
+
+    write_raw(
+        &store::engr_dir(interrupted.path()).join("format.json"),
+        &json!({ "format": "engr-workspace", "version": engr::WORKSPACE_VERSION }),
+    )
+    .expect("independent version edit");
+
+    let error = store::migrate(interrupted.path())
+        .expect_err("the target scalar cannot prove the copies happened");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(stage.exists(), "the recovery plan remains available");
+    assert_eq!(
+        std::fs::read(store::object_path(interrupted.path(), id)).expect("source after"),
+        predecessor,
+        "the source was not mistaken for the staged target"
+    );
+}
+
+#[test]
+fn migration_ignores_its_resumable_stage_in_existing_workspaces() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "local stage")]);
+
+    store::migrate(root).expect("migrate");
+    let ignore = std::fs::read_to_string(store::engr_dir(root).join(".gitignore"))
+        .expect("migration ignore");
+    assert!(ignore.lines().any(|line| line == "/migration-v3/"));
+    assert!(ignore.lines().any(|line| line == "/migration-v3.tmp/"));
+
+    std::fs::create_dir_all(store::engr_dir(root).join("migration-v3")).expect("crash stage");
+    std::fs::write(
+        store::engr_dir(root)
+            .join("migration-v3")
+            .join("manifest.json"),
+        "local recovery state",
+    )
+    .expect("manifest");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["init", "-q"])
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", ".engr/migration-v3/manifest.json"])
+        .status()
+        .expect("git check-ignore");
+    assert!(ignored.success(), "the crash stage is local-only");
 }
 
 #[test]
@@ -219,7 +361,7 @@ fn legacy_refs_become_full_selective_refs_without_gaining_admission() {
         "id": source,
         "title": "source",
         "state": "open",
-        "rev": 1,
+        "rev": 2,
         "next_section_id": 2,
         "sections": [{
             "id": 1,
@@ -257,5 +399,515 @@ fn legacy_refs_become_full_selective_refs_without_gaining_admission() {
         )
         .expect("dependency"),
         engr::dependency::Dependency::Unchanged
+    );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A predecessor Object with no admitted history cannot be proven, so it does
+/// not receive the first v3 aggregate seal.
+///
+/// Its legacy Section seals say nothing about the Object level at all — not the
+/// title, type, state, revision, counter, or which Sections belong to it. The
+/// derivability comparison only ever reaches ids the EventStore knows, so an
+/// Object absent from it was being sealed on the strength of evidence that
+/// cannot answer the question. Under the retained EventStore contract every
+/// stored Object has an admitted creation.
+#[test]
+fn a_predecessor_object_with_no_admitted_history_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(temp.path(), &[object(id, "unprovable")]);
+    let before = std::fs::read(store::object_path(temp.path(), id)).expect("before");
+    std::fs::remove_file(store::events_path(temp.path(), id)).expect("remove the history");
+
+    let error = store::migrate(temp.path()).expect_err("nothing can prove this projection");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("no admitted history"), "{error}");
+    assert_eq!(
+        std::fs::read(store::object_path(temp.path(), id)).expect("after"),
+        before,
+        "and nothing was written"
+    );
+    assert_ne!(
+        store::validate_format(temp.path()).expect("format"),
+        store::WorkspaceFormat::Current,
+        "the version did not advance"
+    );
+}
+
+/// Adopting JCS is itself a representation migration.
+///
+/// The predecessor build wrote its retained resources with a pretty serializer,
+/// so those bytes are not what v3 says a current resource is. Advancing
+/// `format.json` over them unchanged would leave a workspace full of resources
+/// its own reader refuses.
+#[test]
+fn retained_resources_are_rewritten_into_the_current_representation() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "with retained resources")]);
+
+    let item_id = "018f7d58-4ca7-7a2e-98f1-9b301468184a";
+    let item = json!({
+        "id": item_id,
+        "topic": "unresolved",
+        "next_section_id": 3,
+        "sections": [
+            {
+                "id": 2,
+                "text": "second open point",
+                "updated_at": "2026-08-25T00:00:00Z"
+            },
+            {
+                "id": 1,
+                "text": "first open point",
+                "updated_at": "2026-08-25T00:00:00Z"
+            }
+        ]
+    });
+    let item_path = engr::backlog::item_path(root, item_id);
+    std::fs::write(
+        &item_path,
+        format!("{}\n", serde_json::to_string_pretty(&item).expect("json")),
+    )
+    .expect("a v2 backlog item");
+    let work_path = engr::work::path(root, id);
+    let work = json!({
+        "state": "active",
+        "updated_at": "2026-08-25T00:00:00Z",
+        "next_item_id": 3,
+        "dependencies": [],
+        "blockers": [],
+        "items": [
+            { "id": 2, "text": "second step", "state": "pending", "commits": [] },
+            { "id": 1, "text": "first step", "state": "pending", "commits": [] }
+        ]
+    });
+    std::fs::write(
+        &work_path,
+        format!("{}\n", serde_json::to_string_pretty(&work).expect("json")),
+    )
+    .expect("a v2 work sidecar");
+
+    store::migrate(root).expect("migrate");
+
+    let after = std::fs::read_to_string(&item_path).expect("migrated item");
+    let value: Value = serde_json::from_str(&after).expect("json");
+    assert_eq!(
+        after,
+        engr::proof::canonical_bytes(&value, "item").expect("canonical"),
+        "the retained resource is now the bytes v3 says it is"
+    );
+    let item = engr::backlog::load(root, item_id).expect("and the current reader accepts it");
+    assert_eq!(
+        item.sections
+            .iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "migration normalizes the ordered child list"
+    );
+    let work = engr::work::load(root, id).expect("migrated sidecar");
+    assert_eq!(
+        work.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![1, 2],
+        "migration normalizes work items too"
+    );
+}
+
+/// The staged artifact that was validated is the one that gets published.
+///
+/// Two passes over the staging directory — verify, then reopen to copy — is a
+/// window the workspace lock does not close: the stage lives in the repository
+/// like everything else. The commit phase keeps each validated value and
+/// publishes that, and the digest gate is what makes a swap visible at all.
+#[test]
+fn a_staged_object_that_no_longer_matches_its_digest_is_not_published() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(interrupted.path(), &[object(id, "staged plan")]);
+    predecessor(completed.path(), &[object(id, "staged plan")]);
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+
+    let staged = stage.join("objects").join(format!("{id}.json"));
+    let mut swapped: Value = store::read_json(&staged).expect("staged object");
+    swapped["title"] = Value::String("a plan nobody validated".into());
+    std::fs::write(
+        &staged,
+        engr::proof::canonical_bytes(&swapped, "swapped").expect("canonical"),
+    )
+    .expect("swap the staged artifact");
+    let before = std::fs::read(store::object_path(interrupted.path(), id)).expect("before");
+
+    let error = store::migrate(interrupted.path()).expect_err("that is not the validated plan");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(
+        std::fs::read(store::object_path(interrupted.path(), id)).expect("after"),
+        before,
+        "and the workspace still holds its predecessor"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(interrupted.path()).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}
+
+/// A predecessor that moves after the plan was built stops the commit.
+///
+/// The manifest records the digest of the bytes preflight decoded. If the
+/// workspace has moved since, the plan describes something that is no longer
+/// there, and publishing it would overwrite the newer file with the older one.
+#[test]
+fn a_predecessor_that_moved_after_the_plan_stops_the_commit() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(
+        interrupted.path(),
+        &[object(id, "the validated predecessor")],
+    );
+    predecessor(completed.path(), &[object(id, "the validated predecessor")]);
+    staged_plan(interrupted.path(), completed.path(), id);
+
+    let source = store::object_path(interrupted.path(), id);
+    let mut moved: Value = store::read_json(&source).expect("predecessor");
+    moved["title"] = Value::String("changed since preflight".into());
+    std::fs::write(
+        &source,
+        format!("{}\n", serde_json::to_string_pretty(&moved).expect("json")),
+    )
+    .expect("move the predecessor");
+    let after_move = std::fs::read(&source).expect("moved bytes");
+
+    let error = store::migrate(interrupted.path()).expect_err("the plan is about other bytes");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert_eq!(
+        std::fs::read(&source).expect("after"),
+        after_move,
+        "the newer file was not overwritten by the older plan"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(interrupted.path()).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}
+
+/// Build a stage in `root` from a reference migration performed in `reference`,
+/// exactly as an interrupted run would leave one.
+fn staged_plan(root: &Path, reference: &Path, id: &str) -> std::path::PathBuf {
+    let predecessor_bytes =
+        std::fs::read_to_string(store::object_path(root, id)).expect("predecessor");
+    let predecessor_events =
+        std::fs::read_to_string(store::events_path(root, id)).expect("history");
+    store::migrate(reference).expect("reference migration");
+    let migrated =
+        std::fs::read_to_string(store::object_path(reference, id)).expect("migrated object");
+
+    let stage = store::engr_dir(root).join("migration-v3");
+    std::fs::create_dir_all(stage.join("objects")).expect("stage objects");
+    std::fs::write(stage.join("objects").join(format!("{id}.json")), &migrated)
+        .expect("staged object");
+    let mut staged_objects = serde_json::Map::new();
+    staged_objects.insert(
+        id.to_owned(),
+        Value::String(engr::proof::sha256_of(&migrated)),
+    );
+    write_raw(
+        &stage.join("manifest.json"),
+        &json!({
+            "source_version": 2,
+            "target_version": engr::WORKSPACE_VERSION,
+            "objects": staged_objects,
+            "resources": {},
+            "source": {
+                format!("objects/{id}.json"): engr::proof::sha256_of(&predecessor_bytes),
+                format!("events/{id}.jsonl"): engr::proof::sha256_of(&predecessor_events)
+            }
+        }),
+    )
+    .expect("manifest");
+    stage
+}
+
+#[test]
+fn staged_migration_refuses_unrecognized_or_unfrozen_source_versions() {
+    for version in [1, 4] {
+        let interrupted = tempfile::tempdir().expect("interrupted");
+        let completed = tempfile::tempdir().expect("completed");
+        let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+        predecessor(interrupted.path(), &[object(id, "version authority")]);
+        predecessor(completed.path(), &[object(id, "version authority")]);
+        let stage = staged_plan(interrupted.path(), completed.path(), id);
+        let manifest_path = stage.join("manifest.json");
+        let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+        manifest["source_version"] = json!(version);
+        write_raw(&manifest_path, &manifest).expect("rewritten manifest");
+        write_raw(
+            &store::engr_dir(interrupted.path()).join("format.json"),
+            &json!({ "format": "engr-workspace", "version": version }),
+        )
+        .expect("declared version");
+
+        let error = store::migrate(interrupted.path())
+            .expect_err("a staged plan cannot widen migration authority");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "version {version}");
+        assert!(error.message.contains("no defined migration"), "{error}");
+    }
+}
+
+#[test]
+fn staged_manifest_resources_are_not_filesystem_capabilities() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(interrupted.path(), &[object(id, "path capability")]);
+    predecessor(completed.path(), &[object(id, "path capability")]);
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let manifest_path = stage.join("manifest.json");
+    let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+    manifest["resources"]["../victim"] = Value::String("a".repeat(64));
+    manifest["source"]["../victim"] = Value::String("b".repeat(64));
+    write_raw(&manifest_path, &manifest).expect("forged manifest");
+
+    let victim = interrupted.path().join("victim");
+    let error = store::migrate(interrupted.path()).expect_err("a path escape is not a resource");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(!victim.exists(), "nothing was published outside .engr");
+}
+
+#[test]
+fn staged_resource_bytes_must_be_the_migration_of_their_predecessor() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let backlog_id = "018f7d58-4ca7-7a2e-98f1-9b301468184a";
+    for root in [interrupted.path(), completed.path()] {
+        predecessor(root, &[object(id, "resource derivation")]);
+        let item = json!({
+            "id": backlog_id,
+            "topic": "unresolved",
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": "open",
+                "updated_at": "2026-08-25T00:00:00Z"
+            }]
+        });
+        std::fs::write(
+            engr::backlog::item_path(root, backlog_id),
+            format!("{}\n", serde_json::to_string_pretty(&item).expect("item")),
+        )
+        .expect("predecessor item");
+    }
+    let original =
+        std::fs::read_to_string(engr::backlog::item_path(interrupted.path(), backlog_id))
+            .expect("original resource");
+    let stage = staged_plan(interrupted.path(), completed.path(), id);
+    let migrated = std::fs::read_to_string(engr::backlog::item_path(completed.path(), backlog_id))
+        .expect("migrated resource");
+    let relative = format!("backlog/{backlog_id}.json");
+    let staged = stage
+        .join("resources")
+        .join("backlog")
+        .join(format!("{backlog_id}.json"));
+    std::fs::create_dir_all(staged.parent().expect("parent")).expect("resource stage");
+    std::fs::write(&staged, &migrated).expect("stage resource");
+    let manifest_path = stage.join("manifest.json");
+    let mut manifest: Value = store::read_json(&manifest_path).expect("manifest");
+    manifest["resources"][relative.as_str()] = Value::String(engr::proof::sha256_of(&migrated));
+    manifest["source"][relative.as_str()] = Value::String(engr::proof::sha256_of(&original));
+
+    let mut substituted: Value = serde_json::from_str(&migrated).expect("migrated JSON");
+    substituted["topic"] = Value::String("a different valid resource".to_owned());
+    let substituted = engr::proof::canonical_bytes(&substituted, "substituted resource")
+        .expect("canonical substitution");
+    std::fs::write(&staged, &substituted).expect("swap staged resource");
+    manifest["resources"][relative.as_str()] = Value::String(engr::proof::sha256_of(&substituted));
+    write_raw(&manifest_path, &manifest).expect("consistent forged pair");
+
+    let error = store::migrate(interrupted.path())
+        .expect_err("a digest pair cannot replace the deterministic migration output");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("not the canonical migration"),
+        "{error}"
+    );
+}
+
+/// A predecessor Event carrying a number JCS cannot hold stops the migration.
+///
+/// The record contract's own numeric-domain walk is a generation-2 rule, so it
+/// never looks at retained v1 history. Preflight is therefore the only place
+/// that asks, and it has to ask before the workspace advances — afterwards the
+/// log is append-only history nobody can take back, and every read that
+/// reconstructs the Object trips over it.
+#[test]
+fn a_predecessor_event_outside_the_shared_integer_domain_fails_preflight() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "history with an impossible number")]);
+
+    let path = store::events_path(root, id);
+    let history = std::fs::read_to_string(&path).expect("history");
+    let beyond = engr::proof::MAX_SAFE_INTEGER + 1;
+    let rewritten: Vec<String> = history
+        .lines()
+        .map(|line| line.replacen(r#""rev":1"#, &format!(r#""rev":{beyond}"#), 1))
+        .collect();
+    assert_ne!(
+        rewritten.join("\n"),
+        history.trim_end(),
+        "the fixture must actually plant the number"
+    );
+    std::fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("plant it");
+    let before = std::fs::read(store::object_path(root, id)).expect("before");
+
+    let error = store::migrate(root).expect_err("JCS cannot carry that number");
+    assert!(error.message.contains("safe integer"), "{error}");
+    assert_eq!(
+        std::fs::read(store::object_path(root, id)).expect("after"),
+        before,
+        "and nothing was written"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(root).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
+    );
+}
+
+/// A predecessor whose projection is missing but whose history rebuilds it
+/// migrates, atomically.
+///
+/// This is the EventStore's crash-recovery role: a v2 workspace can legitimately
+/// hold admitted history for an Object whose file never landed. Preflight
+/// already admitted that case and rebuilt the projection — but the commit phase
+/// then compared the workspace's Object files against the set the plan
+/// *publishes*, and a reconstructed Object is by definition not among them, so
+/// the plan preflight had just accepted could never commit. The two sets are
+/// different questions: what the predecessor had, and what v3 will hold.
+#[test]
+fn a_projection_rebuilt_from_admitted_history_migrates_with_the_rest() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let kept = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let lost = "018f7d58-4ca7-7a2e-98f1-9b3014681849";
+    predecessor(root, &[object(kept, "the projection that landed")]);
+    predecessor(root, &[object(lost, "the projection that did not")]);
+
+    // The crash: history is durable, the projection never reached disk.
+    std::fs::remove_file(store::object_path(root, lost)).expect("lose the projection");
+    assert!(!store::object_path(root, lost).exists());
+
+    store::migrate(root).expect("the recovery case is the one this admits");
+
+    assert_eq!(
+        store::validate_format(root).expect("format"),
+        store::WorkspaceFormat::Current
+    );
+    for id in [kept, lost] {
+        let migrated = store::load_object(root, id).expect("object");
+        integrity::check_stored_object_integrity(&migrated).expect("integrity");
+        assert_eq!(migrated.sections.len(), 1, "{id}");
+    }
+    assert_eq!(
+        store::load_object(root, lost).expect("rebuilt").sections[0].text,
+        "the projection that did not",
+        "rebuilt from the history that was durable"
+    );
+}
+
+/// The manifest names exactly what preflight read, and nothing else.
+///
+/// The closing walk used to *become* the manifest, so anything it found was
+/// promoted to "expected predecessor" whether or not preflight had ever looked
+/// at it. Now the manifest is the captured set and the walk may only agree with
+/// it — so every file under `.engr` has to be accounted for while it is being
+/// read, Rules included. Remove that accounting and this fails: the walk finds
+/// a file the plan never named.
+///
+/// A Rule's digest is taken from the bytes the loader parsed rather than from a
+/// second read of the path, for the reason artifact-exact identity always
+/// requires it — `.engr/rules` is editable outside the workspace lock. That half
+/// is structural here (one read feeds both) and is pinned at the binding level
+/// in the Rule tests.
+#[test]
+fn every_predecessor_file_is_accounted_for_while_it_is_read() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "with policy")]);
+
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::write(
+        rules.join("architecture.md"),
+        "---\nid: architecture\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Architecture\n\nBody.\n",
+    )
+    .expect("rule");
+    // Not a Rule, and the loader reads only `.md`. It still has to be accounted
+    // for, or the closing set comparison can never be exact.
+    std::fs::write(rules.join("notes.txt"), "not a rule\n").expect("stray file");
+
+    store::migrate(root).expect("a workspace with policy migrates");
+    assert_eq!(
+        store::validate_format(root).expect("format"),
+        store::WorkspaceFormat::Current
+    );
+    assert_eq!(
+        engr::rules::load_all(root).expect("rules").len(),
+        1,
+        "and the policy came through untouched"
+    );
+}
+
+/// A file that appears after the plan was built stops the commit.
+///
+/// It was never enumerated, so nothing schema-, JCS-, replay- or Rule-validated
+/// it; accepting it into the expected predecessor set and then advancing the
+/// generation would leave an unvalidated resource sitting in current v3.
+#[test]
+fn a_file_that_appeared_after_the_plan_stops_the_commit() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(interrupted.path(), &[object(id, "the validated set")]);
+    predecessor(completed.path(), &[object(id, "the validated set")]);
+    staged_plan(interrupted.path(), completed.path(), id);
+
+    let arrival =
+        engr::backlog::item_path(interrupted.path(), "018f7d58-4ca7-7a2e-98f1-9b301468184b");
+    std::fs::write(&arrival, "{}\n").expect("a file nobody validated");
+
+    let error = store::migrate(interrupted.path()).expect_err("that was not in the plan");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("appeared after migration preflight"),
+        "{error}"
+    );
+    assert!(
+        std::fs::read_to_string(store::engr_dir(interrupted.path()).join("format.json"))
+            .expect("format")
+            .contains("\"version\":2"),
+        "the version did not advance"
     );
 }

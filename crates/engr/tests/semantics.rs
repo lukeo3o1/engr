@@ -7,7 +7,7 @@
 
 use engr::model::{Action, Content, Object, Payload, Ref};
 use engr::semantics::{ObjectType, Relation, RelationType, Role, State, Supplement, Target};
-use engr::{gate, ops, store};
+use engr::{gate, ops, store, view};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -130,7 +130,7 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// Adding semantic fields must not have moved any digest that already exists.
@@ -951,7 +951,7 @@ fn a_candidate_bound_to_a_classification_dies_when_the_object_moves() {
             wording("work happened meanwhile"),
         ),
     );
-    store::write_json(
+    write_raw(
         &store::candidate_path(&root, &code).expect("candidate path"),
         &prepared.candidate,
     )
@@ -1061,7 +1061,7 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
         let path = store::object_path(&root, &id);
         let mut value = seed.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write");
+        write_raw(&path, &value).expect("write");
         let error = store::load_object(&root, &id).expect_err(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {}", error.message);
     }
@@ -1152,17 +1152,18 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(object.state, State::Open);
 }
 
-/// A Section with an incidental noncanonical Ref order remains the same
-/// assertion, and re-proposing the same members is still not a change.
+/// One persisted order for a set, and re-proposing the same members either way
+/// round is still not a change.
 ///
-/// Canonicalization is done to the proposal. If the "nothing to confirm" check
-/// did not do the same to the stored value only for the comparison, every
-/// Section stored before this rule holding two refs the other way round would
-/// accept one confirmation and one Event that changed nothing but an array's
-/// order — the exact thing declaring it a set was supposed to rule out. The
-/// stored Section is not tidied either: set order is outside integrity meaning.
+/// Two rules, and they meet here. This generation persists one representation,
+/// so a stored set written the other way round is not valid current authority
+/// however sound its seals are — a reader that accepts both has two encodings
+/// for one value. But *proposing* the members either way round is the same
+/// assertion, because canonicalization is done to the proposal before anything
+/// is hashed, and a revision that changes nothing but an array's order is
+/// refused rather than spending a confirmation on sorting.
 #[test]
-fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
+fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
     let (_dir, root) = workspace();
     let commit = repository(&root);
     let target = new_object(&root, "the target");
@@ -1204,19 +1205,29 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
             },
         ),
     );
-
-    // Seed the same two refs the other way round. The v3 seal canonicalizes
-    // sets, so neither the Section seal nor Object aggregate changes.
-    let mut legacy = object.section(1).expect("section").content();
-    legacy.refs.reverse();
     let stored_sha256 = object.section(1).expect("section").sha256.clone();
+    let canonical = object.section(1).expect("section").refs.clone();
+    let stored_text =
+        std::fs::read_to_string(store::object_path(&root, &id)).expect("stored bytes");
+
+    // Reverse the stored set. The seals still verify — canonical sealing sorts
+    // a clone, so set order was never in the hash — and that is exactly why the
+    // representation rule has to be its own check rather than a consequence of
+    // integrity.
     rewrite(&root, &id, |value| {
         let section = &mut value["sections"][0];
         section["refs"].as_array_mut().expect("refs").reverse();
     });
-    let seeded = store::load_object(&root, &id).expect("an unsorted set is valid stored authority");
-    engr::integrity::check_stored_object_integrity(&seeded)
-        .expect("set order does not change either resource seal");
+    let error =
+        store::load_object(&root, &id).expect_err("a reordered set is not this generation's bytes");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("canonical"),
+        "the refusal names the representation: {error}"
+    );
+
+    std::fs::write(store::object_path(&root, &id), &stored_text).expect("restore");
+    store::load_object(&root, &id).expect("the canonical order loads");
 
     // Both spellings of the same membership are the same assertion.
     for refs in [vec![pin(1), pin(2)], vec![pin(2), pin(1)]] {
@@ -1241,9 +1252,9 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
     let after = store::load_object(&root, &id).expect("load");
     assert_eq!(
         after.sections[0].sha256, stored_sha256,
-        "and nothing sorted the stored Section behind its own hash"
+        "and nothing rewrote the stored Section behind its own hash"
     );
-    assert_eq!(after.sections[0].refs, legacy.refs);
+    assert_eq!(after.sections[0].refs, canonical);
     assert_eq!(
         store::load_events(&root, &id).expect("events").len(),
         2,
@@ -1696,6 +1707,76 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
     );
 }
 
+/// A replacement that stops existing is a broken record, not ordinary drift.
+///
+/// `superseded_by` names an existing different Object, and v1 has no Object
+/// delete — so a target that cannot be established means the invariant already
+/// failed. The source Object's own seals cannot see that: nothing about A
+/// changes when B disappears, and `refs[]`, the only thing verification used to
+/// follow, does not include the relation. Left unchecked, a reader following
+/// the chain to find current knowledge arrives nowhere while `verify` says
+/// PASS.
+#[test]
+fn a_replacement_that_cannot_be_established_stops_the_source_reading_clean() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let replacement = new_object(&root, "the replacement");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&replacement, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&replacement))],
+                ..Content::default()
+            },
+        ),
+    );
+    assert!(
+        ops::verify(&root, &source).expect("verify").passed(),
+        "the chain is intact"
+    );
+
+    // The replacement stops being establishable: its projection is gone and so
+    // is the admitted history that could rebuild it.
+    std::fs::remove_file(store::object_path(&root, &replacement)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &replacement)).expect("remove history");
+    assert!(ops::effective(&root, &replacement).is_err());
+
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(!report.passed(), "the forward link leads nowhere");
+    assert_eq!(report.broken_replacements.len(), 1);
+    assert!(
+        report.broken_replacements[0]
+            .reason
+            .contains("no longer exists"),
+        "{:?}",
+        report.broken_replacements[0]
+    );
+    assert!(
+        report.standing_on_missing.is_empty() && report.standing_on_unreadable.is_empty(),
+        "an authoritative relation is not reported as a ref"
+    );
+
+    let object = ops::effective(&root, &source).expect("source still loads");
+    let marked = view::assess(&root, &object)
+        .into_iter()
+        .find(|(_, status)| status.replacement.is_some())
+        .expect("show marks the section carrying the relation");
+    assert_eq!(marked.1.label(), "REPLACEMENT UNAVAILABLE");
+    assert!(marked.1.forged(), "this is a stop, not a question");
+}
 /// A classification that changes nothing is not a change to confirm.
 ///
 /// Confirming it would append a permanent Event recording no change, spend a
@@ -1735,5 +1816,91 @@ fn classifying_an_object_into_the_state_it_already_holds_is_refused() {
         ops::effective(&root, &id).expect("object").rev,
         before + 1,
         "and the refusal spent nothing"
+    );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A replacement chain that cannot be walked is not a chain that is clear.
+///
+/// Absence used to end a branch quietly, and it is not the same as there being
+/// nothing further: `effective` already rebuilds a target whose projection is
+/// missing but whose admitted history still establishes it, so `NOT_FOUND` here
+/// means the authority genuinely cannot be established. v1 has no Object
+/// delete, so that edge is a broken invariant already — and an unwalked branch
+/// can hide the cycle the traversal exists to find.
+#[test]
+fn a_new_supersession_through_a_target_that_is_gone_is_refused() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let gone = new_object(&root, "the far end");
+    let middle = new_object(&root, "the middle");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&gone, &middle, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &middle,
+            Content {
+                text: "replaced by the far end".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&gone))],
+                ..Content::default()
+            },
+        ),
+    );
+
+    let replaces_source = || {
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced by the middle".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&middle))],
+                ..Content::default()
+            },
+        )
+    };
+    gate::prepare(&root, replaces_source()).expect("an intact chain");
+    gate::discard(
+        &root,
+        &gate::pending_codes(&root).expect("pending")[0].clone(),
+    )
+    .expect("clear");
+
+    // The far end stops being establishable: no projection, and no admitted
+    // history to rebuild it from.
+    std::fs::remove_file(store::object_path(&root, &gone)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &gone)).expect("remove history");
+    assert!(ops::effective(&root, &gone).is_err());
+
+    let error = gate::prepare(&root, replaces_source())
+        .expect_err("the graph this would join cannot be established");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("no longer exists"),
+        "the refusal names why: {error}"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and no code was handed out"
     );
 }

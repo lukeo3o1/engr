@@ -55,11 +55,21 @@ pub struct SectionStatus {
     pub tampered: bool,
     pub basis: Option<git::Distance>,
     pub drifted: Vec<RefDrift>,
+    /// A `superseded_by` on this Section whose target cannot be established.
+    ///
+    /// Not drift, and deliberately not one of the `drifted` entries. Drift asks
+    /// a person whether this wording still holds; this says the authoritative
+    /// forward link out of this Object leads nowhere, so the chain a reader
+    /// follows to find current knowledge is broken.
+    pub replacement: Option<String>,
 }
 
 impl SectionStatus {
     pub fn is_ok(&self) -> bool {
-        !self.tampered && self.basis.is_none() && self.drifted.is_empty()
+        !self.tampered
+            && self.basis.is_none()
+            && self.drifted.is_empty()
+            && self.replacement.is_none()
     }
 
     /// A Section standing on semantics that are not what was admitted.
@@ -87,6 +97,7 @@ impl SectionStatus {
             || self.stands_on_tampered()
             || self.stands_on_unreadable()
             || self.stands_on_missing()
+            || self.replacement.is_some()
     }
 
     pub fn label(&self) -> &'static str {
@@ -101,6 +112,9 @@ impl SectionStatus {
         }
         if self.stands_on_missing() {
             return "REF MISSING";
+        }
+        if self.replacement.is_some() {
+            return "REPLACEMENT UNAVAILABLE";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -122,6 +136,9 @@ impl SectionStatus {
         }
         if self.stands_on_missing() {
             return "ref_missing";
+        }
+        if self.replacement.is_some() {
+            return "replacement_unavailable";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -205,7 +222,7 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
     // Absent and unreadable are different answers, and flattening them here is
     // what would let a corrupt dependency read as ordinary drift on the one
     // surface whose job is to say how far wording can be trusted.
-    let target_unreadable = loaded
+    let mut target_unreadable = loaded
         .as_ref()
         .err()
         .is_some_and(|error| error.code != crate::EXIT_NOT_FOUND);
@@ -221,12 +238,14 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
                 crate::integrity::check_object_integrity(target, seal).is_err()
             })
         });
-        let state = target_object
+        let evaluated = target_object
             .as_ref()
             .and_then(|target| target.sha256.as_deref().map(|seal| (target, seal)))
-            .and_then(|(target, seal)| {
-                crate::dependency::evaluate(root, target, seal, selective).ok()
-            });
+            .map(|(target, seal)| crate::dependency::evaluate(root, target, seal, selective));
+        if evaluated.as_ref().is_some_and(Result::is_err) {
+            target_unreadable = true;
+        }
+        let state = evaluated.and_then(Result::ok);
         let moved_fields = match &state {
             Some(crate::dependency::Dependency::Drifted { fields }) => fields
                 .iter()
@@ -343,6 +362,10 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
                     tampered: section_tampered(object, section),
                     basis,
                     drifted,
+                    replacement: crate::ops::broken_replacements_in(root, section)
+                        .into_iter()
+                        .next()
+                        .map(|broken| format!("{}: {}", broken.target, broken.reason)),
                 },
             )
         })
@@ -523,6 +546,11 @@ pub fn render_show(root: &Path, object: &Object) -> String {
             if let Some(lookback) = &drift.lookback {
                 out.push_str(&format!("             {lookback}\n"));
             }
+        }
+        // Before the advice lines, with the other `!!`: this is not a question
+        // for the reader to weigh, it is a forward link that leads nowhere.
+        if let Some(detail) = &status.replacement {
+            out.push_str(&format!("    !!       superseded by {detail}\n"));
         }
         // Say what to do about it, rather than making the reader work it out.
         if let Some(distance) = &status.basis {

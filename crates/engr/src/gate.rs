@@ -142,6 +142,17 @@ impl Candidate {
             context: self.presented_context(),
         }
     }
+
+    /// The envelope integrity value this candidate's own contents produce.
+    ///
+    /// A read-only computation over a value the caller already holds, exposed
+    /// so a conforming implementation — and this crate's own tests — can build
+    /// or check an envelope without reimplementing the projection. It publishes
+    /// nothing: there is no public writer for a candidate file, and the gate
+    /// still decides what a candidate may do.
+    pub fn integrity_digest(&self) -> Result<String> {
+        self.envelope_integrity().digest()
+    }
 }
 
 /// What a confirmation produced: the Event that entered the record and the
@@ -221,7 +232,17 @@ pub fn find(root: &Path, challenge: &str) -> Result<Candidate> {
         EXIT_NOT_FOUND,
         "no candidate awaiting {challenge}"
     );
-    let stored: serde_json::Value = store::read_json(&path)?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| crate::tool_error(path.display(), error))?;
+    let stored: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    // A candidate is a current-generation resource, so its bytes are the one
+    // representation this generation writes. That also settles a duplicate
+    // member name — two `challenge` keys, say, with the second the one this
+    // reader picks — because the collapsed value no longer re-serializes to the
+    // bytes that had both, and a duplicate is precisely where two conforming
+    // JSON readers may disagree about what a person was shown.
+    store::check_canonical_bytes(&path, &text, &stored)?;
     let candidate: Candidate = serde_json::from_value(stored.clone())
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     // The code a candidate names is the code it will be admitted by, so a file
@@ -256,11 +277,15 @@ fn check_candidate_bytes(stored: &serde_json::Value, candidate: &Candidate) -> R
         "refs",
         "candidate_digest",
         "integrity_sha256",
+        "previous_text",
+        "previous_based_on",
+        "previous_refs",
+        "previous_semantics_recorded",
     ] {
         ensure!(
             stored.contains_key(required),
             EXIT_SCHEMA,
-            "candidate {} is missing required member {required}",
+            "candidate {} is missing required member {required}; prepare it again",
             candidate.challenge
         );
     }
@@ -311,6 +336,16 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
         "candidate {} has an invalid challenge code",
         candidate.challenge
     );
+    ensure!(
+        time::OffsetDateTime::parse(
+            &candidate.created_at,
+            &time::format_description::well_known::Rfc3339
+        )
+        .is_ok(),
+        EXIT_SCHEMA,
+        "candidate {} created_at is not RFC3339",
+        candidate.challenge
+    );
     crate::digest::CANDIDATE.verify(&candidate.candidate_digest)?;
     ensure!(
         candidate.integrity_sha256 == candidate.envelope_integrity().digest()?,
@@ -319,6 +354,42 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
         candidate.challenge
     );
     candidate.payload.validate()?;
+    candidate.payload.content.require_canonical_order()?;
+    ensure!(
+        candidate
+            .payload
+            .content
+            .refs
+            .iter()
+            .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
+        EXIT_SCHEMA,
+        "candidate v3 cannot carry legacy references"
+    );
+    let mut previous_refs = candidate.context.previous_refs.clone();
+    crate::proof::canonical_set(&mut previous_refs, "previous reference")?;
+    let mut previous_relations = candidate.context.previous_relations.clone();
+    crate::proof::canonical_set(&mut previous_relations, "previous relation")?;
+    ensure!(
+        previous_refs == candidate.context.previous_refs
+            && previous_relations == candidate.context.previous_relations,
+        EXIT_SCHEMA,
+        "candidate previous refs and relations must use canonical set order"
+    );
+    // The presentation context is prepared against the current workspace-v3
+    // Object, whose Sections already carry selective refs, and pre-P3
+    // candidates are deliberately not migrated. So a legacy ref here is a
+    // candidate shape no writer of this generation can produce, and the exact
+    // v3 envelope does not widen just because the shared decoder still
+    // understands the retained form for history.
+    ensure!(
+        candidate
+            .context
+            .previous_refs
+            .iter()
+            .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
+        EXIT_SCHEMA,
+        "candidate v3 cannot carry legacy references"
+    );
     validate_title_context(&candidate.payload).map_err(|error| {
         Error::new(
             EXIT_SCHEMA,
@@ -380,6 +451,82 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
         return Ok(());
     }
 
+    // A stale candidate must still prove that its payload produced the frozen
+    // semantic digest. Rebuild the exact predecessor from durable history;
+    // envelope integrity deliberately does not duplicate CandidateDigest.
+    let historical_events: Vec<_> = store::load_events(root, &candidate.payload.object)?
+        .into_iter()
+        .filter(|event| event.rev <= candidate.binding.expected_rev)
+        .collect();
+    let historical = if candidate.binding.expected_rev == 0 {
+        Object::new(candidate.payload.object.clone(), String::new())?
+    } else {
+        let initial = Object::new(candidate.payload.object.clone(), String::new())?;
+        crate::model::replay_recoverable_tail(initial, &historical_events)
+            .map_err(|_| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!(
+                        "candidate {} predecessor cannot be reconstructed; prepare it again",
+                        candidate.challenge
+                    ),
+                )
+            })?
+            .0
+    };
+    ensure!(
+        historical.rev == candidate.binding.expected_rev,
+        EXIT_SCHEMA,
+        "candidate {} predecessor cannot be reconstructed; prepare it again",
+        candidate.challenge
+    );
+    // The candidate was prepared against the *migrated* Object, whose Sections
+    // carry selective refs. Retained Event-v1 history is not migrated — it is
+    // read under its own generation — so replaying it reproduces the same
+    // predecessor in its legacy spelling. Comparing that against a digest taken
+    // over the migrated representation is comparing two spellings of one thing.
+    // Apply exactly the conversion migration applied, so the reconstruction is
+    // the predecessor as this generation reads it.
+    let historical = crate::migration::migrated_replay(root, historical)?;
+    let mut historical_after = historical.clone();
+    project(
+        &mut historical_after,
+        &human_event(
+            &candidate.payload,
+            historical.rev + 1,
+            &candidate.challenge,
+            &candidate.candidate_digest,
+        ),
+    )?;
+    let historical_subject = crate::proof::candidate_subject(
+        &historical,
+        &historical_after,
+        &candidate.payload,
+        review_digest,
+    )?;
+    ensure!(
+        historical_subject.digest()? == candidate.candidate_digest,
+        EXIT_SCHEMA,
+        "candidate {} stale payload does not match its prepared transition",
+        candidate.challenge
+    );
+    // Staleness does not relax self-authentication. The fresh path proves the
+    // stored Rule snapshots reproduce the review identity this candidate claims;
+    // a stale one carrying snapshots inconsistent with its own `review_digest`
+    // is the same forged attestation, only later.
+    if let Some(review) = candidate.context.rule_review.as_ref() {
+        let mutation = crate::proof::object_review_mutation(
+            &historical,
+            &historical_after,
+            &candidate.payload,
+        )?;
+        crate::proof::check_object_review_identity(
+            review,
+            &mutation,
+            candidate.binding.expected_rev,
+        )?;
+    }
+
     let applied_rev = candidate
         .binding
         .expected_rev
@@ -387,13 +534,7 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
         .ok_or_else(|| Error::new(EXIT_INVARIANT, "candidate revision cannot advance"))?;
     let already_applied = store::load_events(root, &candidate.payload.object)?
         .into_iter()
-        .any(|event| {
-            event.rev == applied_rev
-                && event.payload == candidate.payload
-                && event.human_confirmation().is_some_and(|confirmation| {
-                    confirmation.candidate_digest == candidate.candidate_digest
-                })
-        });
+        .any(|event| is_admission_of(&event, candidate, applied_rev));
     // A stale candidate is still a valid historical description of what the
     // Human was shown. Its envelope seal protects those bytes, while
     // `candidate_state` makes it non-actionable and `confirm` refuses it. Keep
@@ -401,6 +542,132 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
     // an already-applied one needs a live Event to establish idempotent retry.
     let _ = already_applied;
     Ok(())
+}
+
+/// Refuse, before anything is minted, a transition no numeric identity can carry.
+///
+/// #25 §14 puts the allocation boundary *before* the candidate. An Object at
+/// `rev == MAX_SAFE_INTEGER` is itself entirely valid, and so is one at
+/// `next_section_id == MAX_SAFE_INTEGER`; what is not representable is the
+/// transition out of either. Some of those numbers appear nowhere in the
+/// payload — the reducer allocates them — so a per-payload check passes, and for
+/// an operation whose CandidateDigest excludes `rev` the hash succeeds too. A
+/// person is then handed a challenge for a mutation the durable Event boundary
+/// can never admit. Asking the projection covers the explicit and the allocated
+/// alike.
+fn check_projection_is_representable(projected: &Object) -> Result<()> {
+    let value = serde_json::to_value(projected)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {}: {error}", projected.id)))?;
+    crate::proof::within_safe_integers(&value, &format!("object {}", projected.id))
+}
+
+/// Prove that this durable Event came from an admission path, not from a caller
+/// who assembled a well-formed record.
+///
+/// The shape checks above establish that a record is schema-exact, contiguous
+/// and replayable. None of that is admission. `Provenance::validate` reads the
+/// ReviewDigest and CandidateDigest scalars for *syntax*; it cannot tell an
+/// attested review from an invented sixty-four hex characters, and it cannot
+/// tell a confirmation a person gave from one nobody was ever shown. Without
+/// this, a direct library caller could append `kind: agent, outcome: passed`
+/// with a plausible digest, or a Human record naming a challenge that was never
+/// minted, and let recovery project either into current authority.
+///
+/// Asked here rather than at the two callers, because the point is the boundary
+/// and not the route to it — and asked under the writer lock, so the material it
+/// recomputes against is the material the append lands on.
+pub(crate) fn check_admission(root: &Path, event: &Event) -> Result<()> {
+    let Provenance::Tagged { admission } = &event.provenance else {
+        // The retained generation cannot be appended by this build at all, and
+        // the generation check above has already said so.
+        return Ok(());
+    };
+    match admission.kind {
+        Admission::Human => {
+            let confirmation = admission.confirmation.as_ref().ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    "a human Event carries the confirmation it was admitted by".to_owned(),
+                )
+            })?;
+            // The candidate is still on disk here: `confirm` appends before it
+            // discards, precisely so this window exists. A challenge is minted
+            // by `prepare` and is the one thing a caller cannot invent, so
+            // requiring the exact prepared envelope is what makes a Human Event
+            // unforgeable rather than merely well spelled.
+            let candidate = find(root, &confirmation.challenge).map_err(|error| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    format!(
+                        "no prepared candidate stands for challenge {}, so this Event was not admitted through the gate: {}",
+                        confirmation.challenge, error.message
+                    ),
+                )
+            })?;
+            ensure!(
+                is_admission_of(event, &candidate, event.rev),
+                EXIT_INVARIANT,
+                "candidate {} does not describe the transition this Event admits",
+                confirmation.challenge
+            );
+            Ok(())
+        }
+        Admission::Agent => {
+            let before = match ops::effective(root, &event.payload.object) {
+                Ok(object) => object,
+                Err(error) if error.code == EXIT_NOT_FOUND => {
+                    Object::new(event.payload.object.clone(), String::new())?
+                }
+                Err(error) => return Err(error),
+            };
+            let mut after = before.clone();
+            project(&mut after, event)?;
+            let review = admission.rule_review.as_ref();
+            let Some(review) = review else {
+                // The one non-authoritative exception, and it is narrow: a
+                // title asserts nothing about the project, so there is no policy
+                // for a review to be of.
+                ensure!(
+                    matches!(
+                        event.payload.action,
+                        Action::ObjectCreated | Action::ObjectRenamed
+                    ),
+                    EXIT_INVARIANT,
+                    "Agent semantic Object admission needs at least one applicable usable Object Rule"
+                );
+                // And narrow in the other direction too: the exception is that
+                // there is no *applicable* Rule, not that titles are exempt from
+                // Rules. Where a workspace does govern the Object domain, a
+                // title mutation reviews against it like any other — so the
+                // absence of a review has to be established, not assumed from
+                // the shape of the action.
+                let mutation =
+                    crate::proof::object_review_mutation(&before, &after, &event.payload)?;
+                ensure!(
+                    !crate::rules::bind_object(root, &mutation, before.rev)?.has_rules(),
+                    EXIT_INVARIANT,
+                    "a project rule governs this Object, so even a title mutation carries its review"
+                );
+                return Ok(());
+            };
+            ensure!(
+                review.outcome == crate::model::ReviewOutcome::Passed,
+                EXIT_INVARIANT,
+                "an Agent mutation is admitted only by a passing Rule Review"
+            );
+            // Recomputed against the live applicable Rule set for exactly this
+            // mutation. A digest that names anything else names a review of
+            // something other than what is being written.
+            let mutation = crate::proof::object_review_mutation(&before, &after, &event.payload)?;
+            let live = crate::rules::bind_object(root, &mutation, before.rev)?;
+            ensure!(
+                live.digest()?.to_string() == review.review_digest,
+                EXIT_INVARIANT,
+                "this Event names a Rule Review that is not the one its mutation would get"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn human_event(payload: &Payload, rev: u64, challenge: &str, candidate_digest: &str) -> Event {
@@ -457,6 +724,25 @@ pub enum CandidateState {
     Stale { current_rev: u64 },
 }
 
+/// Whether `event` is the durable admission of exactly this candidate.
+///
+/// One predicate for both the reader and the classifier, because two answers to
+/// the same question drift. CandidateDigest names the semantic transition, not
+/// the envelope, so two prepared candidates for the same mutation share it while
+/// carrying different random challenges. Event v2 persists the pair
+/// `{challenge, candidate_digest}` precisely so an Event proves confirmation of
+/// *its* challenge; matching the digest alone would let an older identical
+/// envelope — restored or copied after a later one was applied — be reported and
+/// cleaned up as though a person had answered for it. Nobody ever did.
+fn is_admission_of(event: &Event, candidate: &Candidate, applied_rev: u64) -> bool {
+    event.rev == applied_rev
+        && event.payload == candidate.payload
+        && event.human_confirmation().is_some_and(|confirmation| {
+            confirmation.candidate_digest == candidate.candidate_digest
+                && confirmation.challenge == candidate.challenge
+        })
+}
+
 /// Classify a candidate from the same effective projection and durable Event
 /// evidence used by confirmation. Read surfaces and admission must agree about
 /// whether a code is still actionable.
@@ -474,12 +760,7 @@ pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateSt
                         })?;
                 if let Some(event) = store::load_events(root, &candidate.payload.object)?
                     .into_iter()
-                    .find(|event| {
-                        event.rev == applied_rev
-                            && event.human_confirmation().is_some_and(|confirmation| {
-                                confirmation.candidate_digest == candidate.candidate_digest
-                            })
-                    })
+                    .find(|event| is_admission_of(event, candidate, applied_rev))
                 {
                     return Ok(CandidateState::AlreadyApplied(Box::new(event)));
                 }
@@ -597,6 +878,17 @@ fn canonicalize_payload(root: &Path, payload: &mut Payload) -> Result<()> {
     // same relation, and sorting has to see the resolved values or the order
     // would depend on what the caller happened to type.
     payload.content.canonicalize_order()?;
+    // `sources[]` is a protocol-defined set like any other, so it takes the
+    // shared canonical-set order — JCS each element, then sort by those bytes —
+    // rather than a field-local numeric rule. Ruled at PR #52 `5413218070` and
+    // synchronized to #9/#13/#32. The two disagree as soon as the ids have
+    // different digit counts: `[2, 10]` is ascending, canonical is `[10, 2]`.
+    if let Action::SectionMerged {
+        merge: crate::model::Merge::Into { sources, .. },
+    } = &mut payload.action
+    {
+        crate::proof::canonical_set(sources, "merge source")?;
+    }
     payload.validate()
 }
 
@@ -932,7 +1224,7 @@ fn prepare_locked(
             .trim()
             .clone_into(&mut payload.content.text);
     }
-    let object = match ops::reconcile(root, &payload.object) {
+    let object = match ops::reconcile_locked(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
@@ -1064,6 +1356,7 @@ fn prepare_locked(
             &format!("1:{}", "0".repeat(64)),
         );
         project(&mut trial, &probe)?;
+        check_projection_is_representable(&trial)?;
         trial
     };
 
@@ -1169,7 +1462,7 @@ fn admit_agent_locked(
             .trim()
             .clone_into(&mut payload.content.text);
     }
-    let stored = match ops::reconcile(root, &payload.object) {
+    let stored = match ops::reconcile_locked(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
@@ -1213,6 +1506,7 @@ fn admit_agent_locked(
     let probe = agent_event(&payload, before.rev + 1, None);
     let mut projected = before.clone();
     project(&mut projected, &probe)?;
+    check_projection_is_representable(&projected)?;
     validate_refs(root, &payload, Admission::Agent)?;
     validate_relations(root, &payload, &projected)?;
 
@@ -1328,8 +1622,7 @@ fn validate_relations(root: &Path, payload: &Payload, projected: &Object) -> Res
 /// A cycle in `superseded_by` is a set of objects each of which claims the next
 /// one replaced it, so a reader following the chain to find current knowledge
 /// never arrives anywhere. The walk is bounded by the objects in the workspace,
-/// and an object that cannot be loaded ends that branch rather than the check —
-/// a chain into a missing object is a dangling pointer, not a cycle.
+/// and every branch of it must be walked to the end.
 fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
     let mut seen = vec![object.id.clone()];
     let mut frontier = object.replacements()?;
@@ -1349,11 +1642,28 @@ fn check_acyclic(root: &Path, object: &Object) -> Result<()> {
         // function exists to find. Swallowing the error collapsed "no further
         // replacements" and "this file is unreadable" into one answer, which is
         // the downgrade the shared resolution rule forbids on an authoritative
-        // path. Genuine absence still terminates the branch — there is nothing
-        // further to walk — and is governed where references are admitted.
+        // path.
+        //
+        // Absence is the same failure. `effective` already reconstructs a
+        // target whose projection is missing but whose admitted history still
+        // establishes it, so NOT_FOUND here means the authority genuinely
+        // cannot be established — and v1 has no Object delete, so a
+        // `superseded_by` edge pointing at nothing is a broken invariant
+        // already, not an ordinary end of chain. Authorizing a new supersession
+        // through a graph that cannot be established would bless it.
         match ops::effective(root, &next) {
-            Ok(target) => frontier.extend(target.replacements()?),
-            Err(error) if error.code == EXIT_NOT_FOUND => continue,
+            Ok(target) => {
+                ops::sound(root, &target, None)?;
+                frontier.extend(target.replacements()?)
+            }
+            Err(error) if error.code == EXIT_NOT_FOUND => {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    format!(
+                        "the supersession chain passes through {next}, which no longer exists, so the replacement graph this would join cannot be established"
+                    ),
+                ))
+            }
             Err(error) => {
                 return Err(Error::new(
                     error.code,
@@ -1391,6 +1701,7 @@ fn check_consumed_sections_are_unreferenced(root: &Path, payload: &Payload) -> R
     let participants = merge.participants();
     for id in store::object_ids(root)? {
         let object = ops::effective(root, &id)?;
+        ops::sound(root, &object, None)?;
         for section in &object.sections {
             if object.id == payload.object && participants.contains(&section.id) {
                 continue;
@@ -1413,6 +1724,22 @@ fn check_consumed_sections_are_unreferenced(root: &Path, payload: &Payload) -> R
 
 fn validate_refs(root: &Path, payload: &Payload, admitted_by: Admission) -> Result<()> {
     check_consumed_sections_are_unreferenced(root, payload)?;
+    // A current workspace emits exactly one Ref shape. The legacy decoder is
+    // retained so historical Objects and Events can still be read under their
+    // own generation, and letting that compatibility shape reach an emission
+    // path lets a supported writer mint a candidate — or project a Section —
+    // that this build's own reader then refuses as schema-invalid. Asked before
+    // any digest is computed, so nothing is written and no challenge is handed
+    // to a person for a mutation that can never be admitted.
+    ensure!(
+        payload
+            .content
+            .refs
+            .iter()
+            .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
+        EXIT_SCHEMA,
+        "this generation admits only selective references"
+    );
     for reference in &payload.content.refs {
         let (target_id, target_section_id) = reference.target_identity()?;
         if let Action::SectionRevised { section } = payload.action {
@@ -1589,7 +1916,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
 
     let object = match candidate_state(root, &candidate)? {
         CandidateState::AlreadyApplied(applied) => {
-            let object = ops::reconcile(root, &candidate.payload.object)?;
+            let object = ops::reconcile_locked(root, &candidate.payload.object)?;
             discard_locked(root, code)?;
             return Ok(Admitted {
                 event: *applied,
@@ -1605,7 +1932,7 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
             )?;
             unreachable!("a stale candidate cannot be admitted")
         }
-        CandidateState::Pending => match ops::reconcile(root, &candidate.payload.object) {
+        CandidateState::Pending => match ops::reconcile_locked(root, &candidate.payload.object) {
             Ok(object) => object,
             Err(error) if error.code == EXIT_NOT_FOUND => {
                 Object::new(candidate.payload.object.clone(), String::new())?
@@ -1688,19 +2015,26 @@ fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         "candidate {} no longer describes the transition being admitted",
         candidate.challenge
     );
+    let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
+    let live = crate::rules::bind_object(root, &mutation, candidate.binding.expected_rev)?;
     if let Some(review) = candidate.context.rule_review.as_ref() {
         crate::proof::check_review_report(review)?;
-        let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
         crate::proof::check_object_review_identity(
             review,
             &mutation,
             candidate.binding.expected_rev,
         )?;
-        let live = crate::rules::bind_object(root, &mutation, candidate.binding.expected_rev)?;
         ensure!(
             live.digest()?.to_string() == review.review_digest,
             EXIT_INVARIANT,
             "the Rule Review material moved after candidate {} was prepared",
+            candidate.challenge
+        );
+    } else {
+        ensure!(
+            !live.has_rules(),
+            EXIT_INVARIANT,
+            "the applicable Rule set moved after candidate {} was prepared",
             candidate.challenge
         );
     }

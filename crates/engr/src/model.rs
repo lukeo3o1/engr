@@ -256,6 +256,17 @@ impl Content {
         Ok(())
     }
 
+    pub(crate) fn require_canonical_order(&self) -> Result<()> {
+        let mut canonical = self.clone();
+        canonical.canonicalize_order()?;
+        ensure!(
+            canonical.refs == self.refs && canonical.relations == self.relations,
+            EXIT_SCHEMA,
+            "refs and relations must use canonical set order"
+        );
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(based_on) = &self.based_on {
             validate_git_oid("based_on", based_on)?;
@@ -378,6 +389,16 @@ impl Section {
 
     fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
+        ensure!(
+            time::OffsetDateTime::parse(
+                &self.admitted_at,
+                &time::format_description::well_known::Rfc3339
+            )
+            .is_ok(),
+            EXIT_SCHEMA,
+            "§{}: admitted_at is not RFC3339",
+            self.id
+        );
         // Two pieces of the semantic surface are Human-authoritative in
         // themselves, so an Agent Section may not carry them at all.
         //
@@ -732,18 +753,20 @@ impl Merge {
                     EXIT_INVARIANT,
                     "§{destination} survives the merge, so it cannot also be consumed by it"
                 );
-                // Ascending and unique, checked as one pass over the persisted
-                // order rather than over a sorted copy: `sources` is a set, and
-                // a set has one canonical spelling. Two events that consume the
-                // same sections in different orders would otherwise be two
-                // different payloads saying one thing.
-                for (index, source) in sources.iter().enumerate() {
-                    ensure!(
-                        index == 0 || sources[index - 1] < *source,
-                        EXIT_INVARIANT,
-                        "the sections a merge consumes are listed once each, in ascending order"
-                    );
-                }
+                // `sources[]` is a protocol-defined set, and it takes the one
+                // shared algorithm: JCS each element, then order by those bytes.
+                // Ruled at PR #52 `5413218070` and synchronized to #9/#13/#32,
+                // superseding the earlier field-local numeric-ascending wording.
+                // The two disagree as soon as the ids differ in digit count:
+                // `[2, 10]` is ascending, and canonical is `[10, 2]`, because
+                // "10" sorts before "2". A reader may still render numerically.
+                let mut canonical = sources.clone();
+                crate::proof::canonical_set(&mut canonical, "merge source")?;
+                ensure!(
+                    canonical == *sources,
+                    EXIT_INVARIANT,
+                    "the sections a merge consumes are listed once each, in canonical set order"
+                );
             }
             Merge::Absorbing { absorbs } => {
                 for absorbed in absorbs {
@@ -1153,6 +1176,11 @@ impl Provenance {
             }
         }
         if let Some(confirmation) = &admission.confirmation {
+            ensure!(
+                crate::confirmation::valid_challenge(&confirmation.challenge),
+                EXIT_SCHEMA,
+                "a human admission carries an invalid challenge"
+            );
             crate::digest::CANDIDATE.verify(&confirmation.candidate_digest)?;
         }
         if let Some(review) = &admission.rule_review {
@@ -1201,9 +1229,10 @@ impl Event {
 
 /// Apply only the event suffix newer than the persisted projection.
 ///
-/// Retained history may have been purged at its beginning, so events at or
-/// below the projection revision are evidence rather than replay input. Once a
-/// newer event exists, though, it must begin at the next revision and continue
+/// Events at or below the projection revision are audit evidence rather than
+/// replay input. The store requires complete, append-only history separately;
+/// this reducer only decides whether its suffix can advance the projection.
+/// Once a newer event exists, it must begin at the next revision and continue
 /// without a gap: otherwise a later confirmation could be inserted before an
 /// unreachable future event.
 pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(Object, bool)> {
@@ -2008,13 +2037,15 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_tail_allows_purged_history_but_rejects_future_gaps() {
+    fn the_reducer_skips_old_evidence_and_rejects_future_gaps() {
         let id = new_id();
         let mut completed = Object::new(id.clone(), "completed".to_owned()).expect("object");
         completed.rev = 2;
         assert!(
             replay_recoverable_tail(completed, &[section_added(&id, 2, "old evidence")]).is_ok(),
-            "retained evidence at or below the projection may have a missing prefix"
+            "evidence at or below the projection is old news to the reducer; whether the
+             history is complete is the store boundary's question, and it requires
+             a non-empty history to begin at revision 1"
         );
 
         let mut crashed = Object::new(id.clone(), "crashed".to_owned()).expect("object");
