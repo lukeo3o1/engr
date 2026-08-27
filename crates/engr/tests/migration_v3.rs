@@ -1240,3 +1240,64 @@ fn a_stale_candidate_is_still_renderable_after_an_unrelated_commit_is_lost() {
         engr::gate::find(root, &challenge).expect("a stale candidate can still explain itself");
     assert_eq!(candidate.challenge, challenge);
 }
+
+/// Narrowing what a stale candidate reconstructs is not permission to skip what
+/// it hashes.
+///
+/// `section.revised` proves itself from the target Section either side, and the
+/// before-state is the one carrying the legacy Ref — so this candidate's own
+/// CandidateDigest inputs are exactly the material that went missing. It has to
+/// fail, and it has to fail as something other than the candidate or its Object
+/// being absent, which is the distinction #13 keeps NOT_FOUND for.
+#[test]
+fn a_stale_candidate_that_hashes_the_lost_section_still_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let (_, source, commit) = migrated_with_legacy_ref(root);
+
+    let prepared = engr::gate::prepare(
+        root,
+        Payload {
+            action: Action::SectionRevised { section: 1 },
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "replace the section that stood on history".to_owned(),
+                ..Content::default()
+            },
+        },
+    )
+    .expect("prepare revision");
+
+    engr::gate::admit_agent(
+        root,
+        Payload {
+            action: Action::ObjectRenamed,
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "an agent advanced the title first".to_owned(),
+                ..Content::default()
+            },
+        },
+        None,
+    )
+    .expect("agent rename");
+    forget_commit(root, &commit);
+
+    let error = engr::gate::find(root, &prepared.candidate.challenge)
+        .expect_err("this candidate hashes the Section whose provenance is gone");
+    assert_ne!(
+        error.code,
+        engr::EXIT_NOT_FOUND,
+        "missing required provenance is not the candidate being absent: {error}"
+    );
+    // And it fails for the right reason. Skipping the conversion instead would
+    // also produce an error here -- the digest would be recomputed over an
+    // unconverted Section and simply not match -- which looks like a refusal
+    // while actually meaning the proof was never reconstructed.
+    assert!(
+        error.message.contains("historical workspace at commit"),
+        "the refusal names the provenance it could not reach: {error}"
+    );
+}
