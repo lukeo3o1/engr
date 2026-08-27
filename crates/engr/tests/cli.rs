@@ -2222,6 +2222,37 @@ fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
     assert!(printed.starts_with("# engr protocol v0"));
 }
 
+/// The protocol states one persisted order for `backlog subjects[]`, not two.
+///
+/// `## Sets and order` classifies it as a set, gives the shared JCS-element
+/// algorithm, and says current-generation resources are persisted in that order
+/// and refused on the read path in any other — which is what `canonicalize_sets`
+/// and the stored-order check implement. The Backlog section used to close by
+/// saying no persisted sort order was required. Both cannot be normative for the
+/// same array: two answers in one document is worse than either, because each
+/// implementation picks one and they ship different bytes forever.
+#[test]
+fn the_protocol_states_one_persisted_order_for_backlog_subjects() {
+    // Normalized, because the retired sentence wrapped across a line break and
+    // a grep for it in source order silently found nothing.
+    let normalized = engr::PROTOCOL
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !normalized.contains("No persisted sort order is required"),
+        "the superseded Backlog ordering sentence is back in the protocol"
+    );
+    assert!(
+        normalized.contains("backlog subjects[] set"),
+        "backlog subjects[] must still be classified as a set"
+    );
+    assert!(
+        normalized.contains("Current-generation resources are persisted in that order."),
+        "the global persisted-order rule must still be stated"
+    );
+}
+
 /// A workspace with one committed source file, for the surfaces that pin one.
 fn repository_with_source(root: &Path) {
     git(root, &["init", "-q"]);

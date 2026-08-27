@@ -1032,3 +1032,149 @@ fn a_file_that_appeared_after_the_plan_stops_the_commit() {
         "the version did not advance"
     );
 }
+
+/// A migrated workspace whose retained history still carries a legacy Ref.
+///
+/// The Ref is converted away in the current Object, but the Event-v1 records it
+/// was admitted through keep it, so any replay of that history has to convert it
+/// again before comparing against a digest taken over the migrated spelling.
+fn migrated_with_legacy_ref(root: &Path) -> (&'static str, &'static str, String) {
+    let target = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let source = "018f7d58-4ca7-7a2e-98f1-9b3014681849";
+    let target_object = object(target, "the target remains stable");
+    predecessor(root, std::slice::from_ref(&target_object));
+    git(root, &["init"]);
+    git(root, &["add", ".engr"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=engr test",
+            "-c",
+            "user.email=engr@example.invalid",
+            "commit",
+            "-m",
+            "predecessor target",
+        ],
+    );
+    let commit = git(root, &["rev-parse", "HEAD"]);
+    let target_seal = target_object["sections"][0]["sha256"]
+        .as_str()
+        .expect("target seal");
+    let content = Content {
+        text: "the source relies on all legacy target semantics".to_owned(),
+        refs: vec![engr::model::Ref::legacy(target, 1, target_seal, &commit)],
+        ..Content::default()
+    };
+    let source_object = json!({
+        "id": source,
+        "title": "source",
+        "state": "open",
+        "rev": 2,
+        "next_section_id": 2,
+        "sections": [{
+            "id": 1,
+            "text": content.text,
+            "refs": content.refs,
+            "sha256": content.sha256().expect("source seal"),
+            "confirmed_at": "2026-08-25T00:00:00Z"
+        }]
+    });
+    predecessor(root, &[target_object, source_object]);
+    store::migrate(root).expect("migrate");
+    (target, source, commit)
+}
+
+/// Make the pinned commit unresolvable, the way losing history actually does.
+fn forget_commit(root: &Path, commit: &str) {
+    let (directory, rest) = commit.split_at(2);
+    let loose = root.join(".git").join("objects").join(directory).join(rest);
+    std::fs::remove_file(&loose).expect("the pinned commit was a loose object");
+}
+
+fn admit_human(root: &Path, payload: Payload) {
+    let prepared = engr::gate::prepare(root, payload).expect("prepare");
+    engr::gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect("confirm");
+}
+
+/// A lost historical commit says something about what depends on it, not about
+/// whether the Object exists.
+///
+/// The Human CandidateDigest recheck replays retained v1 history, and a legacy
+/// Ref in that history has to be converted before its Section can be compared
+/// against a digest taken over the migrated spelling. Converting the whole
+/// Object made every legacy Ref in it a precondition of the recheck — so one
+/// unrelated pinned commit going away failed `load_events`, and since
+/// `ops::replay` reads events before the Object, a perfectly sound current
+/// Object answered `EXIT_NOT_FOUND`. Absent, rather than "some provenance is
+/// gone", for a record sitting right there.
+///
+/// `object.renamed` hashes title and lifecycle and names no Section at all, so
+/// no legacy Ref anywhere is one of its digest inputs. It authenticates without
+/// that commit, and the Object stays readable.
+#[test]
+fn an_unrelated_lost_commit_does_not_make_a_current_object_unreadable() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let (_, source, commit) = migrated_with_legacy_ref(root);
+
+    admit_human(
+        root,
+        Payload {
+            action: Action::ObjectRenamed,
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "renamed after the generation advanced".to_owned(),
+                ..Content::default()
+            },
+        },
+    );
+    forget_commit(root, &commit);
+
+    let events = store::load_events(root, source).expect("history still authenticates");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.version == engr::EVENT_ENVELOPE_VERSION),
+        "the rename really is a v2 record, so the recheck really ran"
+    );
+    let object = engr::ops::effective(root, source).expect("the object is still readable");
+    assert_eq!(object.title, "renamed after the generation advanced");
+}
+
+/// The other half: an operation whose digest really does read that Section.
+///
+/// Narrowing the conversion is not a licence to skip it. `section.revised` hashes
+/// the Section either side, and the before-state is the one carrying the legacy
+/// Ref — so with its commit gone the recheck cannot be completed, and it must
+/// say so rather than authenticate on material it could not reconstruct.
+#[test]
+fn an_operation_whose_digest_needs_the_lost_commit_still_refuses() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let (_, source, commit) = migrated_with_legacy_ref(root);
+
+    admit_human(
+        root,
+        Payload {
+            action: Action::SectionRevised { section: 1 },
+            object: source.to_owned(),
+            becomes: None,
+            content: Content {
+                text: "revised the section that carries the reference".to_owned(),
+                ..Content::default()
+            },
+        },
+    );
+    forget_commit(root, &commit);
+
+    let error = store::load_events(root, source)
+        .expect_err("the recheck cannot be completed without its own input");
+    assert_ne!(
+        error.code,
+        engr::EXIT_NOT_FOUND,
+        "and it is not reported as the Object being absent: {error}"
+    );
+}

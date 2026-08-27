@@ -487,7 +487,14 @@ fn validate_candidate(root: &Path, candidate: &Candidate) -> Result<()> {
     // over the migrated representation is comparing two spellings of one thing.
     // Apply exactly the conversion migration applied, so the reconstruction is
     // the predecessor as this generation reads it.
-    let historical = crate::migration::migrated_replay(root, historical)?;
+    // `Whole` here, deliberately. The read path converts only the Sections a
+    // recheck reads, because a lost commit must not make a sound Object
+    // unreadable. Admission is the other direction: `object_review_mutation`
+    // below projects the whole Object, and refusing to admit something new
+    // while part of the predecessor cannot be reconstructed is the safe answer
+    // rather than a surprising one.
+    let historical =
+        crate::migration::migrated_replay(root, historical, &crate::migration::Migrated::Whole)?;
     let mut historical_after = historical.clone();
     project(
         &mut historical_after,

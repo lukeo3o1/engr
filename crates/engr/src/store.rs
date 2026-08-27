@@ -1434,16 +1434,58 @@ fn check_event_history(root: &Path, path: &Path, id: &str, events: &[Event]) -> 
     check_human_candidate_digests(root, id, events)
 }
 
+/// Exactly the Sections the Human rechecks below will read.
+///
+/// A CandidateDigest is operation-specific. `object.renamed` hashes the title
+/// and lifecycle either side and names no Section at all; a Section operation
+/// names its own participants. Only `section_merged` and `object.superseded`
+/// project the whole Object, because `ObjectInvariant` carries every Section's
+/// semantics.
+///
+/// Converting more than that is not a wasted cycle, it is a wider precondition:
+/// every legacy Ref on a converted Section has its pinned commit reopened, so
+/// converting the whole Object makes an unrelated Ref's availability decide
+/// whether the Object can be read at all. Asking for the operation's own inputs
+/// keeps a lost commit a fact about the operations that actually depend on it.
+///
+/// A Section this generation *adds* cannot carry a legacy Ref — it did not exist
+/// before the boundary — and the before-state of an add names no Section, so
+/// `section.added` needs nothing converted.
+fn sections_the_rechecks_read(events: &[Event]) -> crate::migration::Migrated {
+    let mut ids = std::collections::BTreeSet::new();
+    for event in events {
+        if event.version != EVENT_ENVELOPE_VERSION || event.human_confirmation().is_none() {
+            continue;
+        }
+        match &event.payload.action {
+            Action::SectionMerged { .. } | Action::ObjectSuperseded => {
+                return crate::migration::Migrated::Whole
+            }
+            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+                ids.insert(*section);
+            }
+            Action::SectionAdded
+            | Action::ObjectCreated
+            | Action::ObjectRenamed
+            | Action::ObjectClosed
+            | Action::ObjectReopened
+            | Action::ObjectClassified { .. } => {}
+        }
+    }
+    crate::migration::Migrated::Sections(ids)
+}
+
 /// Event-v2 keeps a Human candidate digest after its short-lived envelope is
 /// deleted. The transition it seals remains reconstructable from immutable
 /// history, so accepting only the digest's scalar syntax would turn durable
 /// admission evidence into an unauthenticated label after confirmation.
 fn check_human_candidate_digests(root: &Path, id: &str, events: &[Event]) -> Result<()> {
+    let wanted = sections_the_rechecks_read(events);
     let mut projection = Object::new(id.to_owned(), String::new())?;
     let mut migrated = false;
     for event in events {
         if event.version == EVENT_ENVELOPE_VERSION && !migrated {
-            projection = crate::migration::migrated_replay(root, projection)?;
+            projection = crate::migration::migrated_replay(root, projection, &wanted)?;
             migrated = true;
         }
         let before = projection.clone();

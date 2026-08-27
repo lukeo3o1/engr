@@ -1126,8 +1126,14 @@ item unreadable. Backlog is staging, not a referential-integrity database.
 that "the same set" has one meaning. Duplicates are judged by the same identity
 that decides equality, so a target that differs only in `dirty` is a duplicate:
 `dirty` is not part of identity, and a comparison that included it would let one
-target sit in a set twice while the rest of the model calls them one subject. No
-persisted sort order is required.
+target sit in a set twice while the rest of the model calls them one subject.
+
+Semantically unordered does not mean unordered on disk. `subjects[]` is a set in
+`## Sets and order`, so a current-generation item persists it in the shared
+canonical order and a stored item in any other order is refused on the read path.
+An earlier version of this section said no persisted sort order was required;
+that wording is superseded, exactly as `section_merged.sources[]`'s
+numeric-ascending wording is.
 
 ### Mutation preconditions
 

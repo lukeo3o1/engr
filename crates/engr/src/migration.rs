@@ -189,20 +189,30 @@ pub(crate) fn migrated_historical_section(
 ///
 /// A Section already carrying selective refs is left alone; the closure refuses
 /// those by design, and after a partial history there can be both.
-pub(crate) fn migrated_replay(root: &Path, mut object: Object) -> Result<Object> {
-    let legacy = |section: &Section| {
-        section
-            .refs
-            .iter()
-            .any(|reference| matches!(reference, Ref::Legacy(_)))
+///
+/// `wanted` decides how much of the Object has to make that trip. Converting a
+/// Section reopens the historical Git target of every legacy Ref on it, so
+/// converting the whole Object makes every legacy Ref in it a precondition for
+/// whatever the caller was actually trying to do. See [`Migrated`].
+pub(crate) fn migrated_replay(
+    root: &Path,
+    mut object: Object,
+    wanted: &Migrated,
+) -> Result<Object> {
+    let convert = |section: &Section| {
+        wanted.includes(section.id)
+            && section
+                .refs
+                .iter()
+                .any(|reference| matches!(reference, Ref::Legacy(_)))
     };
-    if !object.sections.iter().any(legacy) {
+    if !object.sections.iter().any(convert) {
         return Ok(object);
     }
     let mut closure = RefClosure::new(root);
     let mut sections = Vec::with_capacity(object.sections.len());
     for section in std::mem::take(&mut object.sections) {
-        if legacy(&section) {
+        if convert(&section) {
             sections.push(closure.convert_section(section)?);
         } else {
             sections.push(section);
@@ -210,6 +220,36 @@ pub(crate) fn migrated_replay(root: &Path, mut object: Object) -> Result<Object>
     }
     object.sections = sections;
     Ok(object)
+}
+
+/// How much of an Object a caller needs in the migrated spelling.
+///
+/// Converting a Section is not free and not local: it reopens the historical Git
+/// commit each of its legacy Refs pins. So a caller that converts the whole
+/// Object has made every legacy Ref anywhere in it a precondition — and if one
+/// of those commits is later lost, the conversion fails with `EXIT_NOT_FOUND`
+/// and takes the caller down with it, however little of the Object the caller
+/// was reading.
+///
+/// That matters most on the read path, where the failure would arrive as "this
+/// Object does not exist". Retained Event history is not current-state
+/// authority, and a Ref whose pinned commit is gone is `provenance unavailable`
+/// where it is actually depended on — never grounds for making a sound current
+/// Object unreadable because something unrelated to it moved.
+pub(crate) enum Migrated {
+    /// Every Section carrying a legacy Ref. For projections that read them all.
+    Whole,
+    /// Only these Sections, by id.
+    Sections(std::collections::BTreeSet<u64>),
+}
+
+impl Migrated {
+    fn includes(&self, section: u64) -> bool {
+        match self {
+            Migrated::Whole => true,
+            Migrated::Sections(ids) => ids.contains(&section),
+        }
+    }
 }
 
 /// Migrate or resume a migration while the caller holds the workspace lock.
