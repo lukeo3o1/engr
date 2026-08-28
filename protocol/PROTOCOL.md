@@ -77,9 +77,11 @@ writes only through domain APIs that own their own authority contract.
 ### Sections are current authority; events are durable history
 
 `.engr/events/<id>.jsonl` is append-only admitted history and audit evidence.
-It is never purged in v0, but it is not a replay authority or a second source of
-current truth. **Sections remain authoritative for current wording**, and git
-additionally preserves committed projections for look-back and tamper evidence.
+It is never purged in v0, but it is not current-state authority or a second
+source of current truth. **Sections remain authoritative for current wording**,
+and git additionally preserves committed projections for look-back and tamper
+evidence. Admitted Event history MAY nevertheless be replayed for verification
+or for reconstruction under the explicit repair contract.
 
 This is the inversion from the previous design, and it is deliberate. Event
 sourcing bought a replayable past at the cost of a vocabulary nobody used; the
@@ -1230,14 +1232,15 @@ argument. So a read surface MAY print a short stand-in for each predecessor and
 a mutation MAY take it back, as long as nothing persists it and the authority
 remains the whole predecessor compared at apply time.
 
-Carrying it is not optional decoration. Review happens before the mutation runs,
-so a command that reads and writes under one lock still leaves the entire
-interval between reviewing and running unguarded — a concurrent edit in that gap
-lands underneath a mutation nobody reviewed against it, and every check inside
+Carrying it is not optional decoration. Preparation happens before the mutation
+runs, so a command that reads and writes under one lock still leaves the entire
+interval between preparing and running unguarded — a concurrent edit in that
+gap lands underneath a mutation nobody prepared against, and every check inside
 the lock passes, because they compare against what the command itself read
-rather than against what the agent read. **Where a Rule Review was required, the
-mutation MUST carry the predecessor it was reviewed against.** Where no rule
-applies there was no review to anchor, and a predecessor MAY be omitted.
+rather than against what the agent read. **Every existing-state mutation MUST
+carry the exact predecessor it was prepared against, whether or not a Rule
+Review was required.** Rule presence determines whether review applies, not
+whether the stale-write precondition applies.
 
 That requirement belongs to the **mutation**, not to whichever interface reached
 it. An implementation that enforces it only at its command line has enforced its
@@ -2448,8 +2451,20 @@ may follow as `@<commit>`; it selects an as-of snapshot and is not identity.
 Backlog `subjects[]` and `produced[]` name current resources, so they refuse it.
 Embedded references omit `engr:` and pair their namespace-relative `ref` with
 `kind: "engr"`. The shared parser owns syntax only: each caller decides which
-resources and selectors are legal and what they mean. Repository-qualified
-resolution is deferred.
+resources and selectors are legal and what they mean.
+
+A repository-qualified reference is a Git repository URI whose fragment is a
+valid workspace-relative canonical engr reference:
+
+```text
+<git-repository-uri>#engr:obj:<id>
+<git-repository-uri>#engr:obj:<id>:<section>
+<git-repository-uri>#engr:obj:<id>:<section>@<commit>
+```
+
+The repository URI supplies resolution and location context, not resource
+identity. The optional Git commit supplies snapshot context, not identity. The
+grammar is canonical now; only full remote Git resolution is deferred.
 
 Snapshot input may be abbreviated or symbolic, but it is unresolved input, not
 canonical reference data. Canonical or persisted output MUST contain the full
