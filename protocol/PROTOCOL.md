@@ -2299,6 +2299,38 @@ cleanup happens last. A leftover stage after the version write is therefore also
 safely resumable, and MUST NOT replay its writes — the transaction had already
 completed, so re-copying would overwrite whatever landed afterwards.
 
+### Migration is a maintenance window
+
+An ordinary authoritative write keeps the shared-state rule this protocol relies
+on everywhere else: a reader holding no lock observes a complete old state or a
+complete new one, never a mixture.
+
+A coordinated workspace migration is the one explicit exception.
+
+```text
+ordinary authoritative write
+  -> old-or-new read invariant
+
+coordinated workspace migration
+  -> maintenance window
+  -> current-workspace reads unavailable while the migration is incomplete
+  -> never a mixed-generation interpretation
+```
+
+While the migration marker exists, current reads MUST fail closed rather than
+interpret partially published resources. `unavailable` is therefore a normative
+third outcome during migration, not incidental behaviour of one implementation:
+a second implementation is required to refuse there too, and a reader is entitled
+to treat the refusal as meaning the workspace is mid-migration rather than
+damaged.
+
+If the process dies during publication, reads stay unavailable until `engr
+migrate` resumes and completes the transaction. That is the intended cost. The
+alternative — keeping reads available across the window — would require a
+snapshot pointer or a generation directory, and this contract does not ask for
+one; nor does the exception extend per-domain, so no domain stays readable while
+another is being published.
+
 Legacy admission reconstructs as `human`, `confirmed_at` becomes `admitted_at`,
 and all current resources are resealed. A legacy Ref becomes a selective Ref over
 the six semantic fields its old whole-content seal actually covered; it MUST NOT

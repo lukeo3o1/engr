@@ -1272,6 +1272,108 @@ mod against_a_workspace {
         evaluate(&root, &stranger, &stranger_seal, &reference)
             .expect_err("that is a different object");
     }
+
+    /// Every read-time state is reachable, and no two of them collapse.
+    ///
+    /// Each state has a test of its own above, and that is a different
+    /// guarantee. Most of #35's read-time rulings are about *which* state a
+    /// situation maps to — absence is not integrity failure, a lost commit is
+    /// not drift, a hand-edited Section must not be able to present itself as a
+    /// legitimate removal. So what needs pinning is that the answers stay
+    /// distinct from one another: a change that folded two of them together
+    /// would leave every individual test above still passing, because each one
+    /// only ever asserts its own answer.
+    ///
+    /// `SchemaMismatch` is absent deliberately. Reaching it needs a historical
+    /// commit holding a legacy Ref that the current contract cannot interpret,
+    /// which is a fixture of its own; it is pinned by
+    /// `an_uninterpretable_field_is_a_schema_mismatch_for_the_refs_that_select_it`,
+    /// which already asserts a Ref selecting something else does *not* answer
+    /// the same way.
+    #[test]
+    fn the_read_time_states_are_reachable_and_none_of_them_collapse() {
+        let (_dir, root, object, commit) = workspace();
+        let (current, seal) = phase_three_seals(&object);
+        let reference =
+            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+
+        let mut answers: Vec<(&str, Dependency)> = Vec::new();
+
+        answers.push((
+            "unchanged",
+            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+        ));
+
+        // The selected field moved, through a transition the Object vouches for.
+        let mut moved = current.clone();
+        moved.sections[0].text = "wording that is not what was pinned".to_owned();
+        moved.rev += 1;
+        let (moved, moved_seal) = phase_three_seals(&moved);
+        answers.push((
+            "drifted",
+            evaluate(&root, &moved, &moved_seal, &reference).expect("evaluate"),
+        ));
+
+        // The target is gone, through a transition the Object still vouches for.
+        let mut removed = current.clone();
+        removed.sections.clear();
+        removed.rev += 1;
+        let (removed, removed_seal) = phase_three_seals(&removed);
+        answers.push((
+            "target missing",
+            evaluate(&root, &removed, &removed_seal, &reference).expect("evaluate"),
+        ));
+
+        // The current target was edited outside an admission path: the wording
+        // moved and the seal did not, so the Object no longer vouches for it.
+        let mut tampered = current.clone();
+        tampered.sections[0].text = "wording nobody admitted".to_owned();
+        answers.push((
+            "target integrity failure",
+            evaluate(&root, &tampered, &seal, &reference).expect("evaluate"),
+        ));
+
+        // The recorded commit resolves to nothing.
+        let lost = SelectiveRef::stored(
+            reference.target(),
+            vec![SemanticField::Text],
+            "f".repeat(40),
+            reference.digest(),
+        )
+        .expect("canonical");
+        answers.push((
+            "provenance unavailable",
+            evaluate(&root, &current, &seal, &lost).expect("evaluate"),
+        ));
+
+        // The commit is right there; the digest it claims is not the one that
+        // material produces.
+        let wrong = SelectiveRef::stored(
+            reference.target(),
+            vec![SemanticField::Text],
+            commit.clone(),
+            format!("1:{}", "a".repeat(64)),
+        )
+        .expect("canonical");
+        answers.push((
+            "digest invalid",
+            evaluate(&root, &current, &seal, &wrong).expect("evaluate"),
+        ));
+
+        // Every situation above is a different answer. Compared by discriminant,
+        // because `Drifted` carries the fields that moved and two drifts over
+        // different fields are still one state.
+        for (i, (left_name, left)) in answers.iter().enumerate() {
+            for (right_name, right) in answers.iter().skip(i + 1) {
+                assert_ne!(
+                    std::mem::discriminant(left),
+                    std::mem::discriminant(right),
+                    "{left_name} and {right_name} answer the same way, so a reader cannot tell them apart"
+                );
+            }
+        }
+        assert_eq!(answers.len(), 6, "six of the seven states, by construction");
+    }
 }
 
 /// A Section id inside target text is still a Section id, and still bound by
