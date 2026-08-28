@@ -995,44 +995,19 @@ fn a_manifest_cannot_relabel_the_generation_it_was_prepared_from() {
 }
 
 /// A predecessor that moved between preflight and publication is caught.
+///
+/// The window is real: the plan was validated against bytes that were on disk
+/// then, and the publication happens later — possibly after a crash, a reboot
+/// and someone's hand edit. Resuming over a source that has since changed would
+/// publish a migration of something the workspace no longer says.
 #[test]
 fn a_source_edited_after_preflight_stops_the_publication() {
     let (_temp, root) = released_v1();
-    store::migrate(&root).expect("migrate");
+    staged_v1_plan(&root, &[]);
 
-    // Rebuild the situation: a stage whose manifest describes a predecessor the
-    // workspace no longer matches.
-    let (_other, source) = released_v1();
-    let staged = stage(&root);
-    std::fs::create_dir_all(staged.join("objects")).expect("stage objects");
-    let migrated = read(&store::object_path(&root, AUTHORITY));
-    write(
-        &staged.join("objects").join(format!("{AUTHORITY}.json")),
-        &migrated,
-    );
-    write(
-        &staged.join("manifest.json"),
-        &serde_json::to_string(&serde_json::json!({
-            "source_version": 1,
-            "target_version": engr::WORKSPACE_VERSION,
-            "objects": { AUTHORITY: proof::sha256_of(&migrated) },
-            "resources": {},
-            "source": {
-                format!("objects/{AUTHORITY}.json"): "0".repeat(64),
-                format!("events/{AUTHORITY}.jsonl"):
-                    proof::sha256_of(&read(&store::events_path(&source, AUTHORITY))),
-            },
-        }))
-        .expect("manifest"),
-    );
-    write(
-        &store::engr_dir(&root).join("format.json"),
-        "{\"format\":\"engr-workspace\",\"version\":1}\n",
-    );
-    write(
-        &store::object_path(&root, AUTHORITY),
-        &read(&store::object_path(&source, AUTHORITY)),
-    );
+    edit_stored(&root, AUTHORITY, |object| {
+        object["title"] = Value::String("a title that arrived after the plan".to_owned());
+    });
 
     let error = store::migrate(&root).expect_err("the predecessor is not what was validated");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
@@ -1040,6 +1015,7 @@ fn a_source_edited_after_preflight_stops_the_publication() {
         error.message.contains("after migration preflight"),
         "{error}"
     );
+    assert_eq!(declared_version(&root), 1, "and nothing was published");
 }
 
 /// Two independent migrations of the same predecessor publish the same bytes.
