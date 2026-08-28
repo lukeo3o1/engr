@@ -43,6 +43,19 @@ blocked. Get explicit human direction before running `engr migrate`; never
 silently create `.engr/format.json` or rewrite stored records. Never change an
 unknown or newer workspace version.
 
+If engr reports that an object's integrity has failed, every ordinary change to
+it is refused — the record was edited outside an admission path, and letting
+unrelated work reseal it would launder that edit into valid authority. **Do not
+edit `.engr` to fix it.** That is the move the refusal exists to discourage, and
+it cannot produce authority however carefully you do it.
+
+`engr repair <object>` is the way back. It prepares a Human candidate restoring
+exactly what admitted history proves, and it carries no changes of its own —
+you will see what is being discarded, and confirming is the human's, like any
+other candidate. If you want to keep something from the edited state, repair
+first, then propose that change the normal way; the record then shows both acts
+instead of one that quietly did both.
+
 Use canonical `engr:obj:<26-character-id>` references outside workspace
 commands. Embedded targets use `kind: engr` with a namespace-relative `ref`;
 shared syntax does not make different reference-bearing fields semantically

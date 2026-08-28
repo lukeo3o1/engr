@@ -325,3 +325,71 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
     assert_workspace_sound(&root);
     drop(dir);
 }
+
+/// The survey surface warns about untrusted material without moving its columns.
+///
+/// Phase 4, scope item 8. `ls --sections` is the surface people pipe into
+/// `grep`, so the trust alarm goes to stderr and stdout stays byte for byte what
+/// it was. That is a deliberate trade with two ways to regress, and neither was
+/// pinned: move the warning to stdout and every script that splits on those
+/// columns breaks; drop it and a survey presents material no admission path
+/// accepted as though it were fine.
+#[test]
+fn the_survey_warns_on_stderr_and_leaves_its_columns_alone() {
+    let (dir, root) = workspace();
+    let id = new_object(&root, "surveyed object");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &id, "wording that was admitted"),
+    );
+
+    let clean = std::process::Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(&root)
+        .args(["ls", "--sections"])
+        .output()
+        .expect("run engr ls");
+    assert!(clean.status.success(), "a sound workspace surveys cleanly");
+    let columns_before = String::from_utf8_lossy(&clean.stdout).into_owned();
+    assert!(
+        String::from_utf8_lossy(&clean.stderr).is_empty(),
+        "nothing to warn about yet"
+    );
+
+    // Edit the stored wording without resealing: schema-valid bytes that no
+    // admission path produced.
+    let path = store::object_path(&root, &id);
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("object bytes"))
+            .expect("object json");
+    stored["sections"][0]["text"] = serde_json::Value::String("wording nobody admitted".to_owned());
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&stored, "tampered object").expect("canonical"),
+    )
+    .expect("tamper");
+
+    let surveyed = std::process::Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(&root)
+        .args(["ls", "--sections"])
+        .output()
+        .expect("run engr ls");
+    let stdout = String::from_utf8_lossy(&surveyed.stdout);
+    let stderr = String::from_utf8_lossy(&surveyed.stderr);
+
+    assert!(
+        stderr.contains("cannot be trusted") && stderr.contains("engr verify"),
+        "the survey says so, and says what to run:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("cannot be trusted"),
+        "the alarm does not reach the surface scripts parse:\n{stdout}"
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        columns_before.lines().count(),
+        "and the columns did not shift under the reader"
+    );
+    drop(dir);
+}
