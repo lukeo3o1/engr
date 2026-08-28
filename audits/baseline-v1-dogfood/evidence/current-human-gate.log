@@ -1,0 +1,729 @@
+Candidate  object.created
+Object     01a049b8
+
+Authority and mixed-admission Sections
+
+Type this exactly to confirm:  CONFIRM 2HP4YJ
+HUMAN RESPONSE: CONFIRM 2HP4YJ
+CONFIRMED  01a049b8  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Authority and mixed-admission Sections
+
+Type this exactly to confirm:  CONFIRM XXZE6L
+HUMAN RESPONSE: CONFIRM XXZE6L
+CONFIRMED  01a049b8  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Role       decision
+Based on   none (explicit)
+
+Each current Section states whether Human Gate or passing Agent Rule Review admitted its semantics. The Object is an aggregate and each Section, not the Object as a whole, carries current semantic authority.
+
+Type this exactly to confirm:  CONFIRM B3JWWZ
+HUMAN RESPONSE: CONFIRM B3JWWZ
+CONFIRMED  01a049b8  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+Human admission reviews an integrity-bound Candidate; Agent admission is direct only after every applicable usable project Rule reviewed the exact mutation and passed. Semantic Agent work with no applicable Rule fails closed.
+
+Type this exactly to confirm:  CONFIRM 5YFQBW
+HUMAN RESPONSE: CONFIRM 5YFQBW
+CONFIRMED  01a049b8  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Current representation and integrity
+
+Type this exactly to confirm:  CONFIRM FCDD3Y
+HUMAN RESPONSE: CONFIRM FCDD3Y
+CONFIRMED  01a049b8-93f  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-93f  Current representation and integrity
+Role       decision
+Based on   none (explicit)
+
+Workspace v3 current resources use one exact RFC 8785 canonical representation. Object and Section seals protect the complete persisted projection, while selective Ref digests bind only depended-on semantic fields.
+
+Type this exactly to confirm:  CONFIRM C5YJPN
+HUMAN RESPONSE: CONFIRM C5YJPN
+CONFIRMED  01a049b8-93f  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-93f  Current representation and integrity
+Based on   none (explicit)
+
+Ordinary reads verify representation and seals. Ordinary mutation cannot legitimize tampering by resealing; Human-gated repair restores exactly the last projection provable from admitted event history and records object_repaired.
+
+Type this exactly to confirm:  CONFIRM DZ5J3M
+HUMAN RESPONSE: CONFIRM DZ5J3M
+CONFIRMED  01a049b8-93f  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-94e
+
+Backlog boundary
+
+Type this exactly to confirm:  CONFIRM 7AHDQ2
+HUMAN RESPONSE: CONFIRM 7AHDQ2
+CONFIRMED  01a049b8-94e  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-94e  Backlog boundary
+Role       decision
+Based on   none (explicit)
+
+Backlog is unresolved, freely agent-editable staging outside the engineering record. subjects identify what a point concerns and produced records admitted outcomes without pretending the unresolved point is settled.
+
+Type this exactly to confirm:  CONFIRM M8PNKJ
+HUMAN RESPONSE: CONFIRM M8PNKJ
+CONFIRMED  01a049b8-94e  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-94e  Backlog boundary
+Based on   none (explicit)
+
+Backlog mutations bind an exact predecessor. Consume and merge are atomic destructive operations; stale actors fail rather than overwriting a newer point, and Rule Review exhaustion remains non-destructive where the contract permits.
+
+Type this exactly to confirm:  CONFIRM 6MAAXS
+HUMAN RESPONSE: CONFIRM 6MAAXS
+CONFIRMED  01a049b8-94e  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-95e
+
+Execution and planning are non-authoritative
+
+Type this exactly to confirm:  CONFIRM PL55CR
+HUMAN RESPONSE: CONFIRM PL55CR
+CONFIRMED  01a049b8-95e  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-95e  Execution and planning are non-authoritative
+Role       decision
+Based on   none (explicit)
+
+Work sidecars preserve bounded, Object-owned execution handoff: checkpoint, items, dependencies, blockers, and explicit human pause or resume. They own no Object semantics and cannot admit engineering knowledge.
+
+Type this exactly to confirm:  CONFIRM WT4G4C
+HUMAN RESPONSE: CONFIRM WT4G4C
+CONFIRMED  01a049b8-95e  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-95e  Execution and planning are non-authoritative
+Based on   none (explicit)
+
+Collections provide agent-managed grouping, order, schedule, and priority for navigation and planning. Membership never asserts a semantic relationship or authority over its Object or Backlog target.
+
+Type this exactly to confirm:  CONFIRM EKABTH
+HUMAN RESPONSE: CONFIRM EKABTH
+CONFIRMED  01a049b8-95e  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-96e
+
+Reference and provenance model
+
+Type this exactly to confirm:  CONFIRM Q2NZPZ
+HUMAN RESPONSE: CONFIRM Q2NZPZ
+CONFIRMED  01a049b8-96e  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-96e  Reference and provenance model
+Role       decision
+Based on   none (explicit)
+
+The canonical engr Ref identifies an Object or Backlog resource and optional Section; repository-qualified addressing is reserved for contexts that need cross-repository identity. Aliases remain deferred.
+
+Type this exactly to confirm:  CONFIRM 6A2787
+HUMAN RESPONSE: CONFIRM 6A2787
+CONFIRMED  01a049b8-96e  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-96e  Reference and provenance model
+Based on   none (explicit)
+
+A Section Ref pins selected semantic fields, a target commit, and a digest. Callers distinguish unchanged dependency, legitimate semantic drift, target integrity failure, unavailable provenance, and schema mismatch rather than collapsing all distrust into changed.
+
+Type this exactly to confirm:  CONFIRM YGQDYM
+HUMAN RESPONSE: CONFIRM YGQDYM
+CONFIRMED  01a049b8-96e  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-97d
+
+Migration and storage boundaries
+
+Type this exactly to confirm:  CONFIRM D37KKZ
+HUMAN RESPONSE: CONFIRM D37KKZ
+CONFIRMED  01a049b8-97d  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-97d  Migration and storage boundaries
+Role       decision
+Based on   none (explicit)
+
+Migration is an explicit coordinated maintenance window. A marker makes ordinary reads and writes unavailable, staging is validated against captured predecessor bytes, publication is generation-atomic, and resume is deterministic or fails closed.
+
+Type this exactly to confirm:  CONFIRM H47NWT
+HUMAN RESPONSE: CONFIRM H47NWT
+CONFIRMED  01a049b8-97d  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-97d  Migration and storage boundaries
+Based on   none (explicit)
+
+Phase 3 preserves existing resource paths. Month-organized Object storage and merge-conflict reduction are accepted future directions but deferred until their owning design is implemented without changing current semantic authority.
+
+Type this exactly to confirm:  CONFIRM FNRCHZ
+HUMAN RESPONSE: CONFIRM FNRCHZ
+CONFIRMED  01a049b8-97d  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Authority and mixed-admission Sections
+
+Type this exactly to confirm:  CONFIRM LY9VPQ
+HUMAN RESPONSE: CONFIRM LY9VPQ
+CONFIRMED  01a049b8  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Role       decision
+Based on   none (explicit)
+
+Each current Section states whether Human Gate or passing Agent Rule Review admitted its semantics. The Object is an aggregate and each Section, not the Object as a whole, carries current semantic authority.
+
+Type this exactly to confirm:  CONFIRM UU6EXJ
+HUMAN RESPONSE: CONFIRM UU6EXJ
+CONFIRMED  01a049b8  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+Human admission reviews an integrity-bound Candidate; Agent admission is direct only after every applicable usable project Rule reviewed the exact mutation and passed. Semantic Agent work with no applicable Rule fails closed.
+
+Type this exactly to confirm:  CONFIRM 4QES9Y
+HUMAN RESPONSE: CONFIRM 4QES9Y
+CONFIRMED  01a049b8  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Current representation and integrity
+
+Type this exactly to confirm:  CONFIRM 4NHLFS
+HUMAN RESPONSE: CONFIRM 4NHLFS
+CONFIRMED  01a049b8-df  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-df  Current representation and integrity
+Role       decision
+Based on   none (explicit)
+
+Workspace v3 current resources use one exact RFC 8785 canonical representation. Object and Section seals protect the complete persisted projection, while selective Ref digests bind only depended-on semantic fields.
+
+Type this exactly to confirm:  CONFIRM NFTC3V
+HUMAN RESPONSE: CONFIRM NFTC3V
+CONFIRMED  01a049b8-df  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-df  Current representation and integrity
+Based on   none (explicit)
+
+Ordinary reads verify representation and seals. Ordinary mutation cannot legitimize tampering by resealing; Human-gated repair restores exactly the last projection provable from admitted event history and records object_repaired.
+
+Type this exactly to confirm:  CONFIRM 4PCMRU
+HUMAN RESPONSE: CONFIRM 4PCMRU
+CONFIRMED  01a049b8-df  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-e0
+
+Backlog boundary
+
+Type this exactly to confirm:  CONFIRM LFRUC8
+HUMAN RESPONSE: CONFIRM LFRUC8
+CONFIRMED  01a049b8-e0  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e0  Backlog boundary
+Role       decision
+Based on   none (explicit)
+
+Backlog is unresolved, freely agent-editable staging outside the engineering record. subjects identify what a point concerns and produced records admitted outcomes without pretending the unresolved point is settled.
+
+Type this exactly to confirm:  CONFIRM 6R2GQS
+HUMAN RESPONSE: CONFIRM 6R2GQS
+CONFIRMED  01a049b8-e0  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e0  Backlog boundary
+Based on   none (explicit)
+
+Backlog mutations bind an exact predecessor. Consume and merge are atomic destructive operations; stale actors fail rather than overwriting a newer point, and Rule Review exhaustion remains non-destructive where the contract permits.
+
+Type this exactly to confirm:  CONFIRM 5GN79W
+HUMAN RESPONSE: CONFIRM 5GN79W
+CONFIRMED  01a049b8-e0  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-e1
+
+Execution and planning are non-authoritative
+
+Type this exactly to confirm:  CONFIRM 5V3HWL
+HUMAN RESPONSE: CONFIRM 5V3HWL
+CONFIRMED  01a049b8-e1  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e1  Execution and planning are non-authoritative
+Role       decision
+Based on   none (explicit)
+
+Work sidecars preserve bounded, Object-owned execution handoff: checkpoint, items, dependencies, blockers, and explicit human pause or resume. They own no Object semantics and cannot admit engineering knowledge.
+
+Type this exactly to confirm:  CONFIRM 8GGPGC
+HUMAN RESPONSE: CONFIRM 8GGPGC
+CONFIRMED  01a049b8-e1  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e1  Execution and planning are non-authoritative
+Based on   none (explicit)
+
+Collections provide agent-managed grouping, order, schedule, and priority for navigation and planning. Membership never asserts a semantic relationship or authority over its Object or Backlog target.
+
+Type this exactly to confirm:  CONFIRM JZZBP7
+HUMAN RESPONSE: CONFIRM JZZBP7
+CONFIRMED  01a049b8-e1  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-e2
+
+Reference and provenance model
+
+Type this exactly to confirm:  CONFIRM 8E4PGY
+HUMAN RESPONSE: CONFIRM 8E4PGY
+CONFIRMED  01a049b8-e2  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e2  Reference and provenance model
+Role       decision
+Based on   none (explicit)
+
+The canonical engr Ref identifies an Object or Backlog resource and optional Section; repository-qualified addressing is reserved for contexts that need cross-repository identity. Aliases remain deferred.
+
+Type this exactly to confirm:  CONFIRM VYYF3G
+HUMAN RESPONSE: CONFIRM VYYF3G
+CONFIRMED  01a049b8-e2  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e2  Reference and provenance model
+Based on   none (explicit)
+
+A Section Ref pins selected semantic fields, a target commit, and a digest. Callers distinguish unchanged dependency, legitimate semantic drift, target integrity failure, unavailable provenance, and schema mismatch rather than collapsing all distrust into changed.
+
+Type this exactly to confirm:  CONFIRM 43W52N
+HUMAN RESPONSE: CONFIRM 43W52N
+CONFIRMED  01a049b8-e2  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-e3
+
+Migration and storage boundaries
+
+Type this exactly to confirm:  CONFIRM VZQK4Y
+HUMAN RESPONSE: CONFIRM VZQK4Y
+CONFIRMED  01a049b8-e3  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e3  Migration and storage boundaries
+Role       decision
+Based on   none (explicit)
+
+Migration is an explicit coordinated maintenance window. A marker makes ordinary reads and writes unavailable, staging is validated against captured predecessor bytes, publication is generation-atomic, and resume is deterministic or fails closed.
+
+Type this exactly to confirm:  CONFIRM HLJ5MG
+HUMAN RESPONSE: CONFIRM HLJ5MG
+CONFIRMED  01a049b8-e3  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-e3  Migration and storage boundaries
+Based on   none (explicit)
+
+Phase 3 preserves existing resource paths. Month-organized Object storage and merge-conflict reduction are accepted future directions but deferred until their owning design is implemented without changing current semantic authority.
+
+Type this exactly to confirm:  CONFIRM 6T2L8H
+HUMAN RESPONSE: CONFIRM 6T2L8H
+CONFIRMED  01a049b8-e3  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Authority and mixed-admission Sections
+
+Type this exactly to confirm:  CONFIRM JH7YH3
+HUMAN RESPONSE: CONFIRM JH7YH3
+CONFIRMED  01a049b8  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Role       decision
+Based on   none (explicit)
+
+Each current Section states whether Human Gate or passing Agent Rule Review admitted its semantics. The Object is an aggregate and each Section, not the Object as a whole, carries current semantic authority.
+
+Type this exactly to confirm:  CONFIRM XSEKM7
+HUMAN RESPONSE: CONFIRM XSEKM7
+CONFIRMED  01a049b8  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+Human admission reviews an integrity-bound Candidate; Agent admission is direct only after every applicable usable project Rule reviewed the exact mutation and passed. Semantic Agent work with no applicable Rule fails closed.
+
+Type this exactly to confirm:  CONFIRM NBXU43
+HUMAN RESPONSE: CONFIRM NBXU43
+CONFIRMED  01a049b8  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8
+
+Current representation and integrity
+
+Type this exactly to confirm:  CONFIRM JJG3ED
+HUMAN RESPONSE: CONFIRM JJG3ED
+CONFIRMED  01a049b8-f4  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f4  Current representation and integrity
+Role       decision
+Based on   none (explicit)
+
+Workspace v3 current resources use one exact RFC 8785 canonical representation. Object and Section seals protect the complete persisted projection, while selective Ref digests bind only depended-on semantic fields.
+
+Type this exactly to confirm:  CONFIRM KENWJ7
+HUMAN RESPONSE: CONFIRM KENWJ7
+CONFIRMED  01a049b8-f4  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f4  Current representation and integrity
+Based on   none (explicit)
+
+Ordinary reads verify representation and seals. Ordinary mutation cannot legitimize tampering by resealing; Human-gated repair restores exactly the last projection provable from admitted event history and records object_repaired.
+
+Type this exactly to confirm:  CONFIRM TGCU2Y
+HUMAN RESPONSE: CONFIRM TGCU2Y
+CONFIRMED  01a049b8-f4  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-f5
+
+Backlog boundary
+
+Type this exactly to confirm:  CONFIRM 7FKQ2A
+HUMAN RESPONSE: CONFIRM 7FKQ2A
+CONFIRMED  01a049b8-f5  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f5  Backlog boundary
+Role       decision
+Based on   none (explicit)
+
+Backlog is unresolved, freely agent-editable staging outside the engineering record. subjects identify what a point concerns and produced records admitted outcomes without pretending the unresolved point is settled.
+
+Type this exactly to confirm:  CONFIRM 7VL6ZP
+HUMAN RESPONSE: CONFIRM 7VL6ZP
+CONFIRMED  01a049b8-f5  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f5  Backlog boundary
+Based on   none (explicit)
+
+Backlog mutations bind an exact predecessor. Consume and merge are atomic destructive operations; stale actors fail rather than overwriting a newer point, and Rule Review exhaustion remains non-destructive where the contract permits.
+
+Type this exactly to confirm:  CONFIRM T2USQX
+HUMAN RESPONSE: CONFIRM T2USQX
+CONFIRMED  01a049b8-f5  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-f6
+
+Execution and planning are non-authoritative
+
+Type this exactly to confirm:  CONFIRM TX92Y3
+HUMAN RESPONSE: CONFIRM TX92Y3
+CONFIRMED  01a049b8-f6  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f6  Execution and planning are non-authoritative
+Role       decision
+Based on   none (explicit)
+
+Work sidecars preserve bounded, Object-owned execution handoff: checkpoint, items, dependencies, blockers, and explicit human pause or resume. They own no Object semantics and cannot admit engineering knowledge.
+
+Type this exactly to confirm:  CONFIRM NMH3NZ
+HUMAN RESPONSE: CONFIRM NMH3NZ
+CONFIRMED  01a049b8-f6  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f6  Execution and planning are non-authoritative
+Based on   none (explicit)
+
+Collections provide agent-managed grouping, order, schedule, and priority for navigation and planning. Membership never asserts a semantic relationship or authority over its Object or Backlog target.
+
+Type this exactly to confirm:  CONFIRM FUC2CC
+HUMAN RESPONSE: CONFIRM FUC2CC
+CONFIRMED  01a049b8-f6  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-f7
+
+Reference and provenance model
+
+Type this exactly to confirm:  CONFIRM G7V75F
+HUMAN RESPONSE: CONFIRM G7V75F
+CONFIRMED  01a049b8-f7  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f7  Reference and provenance model
+Role       decision
+Based on   none (explicit)
+
+The canonical engr Ref identifies an Object or Backlog resource and optional Section; repository-qualified addressing is reserved for contexts that need cross-repository identity. Aliases remain deferred.
+
+Type this exactly to confirm:  CONFIRM D3TPZY
+HUMAN RESPONSE: CONFIRM D3TPZY
+CONFIRMED  01a049b8-f7  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f7  Reference and provenance model
+Based on   none (explicit)
+
+A Section Ref pins selected semantic fields, a target commit, and a digest. Callers distinguish unchanged dependency, legitimate semantic drift, target integrity failure, unavailable provenance, and schema mismatch rather than collapsing all distrust into changed.
+
+Type this exactly to confirm:  CONFIRM FLEVVD
+HUMAN RESPONSE: CONFIRM FLEVVD
+CONFIRMED  01a049b8-f7  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b8-f8
+
+Migration and storage boundaries
+
+Type this exactly to confirm:  CONFIRM XAJ8DA
+HUMAN RESPONSE: CONFIRM XAJ8DA
+CONFIRMED  01a049b8-f8  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f8  Migration and storage boundaries
+Role       decision
+Based on   none (explicit)
+
+Migration is an explicit coordinated maintenance window. A marker makes ordinary reads and writes unavailable, staging is validated against captured predecessor bytes, publication is generation-atomic, and resume is deterministic or fails closed.
+
+Type this exactly to confirm:  CONFIRM PDKEXV
+HUMAN RESPONSE: CONFIRM PDKEXV
+CONFIRMED  01a049b8-f8  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b8-f8  Migration and storage boundaries
+Based on   none (explicit)
+
+Phase 3 preserves existing resource paths. Month-organized Object storage and merge-conflict reduction are accepted future directions but deferred until their owning design is implemented without changing current semantic authority.
+
+Type this exactly to confirm:  CONFIRM YZ9EM6
+HUMAN RESPONSE: CONFIRM YZ9EM6
+CONFIRMED  01a049b8-f8  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9
+
+Authority and mixed-admission Sections
+
+Type this exactly to confirm:  CONFIRM RLK57R
+HUMAN RESPONSE: CONFIRM RLK57R
+CONFIRMED  01a049b9  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9  Authority and mixed-admission Sections
+Role       decision
+Based on   none (explicit)
+
+Each current Section states whether Human Gate or passing Agent Rule Review admitted its semantics. The Object is an aggregate and each Section, not the Object as a whole, carries current semantic authority.
+
+Type this exactly to confirm:  CONFIRM QR6WV5
+HUMAN RESPONSE: CONFIRM QR6WV5
+CONFIRMED  01a049b9  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+Human admission reviews an integrity-bound Candidate; Agent admission is direct only after every applicable usable project Rule reviewed the exact mutation and passed. Semantic Agent work with no applicable Rule fails closed.
+
+Type this exactly to confirm:  CONFIRM YLYV3J
+HUMAN RESPONSE: CONFIRM YLYV3J
+CONFIRMED  01a049b9  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9
+
+Current representation and integrity
+
+Type this exactly to confirm:  CONFIRM UDXA85
+HUMAN RESPONSE: CONFIRM UDXA85
+CONFIRMED  01a049b9-16  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-16  Current representation and integrity
+Role       decision
+Based on   none (explicit)
+
+Workspace v3 current resources use one exact RFC 8785 canonical representation. Object and Section seals protect the complete persisted projection, while selective Ref digests bind only depended-on semantic fields.
+
+Type this exactly to confirm:  CONFIRM S6DXCL
+HUMAN RESPONSE: CONFIRM S6DXCL
+CONFIRMED  01a049b9-16  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-16  Current representation and integrity
+Based on   none (explicit)
+
+Ordinary reads verify representation and seals. Ordinary mutation cannot legitimize tampering by resealing; Human-gated repair restores exactly the last projection provable from admitted event history and records object_repaired.
+
+Type this exactly to confirm:  CONFIRM D7K9TE
+HUMAN RESPONSE: CONFIRM D7K9TE
+CONFIRMED  01a049b9-16  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9-17
+
+Backlog boundary
+
+Type this exactly to confirm:  CONFIRM Y3W8Q9
+HUMAN RESPONSE: CONFIRM Y3W8Q9
+CONFIRMED  01a049b9-17  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-17  Backlog boundary
+Role       decision
+Based on   none (explicit)
+
+Backlog is unresolved, freely agent-editable staging outside the engineering record. subjects identify what a point concerns and produced records admitted outcomes without pretending the unresolved point is settled.
+
+Type this exactly to confirm:  CONFIRM 6QV7QL
+HUMAN RESPONSE: CONFIRM 6QV7QL
+CONFIRMED  01a049b9-17  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-17  Backlog boundary
+Based on   none (explicit)
+
+Backlog mutations bind an exact predecessor. Consume and merge are atomic destructive operations; stale actors fail rather than overwriting a newer point, and Rule Review exhaustion remains non-destructive where the contract permits.
+
+Type this exactly to confirm:  CONFIRM DJ743F
+HUMAN RESPONSE: CONFIRM DJ743F
+CONFIRMED  01a049b9-17  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9-18
+
+Execution and planning are non-authoritative
+
+Type this exactly to confirm:  CONFIRM 7PBFKD
+HUMAN RESPONSE: CONFIRM 7PBFKD
+CONFIRMED  01a049b9-18  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-18  Execution and planning are non-authoritative
+Role       decision
+Based on   none (explicit)
+
+Work sidecars preserve bounded, Object-owned execution handoff: checkpoint, items, dependencies, blockers, and explicit human pause or resume. They own no Object semantics and cannot admit engineering knowledge.
+
+Type this exactly to confirm:  CONFIRM SPAQ8E
+HUMAN RESPONSE: CONFIRM SPAQ8E
+CONFIRMED  01a049b9-18  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-18  Execution and planning are non-authoritative
+Based on   none (explicit)
+
+Collections provide agent-managed grouping, order, schedule, and priority for navigation and planning. Membership never asserts a semantic relationship or authority over its Object or Backlog target.
+
+Type this exactly to confirm:  CONFIRM V89X2B
+HUMAN RESPONSE: CONFIRM V89X2B
+CONFIRMED  01a049b9-18  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9-19
+
+Reference and provenance model
+
+Type this exactly to confirm:  CONFIRM 9B9Y3T
+HUMAN RESPONSE: CONFIRM 9B9Y3T
+CONFIRMED  01a049b9-19  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-19  Reference and provenance model
+Role       decision
+Based on   none (explicit)
+
+The canonical engr Ref identifies an Object or Backlog resource and optional Section; repository-qualified addressing is reserved for contexts that need cross-repository identity. Aliases remain deferred.
+
+Type this exactly to confirm:  CONFIRM VQ4LRS
+HUMAN RESPONSE: CONFIRM VQ4LRS
+CONFIRMED  01a049b9-19  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-19  Reference and provenance model
+Based on   none (explicit)
+
+A Section Ref pins selected semantic fields, a target commit, and a digest. Callers distinguish unchanged dependency, legitimate semantic drift, target integrity failure, unavailable provenance, and schema mismatch rather than collapsing all distrust into changed.
+
+Type this exactly to confirm:  CONFIRM 9N7C97
+HUMAN RESPONSE: CONFIRM 9N7C97
+CONFIRMED  01a049b9-19  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  object.created
+Object     01a049b9-1a
+
+Migration and storage boundaries
+
+Type this exactly to confirm:  CONFIRM NC6VC6
+HUMAN RESPONSE: CONFIRM NC6VC6
+CONFIRMED  01a049b9-1a  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-1a  Migration and storage boundaries
+Role       decision
+Based on   none (explicit)
+
+Migration is an explicit coordinated maintenance window. A marker makes ordinary reads and writes unavailable, staging is validated against captured predecessor bytes, publication is generation-atomic, and resume is deterministic or fails closed.
+
+Type this exactly to confirm:  CONFIRM 8QC77Z
+HUMAN RESPONSE: CONFIRM 8QC77Z
+CONFIRMED  01a049b9-1a  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+Candidate  section.added
+Object     01a049b9-1a  Migration and storage boundaries
+Based on   none (explicit)
+
+Phase 3 preserves existing resource paths. Month-organized Object storage and merge-conflict reduction are accepted future directions but deferred until their owning design is implemented without changing current semantic authority.
+
+Type this exactly to confirm:  CONFIRM VSPDKH
+HUMAN RESPONSE: CONFIRM VSPDKH
+CONFIRMED  01a049b9-1a  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back

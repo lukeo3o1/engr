@@ -1,0 +1,10 @@
+01a049b3-62  PASS  2 sections  Purpose and durable engineering memory
+          uncommitted — git holds no record of the current wording yet
+01a049b3-63  PASS  2 sections  Human authority and admission boundary
+          uncommitted — git holds no record of the current wording yet
+01a049b3-65  PASS  2 sections  Object and Section record model
+          uncommitted — git holds no record of the current wording yet
+01a049b3-67  PASS  2 sections  Git basis, provenance, and trust-sensitive reads
+          uncommitted — git holds no record of the current wording yet
+01a049b3-6a  PASS  2 sections  Projection, events, and architectural constraints
+          uncommitted — git holds no record of the current wording yet

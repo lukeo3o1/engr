@@ -1,0 +1,6 @@
+01a049b9-15  PASS  3 sections  Authority and mixed-admission Sections
+01a049b9-16  PASS  2 sections  Current representation and integrity
+01a049b9-17  PASS  2 sections  Backlog boundary
+01a049b9-18  PASS  2 sections  Execution and planning are non-authoritative
+01a049b9-19  PASS  2 sections  Reference and provenance model
+01a049b9-1a  PASS  2 sections  Migration and storage boundaries

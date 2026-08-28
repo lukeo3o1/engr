@@ -1,0 +1,79 @@
+Candidate  section.added
+Object     01a049b9-15  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+candidate one
+
+Type this exactly to confirm:  CONFIRM JVNDT6
+Candidate  section.added
+Object     01a049b9-15  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+candidate two
+
+Type this exactly to confirm:  CONFIRM CHMPVT
+(candidate JVNDT6 was superseded by this one)
++ /tmp/engr-dogfood/test-artifacts/engr-b confirm CONFIRM JVNDT6
+error: no candidate awaiting JVNDT6
+exit=3
++ /tmp/engr-dogfood/test-artifacts/engr-b candidate CHMPVT
+Candidate  section.added
+Object     01a049b9-15  Authority and mixed-admission Sections
+Based on   none (explicit)
+
+candidate two
+
+Type this exactly to confirm:  CONFIRM CHMPVT
+exit=0
++ /tmp/engr-dogfood/test-artifacts/engr-b confirm CONFIRM CHMPVT but adjust
+error: `CONFIRM CHMPVT` carried commentary, so it is a qualified yes rather than assent; candidate CHMPVT was discarded
+exit=2
++ /tmp/engr-dogfood/test-artifacts/engr-b candidate CHMPVT
+error: no candidate awaiting CHMPVT
+exit=3
+error: this mutation is governed by durable-design; review the surfaced Rules, then repeat it with review digest 1:fc56a10e5695d641b2dabb87c7cb8a1d91dea41c101101c5216fbc2f30815f03 and the review outcome
+digest=
++ /tmp/engr-dogfood/test-artifacts/engr-b show 01a049b9-15dc-70e3-bc8a-be032ffb1a13
+01a049b9-15  open  Tampered title
+2 sections   2 ok   rev 3
+!!         Object integrity failed; current authority changed outside a supported transition
+!!         git show 0df70eaa:.engr/objects/01a049b9-15dc-70e3-bc8a-be032ffb1a13.json
+engr:obj:01m14vj5ewe3hvs2ny0cqzp6gk
+
+── §1 [decision] ── ok
+Each current Section states whether Human Gate or passing Agent Rule Review admitted its semantics. The Object is an aggregate and each Section, not the Object as a whole, carries current semantic authority.
+    admitted 2026-08-28T18:54:21.82190143Z
+
+── §2 ── ok
+Human admission reviews an integrity-bound Candidate; Agent admission is direct only after every applicable usable project Rule reviewed the exact mutation and passed. Semantic Agent work with no applicable Rule fails closed.
+    admitted 2026-08-28T18:54:21.89484659Z
+error: current Object integrity failed or 0 sections are not what was admitted; run: engr verify
+exit=5
++ /tmp/engr-dogfood/test-artifacts/engr-b prepare --object 01a049b9-15dc-70e3-bc8a-be032ffb1a13 --rename --text Reseal attempt
+error: object 01a049b9-15dc-70e3-bc8a-be032ffb1a13 was sealed as a0340f2a3e85ea1ca74be81017a415d77cbef5e5190575d8d5ec31c16b3c1806 and its current contents seal as 3e20130e6f5760c243b340191bb9182ea5b02bfeb90dbbb2ba9b8b3aabe4ad3a
+exit=5
++ /tmp/engr-dogfood/test-artifacts/engr-b ls --all
+error: /tmp/engr-dogfood/marker-copy/.engr/migration-v3 marks an incomplete coordinated migration; run `engr migrate` to resume it
+exit=4
++ /tmp/engr-dogfood/test-artifacts/engr-b backlog ls
+error: /tmp/engr-dogfood/marker-copy/.engr/migration-v3 marks an incomplete coordinated migration; run `engr migrate` to resume it
+exit=4
++ /tmp/engr-dogfood/test-artifacts/engr-b migrate
+error: /tmp/engr-dogfood/marker-copy/.engr/migration-v3/manifest.json: not found
+exit=3
++ /tmp/engr-dogfood/test-artifacts/engr-b verify
+error: /tmp/engr-dogfood/malformed-copy/.engr/objects/01a049b9-15dc-70e3-bc8a-be032ffb1a13.json: EOF while parsing a string at line 1 column 25
+exit=4
++ /tmp/engr-dogfood/test-artifacts/engr-b verify
+01a049b9-15  PASS  2 sections  Authority and mixed-admission Sections
+01a049b9-16  PASS  2 sections  Current representation and integrity
+01a049b9-17  PASS  2 sections  Backlog boundary
+01a049b9-18  PASS  2 sections  Execution and planning are non-authoritative
+01a049b9-19  PASS  2 sections  Reference and provenance model
+01a049b9-1a  PASS  2 sections  Migration and storage boundaries
+exit=0
+error: this mutation is governed by durable-design; review the surfaced Rules, then repeat it with review digest 1:60248947d21d3d6df7dedf97ee62779aab1c4e29edcb11706063eb48df0ecc85 and the review outcome
+ADMITTED   01a049b9-15  section.added  rev 4  agent
+note       commit .engr/objects and .engr/events to preserve history and look-back
+error: this review was of something else; review the current subject and attest to 1:86b9d11d66929bc0af99588a05f8f72f572799913bdc6a2ce050abb7b85fba31
+drift_exit=5

@@ -1,0 +1,9 @@
+$ engr ls --all
+error: workspace version 1 is not supported by engr latest (6631326a)
+exit=4
+$ engr show
+error: workspace version 1 is not supported by engr latest (6631326a)
+exit=4
+$ engr verify
+error: workspace version 1 is not supported by engr latest (6631326a)
+exit=4

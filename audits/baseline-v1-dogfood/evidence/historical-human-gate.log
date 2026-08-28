@@ -1,0 +1,151 @@
+Candidate  object.created
+Object     01a049b3
+Based on   6b452a1b
+
+Purpose and durable engineering memory
+
+逐字輸入以確認:  CONFIRM MS9SYX
+HUMAN RESPONSE: CONFIRM MS9SYX
+CONFIRMED  01a049b3  object.created  rev 1
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3
+Based on   6b452a1b
+
+engr exists to preserve settled engineering knowledge across long-running work: decisions, rationale, invariants, and trust boundaries that ordinary diffs and project-management metadata do not retain.
+
+逐字輸入以確認:  CONFIRM FXN7YX
+HUMAN RESPONSE: CONFIRM FXN7YX
+CONFIRMED  01a049b3  section.added  rev 2
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3
+Based on   6b452a1b
+
+The record stays deliberately small. Unsettled plans, progress, conversation, and speculative structure are not durable authority; the model grows only after real recorded use demonstrates that a missing concept costs more than adding it.
+
+逐字輸入以確認:  CONFIRM Z9NU4U
+HUMAN RESPONSE: CONFIRM Z9NU4U
+CONFIRMED  01a049b3  section.added  rev 3
+note       commit .engr/objects to keep look-back working
+Candidate  object.created
+Object     01a049b3
+Based on   6b452a1b
+
+Human authority and admission boundary
+
+逐字輸入以確認:  CONFIRM VS8F2C
+HUMAN RESPONSE: CONFIRM VS8F2C
+CONFIRMED  01a049b3-63  object.created  rev 1
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-63
+Based on   6b452a1b
+
+Nothing enters the engineering record unless a human has read and confirmed the exact proposed change. Every semantic action follows prepare, review of the rendered change, and confirm with the exact challenge phrase.
+
+逐字輸入以確認:  CONFIRM NBQNL8
+HUMAN RESPONSE: CONFIRM NBQNL8
+CONFIRMED  01a049b3-63  section.added  rev 2
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-63
+Based on   6b452a1b
+
+Preparation validates and freezes the mutation before review. A candidate records its expected object revision; a later state change makes it stale, and preparing another candidate for the same object supersedes the earlier challenge.
+
+逐字輸入以確認:  CONFIRM Z2LPMK
+HUMAN RESPONSE: CONFIRM Z2LPMK
+CONFIRMED  01a049b3-63  section.added  rev 3
+note       commit .engr/objects to keep look-back working
+Candidate  object.created
+Object     01a049b3-65
+Based on   6b452a1b
+
+Object and Section record model
+
+逐字輸入以確認:  CONFIRM DZHUWD
+HUMAN RESPONSE: CONFIRM DZHUWD
+CONFIRMED  01a049b3-65  object.created  rev 1
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-65
+Based on   6b452a1b
+
+An Object is the durable knowledge aggregate and holds coherent Sections. Each Section contains the current confirmed wording; there is no competing current-text field and no stored staleness verdict.
+
+逐字輸入以確認:  CONFIRM YW7GGP
+HUMAN RESPONSE: CONFIRM YW7GGP
+CONFIRMED  01a049b3-65  section.added  rev 2
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-65
+Based on   6b452a1b
+
+Object identifiers are UUIDv7 and resolve by unique prefix. Section identifiers are monotonic integers scoped to an Object, never reused or renumbered, so deletion cannot silently retarget an external reference.
+
+逐字輸入以確認:  CONFIRM JSA932
+HUMAN RESPONSE: CONFIRM JSA932
+CONFIRMED  01a049b3-65  section.added  rev 3
+note       commit .engr/objects to keep look-back working
+Candidate  object.created
+Object     01a049b3-67
+Based on   6b452a1b
+
+Git basis, provenance, and trust-sensitive reads
+
+逐字輸入以確認:  CONFIRM 2SHEQR
+HUMAN RESPONSE: CONFIRM 2SHEQR
+CONFIRMED  01a049b3-67  object.created  rev 1
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-67
+Based on   6b452a1b
+
+Every Section records the committed Git basis against which its wording was admitted. Basis movement is computed at read time and reported as information rather than an automatic semantic verdict.
+
+逐字輸入以確認:  CONFIRM SQKUS9
+HUMAN RESPONSE: CONFIRM SQKUS9
+CONFIRMED  01a049b3-67  section.added  rev 2
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-67
+Based on   6b452a1b
+Ref        01a049b3-65 §1
+
+A Section reference pins the target Section hash and Git commit. Reads distinguish a moved basis from a changed dependency, and the recorded commit permits recovery of the earlier target wording.
+
+逐字輸入以確認:  CONFIRM SDF52T
+HUMAN RESPONSE: CONFIRM SDF52T
+CONFIRMED  01a049b3-67  section.added  rev 3
+note       commit .engr/objects to keep look-back working
+Candidate  object.created
+Object     01a049b3-6a
+Based on   6b452a1b
+
+Projection, events, and architectural constraints
+
+逐字輸入以確認:  CONFIRM 4RZH29
+HUMAN RESPONSE: CONFIRM 4RZH29
+CONFIRMED  01a049b3-6a  object.created  rev 1
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-6a
+Based on   6b452a1b
+
+Sections are current authority. Confirmed events are projected immediately and serve only as a purgeable buffer in this historical generation; committed Git projections provide durable look-back.
+
+逐字輸入以確認:  CONFIRM C8LBFG
+HUMAN RESPONSE: CONFIRM C8LBFG
+CONFIRMED  01a049b3-6a  section.added  rev 2
+note       commit .engr/objects to keep look-back working
+Candidate  section.added
+Object     01a049b3-6a
+Based on   6b452a1b
+
+Projection is deterministic: the reducer depends only on the prior Object and admitted event, never clocks, Git queries, model calls, or interpretation of prose. Writer serialization and atomic replacement prevent partial authoritative states.
+
+逐字輸入以確認:  CONFIRM 68BQCJ
+HUMAN RESPONSE: CONFIRM 68BQCJ
+CONFIRMED  01a049b3-6a  section.added  rev 3
+note       commit .engr/objects to keep look-back working
