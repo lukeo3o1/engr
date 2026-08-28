@@ -2190,13 +2190,32 @@ independent of anything local:
 
 `.engr/format.json` is the sole schema/version authority for a current
 workspace, and this build writes **version 3**. Current resource files do not
-repeat those fields. A version-2 workspace is the defined direct predecessor
-for this migration; version 1 remains readable as a historical snapshot, but
-has no cumulative version-1-to-3 migration contract. A workspace without the
-authority may also be recognized from its legacy resource markers. Every
-migratable predecessor remains read-only until `engr migrate` is explicitly
-run. Unknown, newer, and not-directly-migratable workspace versions are never
-mutated and never read as current authority.
+repeat those fields. Workspace versions **1 and 2** are both defined direct
+predecessors of this migration, and a workspace without the authority may also
+be recognized from its legacy resource markers. Every migratable predecessor
+remains read-only until `engr migrate` is explicitly run. Unknown, newer, and
+not-directly-migratable workspace versions are never mutated and never read as
+current authority.
+
+Version 1 is a predecessor because it is the **released** generation: the
+published `latest` release writes `.engr/format.json` version 1, so a version-1
+workspace is what the shipped tool produced rather than an artifact of
+development history. A record a person built with the released binary MUST have
+a supported path forward under this one, and reaching it MUST NOT require
+locating and running an intermediate historical build.
+
+That is one migration, not a chain. There is no v1-to-v2 step: the migrator
+decodes whichever generation the workspace declares, validates it under that
+generation's own rules, and derives version 3 from that single validated
+predecessor. Nothing is ever written in an intermediate generation's spelling,
+which is what keeps a historical serializer out of the permanent contract — and
+what avoids depending on historical output whose bytes may not satisfy the
+frozen predecessor contract that follows it.
+
+One pipeline can serve both because versions 1 and 2 persist an Object, an
+Event and every retained resource identically. What moved at that boundary was
+Rule *interpretation*, and that is where the difference is checked; see
+[What the workspace version is for](#what-the-workspace-version-is-for).
 
 ### What the admitting path may do
 
@@ -2244,8 +2263,8 @@ rather than left for a later write to refuse.
 A migration to version 3 activates mixed Section authority, `admitted_at`, exact
 Section encoding, Section and Object integrity, selective Ref digests, Candidate
 generation 3 and Event generation 2 as one contract. None is activated lazily
-per Object. Its direct predecessor is workspace version 2; this migration does
-not infer a cumulative version-1-to-3 conversion.
+per Object. Its direct predecessors are workspace versions 1 and 2, taken
+forward by the same pipeline and never through one another.
 
 Before writing one authoritative Object, migration MUST preflight the whole
 workspace: predecessor Object and Event reconstruction, every predecessor
@@ -2341,6 +2360,26 @@ silently acquire `admission`. Confirmed Event v1 history is retained, not
 rewritten. Pending candidates are neither migrated nor discarded; old envelopes
 fail closed when used and must be prepared again.
 
+### Four ways a workspace can refuse to be read as current
+
+They are different facts about a workspace and lead to different next actions,
+so an implementation MUST keep them distinguishable rather than collapsing them
+into one refusal:
+
+```text
+recognized migratable predecessor -> readable, read-only, run `engr migrate`
+incomplete migration              -> unavailable, run `engr migrate` to resume
+unsupported generation            -> refused; a newer one needs a newer engr
+malformed or corrupt              -> refused, and named as damage
+```
+
+A predecessor a build can migrate is not damaged and MUST NOT be reported as if
+it were; a workspace from a generation the build has never heard of MUST NOT be
+offered migration, because no migration exists to offer. In particular a build
+MUST NOT hold a **newer** generation to its own persisted-representation rules:
+that generation decides its own encoding, so reporting it as non-canonical
+reports a workspace from the future as a damaged one.
+
 ### What the workspace version is for
 
 It governs how **persisted data is interpreted**, including data whose bytes do
@@ -2355,6 +2394,20 @@ the workspace instead of reading it under its own rules.
 This is distinct from the review binding's own version, which identifies the
 deterministic binding contract and changes when *that* contract changes. A Rule
 does **not** carry a schema version of its own; the workspace answers for it.
+
+Because that is the whole of the version-1-to-2 difference, it is the whole of
+what migrating a version-1 workspace has to decide about a Rule, and the two
+halves need opposite treatment:
+
+* A version-1 Rule that writes **no** `review:` block migrates unchanged and
+  acquires the effective defaults. That reinterpretation is not a side effect to
+  be avoided; it is the content of the step, and running `engr migrate` is the
+  explicit act that authorizes it. No bytes are written into the file: the
+  defaults are what the Rule *means*, not what it says.
+* A version-1 Rule that **does** write one MUST be refused. Those bytes never
+  loaded under the generation that owns them — the member did not exist in that
+  schema — so accepting them now would admit into version 3 a file its own
+  predecessor rejected.
 
 A prepared Rule Review attestation does not survive a migration that changes Rule
 interpretation. It named a subject computed under the old semantics, so it is

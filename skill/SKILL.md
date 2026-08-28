@@ -43,6 +43,13 @@ blocked. Get explicit human direction before running `engr migrate`; never
 silently create `.engr/format.json` or rewrite stored records. Never change an
 unknown or newer workspace version.
 
+Read the refusal before deciding what it means. A workspace at version 1 or 2 is
+a recognized predecessor: it is intact, `engr migrate` moves it forward, and
+version 1 is what the published release wrote, so an old record is a migration
+away rather than lost. A workspace mid-migration says so and asks you to resume.
+A version this build has never heard of is neither — do not offer migration for
+it, and do not go looking for an older binary to bridge with.
+
 If engr reports that an object's integrity has failed, every ordinary change to
 it is refused — the record was edited outside an admission path, and letting
 unrelated work reseal it would launder that edit into valid authority. **Do not

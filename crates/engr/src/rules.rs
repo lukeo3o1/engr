@@ -578,6 +578,18 @@ pub struct Rule {
     pub based_on: Vec<Basis>,
     /// The review policy in force, defaults resolved. See [`Review`].
     pub review: Review,
+    /// Whether the file wrote a `review:` block at all.
+    ///
+    /// [`Review`] is what the Rule *means*, and it is deliberately the same
+    /// value whether the policy was written out or left to the defaults. This
+    /// is the other question, and exactly one caller asks it: the workspace
+    /// version 1 Rule schema had no `review` member, so a predecessor v1 Rule
+    /// carrying one is bytes that generation refused to load. Migration has to
+    /// refuse them too rather than admitting a file into v3 under defaults the
+    /// generation it came from never offered. Not part of identity and not
+    /// hashed — nothing about what the Rule requires depends on it.
+    #[serde(skip)]
+    pub written_review: bool,
     /// The normative text, exactly as written.
     pub body: String,
     /// Where it was found. Not part of identity and not hashed.
@@ -850,6 +862,9 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
 
     // Resolved to effective values here, at the one place a Rule is read, so
     // nothing downstream ever has to know whether a default was written out.
+    // The one caller that has to know is the generation boundary, which gets
+    // the answer from `written_review` rather than from `Review`.
+    let written_review = front.review.is_some();
     let review = match front.review {
         None => Review::default(),
         Some(written) => {
@@ -903,6 +918,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         domains,
         based_on,
         review,
+        written_review,
         body: body.to_owned(),
         source: path.to_path_buf(),
         raw: raw.to_owned(),

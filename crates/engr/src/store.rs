@@ -271,13 +271,41 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         ensure!(
             crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version),
             EXIT_SCHEMA,
-            "workspace version {} is not supported by engr {}",
-            version,
-            crate::IMPLEMENTATION_VERSION
+            "{}",
+            unsupported_version(version)
         );
         return Ok(WorkspaceFormat::OlderVersion(version));
     }
     Ok(WorkspaceFormat::Current)
+}
+
+/// Why an unrecognized workspace version is refused, and which refusal it is.
+///
+/// Two different situations reached one sentence, and the sentence said nothing
+/// about what to do next. A version *above* this build's is a workspace from a
+/// newer engr: nothing here will ever read it, and the answer is a newer
+/// binary. A version below it that this build cannot migrate is a generation
+/// with no defined route forward, which is a different fact and a different
+/// conversation. Neither is the same as "run `engr migrate`", so neither is
+/// allowed to sound like it.
+fn unsupported_version(version: u32) -> String {
+    let mut versions = crate::MIGRATABLE_WORKSPACE_VERSIONS.to_vec();
+    versions.sort_unstable();
+    let migratable = versions
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if version > WORKSPACE_VERSION {
+        return format!(
+            "workspace version {version} was written by a newer engr; this build ({}) writes version {WORKSPACE_VERSION} and cannot read it",
+            crate::IMPLEMENTATION_VERSION
+        );
+    }
+    format!(
+        "workspace version {version} is not supported by engr {}; it migrates versions {migratable} into version {WORKSPACE_VERSION}",
+        crate::IMPLEMENTATION_VERSION
+    )
 }
 
 /// Read only the declared authority while a coordinated migration stage may
@@ -300,7 +328,18 @@ pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     let format: Format = serde_json::from_value(value.clone())
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    if format.version >= WORKSPACE_VERSION {
+    // Said before the representation is judged, because this build has no
+    // standing to judge it. A newer generation decides its own persisted form,
+    // so holding one to *this* generation's canonical bytes reports a workspace
+    // from the future as a corrupt workspace — the wrong fact, and the one that
+    // sends the reader looking for damage instead of for a newer engr.
+    ensure!(
+        format.version <= WORKSPACE_VERSION,
+        EXIT_SCHEMA,
+        "{}",
+        unsupported_version(format.version)
+    );
+    if format.version == WORKSPACE_VERSION {
         check_canonical_bytes(&path, &text, &value)?;
     }
     ensure!(
@@ -571,6 +610,24 @@ fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<
     Ok(())
 }
 
+/// Validate one stored Object against the envelope its own generation wrote.
+///
+/// Each predecessor generation gets its own arm, and each arm names the exact
+/// members that generation persisted rather than asking whether the modern
+/// model happens to deserialize the bytes. The modern model is deliberately
+/// permissive across generations — `status` is an alias for `state`, `admission`
+/// and `sha256` default — so decoding first and inspecting afterwards would let
+/// a file from one generation pass as a file of another with defaults quietly
+/// filled in. This runs before [`decode_object`] for that reason.
+///
+/// Version 1 and version 2 share an arm because they share an envelope, and
+/// that is a fact about those two generations rather than a shortcut: the
+/// v1 -> v2 step moved how a project Rule's `review:` block is interpreted and
+/// changed no persisted resource at all. The Rule difference is the one thing
+/// that needs the source version, and it is checked where Rules are read, in
+/// `migration::check_predecessor_rules`. If a future generation ever changes
+/// the Object representation, it gets an arm of its own here instead of
+/// widening this one.
 pub(crate) fn check_predecessor_object_shape(
     path: &Path,
     source_version: u32,
@@ -588,19 +645,32 @@ pub(crate) fn check_predecessor_object_shape(
         "{}: predecessor Object cannot already carry a v3 aggregate seal",
         path.display()
     );
+    let markers = object.get("format").and_then(serde_json::Value::as_str)
+        == Some(crate::model::OBJECT_FORMAT)
+        && object.get("version").and_then(serde_json::Value::as_u64)
+            == Some(crate::LEGACY_OBJECT_VERSION_V0.into());
     if source_version == 0 {
         ensure!(
-            object.get("format").and_then(serde_json::Value::as_str)
-                == Some(crate::model::OBJECT_FORMAT)
-                && object.get("version").and_then(serde_json::Value::as_u64)
-                    == Some(crate::LEGACY_OBJECT_VERSION_V0.into())
-                && object.contains_key("status")
-                && !object.contains_key("state"),
+            markers && object.contains_key("status") && !object.contains_key("state"),
             EXIT_SCHEMA,
             "{}: not a recognized legacy v0 Object",
             path.display()
         );
     } else {
+        // Said separately from the general envelope refusal below, because it
+        // is the one wrong shape that has a next action. A workspace that
+        // declares a version while its Objects still carry the per-resource
+        // markers and spell the lifecycle `status` is a v0 conversion the
+        // predecessor build began and did not finish — its own migration
+        // renamed the key file by file with no staging — and the reader needs
+        // to be told that rather than reading "does not have its generation's
+        // canonical envelope" about a file that is recognizably something.
+        ensure!(
+            !(markers && object.contains_key("status")),
+            EXIT_SCHEMA,
+            "{}: workspace-v{source_version} declares its generation, but this Object still carries the legacy v0 per-resource envelope, so the v0 conversion never finished",
+            path.display()
+        );
         ensure!(
             !object.contains_key("format")
                 && !object.contains_key("version")
