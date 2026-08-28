@@ -235,12 +235,7 @@ fn absent_optionals_project_as_null_and_sets_project_canonically() {
 }
 
 fn reference(section: u64) -> Ref {
-    Ref {
-        object: object_id(),
-        section,
-        sha256: "c".repeat(64),
-        commit: commit(),
-    }
+    Ref::legacy(object_id(), section, "c".repeat(64), commit())
 }
 
 /// Ordered values keep their order — `content` is a sequence a reader goes
@@ -397,23 +392,8 @@ fn a_sha256_repository_object_id_is_a_full_object_id() {
 /// depending on which contract asked.
 #[test]
 fn incidental_set_order_reaches_no_projection_that_hashes_it() {
-    let low_section_late_commit = Ref {
-        object: object_id(),
-        section: 1,
-        sha256: "a".repeat(64),
-        commit: "f".repeat(40),
-    };
-    let high_section_early_commit = Ref {
-        object: object_id(),
-        section: 2,
-        sha256: "a".repeat(64),
-        commit: "0".repeat(40),
-    };
-    assert!(
-        low_section_late_commit < high_section_early_commit,
-        "derive(Ord) puts these one way round"
-    );
-
+    let low_section_late_commit = Ref::legacy(object_id(), 1, "a".repeat(64), "f".repeat(40));
+    let high_section_early_commit = Ref::legacy(object_id(), 2, "a".repeat(64), "0".repeat(40));
     let mut one = section();
     one.refs = vec![
         low_section_late_commit.clone(),
@@ -495,12 +475,7 @@ fn the_vocabulary_is_exactly_the_canonical_projection() {
 /// history: v2's `Ref::validate` bounds the object id and the commit, never
 /// this number.
 fn out_of_domain_legacy_ref() -> Ref {
-    Ref {
-        object: object_id(),
-        section: 1u64 << 53,
-        sha256: "c".repeat(64),
-        commit: commit(),
-    }
+    Ref::legacy(object_id(), 1u64 << 53, "c".repeat(64), commit())
 }
 
 /// An unselected field cannot break a dependency that never declared it.
@@ -624,14 +599,15 @@ mod against_a_workspace {
         section.admission = Admission::Human;
         section.sha256 = section.recomputed_sha256().expect("v2 seal");
         object.sections = vec![section];
-        engr::store::save_object(&root, &object).expect("save");
+        let (mut object, seal) = phase_three_seals(&object);
+        object.sha256 = Some(seal);
+        save_raw(&root, &object).expect("save");
 
         let commit = commit_all(&root, "record");
         (dir, root, object, commit)
     }
 
-    /// The v3 seals the Phase-3 verifier expects, computed rather than stored —
-    /// no workspace carries them yet, which is the write boundary, not a gap.
+    /// Recompute the v3 Section and Object seals after a test mutation.
     fn phase_three_seals(object: &Object) -> (Object, String) {
         let mut sealed = object.clone();
         for section in &mut sealed.sections {
@@ -984,19 +960,45 @@ mod against_a_workspace {
             .join("objects")
             .join(format!("{}.json", object.id));
         let mut legacy = object.clone();
-        legacy.sections[0].refs = vec![Ref {
-            object: object_id(),
-            section: 1u64 << 53,
-            sha256: "c".repeat(64),
-            commit: "d".repeat(40),
-        }];
+        legacy.sections[0].refs = vec![Ref::legacy(
+            object_id(),
+            1u64 << 53,
+            "c".repeat(64),
+            "d".repeat(40),
+        )];
         legacy.sections[0].sha256 = legacy.sections[0].recomputed_sha256().expect("v2 seal");
+        let mut legacy: serde_json::Value = serde_json::to_value(&legacy).expect("serialize");
+        let stored = legacy.as_object_mut().expect("object");
+        stored.remove("sha256");
+        let section = stored
+            .get_mut("sections")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|sections| sections.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("section");
+        section.remove("admission");
+        let admitted_at = section.remove("admitted_at").expect("admitted_at");
+        section.insert("confirmed_at".to_owned(), admitted_at);
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&legacy).expect("serialize"),
         )
         .expect("write");
+        let format_path = root.join(".engr").join("format.json");
+        std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#)
+            .expect("predecessor authority");
         let historical = commit_all(&root, "legacy reference");
+
+        // Evaluation compares that retained snapshot with a current v3 target.
+        write_raw(&path, &object).expect("restore current object");
+        std::fs::write(
+            &format_path,
+            format!(
+                r#"{{"format":"engr-workspace","version":{}}}"#,
+                engr::WORKSPACE_VERSION
+            ),
+        )
+        .expect("restore current authority");
 
         // The current target is clean, and carries a Phase-3 seal.
         let (current, seal) = phase_three_seals(&object);
@@ -1335,4 +1337,20 @@ fn a_target_has_exactly_one_canonical_spelling() {
         let emitted = engr::proof::section_target(&id, section);
         assert_eq!(parse_target(&emitted).expect("round trip").1, section);
     }
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
 }

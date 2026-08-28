@@ -7,7 +7,7 @@
 
 use engr::model::{Action, Content, Object, Payload, Ref};
 use engr::semantics::{ObjectType, Relation, RelationType, Role, State, Supplement, Target};
-use engr::{gate, ops, store};
+use engr::{gate, ops, store, view};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -83,6 +83,21 @@ fn new_object(root: &Path, title: &str) -> String {
     id
 }
 
+fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
+    let target = ops::effective(root, object).expect("reference target");
+    Ref::selective(
+        engr::dependency::admit(
+            root,
+            &target,
+            target.sha256.as_deref().expect("aggregate seal"),
+            section,
+            &[engr::dependency::SemanticField::Text],
+            commit,
+        )
+        .expect("admit selective reference"),
+    )
+}
+
 fn classify(object_type: Option<ObjectType>, state: State) -> Action {
     Action::ObjectClassified { object_type, state }
 }
@@ -115,7 +130,7 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// Adding semantic fields must not have moved any digest that already exists.
@@ -238,8 +253,8 @@ fn changing_type_carries_an_explicit_destination_state_and_never_a_mapped_one() 
     let stored = store::load_object(&root, &id).expect("stored");
     let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
     assert!(
-        raw.get("type").is_none(),
-        "an untyped object stores no type at all: {raw}"
+        raw["type"].is_null(),
+        "an untyped object stores type=null: {raw}"
     );
     assert!(
         raw.get("status").is_none(),
@@ -362,14 +377,7 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
         ],
     );
     let commit = engr::git::head(&root).unwrap_or(commit);
-    let pin = |section: u64| Ref {
-        object: target.clone(),
-        section,
-        sha256: ops::effective_section(&root, &target, section)
-            .expect("section")
-            .sha256,
-        commit: commit.clone(),
-    };
+    let pin = |section: u64| text_ref(&root, &target, section, &commit);
     let implemented = |symbol: &str| Relation {
         relation: RelationType::ImplementedBy,
         target: Target::Symbol {
@@ -395,15 +403,17 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
         ),
     );
     let stored = object.section(1).expect("section").clone();
+    let mut canonical = Content {
+        refs: vec![pin(1), pin(2)],
+        relations: vec![implemented("check"), implemented("verify")],
+        ..Content::default()
+    };
+    canonical.canonicalize_order().expect("canonical set order");
     assert_eq!(
-        stored.refs,
-        vec![pin(1), pin(2)],
+        stored.refs, canonical.refs,
         "the gate puts a set in one order before it is hashed"
     );
-    assert_eq!(
-        stored.relations,
-        vec![implemented("check"), implemented("verify")]
-    );
+    assert_eq!(stored.relations, canonical.relations);
 
     // The same members written the other way round are the same assertion, so
     // there is nothing to confirm and the gate says exactly that.
@@ -897,14 +907,14 @@ fn every_new_semantic_field_is_inside_what_the_human_confirmed() {
     let plain = gate::prepare(&root, payload(Action::SectionAdded, &id, base.clone()))
         .expect("prepare")
         .candidate
-        .payload_sha256
+        .candidate_digest
         .clone();
     for variant in variants {
         let candidate = gate::prepare(&root, payload(Action::SectionAdded, &id, variant))
             .expect("prepare")
             .candidate;
         assert_ne!(
-            candidate.payload_sha256, plain,
+            candidate.candidate_digest, plain,
             "a semantic field outside the payload hash is one a human never assented to"
         );
         // And inside the section hash, so `verify` can see it move.
@@ -941,7 +951,7 @@ fn a_candidate_bound_to_a_classification_dies_when_the_object_moves() {
             wording("work happened meanwhile"),
         ),
     );
-    store::write_json(
+    write_raw(
         &store::candidate_path(&root, &code).expect("candidate path"),
         &prepared.candidate,
     )
@@ -1051,7 +1061,7 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
         let path = store::object_path(&root, &id);
         let mut value = seed.clone();
         corrupt(&mut value);
-        store::write_json(&path, &value).expect("write");
+        write_raw(&path, &value).expect("write");
         let error = store::load_object(&root, &id).expect_err(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {}", error.message);
     }
@@ -1073,13 +1083,43 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     );
 
     // Put it back into the v0 shape a Phase 0 workspace really had.
+    let current = store::load_object(&root, &id).expect("current object");
     rewrite(&root, &id, |value| {
         let object = value.as_object_mut().expect("object");
+        object.remove("sha256");
         object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
         object.insert("version".to_owned(), Value::from(1));
         let state = object.remove("state").expect("state");
         object.insert("status".to_owned(), state);
+        for stored in object["sections"].as_array_mut().expect("sections") {
+            let stored = stored.as_object_mut().expect("section");
+            let section_id = stored["id"].as_u64().expect("section id");
+            let section = current.section(section_id).expect("current section");
+            stored.remove("admission");
+            let admitted_at = stored.remove("admitted_at").expect("admitted_at");
+            stored.insert("confirmed_at".to_owned(), admitted_at);
+            stored.insert(
+                "sha256".to_owned(),
+                Value::String(section.recomputed_sha256().expect("legacy Section seal")),
+            );
+        }
     });
+    let events_path = store::events_path(&root, &id);
+    let mut retained = String::new();
+    for line in std::fs::read_to_string(&events_path)
+        .expect("events")
+        .lines()
+    {
+        let mut event: engr::model::Event = serde_json::from_str(line).expect("event");
+        event.version = engr::EVENT_ENVELOPE_VERSION_V0;
+        event.provenance = engr::model::Provenance::confirmed(
+            "TEST00",
+            event.payload.sha256().expect("payload hash"),
+        );
+        retained.push_str(&serde_json::to_string(&event).expect("event"));
+        retained.push('\n');
+    }
+    std::fs::write(events_path, retained).expect("retained events");
     std::fs::remove_file(store::engr_dir(&root).join("format.json")).expect("format");
 
     assert_eq!(
@@ -1091,7 +1131,7 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(before.state, State::Closed);
     assert_eq!(before.object_type, None);
 
-    store::with_lock(&root, || store::migrate(&root)).expect("migrate");
+    store::migrate(&root).expect("migrate");
     let after = store::load_object(&root, &id).expect("migrated");
     assert_eq!(after.state, State::Closed);
     assert_eq!(
@@ -1100,7 +1140,7 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     );
     let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
     assert!(raw.get("status").is_none(), "{raw}");
-    assert!(raw.get("type").is_none(), "{raw}");
+    assert!(raw["type"].is_null(), "{raw}");
     assert_eq!(raw["state"], Value::String("closed".to_owned()));
 
     // And the old vocabulary still works on it, because that is what its own
@@ -1112,19 +1152,18 @@ fn a_migrated_workspace_carries_no_invented_classification() {
     assert_eq!(object.state, State::Open);
 }
 
-/// A Section written before `refs[]` was declared a set keeps the order its
-/// gate happened to write, and re-proposing the same members is still not a
-/// change.
+/// One persisted order for a set, and re-proposing the same members either way
+/// round is still not a change.
 ///
-/// Canonicalization is done to the proposal. If the "nothing to confirm" check
-/// did not do the same to the stored value only for the comparison, every
-/// Section stored before this rule holding two refs the other way round would
-/// accept one confirmation and one Event that changed nothing but an array's
-/// order — the exact thing declaring it a set was supposed to rule out. The
-/// stored Section is not tidied either: its hash covers the order it was
-/// written in.
+/// Two rules, and they meet here. This generation persists one representation,
+/// so a stored set written the other way round is not valid current authority
+/// however sound its seals are — a reader that accepts both has two encodings
+/// for one value. But *proposing* the members either way round is the same
+/// assertion, because canonicalization is done to the proposal before anything
+/// is hashed, and a revision that changes nothing but an array's order is
+/// refused rather than spending a confirmation on sorting.
 #[test]
-fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
+fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
     let (_dir, root) = workspace();
     let commit = repository(&root);
     let target = new_object(&root, "the target");
@@ -1150,14 +1189,7 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
         ],
     );
     let commit = engr::git::head(&root).unwrap_or(commit);
-    let pin = |section: u64| Ref {
-        object: target.clone(),
-        section,
-        sha256: ops::effective_section(&root, &target, section)
-            .expect("section")
-            .sha256,
-        commit: commit.clone(),
-    };
+    let pin = |section: u64| text_ref(&root, &target, section, &commit);
 
     let id = new_object(&root, "the source");
     let object = admit(
@@ -1173,24 +1205,29 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
             },
         ),
     );
+    let stored_sha256 = object.section(1).expect("section").sha256.clone();
+    let canonical = object.section(1).expect("section").refs.clone();
+    let stored_text =
+        std::fs::read_to_string(store::object_path(&root, &id)).expect("stored bytes");
 
-    // Seed what an older gate would have left: the same two refs the other way
-    // round, with the hash that order really produces. It is valid stored
-    // authority, not corruption — `verify` recomputes it and agrees.
-    let mut legacy = object.section(1).expect("section").content();
-    legacy.refs.reverse();
-    let legacy_sha256 = legacy.sha256().expect("hash");
+    // Reverse the stored set. The seals still verify — canonical sealing sorts
+    // a clone, so set order was never in the hash — and that is exactly why the
+    // representation rule has to be its own check rather than a consequence of
+    // integrity.
     rewrite(&root, &id, |value| {
         let section = &mut value["sections"][0];
         section["refs"].as_array_mut().expect("refs").reverse();
-        section["sha256"] = Value::String(legacy_sha256.clone());
     });
-    let seeded = store::load_object(&root, &id).expect("an unsorted set is valid stored authority");
-    assert_eq!(
-        seeded.sections[0].recomputed_sha256().expect("recomputed"),
-        legacy_sha256,
-        "the seeded Section verifies against the order it is stored in"
+    let error =
+        store::load_object(&root, &id).expect_err("a reordered set is not this generation's bytes");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("canonical"),
+        "the refusal names the representation: {error}"
     );
+
+    std::fs::write(store::object_path(&root, &id), &stored_text).expect("restore");
+    store::load_object(&root, &id).expect("the canonical order loads");
 
     // Both spellings of the same membership are the same assertion.
     for refs in [vec![pin(1), pin(2)], vec![pin(2), pin(1)]] {
@@ -1214,10 +1251,10 @@ fn a_section_stored_before_refs_were_a_set_is_not_revised_into_sorted_order() {
 
     let after = store::load_object(&root, &id).expect("load");
     assert_eq!(
-        after.sections[0].sha256, legacy_sha256,
-        "and nothing sorted the stored Section behind its own hash"
+        after.sections[0].sha256, stored_sha256,
+        "and nothing rewrote the stored Section behind its own hash"
     );
-    assert_eq!(after.sections[0].refs, legacy.refs);
+    assert_eq!(after.sections[0].refs, canonical);
     assert_eq!(
         store::load_events(&root, &id).expect("events").len(),
         2,
@@ -1670,6 +1707,76 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
     );
 }
 
+/// A replacement that stops existing is a broken record, not ordinary drift.
+///
+/// `superseded_by` names an existing different Object, and v1 has no Object
+/// delete — so a target that cannot be established means the invariant already
+/// failed. The source Object's own seals cannot see that: nothing about A
+/// changes when B disappears, and `refs[]`, the only thing verification used to
+/// follow, does not include the relation. Left unchecked, a reader following
+/// the chain to find current knowledge arrives nowhere while `verify` says
+/// PASS.
+#[test]
+fn a_replacement_that_cannot_be_established_stops_the_source_reading_clean() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let replacement = new_object(&root, "the replacement");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&replacement, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&replacement))],
+                ..Content::default()
+            },
+        ),
+    );
+    assert!(
+        ops::verify(&root, &source).expect("verify").passed(),
+        "the chain is intact"
+    );
+
+    // The replacement stops being establishable: its projection is gone and so
+    // is the admitted history that could rebuild it.
+    std::fs::remove_file(store::object_path(&root, &replacement)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &replacement)).expect("remove history");
+    assert!(ops::effective(&root, &replacement).is_err());
+
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(!report.passed(), "the forward link leads nowhere");
+    assert_eq!(report.broken_replacements.len(), 1);
+    assert!(
+        report.broken_replacements[0]
+            .reason
+            .contains("no longer exists"),
+        "{:?}",
+        report.broken_replacements[0]
+    );
+    assert!(
+        report.standing_on_missing.is_empty() && report.standing_on_unreadable.is_empty(),
+        "an authoritative relation is not reported as a ref"
+    );
+
+    let object = ops::effective(&root, &source).expect("source still loads");
+    let marked = view::assess(&root, &object)
+        .into_iter()
+        .find(|(_, status)| status.replacement.is_some())
+        .expect("show marks the section carrying the relation");
+    assert_eq!(marked.1.label(), "REPLACEMENT UNAVAILABLE");
+    assert!(marked.1.forged(), "this is a stop, not a question");
+}
 /// A classification that changes nothing is not a change to confirm.
 ///
 /// Confirming it would append a permanent Event recording no change, spend a
@@ -1709,5 +1816,91 @@ fn classifying_an_object_into_the_state_it_already_holds_is_refused() {
         ops::effective(&root, &id).expect("object").rev,
         before + 1,
         "and the refusal spent nothing"
+    );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A replacement chain that cannot be walked is not a chain that is clear.
+///
+/// Absence used to end a branch quietly, and it is not the same as there being
+/// nothing further: `effective` already rebuilds a target whose projection is
+/// missing but whose admitted history still establishes it, so `NOT_FOUND` here
+/// means the authority genuinely cannot be established. v1 has no Object
+/// delete, so that edge is a broken invariant already — and an unwalked branch
+/// can hide the cycle the traversal exists to find.
+#[test]
+fn a_new_supersession_through_a_target_that_is_gone_is_refused() {
+    let (_dir, root) = workspace();
+    let compact = |id: &str| {
+        format!(
+            "obj:{}",
+            engr::reference::encode_uuid_str(id).expect("compact")
+        )
+    };
+    let gone = new_object(&root, "the far end");
+    let middle = new_object(&root, "the middle");
+    let source = new_object(&root, "the object being replaced");
+    for id in [&gone, &middle, &source] {
+        classified(&root, id, Some(ObjectType::Design), State::Accepted);
+    }
+    admit(
+        &root,
+        payload(
+            Action::ObjectSuperseded,
+            &middle,
+            Content {
+                text: "replaced by the far end".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&gone))],
+                ..Content::default()
+            },
+        ),
+    );
+
+    let replaces_source = || {
+        payload(
+            Action::ObjectSuperseded,
+            &source,
+            Content {
+                text: "replaced by the middle".to_owned(),
+                role: Some(Role::Supersession),
+                relations: vec![Relation::superseded_by(compact(&middle))],
+                ..Content::default()
+            },
+        )
+    };
+    gate::prepare(&root, replaces_source()).expect("an intact chain");
+    gate::discard(
+        &root,
+        &gate::pending_codes(&root).expect("pending")[0].clone(),
+    )
+    .expect("clear");
+
+    // The far end stops being establishable: no projection, and no admitted
+    // history to rebuild it from.
+    std::fs::remove_file(store::object_path(&root, &gone)).expect("remove projection");
+    std::fs::remove_file(store::events_path(&root, &gone)).expect("remove history");
+    assert!(ops::effective(&root, &gone).is_err());
+
+    let error = gate::prepare(&root, replaces_source())
+        .expect_err("the graph this would join cannot be established");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("no longer exists"),
+        "the refusal names why: {error}"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and no code was handed out"
     );
 }

@@ -7,12 +7,13 @@
 //!
 //! It changes nothing about what it contains. Moving an Object between
 //! collections, ranking it, or calling a plan complete is planning activity —
-//! the Object means exactly what its confirmed sections say either way. That is
+//! the Object means exactly what its admitted Sections say either way. That is
 //! the whole trust boundary, and every rule here exists to keep it: membership
 //! carries no authority, priority belongs to the membership rather than to the
 //! target, and completing a plan is a declaration rather than a proof.
 
 use crate::reference::{canonical_embedded, EngrTarget, ResourceKind};
+use crate::rules::Attempt;
 use crate::{
     ensure, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -214,6 +215,9 @@ impl Collection {
     /// earlier by the same rule with the other exit code, and a file nobody
     /// currently running a command wrote is not their mistake.
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("collection: {error}")))?;
+        crate::proof::stored_within_safe_integers(&value, "collection")?;
         crate::reference::canonical_embedded(
             &format!("collection:{}", self.id),
             &[ResourceKind::Collection],
@@ -371,11 +375,38 @@ pub fn ids(root: &Path) -> Result<Vec<String>> {
     Ok(found)
 }
 
+/// The shared canonical order for `members[]`.
+///
+/// A plan's own text says the order of members in the file is never the plan's
+/// order — `--order` is, and it is a field. So `members[]` is a set, and a set
+/// has one persisted spelling. Applied on the way out, so a caller adding
+/// members in whatever order they thought of them is not refused for it.
+pub(crate) fn canonicalize_members(collection: &mut Collection) -> Result<()> {
+    crate::proof::canonical_set(&mut collection.members, "collection member")
+}
+
+fn check_canonical_members(path: &Path, collection: &Collection) -> Result<()> {
+    let mut canonical = collection.clone();
+    canonicalize_members(&mut canonical)?;
+    ensure!(
+        canonical == *collection,
+        EXIT_SCHEMA,
+        "{}: members are stored in canonical set order",
+        path.display()
+    );
+    Ok(())
+}
+
 pub fn load(root: &Path, id: &str) -> Result<Collection> {
     let path = path(root, id);
     ensure!(path.exists(), EXIT_NOT_FOUND, "no collection {id}");
-    let collection: Collection = store::read_json(&path)?;
+    let collection: Collection = store::read_resource(root, &path)?;
     collection.validate()?;
+    // Current generation only: a predecessor workspace kept whatever order its
+    // writer produced, and migration is where those bytes come forward.
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_members(&path, &collection)?;
+    }
     // The filename is the identity, so a file whose contents disagree with it
     // is two identities for one plan — and every reference names one of them.
     ensure!(
@@ -388,21 +419,63 @@ pub fn load(root: &Path, id: &str) -> Result<Collection> {
     Ok(collection)
 }
 
-fn save(root: &Path, collection: &Collection) -> Result<()> {
+/// Decode predecessor bytes already captured by coordinated migration.
+pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Collection> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let collection: Collection = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     collection.validate()?;
-    store::write_json(&path(root, &collection.id), collection)
+    ensure!(
+        collection.id == id,
+        EXIT_SCHEMA,
+        "{} says it is collection {}, and a plan has one identity",
+        path.display(),
+        collection.id
+    );
+    Ok(collection)
 }
 
-fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+/// Validate a staged Collection artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Collection> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let collection = decode_for_migration(path, id, text)?;
+    store::check_current_resource_shape(path, text, &collection)?;
+    check_canonical_members(path, &collection)?;
+    Ok(collection)
+}
+
+fn save(root: &Path, collection: &Collection) -> Result<()> {
+    collection.validate()?;
+    let mut collection = collection.clone();
+    canonicalize_members(&mut collection)?;
+    store::write_json(&path(root, &collection.id), &collection)
+}
+
+/// Every Collection mutation, under the lock, past the applicable Rule set.
+///
+/// The Rule check is inside the lock and before the read, so what it was
+/// established against is what gets written. Collection has no prepared
+/// candidate to bind, so the attempt is the whole of what a caller attests.
+fn locked<T>(root: &Path, attempt: Attempt, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
         store::require_current(root)?;
+        crate::rules::direct(root, crate::rules::Domain::Collection, attempt)?;
         body()
     })
 }
 
-fn edit<T>(root: &Path, id: &str, body: impl FnOnce(&mut Collection) -> Result<T>) -> Result<T> {
-    locked(root, || {
+fn edit<T>(
+    root: &Path,
+    id: &str,
+    attempt: Attempt,
+    body: impl FnOnce(&mut Collection) -> Result<T>,
+) -> Result<T> {
+    locked(root, attempt, || {
         let mut collection = load(root, id)?;
         let outcome = body(&mut collection)?;
         save(root, &collection)?;
@@ -455,12 +528,13 @@ pub fn create(
     name: &str,
     description: Option<&str>,
     schedule: Option<Schedule>,
+    attempt: Attempt,
 ) -> Result<Collection> {
     check_name(EXIT_USAGE, name)?;
     if let Some(schedule) = &schedule {
         schedule.validate(EXIT_USAGE)?;
     }
-    locked(root, || {
+    locked(root, attempt, || {
         let collection = Collection {
             id: mint(root)?,
             name: name.trim().to_owned(),
@@ -486,8 +560,8 @@ pub fn create(
 ///
 /// What it does is report what the plan held, so removing planning context is
 /// never silent. Deleting a collection changes nothing about its members.
-pub fn remove(root: &Path, id: &str) -> Result<Removed> {
-    locked(root, || {
+pub fn remove(root: &Path, id: &str, attempt: Attempt) -> Result<Removed> {
+    locked(root, attempt, || {
         let collection = load(root, id)?;
         let path = path(root, id);
         std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
@@ -505,16 +579,21 @@ pub struct Removed {
     pub members: usize,
 }
 
-pub fn rename(root: &Path, id: &str, name: &str) -> Result<Collection> {
+pub fn rename(root: &Path, id: &str, name: &str, attempt: Attempt) -> Result<Collection> {
     check_name(EXIT_USAGE, name)?;
-    edit(root, id, |collection| {
+    edit(root, id, attempt, |collection| {
         collection.name = name.trim().to_owned();
         Ok(())
     })?;
     load(root, id)
 }
 
-pub fn describe(root: &Path, id: &str, description: Option<&str>) -> Result<Collection> {
+pub fn describe(
+    root: &Path,
+    id: &str,
+    description: Option<&str>,
+    attempt: Attempt,
+) -> Result<Collection> {
     if let Some(description) = description {
         ensure!(
             !description.trim().is_empty(),
@@ -522,7 +601,7 @@ pub fn describe(root: &Path, id: &str, description: Option<&str>) -> Result<Coll
             "a description that is present says something; omit --text to clear it"
         );
     }
-    edit(root, id, |collection| {
+    edit(root, id, attempt, |collection| {
         collection.description = description.map(str::to_owned);
         Ok(())
     })?;
@@ -530,19 +609,24 @@ pub fn describe(root: &Path, id: &str, description: Option<&str>) -> Result<Coll
 }
 
 /// Declare where the plan stands. Never inferred from members or dates.
-pub fn set_state(root: &Path, id: &str, state: State) -> Result<Collection> {
-    edit(root, id, |collection| {
+pub fn set_state(root: &Path, id: &str, state: State, attempt: Attempt) -> Result<Collection> {
+    edit(root, id, attempt, |collection| {
         collection.state = state;
         Ok(())
     })?;
     load(root, id)
 }
 
-pub fn set_schedule(root: &Path, id: &str, schedule: Option<Schedule>) -> Result<Collection> {
+pub fn set_schedule(
+    root: &Path,
+    id: &str,
+    schedule: Option<Schedule>,
+    attempt: Attempt,
+) -> Result<Collection> {
     if let Some(schedule) = &schedule {
         schedule.validate(EXIT_USAGE)?;
     }
-    edit(root, id, |collection| {
+    edit(root, id, attempt, |collection| {
         collection.schedule = schedule;
         Ok(())
     })?;
@@ -586,13 +670,14 @@ pub fn add_member(
     target: &str,
     order: Option<i64>,
     priority: Option<Priority>,
+    attempt: Attempt,
 ) -> Result<Collection> {
     // Shape first, so a malformed reference is refused as malformed rather than
     // as missing — `decode_uuid` on nonsense would otherwise answer the wrong
     // question. This one needs no lock: it reads the argument, not the
     // workspace.
     check_target("a collection member", target)?;
-    edit(root, id, |collection| {
+    edit(root, id, attempt, |collection| {
         // Existence is checked **inside** the lock, because the check is what
         // defines admission. Backlog consumption takes the same workspace lock,
         // so a check outside it can observe a target, lose the race, and then
@@ -616,8 +701,8 @@ pub fn add_member(
     load(root, id)
 }
 
-pub fn remove_member(root: &Path, id: &str, target: &str) -> Result<Collection> {
-    edit(root, id, |collection| {
+pub fn remove_member(root: &Path, id: &str, target: &str, attempt: Attempt) -> Result<Collection> {
+    edit(root, id, attempt, |collection| {
         collection.member(target)?;
         collection
             .members
@@ -628,8 +713,14 @@ pub fn remove_member(root: &Path, id: &str, target: &str) -> Result<Collection> 
 }
 
 /// Rank a member, or unrank it with `None`.
-pub fn set_order(root: &Path, id: &str, target: &str, order: Option<i64>) -> Result<Collection> {
-    edit(root, id, |collection| {
+pub fn set_order(
+    root: &Path,
+    id: &str,
+    target: &str,
+    order: Option<i64>,
+    attempt: Attempt,
+) -> Result<Collection> {
+    edit(root, id, attempt, |collection| {
         collection.member_mut(target)?.order = order;
         Ok(())
     })?;
@@ -641,6 +732,7 @@ pub fn set_priority(
     id: &str,
     target: &str,
     priority: Option<Priority>,
+    attempt: Attempt,
 ) -> Result<Collection> {
     if let Some(priority) = &priority {
         if let Some(reason) = &priority.reason {
@@ -651,7 +743,7 @@ pub fn set_priority(
             );
         }
     }
-    edit(root, id, |collection| {
+    edit(root, id, attempt, |collection| {
         collection.member_mut(target)?.priority = priority;
         Ok(())
     })?;

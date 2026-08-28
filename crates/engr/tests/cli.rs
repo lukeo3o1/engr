@@ -2,7 +2,10 @@
 
 use engr::{
     gate,
-    model::{Action, Content, Event, Object, Payload, Provenance, EVENT_FORMAT},
+    model::{
+        Action, Content, Event, HumanConfirmation, Object, Payload, Provenance, TaggedAdmission,
+        EVENT_FORMAT,
+    },
     ops, store,
 };
 use serde_json::Value;
@@ -90,12 +93,47 @@ fn rewrite_object(root: &Path, id: &str, update: impl FnOnce(&mut serde_json::Ma
 }
 
 fn mark_legacy(root: &Path, id: &str) {
+    let path = store::object_path(root, id);
+    let decoded: Object = store::read_json(&path).expect("current object");
     rewrite_object(root, id, |object| {
-        object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
-        object.insert("version".to_owned(), Value::from(1));
-        let state = object.remove("state").expect("state");
-        object.insert("status".to_owned(), state);
+        object.remove("sha256");
+        object.remove("format");
+        object.remove("version");
+        for stored in object
+            .get_mut("sections")
+            .and_then(Value::as_array_mut)
+            .expect("sections")
+        {
+            let stored = stored.as_object_mut().expect("section");
+            let section_id = stored.get("id").and_then(Value::as_u64).expect("id");
+            let section = decoded.section(section_id).expect("decoded section");
+            stored.remove("admission");
+            let admitted_at = stored.remove("admitted_at").expect("admitted_at");
+            stored.insert("confirmed_at".to_owned(), admitted_at);
+            stored.insert(
+                "sha256".to_owned(),
+                Value::String(section.recomputed_sha256().expect("legacy section seal")),
+            );
+        }
     });
+
+    let events_path = store::events_path(root, id);
+    let events = std::fs::read_to_string(&events_path).expect("current events");
+    let mut retained = String::new();
+    for line in events.lines() {
+        let mut event: Event = serde_json::from_str(line).expect("current event");
+        event.version = engr::EVENT_ENVELOPE_VERSION_V0;
+        event.provenance =
+            Provenance::confirmed("234567", event.payload.sha256().expect("payload hash"));
+        retained.push_str(&serde_json::to_string(&event).expect("retained event"));
+        retained.push('\n');
+    }
+    std::fs::write(events_path, retained).expect("retained events");
+    std::fs::write(
+        store::engr_dir(root).join("format.json"),
+        r#"{"format":"engr-workspace","version":2}"#,
+    )
+    .expect("predecessor authority");
 }
 
 fn assert_migration_preflight_refuses(corrupt: impl FnOnce(&Path, &str, &str)) {
@@ -233,17 +271,23 @@ fn reference_admission_uses_the_effective_target_projection() {
     .expect("prepare revision");
     let revision_event = Event {
         format: EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
+        version: engr::EVENT_ENVELOPE_VERSION,
         event_id: engr::model::new_id(),
         rev: revision.candidate.binding.expected_rev + 1,
         time: "2026-08-17T00:00:00Z".to_owned(),
         payload: revision.candidate.payload.clone(),
-        provenance: Provenance::confirmed(
-            revision.candidate.challenge.clone(),
-            revision.candidate.payload_sha256.clone(),
-        ),
+        provenance: Provenance::Tagged {
+            admission: TaggedAdmission {
+                kind: engr::semantics::Admission::Human,
+                confirmation: Some(HumanConfirmation {
+                    challenge: revision.candidate.challenge.clone(),
+                    candidate_digest: revision.candidate.candidate_digest.clone(),
+                }),
+                rule_review: None,
+            },
+        },
     };
-    store::append_event(root, &revision_event).expect("append without projection");
+    append_admitted_raw(root, &revision_event);
     let effective = ops::effective_section(root, &target, 1).expect("effective target section");
     assert_ne!(effective.sha256, raw.sha256);
 
@@ -269,6 +313,20 @@ fn reference_admission_uses_the_effective_target_projection() {
     )
     .expect("confirm source");
 
+    let effective_object = ops::effective(root, &target).expect("effective target object");
+    let stale_projection_ref = engr::dependency::admit(
+        root,
+        &effective_object,
+        effective_object.sha256.as_deref().expect("aggregate seal"),
+        1,
+        &[engr::dependency::SemanticField::Text],
+        &old_commit,
+    );
+    let error = stale_projection_ref
+        .expect_err("a reference cannot be born stale against the effective target");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("stale at birth"));
+
     let stale_projection_ref = Payload {
         action: Action::SectionAdded,
         object: source.clone(),
@@ -276,19 +334,11 @@ fn reference_admission_uses_the_effective_target_projection() {
         content: Content {
             text: "cannot pin stale projection".to_owned(),
             based_on: None,
-            refs: vec![engr::model::Ref {
-                object: target.clone(),
-                section: 1,
-                sha256: raw.sha256,
-                commit: old_commit.clone(),
-            }],
+            refs: Vec::new(),
             ..Content::default()
         },
     };
-    let error = gate::prepare(root, stale_projection_ref)
-        .expect_err("gate must reject a stale raw projection reference");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(error.message.contains("that section is now"));
+    gate::prepare(root, stale_projection_ref).expect("unreferenced control proposal");
 
     let cli = run_engr(
         root,
@@ -302,16 +352,17 @@ fn reference_admission_uses_the_effective_target_projection() {
             "--no-based-on",
             "--ref",
             &format!("{target}:1"),
+            "text",
         ],
     );
     assert_eq!(cli.status.code(), Some(engr::EXIT_INVARIANT));
     assert!(
-        String::from_utf8_lossy(&cli.stderr).contains("commit the target wording first"),
+        String::from_utf8_lossy(&cli.stderr).contains("stale at birth"),
         "CLI must not hash the stale projection: {}",
         String::from_utf8_lossy(&cli.stderr)
     );
 
-    store::save_object(
+    save_raw(
         root,
         &ops::effective(root, &target).expect("effective object"),
     )
@@ -319,6 +370,16 @@ fn reference_admission_uses_the_effective_target_projection() {
     git(root, &["add", ".engr"]);
     git(root, &["commit", "-qm", "record recovered target"]);
     let committed_effective = engr::git::head(root).expect("new head");
+    let target_object = store::load_object(root, &target).expect("committed target");
+    let reference = engr::dependency::admit(
+        root,
+        &target_object,
+        target_object.sha256.as_deref().expect("aggregate seal"),
+        1,
+        &[engr::dependency::SemanticField::Text],
+        &committed_effective,
+    )
+    .expect("reference committed effective wording");
     gate::prepare(
         root,
         Payload {
@@ -328,12 +389,7 @@ fn reference_admission_uses_the_effective_target_projection() {
             content: Content {
                 text: "historically verified effective wording".to_owned(),
                 based_on: None,
-                refs: vec![engr::model::Ref {
-                    object: target,
-                    section: 1,
-                    sha256: effective.sha256,
-                    commit: committed_effective,
-                }],
+                refs: vec![engr::model::Ref::selective(reference)],
                 ..Content::default()
             },
         },
@@ -382,7 +438,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     .expect("prepare retryable candidate");
     let retry_code = retryable.candidate.challenge.clone();
     gate::confirm(root, &format!("CONFIRM {retry_code}")).expect("apply candidate");
-    store::write_json(
+    write_raw(
         &store::candidate_path(root, &retry_code).expect("candidate path"),
         &retryable.candidate,
     )
@@ -447,7 +503,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     .expect("prepare overtaking candidate");
     gate::confirm(root, &format!("CONFIRM {}", overtaking.candidate.challenge))
         .expect("confirm overtaking candidate");
-    store::write_json(
+    write_raw(
         &store::candidate_path(root, &stale_code).expect("candidate path"),
         &stale.candidate,
     )
@@ -473,31 +529,12 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     let current_id = current["object"].as_str().expect("current object id");
     let object_path = store::object_path(root, id);
     let current_path = store::object_path(root, current_id);
-    let current_before = std::fs::read(&current_path).expect("current object");
     let events_path = store::events_path(root, id);
-    let events_before = std::fs::read(&events_path).expect("events");
     let format_path = store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    mark_legacy(root, id);
+    mark_legacy(root, current_id);
+    let events_before = std::fs::read(&events_path).expect("retained events");
     let format_before = std::fs::read(&format_path).expect("format");
-    let mut object: Value =
-        serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
-    object["format"] = Value::String("engr-object".to_owned());
-    object["version"] = Value::from(1);
-    let state = object
-        .as_object_mut()
-        .expect("object")
-        .remove("state")
-        .expect("state");
-    object["status"] = state;
-    std::fs::write(
-        &object_path,
-        serde_json::to_vec_pretty(&object).expect("json"),
-    )
-    .expect("legacy object");
-    assert!(
-        format_path.exists(),
-        "Phase 0 already had the version 1 workspace authority"
-    );
     let shown = run_engr(root, &["show", id]);
     assert!(
         shown.status.success(),
@@ -509,8 +546,8 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("engr migrate"));
     let still_legacy: Value =
         serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
-    assert_eq!(still_legacy["status"], "open");
-    assert!(still_legacy.get("state").is_none());
+    assert_eq!(still_legacy["state"], "open");
+    assert!(still_legacy.get("sha256").is_none());
 
     let migrated = run_engr(root, &["migrate"]);
     assert!(
@@ -522,11 +559,10 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         serde_json::from_slice(&std::fs::read(&object_path).expect("object")).expect("json");
     assert_eq!(migrated_object["state"], "open");
     assert!(migrated_object.get("status").is_none());
-    assert_eq!(
-        std::fs::read(&current_path).expect("current object after migration"),
-        current_before,
-        "an already current Object is not cosmetically rewritten"
-    );
+    let migrated_current: Value =
+        serde_json::from_slice(&std::fs::read(&current_path).expect("second migrated object"))
+            .expect("json");
+    assert!(migrated_current["sha256"].is_string());
     assert_eq!(
         std::fs::read(&events_path).expect("events after migration"),
         events_before,
@@ -537,14 +573,9 @@ fn legacy_workspace_is_readable_but_requires_explicit_migration_to_mutate() {
         format_before,
         "the workspace authority moves forward, because version 1 no longer denotes what this build writes"
     );
-    assert_eq!(
-        migrated_object["format"], "engr-object",
-        "compatible legacy marker is preserved"
-    );
-    assert_eq!(
-        migrated_object["version"], 1,
-        "the Object's own legacy envelope marker is compatible and is not touched"
-    );
+    assert!(migrated_object.get("format").is_none());
+    assert!(migrated_object.get("version").is_none());
+    assert!(migrated_object["sha256"].is_string());
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
@@ -795,7 +826,7 @@ fn runtime_and_migration_reject_the_same_future_event_gap() {
 }
 
 #[test]
-fn the_coordinated_phase_three_generation_is_implemented_and_not_written() {
+fn the_coordinated_phase_three_generation_is_written_as_one_contract() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -816,43 +847,52 @@ fn the_coordinated_phase_three_generation_is_implemented_and_not_written() {
     );
     confirm(root, &section);
 
-    // A version has exactly one canonical interpretation for current resources.
-    // Version 3 is being implemented in slices, so nothing here may claim it:
-    // not the authority, not a resource, not a record.
+    // The authority, resources, and records move as one coordinated generation.
     let authority: Value = serde_json::from_slice(
         &std::fs::read(store::engr_dir(root).join("format.json")).expect("format"),
     )
     .expect("json");
     assert_eq!(authority["version"], Value::from(engr::WORKSPACE_VERSION));
-    assert_ne!(
+    assert_eq!(
         authority["version"],
         Value::from(engr::PHASE_3_WORKSPACE_VERSION),
-        "an unfinished generation is never what a workspace says it is"
+        "the current workspace authority is the activated Phase-3 generation"
     );
 
     let object: Value =
         serde_json::from_slice(&std::fs::read(store::object_path(root, &id)).expect("object"))
             .expect("json");
     let stored = object["sections"][0].as_object().expect("section");
-    assert!(stored.contains_key("confirmed_at"));
-    for absent in ["admission", "admitted_at", "sha256_object"] {
+    assert!(object["sha256"].is_string());
+    assert!(object.get("format").is_none() && object.get("version").is_none());
+    for present in [
+        "id",
+        "admission",
+        "role",
+        "text",
+        "content",
+        "based_on",
+        "refs",
+        "relations",
+        "sha256",
+        "admitted_at",
+    ] {
         assert!(
-            !stored.contains_key(absent),
-            "{absent} belongs to the coordinated Phase-3 contract, which is not durable yet"
+            stored.contains_key(present),
+            "current Section omits {present}"
         );
     }
+    assert_eq!(stored["admission"], "human");
+    assert!(!stored.contains_key("confirmed_at"));
 
     let events = std::fs::read_to_string(store::events_path(root, &id)).expect("events");
     for line in events.lines() {
         let event: Value = serde_json::from_str(line).expect("event");
-        assert_eq!(
-            event["version"],
-            Value::from(engr::EVENT_ENVELOPE_VERSION_V0)
-        );
-        assert!(event.get("admission").is_none());
+        assert_eq!(event["version"], Value::from(engr::EVENT_ENVELOPE_VERSION));
+        assert_eq!(event["admission"]["kind"], "human");
+        assert!(event["admission"]["confirmation"]["candidate_digest"].is_string());
     }
 
-    // And the model that generation describes is nevertheless here, and works.
     let loaded = store::load_object(root, &id).expect("object");
     assert_eq!(
         loaded.sections[0].admission,
@@ -924,6 +964,7 @@ fn malformed_canonical_references_are_usage_errors_at_the_cli_boundary() {
             "--no-based-on",
             "--ref",
             malformed,
+            "text",
         ],
     );
     assert_eq!(
@@ -975,6 +1016,7 @@ fn title_actions_reject_references_as_cli_usage() {
             "title",
             "--ref",
             "not-a-reference",
+            "text",
         ],
     );
     assert_eq!(created.status.code(), Some(engr::EXIT_USAGE));
@@ -993,6 +1035,7 @@ fn title_actions_reject_references_as_cli_usage() {
             "renamed title",
             "--ref",
             "not-a-reference",
+            "text",
         ],
     );
     assert_eq!(renamed.status.code(), Some(engr::EXIT_USAGE));
@@ -1018,6 +1061,8 @@ fn dirty_source_requires_an_explicit_repository_basis_choice() {
     let root = workspace.path();
     store::init(root).expect("init");
     git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
     std::fs::write(root.join("source.txt"), "committed\n").expect("source");
     git(root, &["add", "."]);
     git(
@@ -1240,6 +1285,7 @@ fn revision_candidate_renders_basis_and_reference_changes() {
             "--no-based-on",
             "--ref",
             &reference,
+            "text",
         ],
     );
     let code = added_ref["challenge"].as_str().expect("challenge");
@@ -1248,7 +1294,7 @@ fn revision_candidate_renders_basis_and_reference_changes() {
     assert!(rendered.contains("Based on -"));
     assert!(rendered.contains("Based on + none (explicit)"));
     assert!(rendered.contains("Ref      +"));
-    assert!(rendered.contains("sha256"));
+    assert!(rendered.contains("digest"));
     assert!(rendered.contains("commit"));
     confirm(root, &added_ref);
 
@@ -1306,10 +1352,16 @@ fn event_workspace() -> (TempDir, std::path::PathBuf, Event) {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path().to_path_buf();
     store::init(&root).expect("init");
-    let object =
+    let mut object =
         Object::new(engr::model::new_id(), "event validation".to_owned()).expect("new object");
     let id = object.id.clone();
-    store::save_object(&root, &object).expect("save object");
+    object.sha256 = Some(
+        engr::integrity::sealed_object(&object)
+            .expect("object projection")
+            .seal()
+            .expect("object seal"),
+    );
+    save_raw(&root, &object).expect("save object");
     let payload = Payload {
         action: Action::SectionAdded,
         object: id,
@@ -1514,7 +1566,7 @@ fn an_object_file_must_match_its_embedded_id() {
 
     let object = Object::new(engr::model::new_id(), "mismatched storage key".to_owned())
         .expect("new object");
-    store::write_json(&store::object_path(root, "wrong"), &object).expect("write object");
+    write_raw(&store::object_path(root, "wrong"), &object).expect("write object");
 
     let output = run_engr(root, &["show", "wrong"]);
     assert_eq!(
@@ -1548,20 +1600,31 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
             ..Content::default()
         },
     };
-    let payload_sha256 = payload.sha256().expect("payload hash");
-    store::append_event(
+    // Prepared for real, then appended without the projection: that is exactly
+    // the crash window `show` has to reconcile, and the durable boundary admits
+    // an Event only against the candidate it was prepared as.
+    let prepared = gate::prepare(root, payload).expect("prepare the unprojected change");
+    append_admitted_raw(
         root,
         &Event {
             format: EVENT_FORMAT.to_owned(),
-            version: engr::EVENT_ENVELOPE_VERSION_V0,
+            version: engr::EVENT_ENVELOPE_VERSION,
             event_id: engr::model::new_id(),
-            rev: 2,
+            rev: prepared.candidate.binding.expected_rev + 1,
             time: "2026-08-13T00:00:00Z".to_owned(),
-            payload,
-            provenance: Provenance::confirmed("234567", payload_sha256),
+            payload: prepared.candidate.payload.clone(),
+            provenance: Provenance::Tagged {
+                admission: TaggedAdmission {
+                    kind: engr::semantics::Admission::Human,
+                    confirmation: Some(HumanConfirmation {
+                        challenge: prepared.candidate.challenge.clone(),
+                        candidate_digest: prepared.candidate.candidate_digest.clone(),
+                    }),
+                    rule_review: None,
+                },
+            },
         },
-    )
-    .expect("append unprojected event");
+    );
 
     let lock_path = store::engr_dir(root).join("lock");
     let lock = OpenOptions::new()
@@ -1608,7 +1671,8 @@ fn unsupported_event_versions_are_rejected() {
     let id = event.payload.object.clone();
 
     // Refused on the way in, so nothing writes one...
-    let error = store::append_event(&root, &event).expect_err("this build emits one generation");
+    let error =
+        store::check_appendable(&root, &event).expect_err("this build emits one generation");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(
         !store::events_path(&root, &id).exists(),
@@ -1926,7 +1990,7 @@ fn the_backlog_cli_separates_bad_input_from_missing_and_malformed() {
     let path = engr::backlog::item_path(root, &item);
     let mut stored: Value = store::read_json(&path).expect("item");
     stored["sections"][0]["updated_at"] = Value::String("last tuesday".to_owned());
-    store::write_json(&path, &stored).expect("corrupt the stored item");
+    write_raw(&path, &stored).expect("corrupt the stored item");
     assert_eq!(
         code(&["backlog", "show", &item]),
         Some(engr::EXIT_SCHEMA),
@@ -1972,11 +2036,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     );
     let id = engr::backlog::ids(root).expect("ids").remove(0);
 
-    assert!(
-        run_engr(root, &["backlog", "add", &id, "--text", "second point"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "second point",
+            "--expect",
+            &add_token(root, &id)
+        ]
+    )
+    .status
+    .success());
     assert!(run_engr(
         root,
         &[
@@ -1986,7 +2059,9 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "--section",
             "2",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
@@ -1999,19 +2074,32 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
-            "one point"
+            "one point",
+            "--expect",
+            &expect_token(root, &id, Some(1)),
+            "--expect",
+            &expect_token(root, &id, Some(2))
         ]
     )
     .status
     .success());
-    assert!(
-        run_engr(root, &["backlog", "rename", &id, "--topic", "refresh"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "rename",
+            &id,
+            "--topic",
+            "refresh",
+            "--expect",
+            &expect_token(root, &id, None)
+        ]
+    )
+    .status
+    .success());
 
     let item = engr::backlog::load(root, &id).expect("item");
     assert_eq!(item.topic, "refresh");
@@ -2038,6 +2126,8 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
             "concerns dirty source",
             "--subject-file",
             "session.rs",
+            "--expect",
+            &add_token(root, &id),
         ],
     );
     assert!(
@@ -2065,11 +2155,20 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         remaining, 2,
         "the dirty subject was staged as its own point"
     );
-    assert!(
-        run_engr(root, &["backlog", "consume", &id, "--section", "3"])
-            .status
-            .success()
-    );
+    assert!(run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            "3",
+            "--expect",
+            &expect_token(root, &id, Some(3))
+        ]
+    )
+    .status
+    .success());
     assert_eq!(
         engr::backlog::load(root, &id).expect("item").sections.len(),
         1,
@@ -2078,7 +2177,15 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
     assert!(run_engr(
         root,
-        &["backlog", "consume", &id, "--section", &last.to_string()]
+        &[
+            "backlog",
+            "consume",
+            &id,
+            "--section",
+            &last.to_string(),
+            "--expect",
+            &expect_token(root, &id, Some(last))
+        ]
     )
     .status
     .success());
@@ -2113,6 +2220,37 @@ fn the_protocol_prints_without_a_workspace_and_byte_for_byte() {
     let printed = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(printed, engr::PROTOCOL);
     assert!(printed.starts_with("# engr protocol v0"));
+}
+
+/// The protocol states one persisted order for `backlog subjects[]`, not two.
+///
+/// `## Sets and order` classifies it as a set, gives the shared JCS-element
+/// algorithm, and says current-generation resources are persisted in that order
+/// and refused on the read path in any other — which is what `canonicalize_sets`
+/// and the stored-order check implement. The Backlog section used to close by
+/// saying no persisted sort order was required. Both cannot be normative for the
+/// same array: two answers in one document is worse than either, because each
+/// implementation picks one and they ship different bytes forever.
+#[test]
+fn the_protocol_states_one_persisted_order_for_backlog_subjects() {
+    // Normalized, because the retired sentence wrapped across a line break and
+    // a grep for it in source order silently found nothing.
+    let normalized = engr::PROTOCOL
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !normalized.contains("No persisted sort order is required"),
+        "the superseded Backlog ordering sentence is back in the protocol"
+    );
+    assert!(
+        normalized.contains("backlog subjects[] set"),
+        "backlog subjects[] must still be classified as a set"
+    );
+    assert!(
+        normalized.contains("Current-generation resources are persisted in that order."),
+        "the global persisted-order rule must still be stated"
+    );
 }
 
 /// A workspace with one committed source file, for the surfaces that pin one.
@@ -2724,14 +2862,17 @@ fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
 /// corruption — exactly what a workspace written by any build may hold, since
 /// nothing on the read path normalizes a body.
 fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
-    let mut object = store::load_object(root, id).expect("load");
-    let section = &mut object.sections[0];
-    section.content = bodies
-        .iter()
-        .map(|body| engr::semantics::Supplement::new("code.rs", *body))
-        .collect();
-    section.sha256 = section.recomputed_sha256().expect("hash");
-    store::save_object(root, &object).expect("save");
+    let object = store::load_object(root, id).expect("load");
+    let expected = object.sha256.as_deref().expect("aggregate seal");
+    let resealed = engr::integrity::mutate(&object, expected, |next| {
+        next.sections[0].content = bodies
+            .iter()
+            .map(|body| engr::semantics::Supplement::new("code.rs", *body))
+            .collect();
+        Ok(())
+    })
+    .expect("reseal seeded bodies");
+    save_raw(root, &resealed.object).expect("save");
     assert!(
         run_engr(root, &["verify", id]).status.success(),
         "the seeded section must be valid stored authority"
@@ -2972,7 +3113,7 @@ fn work_is_its_own_namespace_and_every_screen_says_it_is_not_the_record() {
     assert!(empty.status.success());
     let shown = String::from_utf8_lossy(&empty.stdout).to_string();
     assert!(shown.contains("EXECUTION MEMORY"), "{shown}");
-    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("admitted by nobody"), "{shown}");
     assert!(shown.contains("no execution memory"), "{shown}");
 
     let started = run_engr(
@@ -3226,7 +3367,7 @@ fn collections_are_their_own_namespace_and_never_reach_the_record() {
     assert!(empty.status.success());
     let shown = String::from_utf8_lossy(&empty.stdout).to_string();
     assert!(shown.contains("PLANNING"), "{shown}");
-    assert!(shown.contains("confirmed by nobody"), "{shown}");
+    assert!(shown.contains("admitted by nobody"), "{shown}");
     assert!(shown.contains("no collections"), "{shown}");
 
     let made = run_engr(
@@ -3841,7 +3982,8 @@ fn backlog_json_sections_do_not_repeat_a_key() {
         &item.id,
         "a second point",
         Vec::new(),
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section_absent(root, &item.id).expect("observe")),
     )
     .expect("second");
 
@@ -3853,7 +3995,7 @@ fn backlog_json_sections_do_not_repeat_a_key() {
     assert_eq!(parsed.sections.len(), 2);
 }
 
-/// A pending candidate presents the identity it was prepared with.
+/// A pending candidate never presents against a tampered live predecessor.
 ///
 /// The screen names the Object by title, which makes the title part of the
 /// confirmation context — and a live lookup at render time would have left that
@@ -3862,7 +4004,7 @@ fn backlog_json_sections_do_not_repeat_a_key() {
 /// while its payload hash, its integrity hash and `expected_rev` all still
 /// checked out, which is exactly what #20 says must be impossible.
 #[test]
-fn a_pending_candidate_shows_the_title_it_was_prepared_with() {
+fn a_pending_candidate_refuses_a_projection_changed_outside_the_gate() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -3909,22 +4051,28 @@ fn a_pending_candidate_shows_the_title_it_was_prepared_with() {
     let path = store::object_path(root, &id);
     let mut stored: Value = store::read_json(&path).expect("object");
     stored["title"] = Value::String("a record this candidate is not about".into());
-    store::write_json(&path, &stored).expect("rewrite title");
+    write_raw(&path, &stored).expect("rewrite title");
 
-    let after = String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    let after = run_engr(root, &["candidate", &code]);
     assert!(
-        !after.contains("a record this candidate is not about"),
-        "a pending candidate must not present an identity nobody prepared: {after}"
+        after.status.success(),
+        "the sealed candidate can still present its own bound context: {}",
+        String::from_utf8_lossy(&after.stderr)
     );
-    assert!(after.contains("the auth design"), "{after}");
-    assert_eq!(before, after, "the same candidate renders the same screen");
+    let after_text = String::from_utf8_lossy(&after.stdout);
+    assert!(!after_text.contains("a record this candidate is not about"));
+    assert!(after_text.contains("the auth design"));
+    assert_eq!(
+        before, after_text,
+        "the same candidate renders the same screen"
+    );
 
-    // And it is still admissible: the projection changed, the prepared context
-    // did not, so nothing about the candidate's own integrity moved.
+    // Confirmation follows the same trust boundary and cannot launder the edit
+    // by resealing it as part of an otherwise authorized transition.
     let admitted = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
     assert!(
-        admitted.status.success(),
-        "{}",
+        !admitted.status.success(),
+        "a tampered predecessor must refuse confirmation: {}",
         String::from_utf8_lossy(&admitted.stderr)
     );
 }
@@ -3941,6 +4089,8 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
     let root = workspace.path();
     store::init(root).expect("init");
     git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
 
     let target = prepare(root, &["prepare", "--new", "--text", "upstream decision"]);
     confirm(root, &target);
@@ -3962,12 +4112,14 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
     let source = prepare(root, &["prepare", "--new", "--text", "downstream decision"]);
     confirm(root, &source);
     let source = source["object"].as_str().expect("object id").to_owned();
+    git(root, &["add", ".engr"]);
+    git(root, &["commit", "-qm", "record reference target"]);
 
     // The wording changes; the seal beside it does not.
     let path = store::object_path(root, &target);
     let mut stored: Value = store::read_json(&path).expect("object");
     stored["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
-    store::write_json(&path, &stored).expect("rewrite");
+    write_raw(&path, &stored).expect("rewrite");
 
     let reference = format!("{target}:1");
     let refused = run_engr(
@@ -3982,12 +4134,13 @@ fn a_reference_refuses_a_target_that_no_longer_matches_its_own_hash() {
             "So the UI renders integers.",
             "--ref",
             &reference,
+            "text",
         ],
     );
     assert!(!refused.status.success());
     let message = String::from_utf8_lossy(&refused.stderr).to_string();
     assert!(
-        message.contains("changed outside the gate"),
+        message.contains("was sealed as") && message.contains("current contents seal as"),
         "the refusal must name what is actually wrong: {message}"
     );
 }
@@ -4076,8 +4229,15 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
-    engr::work::start(root, &healthy, Some("underway")).expect("work");
-    engr::collection::create(root, "a plan", None, None).expect("collection");
+    engr::work::start(
+        root,
+        &healthy,
+        Some("underway"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("work");
+    engr::collection::create(root, "a plan", None, None, engr::rules::Attempt::FIRST)
+        .expect("collection");
 
     std::fs::write(store::object_path(root, &broken), "not json at all").expect("break it");
 
@@ -4107,14 +4267,15 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
         "the library path fails closed too"
     );
 
-    // A file claiming both spellings of the lifecycle field cannot say which it
-    // means, so loading it is refused rather than serde quietly taking one.
+    // A current resource has one exact member set. A legacy alias appearing
+    // beside it is therefore an unknown extra member, not a second truth to
+    // choose between.
     let mut confused: Value = store::read_json(&store::object_path(root, &healthy)).expect("read");
     confused["status"] = confused["state"].clone();
-    store::write_json(&store::object_path(root, &healthy), &confused).expect("write");
+    write_raw(&store::object_path(root, &healthy), &confused).expect("write");
     let error = engr::ops::effective(root, &healthy).expect_err("two spellings, one truth");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("both legacy status"), "{error}");
+    assert!(error.message.contains("Object members"), "{error}");
 }
 
 /// A workspace at an older version is refused, not reinterpreted.
@@ -4138,16 +4299,16 @@ fn an_older_workspace_is_refused_rather_than_read_under_the_new_rule_semantics()
     )
     .expect("rule");
 
-    // Exactly what a version 1 workspace looks like: intact, well formed, and
-    // written by a build that had never heard of `review:`.
+    // Exactly what a version 2 workspace looks like: intact, well formed, and
+    // one explicit command away from being current.
     let format_path = store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let listed = run_engr(root, &["rules", "ls"]);
     assert_eq!(listed.status.code(), Some(engr::EXIT_SCHEMA));
     let stderr = String::from_utf8_lossy(&listed.stderr).to_string();
     assert!(
-        stderr.contains("version 1") && stderr.contains("engr migrate"),
+        stderr.contains("version 2") && stderr.contains("engr migrate"),
         "the refusal names the version it found and what to do: {stderr}"
     );
     assert!(
@@ -4208,10 +4369,11 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     confirm(root, &created);
     let id = created["object"].as_str().expect("object id").to_owned();
 
-    // Commit while the workspace still says version 1, which is what every
-    // commit made before this change looks like.
+    // Commit a complete predecessor generation, including the retained Event
+    // envelope and legacy Section seal. Changing only format.json would be a
+    // mixed-generation workspace, not a historical snapshot engr may trust.
     let format_path = store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    mark_legacy(root, &id);
     git(root, &["add", "-A", "."]);
     commit_as_test(root, "before the migration");
     let commit = String::from_utf8(
@@ -4227,7 +4389,12 @@ fn a_snapshot_taken_before_the_migration_is_still_readable_after_it() {
     .trim()
     .to_owned();
 
-    run_engr(root, &["migrate"]);
+    let migrated = run_engr(root, &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "migration: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&format_path).expect("format"))
             .expect("json")["version"],
@@ -4332,6 +4499,15 @@ fn governed_backlog(root: &Path, max_attempts: u32) -> String {
 }
 
 /// What `backlog show --json` says to hand back for a given point.
+/// The `expect` value for adding a point: the topic plus the id the add will
+/// receive.
+fn add_token(root: &Path, id: &str) -> String {
+    let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    shown["expect"]["add"].as_str().expect("add").to_owned()
+}
+
 fn expect_token(root: &Path, id: &str, section: Option<u64>) -> String {
     let shown = run_engr(root, &["backlog", "show", id, "--format", "json"]);
     assert!(shown.status.success());
@@ -4565,9 +4741,9 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
     .success());
 }
 
-/// A merge carries one predecessor per point it touches.
+/// A merge carries one predecessor for each of the two points it touches.
 #[test]
-fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
+fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4594,7 +4770,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4612,7 +4788,7 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
             &id,
             "--into",
             "1",
-            "--sections",
+            "--section",
             "2",
             "--text",
             "one point",
@@ -4629,9 +4805,14 @@ fn a_merge_carries_a_predecessor_for_every_point_it_touches() {
     assert_eq!(stored.section(1).expect("§1").text, "one point");
 }
 
-/// With no rule governing backlog there is no review, so nothing to anchor.
+/// Stale-write protection does not depend on a rule being configured.
+///
+/// A rule decides whether there is a *review*; it does not decide whether
+/// somebody else's write can land between a caller's reading and their writing.
+/// With the two conflated, the ungoverned workspace — the one nobody has
+/// thought about concurrency in — was the one with no protection at all.
 #[test]
-fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
+fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -4643,7 +4824,34 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
+    assert!(
+        engr::rules::applicable(root, engr::rules::Domain::Backlog)
+            .expect("rules")
+            .is_empty(),
+        "nothing governs backlog here"
+    );
 
+    let bare = run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &item.id,
+            "--section",
+            "1",
+            "--text",
+            "reworded",
+        ],
+    );
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("--expect"));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "an unresolved point",
+        "the refused write left the newer wording alone"
+    );
+
+    let current = expect_token(root, &item.id, Some(1));
     assert!(run_engr(
         root,
         &[
@@ -4653,20 +4861,23 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
             "--section",
             "1",
             "--text",
-            "reworded"
+            "reworded",
+            "--expect",
+            &current
         ]
     )
     .status
     .success());
 
-    // And one may still be given, in which case it is held to.
+    // And a predecessor that has moved is held to, with no rule in sight.
     let stale = expect_token(root, &item.id, Some(1));
     engr::backlog::revise_section(
         root,
         &item.id,
         1,
         "moved",
-        &engr::backlog::Prepared::first(),
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(root, &item.id, 1).expect("observe")),
     )
     .expect("concurrent");
     let refused = run_engr(
@@ -4684,6 +4895,19 @@ fn an_ungoverned_backlog_mutation_needs_no_predecessor() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_STALE));
+    assert_eq!(
+        engr::backlog::load(root, &item.id).expect("load").sections[0].text,
+        "moved",
+        "the stale write left the newer wording untouched"
+    );
+
+    // Destructive consumption is held to the same rule.
+    let bare = run_engr(root, &["backlog", "consume", &item.id, "--section", "1"]);
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        !engr::backlog::ids(root).expect("ids").is_empty(),
+        "an unresolved point is not consumed on a reading nobody bound"
+    );
 }
 
 /// A rule about unresolved points must not make unresolved points uncreatable.
@@ -4873,7 +5097,7 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
 
     // Put the workspace back a generation, leaving the candidate where it is.
     let format_path = engr::store::engr_dir(root).join("format.json");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":1}"#).expect("format");
+    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#).expect("format");
 
     let migrated = run_engr(root, &["migrate"]);
     assert!(
@@ -4896,5 +5120,87 @@ fn migration_neither_blocks_on_a_pending_candidate_nor_disposes_of_it() {
         confirmed.status.success(),
         "{}",
         String::from_utf8_lossy(&confirmed.stderr)
+    );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// Put an Object on disk directly, for a fixture that needs one there.
+fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
+    write_raw(&engr::store::object_path(root, &object.id), object)
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
+}
+
+/// A current Object with a null aggregate seal is refused, not called healthy.
+///
+/// `Object.sha256` is an `Option` only so historical v1/v2 material still
+/// decodes. The current read boundary checked that the member was *present*,
+/// which `"sha256": null` satisfies — and then every trust diagnostic asks
+/// `sha256.as_deref().is_some_and(...)`, where `None` answers false. Give it an
+/// Object with no Sections and there is nothing else for a report to fail on,
+/// so unsealed authority came back sound from both surfaces.
+///
+/// No writer can produce this: `save_object` requires the seal. A shape only a
+/// hand edit reaches, which then reads as sound, is exactly the shape to refuse.
+#[test]
+fn a_current_object_without_an_aggregate_seal_is_not_reported_healthy() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "unsealed authority"]);
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+
+    let path = store::object_path(root, id);
+    let mut stored: Value = store::read_json(&path).expect("stored object");
+    assert!(
+        stored["sections"].as_array().expect("sections").is_empty(),
+        "the fixture needs an Object whose aggregate is all its integrity"
+    );
+    assert!(
+        ops::verify(root, id).expect("verify").passed(),
+        "sound first"
+    );
+    stored["sha256"] = Value::Null;
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&stored, "unsealed object").expect("canonical"),
+    )
+    .expect("plant the null seal");
+
+    store::load_object(root, id).expect_err("a current Object carries an aggregate seal");
+    let verified = ops::verify(root, id);
+    assert!(
+        verified.as_ref().err().is_some() || !verified.expect("report").passed(),
+        "verification must not call unsealed authority healthy"
+    );
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        !shown.status.success(),
+        "show must not exit 0 on unsealed authority"
     );
 }

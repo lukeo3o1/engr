@@ -15,20 +15,10 @@
 //! turns Agent-admitted state into Human-authoritative state, and a migration
 //! that reseals a resource has not confirmed anything about it.
 //!
-//! # Nothing here is durable yet
-//!
-//! These are the **Phase-3** projections. The seal a Section carries on disk
-//! today covers its content only — not `id`, not `admission`, not `admitted_at`
-//! — and no Object carries an aggregate seal at all. So nothing in this crate
-//! calls any of it yet, and no path writes what it produces: that is #13's
-//! in-progress write boundary.
-//!
-//! It is also why [`check_section_seal`] takes the expected digest as an
-//! argument rather than reading `Section.sha256` itself. A verifier that read
-//! the stored field would be one call site away from checking a v3 projection
-//! against a v2 seal and reporting every existing Section as corrupt. The one
-//! function that does read stored seals is [`check_object_integrity`], because
-//! that is the question it exists to ask, and it says so where it is defined.
+//! Current workspaces persist these v3 projections. [`check_section_seal`]
+//! still takes the expected digest explicitly because migration also verifies
+//! predecessor seals, whose projection is different; the stored-current entry
+//! point is [`check_stored_object_integrity`].
 
 use crate::model::{Object, Ref, Section};
 use crate::proof::{canonical_bytes, canonical_set, sha256_of};
@@ -249,16 +239,25 @@ pub fn check_object_seal(object: &Object, expected: &str) -> Result<()> {
 /// caller that checked only the aggregate would accept an Object whose Section
 /// contents and Section seal were rewritten together.
 ///
-/// The Section seals are read from the Sections. That is correct **only** for a
-/// workspace whose Sections carry the Phase-3 seal, which no workspace does
-/// yet — see the module note. Nothing calls this; it is the verifier the
-/// migration and the trust-sensitive paths will share, written once so there is
-/// no second one to disagree with it.
+/// The Section seals are read from the Sections, so this function is for the
+/// current v3 projection. Migration verifies predecessor seals under their own
+/// representation before resealing, then uses this same verifier on the result.
 pub fn check_object_integrity(object: &Object, expected: &str) -> Result<()> {
     for section in &object.sections {
         check_section_seal(section, &section.sha256)?;
     }
     check_object_seal(object, expected)
+}
+
+/// Verify a current Object using the aggregate seal it stores.
+pub fn check_stored_object_integrity(object: &Object) -> Result<()> {
+    let expected = object.sha256.as_deref().ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!("object {} has no aggregate integrity seal", object.id),
+        )
+    })?;
+    check_object_integrity(object, expected)
 }
 
 /// An Object with fresh seals, and the aggregate value that goes with it.
@@ -282,7 +281,14 @@ fn seal_in_place(mut object: Object) -> Result<Resealed> {
         section.sha256 = sealed_section(section)?.seal()?;
     }
     let seal = sealed_object(&object)?.seal()?;
+    object.sha256 = Some(seal.clone());
     Ok(Resealed { object, seal })
+}
+
+/// Produce the first v3 seals after the caller has verified the predecessor
+/// under its historical contract and proved the representation conversion.
+pub(crate) fn seal_migrated(object: Object) -> Result<Resealed> {
+    seal_in_place(object)
 }
 
 /// The mutation sequence of #35 §12, as one call so the order cannot be got

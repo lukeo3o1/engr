@@ -9,11 +9,12 @@
 //! What keeps that safe is that Work owns no authority. It is a sidecar on an
 //! Object, not a resource: there is no `engr:work:` reference, nothing points at
 //! it, and finishing every item it lists changes nothing about what the Object
-//! says. Stable conclusions reach the record the only way anything does, through
-//! `prepare` and a human. Work is what the next agent reads first and trusts
-//! least.
+//! says. Stable conclusions reach the record through the applicable Human or
+//! reviewed Agent admission path. Work is what the next agent reads first and
+//! trusts least.
 
 use crate::reference::{canonical_embedded, EngrTarget, ResourceKind};
+use crate::rules::Attempt;
 use crate::{
     ensure, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -214,6 +215,11 @@ impl Work {
 
     fn take_id(&mut self) -> Result<u64> {
         let id = self.next_item_id;
+        ensure!(
+            id < crate::proof::MAX_SAFE_INTEGER,
+            EXIT_USAGE,
+            "this sidecar has no remaining item ids in the shared safe-integer domain"
+        );
         self.next_item_id = self
             .next_item_id
             .checked_add(1)
@@ -227,6 +233,14 @@ impl Work {
     /// edit, and these files are meant to be read and diffed like any other
     /// tracked file.
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("work: {error}")))?;
+        crate::proof::stored_within_safe_integers(&value, "work")?;
+        ensure!(
+            self.next_item_id >= 1,
+            EXIT_SCHEMA,
+            "next_item_id must be positive"
+        );
         // Every fault here is a fault in *stored* data, so they all read as
         // schema rather than usage. A caller who typed something too long is
         // refused earlier, by the same rule with the other exit code — a file
@@ -270,6 +284,7 @@ impl Work {
         }
         let mut seen = std::collections::BTreeSet::new();
         for item in &self.items {
+            ensure!(item.id >= 1, EXIT_SCHEMA, "work item ids must be positive");
             bounded(EXIT_SCHEMA, "a work item", &item.text, ITEM_TEXT_MAX)?;
             if let Some(result) = &item.result {
                 bounded(EXIT_SCHEMA, "a work item result", result, ITEM_RESULT_MAX)?;
@@ -394,8 +409,11 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
         EXIT_NOT_FOUND,
         "no work recorded for object {object}"
     );
-    let work: Work = store::read_json(&path)?;
+    let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_work(&path, &work)?;
+    }
     // The owner invariant, held on the way *out* as well as on the way in. A
     // sidecar names its Object in its filename, so a copied file can name one
     // that never existed — and a check that only runs on the write path would
@@ -428,6 +446,63 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     Ok(work)
 }
 
+/// Decode predecessor bytes already captured by coordinated migration.
+pub(crate) fn decode_for_migration(path: &Path, object: &str, text: &str) -> Result<Work> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    let work: Work = serde_json::from_value(value)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    work.validate()?;
+    // The filename is the sidecar owner. `Work` does not duplicate that id,
+    // so the caller supplies it and validates ownership against its plan.
+    crate::model::validate_object_id(object).map_err(|error| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{}: work sidecar owner {:?} is invalid: {}",
+                path.display(),
+                object,
+                error.message
+            ),
+        )
+    })?;
+    Ok(work)
+}
+
+/// Validate a staged Work artifact as a current resource before publication.
+pub(crate) fn decode_current_staged(path: &Path, object: &str, text: &str) -> Result<Work> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    store::check_canonical_bytes(path, text, &value)?;
+    let work = decode_for_migration(path, object, text)?;
+    store::check_current_resource_shape(path, text, &work)?;
+    check_canonical_work(path, &work)?;
+    Ok(work)
+}
+
+/// The current writer's one representation for each Work collection.
+pub(crate) fn canonicalize_work(work: &mut Work) -> Result<()> {
+    crate::proof::canonical_set(&mut work.dependencies, "work dependency")?;
+    work.items.sort_by_key(|item| item.id);
+    for item in &mut work.items {
+        crate::proof::canonical_set(&mut item.commits, "work item commit")?;
+    }
+    Ok(())
+}
+
+fn check_canonical_work(path: &Path, work: &Work) -> Result<()> {
+    let mut canonical = work.clone();
+    canonicalize_work(&mut canonical)?;
+    ensure!(
+        canonical == *work,
+        EXIT_SCHEMA,
+        "{}: Work collections are stored in their canonical order",
+        path.display()
+    );
+    Ok(())
+}
+
 /// The sidecar if there is one, and no complaint if there is not.
 ///
 /// Absence means only that engr holds no operational memory for the Object —
@@ -441,13 +516,21 @@ pub fn find(root: &Path, object: &str) -> Result<Option<Work>> {
 
 fn save(root: &Path, object: &str, work: &Work) -> Result<()> {
     work.validate()?;
-    store::write_json(&path(root, object), work)
+    let mut work = work.clone();
+    canonicalize_work(&mut work)?;
+    store::write_json(&path(root, object), &work)
 }
 
-fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+/// Every Work mutation, under the lock, past the applicable Rule set.
+///
+/// The Rule check is inside the lock and before the read, so what it was
+/// established against is what gets written. Work has no prepared candidate to
+/// bind, so the attempt is the whole of what a caller attests.
+fn locked<T>(root: &Path, attempt: Attempt, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
         store::require_current(root)?;
+        crate::rules::direct(root, crate::rules::Domain::Work, attempt)?;
         body()
     })
 }
@@ -494,12 +577,16 @@ fn require_target(root: &Path, target: &str) -> Result<()> {
 
 /// Read, change, stamp, write — under the lock, with the invariants checked on
 /// both sides of the change.
-fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>) -> Result<T> {
-    locked(root, || {
+fn edit<T>(
+    root: &Path,
+    object: &str,
+    attempt: Attempt,
+    body: impl FnOnce(&mut Work) -> Result<T>,
+) -> Result<T> {
+    locked(root, attempt, || {
         require_object(root, object)?;
         let mut work = load(root, object)?;
         let outcome = body(&mut work)?;
-        work.items.sort_by_key(|item| item.id);
         work.updated_at = now();
         save(root, object, &work)?;
         Ok(outcome)
@@ -507,11 +594,11 @@ fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>)
 }
 
 /// Begin keeping execution memory for an Object.
-pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+pub fn start(root: &Path, object: &str, summary: Option<&str>, attempt: Attempt) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    locked(root, || {
+    locked(root, attempt, || {
         require_object(root, object)?;
         ensure!(
             !path(root, object).exists(),
@@ -544,8 +631,8 @@ pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
 /// the Skill. Whether human direction should have a mechanical representation at
 /// all is a real question and an open one; see `## What v0 does not solve`.
 /// [`Removed`] reports what was discarded so a caller can say so.
-pub fn remove(root: &Path, object: &str) -> Result<Removed> {
-    locked(root, || {
+pub fn remove(root: &Path, object: &str, attempt: Attempt) -> Result<Removed> {
+    locked(root, attempt, || {
         let work = load(root, object)?;
         let path = path(root, object);
         std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
@@ -570,19 +657,24 @@ pub struct Removed {
 /// rule an agent has to follow is about who decided, not about which value is
 /// stored. engr cannot check that; the Skill is where it is stated, and the
 /// refusal in [`remove`] is where it bites.
-pub fn set_state(root: &Path, object: &str, state: State) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_state(root: &Path, object: &str, state: State, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.state = state;
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_summary(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+pub fn set_summary(
+    root: &Path,
+    object: &str,
+    summary: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.summary = summary.map(str::to_owned);
         Ok(())
     })?;
@@ -594,12 +686,13 @@ pub fn add_dependency(
     object: &str,
     target: &str,
     reason: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a dependency reason", reason, REASON_MAX)?;
     }
     check_target("a dependency target", target)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         // Inside the lock, because the check is what defines admission. It used
         // to live only in the CLI, so what a sidecar could name depended on
         // which door it came through — the same split that was fixed for
@@ -626,8 +719,13 @@ pub fn add_dependency(
     load(root, object)
 }
 
-pub fn remove_dependency(root: &Path, object: &str, target: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_dependency(
+    root: &Path,
+    object: &str,
+    target: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         let before = work.dependencies.len();
         work.dependencies
             .retain(|held| held.target.reference != target);
@@ -646,6 +744,7 @@ pub fn add_blocker(
     object: &str,
     reason: Option<&str>,
     target: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a blocker reason", reason, REASON_MAX)?;
@@ -653,7 +752,7 @@ pub fn add_blocker(
     if let Some(target) = target {
         check_target("a blocker target", target)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         if let Some(target) = target {
             require_target(root, target)?;
         }
@@ -668,8 +767,8 @@ pub fn add_blocker(
 
 /// Blockers are addressed by position, because they have no ids — they are
 /// conditions rather than things, and a condition that cleared is simply gone.
-pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_blocker(root: &Path, object: &str, index: usize, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         ensure!(
             index < work.blockers.len(),
             EXIT_NOT_FOUND,
@@ -682,9 +781,9 @@ pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
     load(root, object)
 }
 
-pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
+pub fn add_item(root: &Path, object: &str, text: &str, attempt: Attempt) -> Result<u64> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         let id = work.take_id()?;
         work.items.push(Item {
             id,
@@ -697,36 +796,60 @@ pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
     })
 }
 
-pub fn set_item_state(root: &Path, object: &str, id: u64, state: ItemState) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_item_state(
+    root: &Path,
+    object: &str,
+    id: u64,
+    state: ItemState,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.state = state;
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_item_text(root: &Path, object: &str, id: u64, text: &str) -> Result<Work> {
+pub fn set_item_text(
+    root: &Path,
+    object: &str,
+    id: u64,
+    text: &str,
+    attempt: Attempt,
+) -> Result<Work> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.text = text.to_owned();
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn set_item_result(root: &Path, object: &str, id: u64, result: Option<&str>) -> Result<Work> {
+pub fn set_item_result(
+    root: &Path,
+    object: &str,
+    id: u64,
+    result: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(result) = result {
         check_text("a work item result", result, ITEM_RESULT_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, object, attempt, |work| {
         work.item_mut(id)?.result = result.map(str::to_owned);
         Ok(())
     })?;
     load(root, object)
 }
 
-pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn add_item_commit(
+    root: &Path,
+    object: &str,
+    id: u64,
+    commit: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         let item = work.item_mut(id)?;
         ensure!(
             !item.commits.iter().any(|held| held == commit),
@@ -741,8 +864,8 @@ pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Resu
 
 /// Prune one item. Its id is not reclaimed, and nothing is archived: git holds
 /// what the sidecar used to say.
-pub fn remove_item(root: &Path, object: &str, id: u64) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_item(root: &Path, object: &str, id: u64, attempt: Attempt) -> Result<Work> {
+    edit(root, object, attempt, |work| {
         work.item(id)?;
         work.items.retain(|item| item.id != id);
         Ok(())

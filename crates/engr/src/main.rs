@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "engr",
     version = engr::IMPLEMENTATION_VERSION,
-    about = "Engineering records whose every word a human confirmed"
+    about = "Engineering records with explicit Human or reviewed Agent authority"
 )]
 struct Cli {
     /// Workspace root. Defaults to the nearest ancestor containing .engr
@@ -24,12 +24,12 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
-    /// Explicitly upgrade a recognized legacy v0 workspace
+    /// Explicitly upgrade a recognized predecessor workspace to v3
     Migrate,
     /// Print the protocol this build implements
     Protocol,
-    /// Put a change up for a human to confirm
-    Prepare(Prepare),
+    /// Prepare a Human change, or admit a reviewed Agent change
+    Prepare(Box<Prepare>),
     /// List candidates awaiting confirmation, or show one in full
     Candidate {
         /// Challenge code. Omit to list everything pending
@@ -56,14 +56,36 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Recompute section hashes
+    /// Verify Object and Section integrity plus dependencies
     Verify { object: Option<String> },
+    /// Propose restoring an Object whose stored integrity has failed
+    ///
+    /// Prepares a Human candidate that restores exactly what admitted history
+    /// proves. It carries no changes of its own: confirm it, then make any
+    /// wanted change the normal way.
+    Repair {
+        object: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
-    #[command(subcommand)]
-    Work(Work),
+    Work {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs work
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: Work,
+    },
     /// Planning metadata: what is grouped together. Nothing here is confirmed
-    #[command(subcommand)]
-    Collection(CollectionCommand),
+    Collection {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs collection
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: CollectionCommand,
+    },
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
@@ -118,7 +140,7 @@ impl DomainArg {
 
 /// Backlog edits do not go through the gate, and must not look as though they
 /// might: a separate namespace keeps `ls`, `show` and `verify` meaning exactly
-/// what they meant before, which is confirmed record and nothing else.
+/// what they meant before, which is admitted record and nothing else.
 #[derive(Subcommand)]
 enum Backlog {
     /// Start a topic with its first unresolved point
@@ -187,9 +209,9 @@ enum Backlog {
         /// The point that survives, keeping its id and taking the merged wording
         #[arg(long = "into", value_name = "SECTION")]
         into: u64,
-        /// The points merged into it. They are removed, and their ids not reused
-        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-        sections: Vec<u64>,
+        /// The point merged into it. It is removed, and its id not reused
+        #[arg(long, value_name = "SECTION")]
+        section: u64,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
@@ -272,22 +294,19 @@ impl ReviewArg {
 
     fn prepared(
         &self,
-        governed: bool,
         binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
     ) -> Result<backlog::Prepared> {
         let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
-        if self.expect.is_empty() {
-            // Only where a review was actually required. With no applicable rule
-            // there is no review for a predecessor to anchor, and demanding one
-            // would be ceremony; with one, an unanchored mutation is a review of
-            // something nobody can show was what got applied.
-            ensure!(
-                !governed,
-                engr::EXIT_USAGE,
-                "a project rule governs backlog, so this needs --expect: run `engr backlog show <item> --json`, review what you read, and pass its expect value back"
-            );
-            return Ok(prepared);
-        }
+        // Every existing-state mutation, whether or not a Rule governs backlog.
+        // A rule decides whether there is a *review* to anchor; it does not
+        // decide whether someone else's write can land between your reading and
+        // yours. Making this conditional meant stale-write protection was
+        // switched off in exactly the workspaces nobody had configured.
+        ensure!(
+            !self.expect.is_empty(),
+            engr::EXIT_USAGE,
+            "this needs --expect: run `engr backlog show <item> --json`, read the point, and pass its expect value back"
+        );
         let bound = binds()?;
         let mut wanted = Vec::new();
         for precondition in &bound {
@@ -473,6 +492,24 @@ enum RoleArg {
     AcceptanceCriterion,
 }
 
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum ReviewResultArg {
+    Passed,
+    Failed,
+    Exhausted,
+}
+
+impl ReviewResultArg {
+    fn model(self) -> engr::proof::ReviewResult {
+        match self {
+            Self::Passed => engr::proof::ReviewResult::Passed,
+            Self::Failed => engr::proof::ReviewResult::Failed,
+            Self::Exhausted => engr::proof::ReviewResult::Exhausted,
+        }
+    }
+}
+
 impl RoleArg {
     fn model(self) -> semantics::Role {
         match self {
@@ -503,9 +540,17 @@ struct Prepare {
     /// Replace the wording of a section
     #[arg(long, value_name = "SECTION")]
     revise: Option<u64>,
-    /// Consolidate sections into one
-    #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-    merge: Option<Vec<u64>>,
+    /// Consolidate sections into this surviving destination
+    #[arg(long, value_name = "DESTINATION")]
+    merge: Option<u64>,
+    /// Sections consumed by --merge
+    #[arg(
+        long,
+        value_name = "SECTIONS",
+        value_delimiter = ',',
+        requires = "merge"
+    )]
+    sources: Vec<u64>,
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
@@ -579,17 +624,64 @@ struct Prepare {
     /// Record that this wording has no repository basis
     #[arg(long, conflicts_with = "based_on")]
     no_based_on: bool,
-    /// A section this wording depends on, as OBJECT:SECTION
-    #[arg(long = "ref", value_name = "OBJECT:SECTION")]
+    /// A section this wording depends on, followed by comma-separated semantic fields
+    #[arg(long = "ref", value_names = ["OBJECT:SECTION", "FIELDS"], num_args = 2)]
     references: Vec<String>,
     /// Retry a proposal a size threshold already refused once
     #[arg(long)]
     oversize: bool,
+    /// Admit directly through Agent Rule Review instead of minting a Human challenge
+    #[arg(long)]
+    agent: bool,
+    /// ReviewDigest surfaced by the first governed attempt
+    #[arg(long = "review", value_name = "DIGEST")]
+    review_digest: Option<String>,
+    /// Rule id actually reviewed. Repeat for the complete surfaced set
+    #[arg(long = "reviewed-rule", value_name = "RULE")]
+    reviewed_rules: Vec<String>,
+    /// Which attempt of the continuous review sequence this is
+    #[arg(long = "review-attempt", default_value_t = 1, value_name = "N")]
+    review_attempt: u32,
+    /// Agent-attested outcome of reviewing the exact mutation
+    #[arg(long = "review-result", value_enum, value_name = "RESULT")]
+    review_result: Option<ReviewResultArg>,
+    /// Exact explanation shown when a Human is asked to override
+    #[arg(long = "review-explanation", value_name = "TEXT")]
+    review_explanation: Option<String>,
     #[arg(long)]
     json: bool,
 }
 
 impl Prepare {
+    fn review(&self) -> Result<Option<gate::ReviewAttestation>> {
+        let any = self.review_digest.is_some()
+            || !self.reviewed_rules.is_empty()
+            || self.review_result.is_some()
+            || self.review_explanation.is_some();
+        if !any {
+            return Ok(None);
+        }
+        let review_digest = self.review_digest.clone().ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review <DIGEST>",
+            )
+        })?;
+        let result = self.review_result.ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review-result passed|failed|exhausted",
+            )
+        })?;
+        Ok(Some(gate::ReviewAttestation {
+            review_digest,
+            reviewed_rules: self.reviewed_rules.clone(),
+            attempt: self.review_attempt,
+            result: result.model(),
+            explanation: self.review_explanation.clone(),
+        }))
+    }
+
     /// The supplementary entries, in the order the caller wrote them.
     ///
     /// Inline and from-file entries are two spellings of one list, and clap
@@ -746,6 +838,54 @@ fn main() {
     }
 }
 
+/// Propose restoring an Object whose stored integrity has failed.
+///
+/// The recovery half of #35 §10, and the reason it needs a command of its own:
+/// ordinary mutation is refused on integrity-invalid authority, so without this
+/// the only way back was editing `.engr` by hand — which is not an authority
+/// path, and is the behaviour the refusal exists to discourage.
+///
+/// It proposes only what admitted history proves. Anything worth keeping from
+/// the invalid bytes is a separate, ordinary change made after the repair, so
+/// the record shows both acts instead of one that quietly did both.
+fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
+    store::require_current(root)?;
+    let prepared = gate::prepare_repair(root, object)?;
+    if json {
+        // Both sides, not just the candidate. The candidate binds only what is
+        // being restored — the invalid bytes are deliberately outside it and
+        // outside its digest — so a reader given the candidate alone cannot see
+        // what the repair discards. The comparison is reported beside it, as
+        // diagnostic material rather than as anything being admitted.
+        let document = serde_json::json!({
+            "candidate": prepared.candidate,
+            "repair": {
+                "stored_verifies": store::load_object(root, object)
+                    .ok()
+                    .is_some_and(|stored| {
+                        engr::integrity::check_stored_object_integrity(&stored).is_ok()
+                    }),
+                "restores": engr::ops::provable(root, object).ok(),
+                "stored": store::load_object(root, object).ok(),
+            }
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&document)
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    print!(
+        "{}",
+        render_candidate(root, &prepared.candidate, &prepared.notes)
+    );
+    for code in &prepared.superseded {
+        println!("(candidate {code} was superseded by this one)");
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<()> {
     // Before the workspace is located, like `init`: the protocol is what you
     // read to decide whether to adopt engr at all, so needing an adopted
@@ -776,7 +916,7 @@ fn run(cli: Cli) -> Result<()> {
 
     let root = store::find_root(cli.root.as_deref())?;
     if matches!(cli.command, Command::Migrate) {
-        store::with_lock(&root, || store::migrate(&root))?;
+        store::migrate(&root)?;
         println!(
             "migrated {} to workspace version {}",
             store::engr_dir(&root).display(),
@@ -784,13 +924,13 @@ fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    let workspace_format = store::validate_format(&root)?;
+    store::validate_format(&root)?;
 
     match cli.command {
         Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
         Command::Prepare(command) => {
             store::require_current(&root)?;
-            prepare(&root, command)
+            prepare(&root, *command)
         }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
         Command::Confirm { response } => {
@@ -817,9 +957,20 @@ fn run(cli: Cli) -> Result<()> {
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
-            let object = if workspace_format == store::WorkspaceFormat::Current {
-                store::with_lock(&root, || ops::reconcile(&root, &id))?
+            let object = if store::validate_format(&root)? == store::WorkspaceFormat::Current {
+                let stored = store::load_object(&root, &id)?;
+                if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
+                    // Reconciliation is a write and shares the same lock as
+                    // admission. The integrity check is repeated inside the
+                    // lock by `reconcile`; this first check only decides
+                    // whether show may repair or must remain diagnostic-only.
+                    ops::reconcile(&root, &id)?
+                } else {
+                    ops::effective(&root, &id)?
+                }
             } else {
+                // Explicit migration is the only write allowed to a
+                // predecessor generation, including creation of its lock file.
                 ops::effective(&root, &id)?
             };
             if format == Format::Json {
@@ -833,26 +984,35 @@ fn run(cli: Cli) -> Result<()> {
                 .iter()
                 .filter(|(_, status)| status.forged())
                 .count();
-            if forged > 0 {
+            // Same rule as `verify`: in a current workspace a missing aggregate
+            // seal is a failure, not an absence of anything to check.
+            let object_forged = match object.sha256.as_deref() {
+                Some(seal) => engr::integrity::check_object_integrity(&object, seal).is_err(),
+                None => {
+                    engr::store::validate_format(&root)? == engr::store::WorkspaceFormat::Current
+                }
+            };
+            if forged > 0 || object_forged {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    format!("{forged} sections are not what was confirmed; run: engr verify"),
+                    format!(
+                        "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
+                    ),
                 ));
             }
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
+        Command::Repair { object, json } => repair(&root, &object, json),
         Command::Backlog(command) => backlog_command(&root, command),
         Command::Rules(command) => rules_command(&root, command),
-        Command::Work(command) => work_command(&root, command),
-        Command::Collection(command) => collection_command(&root, command),
+        Command::Work { attempt, command } => {
+            work_command(&root, command, rules::Attempt::new(attempt)?)
+        }
+        Command::Collection { attempt, command } => {
+            collection_command(&root, command, rules::Attempt::new(attempt)?)
+        }
     }
-}
-
-/// Whether a project rule governs backlog here, and so whether a review was
-/// required at all.
-fn governed(root: &Path) -> Result<bool> {
-    Ok(!rules::applicable(root, rules::Domain::Backlog)?.is_empty())
 }
 
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
@@ -904,9 +1064,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
-                Ok(vec![backlog::Precondition::topic(root, &id)?])
-            })?;
+            let prepared =
+                review.prepared(|| Ok(vec![backlog::Precondition::topic(root, &id)?]))?;
             let item = backlog::rename(root, &id, &topic, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
@@ -923,9 +1082,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &id,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(governed(root)?, || {
-                    Ok(vec![backlog::Precondition::section_absent(root, &id)?])
-                })?,
+                &review.prepared(|| Ok(vec![backlog::Precondition::section_absent(root, &id)?]))?,
             )?;
             println!("added §{section}");
             Ok(())
@@ -937,9 +1094,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
             Ok(())
@@ -953,9 +1109,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            let prepared = review.prepared(governed(root)?, || {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
             Ok(())
@@ -963,7 +1118,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
         Backlog::Merge {
             item,
             into,
-            sections,
+            section,
             text,
             subjects,
             review,
@@ -973,23 +1128,17 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 root,
                 &id,
                 into,
-                &sections,
+                section,
                 &text.read()?,
                 subjects.build(root)?,
-                &review.prepared(governed(root)?, || {
-                    let mut bound = vec![backlog::Precondition::section(root, &id, into)?];
-                    for source in &sections {
-                        bound.push(backlog::Precondition::section(root, &id, *source)?);
-                    }
-                    Ok(bound)
+                &review.prepared(|| {
+                    Ok(vec![
+                        backlog::Precondition::section(root, &id, into)?,
+                        backlog::Precondition::section(root, &id, section)?,
+                    ])
                 })?,
             )?;
-            let absorbed = sections
-                .iter()
-                .map(|section| format!("§{section}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("merged {absorbed} into §{into}");
+            println!("merged §{section} into §{into}");
             Ok(())
         }
         Backlog::Produced {
@@ -1000,9 +1149,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             let outcome = backlog::Produced::object(
                 backlog::EngrTarget::new(target.clone()).reference.clone(),
             );
@@ -1025,9 +1173,8 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let prepared = review.prepared(governed(root)?, || {
-                Ok(vec![backlog::Precondition::section(root, &id, section)?])
-            })?;
+            let prepared = review
+                .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             if backlog::consume_section(root, &id, section, &prepared)? {
                 println!(
                     "consumed §{section}, and the topic with it — nothing else was unresolved"
@@ -1049,9 +1196,22 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         Action::SectionAdded
     } else if let Some(section) = command.revise {
         Action::SectionRevised { section }
-    } else if let Some(absorbs) = command.merge.clone() {
+    } else if let Some(destination) = command.merge {
+        let mut sources = command.sources.clone();
+        sources.sort_unstable();
+        for pair in sources.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--sources names each consumed Section once",
+                ));
+            }
+        }
         Action::SectionMerged {
-            merge: Merge::Absorbing { absorbs },
+            merge: Merge::Into {
+                destination,
+                sources,
+            },
         }
     } else if let Some(section) = command.delete {
         Action::SectionDeleted { section }
@@ -1185,8 +1345,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
 
     let mut references = Vec::new();
-    for spec in &command.references {
-        references.push(parse_ref(root, spec)?);
+    for pair in command.references.chunks(2) {
+        let [spec, fields] = pair else {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--ref takes an Object section and a comma-separated field list",
+            ));
+        };
+        references.push(parse_ref(root, spec, fields)?);
     }
     check_unique_arguments(&references, "--ref")?;
     if !action.carries_content() && command.no_based_on {
@@ -1234,10 +1400,43 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         becomes,
         content,
     };
-    let prepared = if command.oversize {
-        gate::prepare_oversize(root, payload)?
+    let review = command.review()?;
+    if command.agent {
+        ensure!(
+            !command.oversize,
+            EXIT_USAGE,
+            "--oversize is a Human candidate exception; an Agent admission cannot claim it"
+        );
+        let admitted = gate::admit_agent(root, payload, review)?;
+        if command.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "event": admitted.event,
+                    "object": admitted.object,
+                }))
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+            );
+        } else {
+            println!(
+                "ADMITTED   {}  {}  rev {}  agent",
+                shorten(&admitted.object.id, view::width(root)),
+                admitted.event.payload.action.label(),
+                admitted.event.rev
+            );
+            warn_uncommitted(root, &admitted.object.id);
+        }
+        return Ok(());
+    }
+    let allowance = if command.oversize {
+        gate::Allowance::Oversize
     } else {
-        gate::prepare(root, payload)?
+        gate::Allowance::Normal
+    };
+    let prepared = match review {
+        Some(review) => gate::prepare_reviewed(root, payload, allowance, review)?,
+        None if command.oversize => gate::prepare_oversize(root, payload)?,
+        None => gate::prepare(root, payload)?,
     };
 
     if command.json {
@@ -1367,31 +1566,11 @@ fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<Stri
     backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
-/// The content identity to pin, recomputed from what the target actually says.
-///
-/// Not `section.sha256`. That value is the target's confirmed integrity seal —
-/// a claim about what was admitted — and copying a claim is not the same as
-/// checking it. A section rewritten outside the gate keeps its old seal, so a
-/// ref built from the seal would pin a hash the current wording does not
-/// produce, and the pin would look like agreement to text nobody confirmed.
-///
-/// Recomputing and then refusing the mismatch keeps the two roles apart:
-/// `section.sha256` says what was confirmed, `refs[].sha256` says what this
-/// section was actually written against, and they are only allowed to be equal.
-fn pin_target(target: &engr::model::Section, object: &str, section: u64) -> Result<String> {
-    let actual = target.recomputed_sha256()?;
-    if actual != target.sha256 {
-        return Err(Error::new(
-            engr::EXIT_INVARIANT,
-            format!(
-                "{object} §{section} does not match its own confirmed hash; its wording was changed outside the gate, so it cannot be referenced until that is resolved"
-            ),
-        ));
-    }
-    Ok(actual)
-}
-
-fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+fn parse_ref(root: &Path, spec: &str, field_names: &str) -> Result<Ref> {
+    let fields = field_names
+        .split(',')
+        .map(engr::dependency::SemanticField::parse)
+        .collect::<Result<Vec<_>>>()?;
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
             .map_err(|error| malformed_argument("--ref", spec, error))?;
@@ -1412,12 +1591,6 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         let section = canonical
             .section()
             .expect("checked before canonicalization");
-        let target_section = ops::effective_section(root, &id, section)?;
-        // Content identity before provenance, in that order. What the target
-        // says is the question a reference is about; which commit it was read
-        // at explains the answer. Asking for a repository first would refuse a
-        // rewritten target with a message about git.
-        let sha256 = pin_target(&target_section, &id, section)?;
         let commit = match canonical.snapshot() {
             Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
@@ -1427,12 +1600,15 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
                 )
             })?,
         };
-        return Ok(Ref {
-            object: id,
-            section,
-            sha256,
-            commit,
-        });
+        let target = ops::effective(root, &id)?;
+        let seal = target.sha256.as_deref().ok_or_else(|| {
+            Error::new(
+                engr::EXIT_SCHEMA,
+                format!("reference target object {id} has no aggregate seal"),
+            )
+        })?;
+        return engr::dependency::admit(root, &target, seal, section, &fields, &commit)
+            .map(Ref::selective);
     }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
@@ -1447,20 +1623,20 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         )
     })?;
     let id = resolve_object_argument(root, "--ref", prefix)?;
-    let target_section = ops::effective_section(root, &id, section)?;
-    let sha256 = pin_target(&target_section, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
             "a reference records the commit it was read at, which needs a git repository",
         )
     })?;
-    Ok(Ref {
-        object: id,
-        section,
-        sha256,
-        commit,
-    })
+    let target = ops::effective(root, &id)?;
+    let seal = target.sha256.as_deref().ok_or_else(|| {
+        Error::new(
+            engr::EXIT_SCHEMA,
+            format!("reference target object {id} has no aggregate seal"),
+        )
+    })?;
+    engr::dependency::admit(root, &target, seal, section, &fields, &commit).map(Ref::selective)
 }
 
 fn shorten(id: &str, width: usize) -> &str {
@@ -1468,13 +1644,31 @@ fn shorten(id: &str, width: usize) -> &str {
 }
 
 fn render_ref(reference: &Ref, width: usize) -> String {
-    format!(
-        "{} §{}  sha256 {}  commit {}",
-        shorten(&reference.object, width),
-        reference.section,
-        shorten(&reference.sha256, 8),
-        shorten(&reference.commit, 8)
-    )
+    let (object, section) = reference
+        .target_identity()
+        .unwrap_or_else(|_| ("invalid".to_owned(), 0));
+    match reference {
+        Ref::Selective(reference) => format!(
+            "{} §{}  fields {}  digest {}  commit {}",
+            shorten(&object, width),
+            section,
+            reference
+                .fields()
+                .iter()
+                .map(|field| field.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            shorten(reference.digest(), 10),
+            shorten(reference.commit(), 8)
+        ),
+        Ref::Legacy(reference) => format!(
+            "{} §{}  sha256 {}  commit {}",
+            shorten(&reference.object, width),
+            reference.section,
+            shorten(&reference.sha256, 8),
+            shorten(&reference.commit, 8)
+        ),
+    }
 }
 
 fn render_relation(relation: &Relation) -> String {
@@ -1689,6 +1883,78 @@ fn render_basis(basis: Option<&str>) -> String {
 /// Backlog ids — borrowing the Object width can print two different unresolved
 /// points identically on the one screen that says which of them confirming
 /// consumes.
+/// What a repair discards, beside what it restores.
+///
+/// #35's ruling requires the person confirming a repair to see three things: the
+/// last provable admitted projection, the integrity-invalid stored state, and
+/// the difference. Only the first is in the candidate — binding the invalid
+/// bytes into a CandidateDigest would make a digest that could never be
+/// recomputed from history, which is the one property every durable candidate
+/// digest has to keep. So they are read here, at render time, and stay
+/// diagnostic: nothing on this screen is authority, and confirming does not
+/// admit any of it.
+///
+/// Being unable to read them is not a reason to hide the screen. A repair whose
+/// comparison cannot be built is exactly the one a person should be told about
+/// before answering.
+fn render_repair_comparison(root: &Path, id: &str) -> String {
+    let provable = match engr::ops::provable(root, id) {
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  admitted history cannot rebuild this record: {}\n",
+                error.message
+            )
+        }
+    };
+    let stored = match store::load_object(root, id) {
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  the stored record cannot be read: {}\n",
+                error.message
+            )
+        }
+    };
+    // A pending repair candidate rendered again after the record already
+    // verifies — someone repaired it another way, or the edit was reverted.
+    // Say so rather than showing an empty comparison.
+    if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
+        return "Integrity  the stored record verifies again, so there is nothing left to repair\n"
+            .to_owned();
+    }
+
+    let mut out = String::from(
+        "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n",
+    );
+    let differences = match view::repair_differences(&stored, &provable) {
+        Ok(differences) => differences,
+        Err(error) => {
+            return format!(
+                "{out}  the two states cannot be compared: {}\n\n",
+                error.message
+            )
+        }
+    };
+    // Integrity failed, so something differs. Nothing listed would mean the
+    // comparison missed it, and saying so is better than an empty screen that
+    // reads like agreement.
+    if differences.is_empty() {
+        out.push_str(
+            "  integrity failed but no persisted member differs; do not confirm this without\n  looking at the file, because something is wrong with this comparison\n\n",
+        );
+        return out;
+    }
+    for difference in &differences {
+        out.push_str(&format!(
+            "  {}\n    stored   {}\n    restore  {}\n",
+            difference.at, difference.stored, difference.restore
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
     let mut out = String::new();
@@ -1710,20 +1976,27 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // change what a pending candidate presents while the payload hash, the
     // integrity hash and `expected_rev` all still checked out. Omitted when
     // there is none, which is the case for `object.created` — its title is the
-    // wording below — and for candidates prepared before the snapshot existed.
+    // wording below.
     let subject = match &candidate.payload.action {
         Action::SectionRevised { section } | Action::SectionDeleted { section } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { merge } => format!(
-            " absorbing {}",
-            merge
-                .consumed()
-                .iter()
-                .map(|section| format!("§{section}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Action::SectionMerged { merge } => {
+            // Persisted order is the shared canonical set order, which is over
+            // JCS bytes: §10 comes before §2. That is right for hashing and
+            // wrong for the line a person reads before answering, so the
+            // rendering sorts numerically. It changes nothing persisted.
+            let mut consumed = merge.consumed().to_vec();
+            consumed.sort_unstable();
+            format!(
+                " absorbing {}",
+                consumed
+                    .iter()
+                    .map(|section| format!("§{section}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
         _ => String::new(),
     };
     let title = candidate
@@ -1739,6 +2012,13 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         shorten(&candidate.payload.object, width),
         title
     ));
+    // A repair is confirmed against a comparison, not against wording. It
+    // carries no content of its own, so without this the screen would say only
+    // that something is being restored, and a person would be assenting to the
+    // discarding of material they were never shown.
+    if matches!(candidate.payload.action, Action::ObjectRepaired) {
+        out.push_str(&render_repair_comparison(root, &candidate.payload.object));
+    }
     // A title is a label, not wording written against code, so the commit it
     // happened to be typed at says nothing about the change being confirmed.
     // It stays in the payload; it just does not belong on this screen, where
@@ -1860,6 +2140,30 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
+        }
+    }
+    if let Some(review) = &candidate.context.rule_review {
+        let result = match review.result {
+            engr::proof::ReviewResult::Passed => "passed",
+            engr::proof::ReviewResult::Failed => "failed — Human override required",
+            engr::proof::ReviewResult::Exhausted => "exhausted — Human override required",
+        };
+        out.push_str(&format!(
+            "Review     {result}\nAttempt    {}\nDigest     {}\nRules      {}\n",
+            review.attempt,
+            review.review_digest,
+            review
+                .rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        if let Some(explanation) = &review.explanation {
+            out.push_str("Explanation\n");
+            for line in explanation.lines() {
+                out.push_str(&format!("  {line}\n"));
+            }
         }
     }
     out.push('\n');
@@ -2032,15 +2336,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
             report.sections,
             report.title
         );
+        if report.object_tampered {
+            println!("          current Object integrity failed");
+        }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");
         }
         for stood in &report.standing_on_tampered {
             println!(
-                "          §{} stands on {} §{}, which does not match its own hash",
+                "          §{} stands on {} §{}, whose {} integrity failed",
                 stood.section,
                 shorten(&stood.target, width),
-                stood.target_section
+                stood.target_section,
+                stood.side.unwrap_or("current")
             );
         }
         // Said separately from tampering, and from each other. "Not there" and
@@ -2061,6 +2369,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 shorten(&stood.target, width),
                 stood.target_section,
                 stood.reason
+            );
+        }
+        // An authoritative forward link that leads nowhere, said in its own
+        // words. It is not drift: nobody is being asked to judge whether this
+        // section still holds. The replacement this object points at cannot be
+        // established, so the chain a reader follows to find current knowledge
+        // is broken.
+        for broken in &report.broken_replacements {
+            println!(
+                "          §{} is superseded by {}, which cannot be established: {}",
+                broken.section,
+                shorten(&broken.target, width),
+                broken.reason
             );
         }
         if report.unprojected > 0 {
@@ -2094,7 +2415,7 @@ fn warn_uncommitted(root: &Path, id: &str) {
 ///
 /// Its own namespace, like `backlog`, and for the same reason: nothing here
 /// goes through the gate, so it must not be reachable by a command that looks
-/// like one that does. `ls`, `show` and `verify` still mean confirmed record
+/// like one that does. `ls`, `show` and `verify` still mean admitted record
 /// and nothing else.
 #[derive(Subcommand)]
 enum Work {
@@ -2267,11 +2588,11 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
     }
 }
 
-fn work_command(root: &Path, command: Work) -> Result<()> {
+fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<()> {
     match command {
         Work::Start { object, summary } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            work::start(root, &id, summary.as_deref())?;
+            work::start(root, &id, summary.as_deref(), attempt)?;
             print!(
                 "{}",
                 view::render_work_show(root, &id, &work::load(root, &id)?)
@@ -2298,22 +2619,22 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
         }
         Work::Summary { object, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_summary(root, &id, text.as_deref())?;
+            let item = work::set_summary(root, &id, text.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Pause { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Paused)?;
+            let item = work::set_state(root, &id, work::State::Paused, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Resume { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Active)?;
+            let item = work::set_state(root, &id, work::State::Active, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Rm { object } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let removed = work::remove(root, &id)?;
+            let removed = work::remove(root, &id, attempt)?;
             println!(
                 "no execution memory for {}",
                 shorten(&id, view::width(root))
@@ -2330,13 +2651,13 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
         Work::Depend { object, on, reason } => {
             let id = resolve_object_argument(root, "object", &object)?;
             let target = work_target(root, "--on", &on)?;
-            let item = work::add_dependency(root, &id, &target, reason.as_deref())?;
+            let item = work::add_dependency(root, &id, &target, reason.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Undepend { object, on } => {
             let id = resolve_object_argument(root, "object", &object)?;
             let target = on.strip_prefix("engr:").unwrap_or(&on).to_owned();
-            let item = work::remove_dependency(root, &id, &target)?;
+            let item = work::remove_dependency(root, &id, &target, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Block {
@@ -2348,24 +2669,24 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
             let target = target
                 .map(|spec| work_target(root, "--target", &spec))
                 .transpose()?;
-            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref())?;
+            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
         Work::Unblock { object, index } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::remove_blocker(root, &id, index)?;
+            let item = work::remove_blocker(root, &id, index, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
-        Work::Item(command) => return work_item_command(root, command),
+        Work::Item(command) => return work_item_command(root, command, attempt),
     }
     Ok(())
 }
 
-fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
+fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) -> Result<()> {
     match command {
         WorkItem::Add { object, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::add_item(root, &id, &text)?;
+            let item = work::add_item(root, &id, &text, attempt)?;
             println!("work item {item}");
             print!(
                 "{}",
@@ -2374,7 +2695,7 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
         }
         WorkItem::Revise { object, item, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_text(root, &id, item, &text)?;
+            let work = work::set_item_text(root, &id, item, &text, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::State {
@@ -2383,12 +2704,12 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
             state,
         } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_state(root, &id, item, state.into())?;
+            let work = work::set_item_state(root, &id, item, state.into(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Result { object, item, text } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_result(root, &id, item, text.as_deref())?;
+            let work = work::set_item_result(root, &id, item, text.as_deref(), attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Commit {
@@ -2406,12 +2727,12 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
                     format!("--commit {commit:?} does not name a commit in this repository"),
                 )
             })?;
-            let work = work::add_item_commit(root, &id, item, &resolved)?;
+            let work = work::add_item_commit(root, &id, item, &resolved, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
         WorkItem::Rm { object, item } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::remove_item(root, &id, item)?;
+            let work = work::remove_item(root, &id, item, attempt)?;
             print!("{}", view::render_work_show(root, &id, &work));
         }
     }
@@ -2606,14 +2927,24 @@ fn priority_of(
     }
 }
 
-fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
+fn collection_command(
+    root: &Path,
+    command: CollectionCommand,
+    attempt: rules::Attempt,
+) -> Result<()> {
     match command {
         CollectionCommand::New {
             name,
             description,
             schedule,
         } => {
-            let item = collection::create(root, &name, description.as_deref(), schedule.build())?;
+            let item = collection::create(
+                root,
+                &name,
+                description.as_deref(),
+                schedule.build(),
+                attempt,
+            )?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Ls => {
@@ -2652,17 +2983,17 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         }
         CollectionCommand::Rename { collection, name } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::rename(root, &id, &name)?;
+            let item = collection::rename(root, &id, &name, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Describe { collection, text } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::describe(root, &id, text.as_deref())?;
+            let item = collection::describe(root, &id, text.as_deref(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::State { collection, state } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_state(root, &id, state.into())?;
+            let item = collection::set_state(root, &id, state.into(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Schedule {
@@ -2670,7 +3001,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             schedule,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_schedule(root, &id, schedule.build())?;
+            let item = collection::set_schedule(root, &id, schedule.build(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Add {
@@ -2683,13 +3014,13 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             let id = collection::resolve_id(root, &collection)?;
             let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
-            let item = collection::add_member(root, &id, &target, order, priority)?;
+            let item = collection::add_member(root, &id, &target, order, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Rm { collection, target } => {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::remove_member(root, &id, &target)?;
+            let item = collection::remove_member(root, &id, &target, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Order {
@@ -2699,7 +3030,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
         } => {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::set_order(root, &id, &target, order)?;
+            let item = collection::set_order(root, &id, &target, order, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Priority {
@@ -2711,12 +3042,12 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             let id = collection::resolve_id(root, &collection)?;
             let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
             let priority = priority_of(priority, reason)?;
-            let item = collection::set_priority(root, &id, &target, priority)?;
+            let item = collection::set_priority(root, &id, &target, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Delete { collection } => {
             let id = collection::resolve_id(root, &collection)?;
-            let removed = collection::remove(root, &id)?;
+            let removed = collection::remove(root, &id, attempt)?;
             // Carried out and reported, not refused. #10 makes this a rule for
             // the agent and says a technical guard can come later if real use
             // shows one is needed; engr cannot tell who asked, so it says what

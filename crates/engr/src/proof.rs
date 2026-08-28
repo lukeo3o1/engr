@@ -54,6 +54,21 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// range of its own keeps it — this is the ceiling every field shares, never a
 /// licence to widen one.
 pub fn within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()> {
+    walk_safe_integers(EXIT_USAGE, value, what)
+}
+
+/// The same walk over material that was already **stored**.
+///
+/// One traversal, two fault classes. A number a caller just typed is a usage
+/// error; the identical number found inside a persisted Object, Event, Backlog
+/// item, Collection or Work sidecar is not something the caller did. It is a
+/// file outside the schema, and saying "usage" there sends a reader to fix
+/// their command line instead of the record.
+pub fn stored_within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()> {
+    walk_safe_integers(EXIT_SCHEMA, value, what)
+}
+
+fn walk_safe_integers(code: i32, value: &serde_json::Value, what: &str) -> Result<()> {
     match value {
         serde_json::Value::Number(number) => {
             let magnitude = match (number.as_u64(), number.as_i64()) {
@@ -65,20 +80,20 @@ pub fn within_safe_integers(value: &serde_json::Value, what: &str) -> Result<()>
             };
             ensure!(
                 magnitude <= MAX_SAFE_INTEGER,
-                EXIT_USAGE,
+                code,
                 "{what}: {number} is outside the safe integer range every implementation shares, so canonical JSON would turn it into a different number and two different subjects would hash alike; carry it as a string"
             );
             Ok(())
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                within_safe_integers(item, what)?;
+                walk_safe_integers(code, item, what)?;
             }
             Ok(())
         }
         serde_json::Value::Object(entries) => {
             for entry in entries.values() {
-                within_safe_integers(entry, what)?;
+                walk_safe_integers(code, entry, what)?;
             }
             Ok(())
         }
@@ -499,6 +514,25 @@ pub fn candidate_subject(
                 json(&ObjectInvariant::of(after)?)?,
             )
         }
+        // The whole Object either side, and no parameters at all.
+        //
+        // Both sides are the replay-derived projection: repair restores exactly
+        // that, so what the Human confirms is "this Object becomes precisely
+        // what its admitted history says". The integrity-invalid stored bytes
+        // are deliberately **not** an input. They are diagnostic material shown
+        // beside the proposal, and a digest that bound them could not be
+        // recomputed from history later — which is the one thing every durable
+        // CandidateDigest has to survive.
+        //
+        // No parameters, because repair takes none. A parameter here would be
+        // somewhere for a repair to carry an instruction, and #35's ruling is
+        // that it carries none.
+        Action::ObjectRepaired => (
+            object_target(id),
+            serde_json::json!({}),
+            json(&ObjectInvariant::of(before)?)?,
+            json(&ObjectInvariant::of(after)?)?,
+        ),
     };
 
     // And the formatted target parses back as the identity it claims to be.
@@ -1018,7 +1052,8 @@ fn check_members(value: &serde_json::Value, expected: &[&str], what: &str) -> Re
 /// human sees what was reviewed against, and so a reader can recompute the
 /// review identity from the candidate alone rather than trusting the name it
 /// gives itself.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateReview {
     pub review_digest: String,
     pub attempt: u32,
@@ -1035,7 +1070,7 @@ pub struct CandidateReview {
 /// Wider than what an Event records: `failed` and `exhausted` never become
 /// durable provenance, because neither produces an admission on its own. They
 /// exist here because a human may be shown one and choose to override it.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewResult {
     Passed,
@@ -1044,7 +1079,8 @@ pub enum ReviewResult {
 }
 
 /// The concurrency predecessor a candidate is bound to.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub expected_rev: u64,
 }
@@ -1182,6 +1218,13 @@ mod envelope_tests {
 /// the candidate's own bytes. Recomputing the review *identity* additionally
 /// needs the mutation descriptor projection, which is [`check_review_identity`].
 pub fn check_review_report(review: &CandidateReview) -> Result<()> {
+    let mut canonical_rules = review.rules.clone();
+    canonical_set(&mut canonical_rules, "rule")?;
+    ensure!(
+        canonical_rules == review.rules,
+        EXIT_SCHEMA,
+        "candidate Rule snapshots must use canonical set order"
+    );
     // Reject attempt 0 through the same type the rest of the crate counts
     // attempts with, so the candidate cannot carry a number no policy question
     // has an answer for.

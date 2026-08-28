@@ -57,6 +57,24 @@ fn commit_all(root: &Path, message: &str) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
+/// An admitted Object, so a Work sidecar has an owner that exists.
+fn admitted_object(root: &Path) -> String {
+    let id = engr::model::new_id();
+    let payload = engr::model::Payload {
+        action: engr::model::Action::ObjectCreated,
+        object: id.clone(),
+        becomes: None,
+        content: engr::model::Content {
+            text: "a thing to work on".to_owned(),
+            ..engr::model::Content::default()
+        },
+    };
+    let prepared = engr::gate::prepare(root, payload).expect("prepare");
+    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    engr::gate::confirm(root, &response).expect("confirm");
+    id
+}
+
 const ARCHITECTURE: &str = "\
 ---
 id: architecture-consistency
@@ -1491,9 +1509,9 @@ fn the_review_block_refuses_what_v1_does_not_define() {
 
 /// The workspace-version boundary holds on every public door, not just the CLI.
 ///
-/// Rule semantics are versioned by the workspace, so a version 1 workspace must
-/// not be read under version 2 defaults — and it must not matter which public
-/// API asked. Enforcing it only in the command left `engr rules ls` refusing a
+/// Rule semantics are versioned by the workspace, so an older workspace must not
+/// be read under the current generation's defaults — and it must not matter which
+/// public API asked. Enforcing it only in the command left `engr rules ls` refusing a
 /// workspace that `rules::load_all` accepted and silently assigned the newer
 /// effective policy, which is the exact reinterpretation the version exists to
 /// prevent, reached through a different door.
@@ -1507,18 +1525,18 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
     );
     let (mutation, precondition) = subject();
 
-    // Exactly what a version 1 workspace is: intact, and written by a build
-    // that had never heard of `review:`.
+    // Exactly what a version 2 workspace is: intact, and one explicit command
+    // away from being current.
     std::fs::write(
         store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":1}"#,
+        r#"{"format":"engr-workspace","version":2}"#,
     )
     .expect("format");
 
     let refused = |error: engr::Error, what: &str| {
         assert!(
-            error.message.contains("version 1") && error.message.contains("engr migrate"),
-            "{what} should refuse a version 1 workspace by name, said {:?}",
+            error.message.contains("version 2") && error.message.contains("engr migrate"),
+            "{what} should refuse an older workspace by name, said {:?}",
             error.message
         );
     };
@@ -1533,7 +1551,7 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
         mutation.clone(),
         precondition.clone(),
     ) {
-        Ok(_) => panic!("bind produced a v2 binding over a workspace declaring v1"),
+        Ok(_) => panic!("bind produced a v3 binding over a workspace declaring v2"),
         Err(error) => refused(error, "bind"),
     }
     refused(
@@ -2095,6 +2113,15 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
     ] {
         rules::bind(&root, Domain::Backlog, fine, ok.clone()).expect("inside the shared range");
     }
+
+    assert!(
+        engr::PROTOCOL.contains("shared Phase-3 integer domain"),
+        "the shipped protocol must state the range the implementation enforces"
+    );
+    assert!(
+        !engr::PROTOCOL.contains("The domain is exact representability"),
+        "the superseded wider numeric contract must not remain normative"
+    );
 }
 
 /// Governance and the verdict come from one reading of policy.
@@ -2741,4 +2768,205 @@ fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
     oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
     engr::proof::candidate_subject(&before, &after, &oversize, None)
         .expect_err("past the shared safe-integer ceiling");
+}
+
+// ---------------------------------------------------------------------------
+// Domains whose mutations apply directly
+// ---------------------------------------------------------------------------
+
+/// A Collection or Work Rule is not advisory.
+///
+/// These two domains have no prepared candidate to bind, which is why their
+/// mutations apply directly — not why they are exempt. A Rule that exists must
+/// be establishable before anything is written: every basis readable, every
+/// ceiling known. Before this, a `domain: work` Rule with missing material sat
+/// in the workspace while every sidecar mutation proceeded as if it were not
+/// there.
+#[test]
+fn a_collection_or_work_rule_with_unusable_material_blocks_its_domain() {
+    let (_dir, root) = workspace();
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, Some("stands here"), attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+based_on:
+  - path: MISSING.md
+---
+
+# Read this first
+",
+    );
+
+    let refused = engr::work::add_item(&root, &object, "a step", attempt(1))
+        .expect_err("the applicable Rule cannot be established");
+    assert_ne!(refused.code, 0);
+    let refused = engr::collection::rename(&root, &plan.id, "renamed", attempt(1))
+        .expect_err("the applicable Rule cannot be established");
+    assert_ne!(refused.code, 0);
+    assert_eq!(
+        engr::collection::load(&root, &plan.id).expect("load").name,
+        "a plan",
+        "nothing was written"
+    );
+    assert!(
+        engr::work::load(&root, &object)
+            .expect("load")
+            .items
+            .is_empty(),
+        "nothing was written"
+    );
+}
+
+/// With the material in place, an attempt inside every ceiling goes through.
+#[test]
+fn a_usable_collection_or_work_rule_admits_an_attempt_within_its_ceiling() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+review:
+  max_attempts: 2
+based_on:
+  - path: AGENTS.md
+---
+
+# Read this first
+",
+    );
+
+    engr::work::add_item(&root, &object, "a step", attempt(2)).expect("inside the ceiling");
+    engr::collection::rename(&root, &plan.id, "renamed", attempt(2)).expect("inside the ceiling");
+}
+
+/// Past the ceiling these two fail closed, because v1 never said what an
+/// exhausted Rule means for them.
+///
+/// Not borrowed from Backlog, which keeps the mutation and marks it, and not
+/// borrowed from Object, which escalates. Inventing either here would be
+/// answering a question the owning design left open, in the one place where a
+/// wrong answer is silently durable.
+#[test]
+fn an_exhausted_collection_or_work_attempt_refuses_rather_than_guessing() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let object = admitted_object(&root);
+    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    write_rule(
+        &root,
+        "direct",
+        "\
+---
+id: direct-domains
+applies:
+  domains:
+    - collection
+    - work
+review:
+  max_attempts: 1
+based_on:
+  - path: AGENTS.md
+---
+
+# Read this first
+",
+    );
+
+    for (what, error) in [
+        (
+            "work",
+            engr::work::add_item(&root, &object, "a step", attempt(2)).map(|_| ()),
+        ),
+        (
+            "collection",
+            engr::collection::rename(&root, &plan.id, "renamed", attempt(2)).map(|_| ()),
+        ),
+    ] {
+        let error = error.expect_err("v1 does not define this");
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}");
+        assert!(
+            error.message.contains("does not define"),
+            "{what}: {}",
+            error.message
+        );
+    }
+    assert_eq!(
+        engr::collection::load(&root, &plan.id).expect("load").name,
+        "a plan",
+        "a refused mutation writes nothing"
+    );
+    assert!(
+        engr::work::load(&root, &object)
+            .expect("load")
+            .items
+            .is_empty(),
+        "a refused mutation writes nothing"
+    );
+}
+
+/// A binding is one coherent snapshot of a Rule, or it is nothing.
+///
+/// `.engr/rules` is deliberately editable outside the workspace lock. Parsing a
+/// Rule and then reopening the path to fingerprint it is two reads of a moving
+/// target, and the binding that comes out can name one file's normative text
+/// while claiming the next file's `content_sha256` — provenance for an artifact
+/// whose semantics nobody reviewed. Artifact-exact identity means the two halves
+/// come from the same bytes.
+#[test]
+fn a_rule_binding_never_mixes_two_reads_of_the_file() {
+    let (_dir, root) = workspace();
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    let path = write_rule(&root, "architecture", ARCHITECTURE);
+    let first = std::fs::read_to_string(&path).expect("as written");
+
+    let (mutation, precondition) = subject();
+    let bound = rules::bind(
+        &root,
+        Domain::Backlog,
+        mutation.clone(),
+        precondition.clone(),
+    )
+    .expect("bind");
+    let rule = bound.rules()[0].clone();
+    assert_eq!(
+        rule.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(&first).as_str()),
+        "the provenance identifies the bytes that were parsed"
+    );
+
+    // The file changes. Every half of the next binding describes the new one.
+    let second_text = ARCHITECTURE.replace("architecture contract", "architecture contract (v2)");
+    write_rule(&root, "architecture", &second_text);
+    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind again");
+    let rule = bound.rules()[0].clone();
+    assert!(
+        rule.body.contains("(v2)"),
+        "the semantics are the new file's"
+    );
+    assert_eq!(
+        rule.content_sha256.as_deref(),
+        Some(engr::proof::sha256_of(&second_text).as_str()),
+        "and so is the provenance — never one of each"
+    );
 }

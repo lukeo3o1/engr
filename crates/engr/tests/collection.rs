@@ -61,7 +61,7 @@ fn backlog_ref(id: &str) -> String {
 }
 
 fn plan(root: &Path, name: &str) -> collection::Collection {
-    collection::create(root, name, None, None).expect("create")
+    collection::create(root, name, None, None, engr::rules::Attempt::FIRST).expect("create")
 }
 
 /// Edit a stored plan the way a text editor would.
@@ -69,7 +69,7 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = collection::path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 /// A plan has an identity of its own, and it says nothing.
@@ -80,7 +80,14 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
 #[test]
 fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
     let (_dir, root) = workspace();
-    let item = collection::create(&root, "Q3 authentication", None, None).expect("create");
+    let item = collection::create(
+        &root,
+        "Q3 authentication",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("create");
     assert_eq!(item.id.len(), 10);
     assert!(item
         .id
@@ -91,12 +98,25 @@ fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
     // The canonical reference form resolves, and the id survives a rename.
     engr::reference::EngrRef::parse_standalone(&format!("engr:collection:{}", item.id))
         .expect("a collection reference");
-    let renamed = collection::rename(&root, &item.id, "Q4 authentication").expect("rename");
+    let renamed = collection::rename(
+        &root,
+        &item.id,
+        "Q4 authentication",
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("rename");
     assert_eq!(renamed.id, item.id);
     assert_eq!(renamed.name, "Q4 authentication");
 
     // Ids are unique, and a prefix resolves the way object ids do.
-    let other = collection::create(&root, "another plan", None, None).expect("create");
+    let other = collection::create(
+        &root,
+        "another plan",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("create");
     assert_ne!(other.id, item.id);
     assert_eq!(
         collection::resolve_id(&root, &item.id[..6]).expect("prefix"),
@@ -122,6 +142,20 @@ fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
     assert!(raw.get("version").is_none(), "{raw}");
 }
 
+#[test]
+fn a_current_collection_refuses_an_explicit_null_optional_member() {
+    let (_dir, root) = workspace();
+    let collection = plan(&root, "one spelling");
+    rewrite(&root, &collection.id, |value| {
+        value["description"] = Value::Null;
+    });
+
+    let error = collection::load(&root, &collection.id)
+        .expect_err("the writer omits an absent description");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("exact shape"), "{error}");
+}
+
 /// Planning state is declared, never inferred — and it is only about the plan.
 ///
 /// `completed` does not claim its members are resolved. A milestone can be
@@ -133,10 +167,24 @@ fn completing_a_plan_declares_nothing_about_its_members() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "still being worked on");
     let item = plan(&root, "Q3");
-    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("add");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&object),
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
 
     let before = ops::effective(&root, &object).expect("object");
-    let completed = collection::set_state(&root, &item.id, State::Completed).expect("complete");
+    let completed = collection::set_state(
+        &root,
+        &item.id,
+        State::Completed,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("complete");
     assert_eq!(completed.state, State::Completed);
 
     let after = ops::effective(&root, &object).expect("object");
@@ -148,7 +196,13 @@ fn completing_a_plan_declares_nothing_about_its_members() {
     );
 
     // Cancelled is a different fact from completed, and both are storable.
-    let cancelled = collection::set_state(&root, &item.id, State::Cancelled).expect("cancel");
+    let cancelled = collection::set_state(
+        &root,
+        &item.id,
+        State::Cancelled,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("cancel");
     assert_eq!(cancelled.state, State::Cancelled);
     for invalid in ["archived", "closed", "open ", ""] {
         rewrite(&root, &item.id, |value| {
@@ -169,15 +223,44 @@ fn one_plan_holds_a_target_once_and_a_rank_once() {
     let second = new_object(&root, "second");
     let item = plan(&root, "ordering");
 
-    collection::add_member(&root, &item.id, &object_ref(&first), Some(10), None).expect("add");
-    collection::add_member(&root, &item.id, &object_ref(&second), Some(20), None).expect("add");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&first),
+        Some(10),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&second),
+        Some(20),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
 
-    let twice = collection::add_member(&root, &item.id, &object_ref(&first), None, None)
-        .expect_err("one plan holds it once");
+    let twice = collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&first),
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("one plan holds it once");
     assert_eq!(twice.code, engr::EXIT_INVARIANT);
 
-    let clash = collection::set_order(&root, &item.id, &object_ref(&second), Some(10))
-        .expect_err("two members cannot both be tenth");
+    let clash = collection::set_order(
+        &root,
+        &item.id,
+        &object_ref(&second),
+        Some(10),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("two members cannot both be tenth");
     assert_eq!(clash.code, engr::EXIT_SCHEMA);
     assert!(
         clash.message.contains("says nothing at that point"),
@@ -186,9 +269,23 @@ fn one_plan_holds_a_target_once_and_a_rank_once() {
 
     // Unranked is a real answer, and any number of members may share it.
     let third = new_object(&root, "third");
-    collection::add_member(&root, &item.id, &object_ref(&third), None, None).expect("add");
-    let unranked = collection::set_order(&root, &item.id, &object_ref(&second), None)
-        .expect("unranking is allowed");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&third),
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
+    let unranked = collection::set_order(
+        &root,
+        &item.id,
+        &object_ref(&second),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("unranking is allowed");
     assert_eq!(
         unranked
             .members
@@ -236,6 +333,7 @@ fn priority_belongs_to_the_membership_and_not_to_the_target() {
             level: Level::High,
             reason: Some("Blocks the rest of the milestone.".to_owned()),
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("add");
     collection::add_member(
@@ -247,6 +345,7 @@ fn priority_belongs_to_the_membership_and_not_to_the_target() {
             level: Level::Low,
             reason: None,
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("add");
 
@@ -274,7 +373,14 @@ fn priority_belongs_to_the_membership_and_not_to_the_target() {
     assert!(!text.contains("collection"), "{raw}");
 
     // A reason without a level is not a priority, and clearing works.
-    let cleared = collection::set_priority(&root, &urgent.id, &target, None).expect("clear");
+    let cleared = collection::set_priority(
+        &root,
+        &urgent.id,
+        &target,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("clear");
     assert!(cleared.members[0].priority.is_none());
     rewrite(&root, &urgent.id, |value| {
         value["members"][0]["priority"] = json!({"reason": "no level"});
@@ -298,6 +404,7 @@ fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
             end: Some("2026-09-30".to_owned()),
             target: Some("2026-09-15".to_owned()),
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("create");
     let schedule = dated.schedule.as_ref().expect("schedule");
@@ -318,7 +425,8 @@ fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
             ..Schedule::default()
         },
     ] {
-        collection::set_schedule(&root, &dated.id, Some(single)).expect("one date is a schedule");
+        collection::set_schedule(&root, &dated.id, Some(single), engr::rules::Attempt::FIRST)
+            .expect("one date is a schedule");
     }
     // A target need not sit between start and end: it is an intention.
     collection::set_schedule(
@@ -329,14 +437,21 @@ fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
             end: Some("2026-09-30".to_owned()),
             target: Some("2026-12-01".to_owned()),
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("a target outside the window is not a contradiction");
 
     // Absent is valid; present-and-empty is not.
-    let cleared = collection::set_schedule(&root, &dated.id, None).expect("clear");
+    let cleared = collection::set_schedule(&root, &dated.id, None, engr::rules::Attempt::FIRST)
+        .expect("clear");
     assert!(cleared.schedule.is_none());
-    let empty = collection::set_schedule(&root, &dated.id, Some(Schedule::default()))
-        .expect_err("an empty schedule");
+    let empty = collection::set_schedule(
+        &root,
+        &dated.id,
+        Some(Schedule::default()),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("an empty schedule");
     assert_eq!(empty.code, engr::EXIT_USAGE);
 
     for (what, schedule) in [
@@ -370,7 +485,13 @@ fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
             },
         ),
     ] {
-        let error = collection::set_schedule(&root, &dated.id, Some(schedule)).expect_err(what);
+        let error = collection::set_schedule(
+            &root,
+            &dated.id,
+            Some(schedule),
+            engr::rules::Attempt::FIRST,
+        )
+        .expect_err(what);
         assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
     }
 }
@@ -393,10 +514,25 @@ fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
     .expect("backlog");
     let plan = plan(&root, "with a backlog member");
     let target = backlog_ref(&item.id);
-    collection::add_member(&root, &plan.id, &target, Some(10), None).expect("add");
+    collection::add_member(
+        &root,
+        &plan.id,
+        &target,
+        Some(10),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
 
     // The point is settled and removed from staging.
-    backlog::consume_section(&root, &item.id, 1, &Prepared::first()).expect("consume");
+    backlog::consume_section(
+        &root,
+        &item.id,
+        1,
+        &Prepared::first()
+            .against(backlog::Precondition::section(&root, &item.id, 1).expect("observe")),
+    )
+    .expect("consume");
     assert!(backlog::load(&root, &item.id).is_err());
 
     // The plan still says what it said. Nothing was rewritten.
@@ -405,7 +541,8 @@ fn a_member_that_stops_existing_is_surfaced_rather_than_retargeted() {
     assert_eq!(after.members[0].target.reference, target);
 
     // Removing it is an explicit act, not something that happened by itself.
-    let emptied = collection::remove_member(&root, &plan.id, &target).expect("remove");
+    let emptied = collection::remove_member(&root, &plan.id, &target, engr::rules::Attempt::FIRST)
+        .expect("remove");
     assert!(emptied.members.is_empty());
 }
 
@@ -417,7 +554,15 @@ fn members_are_whole_objects_and_backlog_items() {
     let item = plan(&root, "targets");
     let compact = engr::reference::encode_uuid_str(&object).expect("compact");
 
-    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("legal");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&object),
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("legal");
 
     for refused in [
         format!("obj:{compact}:1"),
@@ -426,8 +571,15 @@ fn members_are_whole_objects_and_backlog_items() {
         format!("engr:obj:{compact}"),
         "obj:not-a-compact-id".to_owned(),
     ] {
-        let error = collection::add_member(&root, &item.id, &refused, None, None)
-            .expect_err("a plan does not group that");
+        let error = collection::add_member(
+            &root,
+            &item.id,
+            &refused,
+            None,
+            None,
+            engr::rules::Attempt::FIRST,
+        )
+        .expect_err("a plan does not group that");
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{refused}");
     }
 }
@@ -444,10 +596,26 @@ fn members_are_whole_objects_and_backlog_items() {
 fn deleting_a_plan_is_carried_out_and_reported_rather_than_refused() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "a member");
-    let item = collection::create(&root, "Q3 authentication", None, None).expect("create");
-    collection::add_member(&root, &item.id, &object_ref(&object), None, None).expect("add");
+    let item = collection::create(
+        &root,
+        "Q3 authentication",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("create");
+    collection::add_member(
+        &root,
+        &item.id,
+        &object_ref(&object),
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("add");
 
-    let removed = collection::remove(&root, &item.id).expect("the rule is the agent's");
+    let removed = collection::remove(&root, &item.id, engr::rules::Attempt::FIRST)
+        .expect("the rule is the agent's");
     assert_eq!(removed.name, "Q3 authentication");
     assert_eq!(removed.members, 1, "and what went with it is reported");
     assert!(collection::load(&root, &item.id).is_err());
@@ -471,6 +639,7 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
             start: Some("2026-07-01".to_owned()),
             ..Schedule::default()
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("create");
     collection::add_member(
@@ -482,6 +651,7 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
             level: Level::High,
             reason: Some("first".to_owned()),
         }),
+        engr::rules::Attempt::FIRST,
     )
     .expect("add");
 
@@ -515,7 +685,7 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
 
     let sound: Value = store::read_json(&collection::path(&root, &item.id)).expect("read");
     for (what, corrupt) in corruptions {
-        store::write_json(&collection::path(&root, &item.id), &sound).expect("restore");
+        write_raw(&collection::path(&root, &item.id), &sound).expect("restore");
         rewrite(&root, &item.id, corrupt);
         let error = collection::load(&root, &item.id).expect_err(what);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
@@ -536,14 +706,28 @@ fn a_member_must_exist_when_it_is_added_whichever_door_it_comes_through() {
 
     // Well-formed, canonical, and naming a UUID nothing ever created.
     let absent = object_ref(&engr::model::new_id());
-    let error = collection::add_member(&root, &item.id, &absent, None, None)
-        .expect_err("a plan cannot cover something that was never there");
+    let error = collection::add_member(
+        &root,
+        &item.id,
+        &absent,
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("a plan cannot cover something that was never there");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
     assert!(error.message.contains("does not exist"), "{error}");
 
     let absent_item = backlog_ref(&engr::model::new_id());
-    let error = collection::add_member(&root, &item.id, &absent_item, None, None)
-        .expect_err("the same for staging");
+    let error = collection::add_member(
+        &root,
+        &item.id,
+        &absent_item,
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("the same for staging");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
 
     assert!(
@@ -556,8 +740,15 @@ fn a_member_must_exist_when_it_is_added_whichever_door_it_comes_through() {
 
     // Malformed is still refused as malformed, not as missing: the shape check
     // runs first, so the error names the real problem.
-    let error = collection::add_member(&root, &item.id, "obj:not-compact", None, None)
-        .expect_err("a malformed reference");
+    let error = collection::add_member(
+        &root,
+        &item.id,
+        "obj:not-compact",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("a malformed reference");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
 
@@ -570,12 +761,20 @@ fn a_member_must_exist_when_it_is_added_whichever_door_it_comes_through() {
 #[test]
 fn a_stored_collection_name_carries_no_surrounding_whitespace() {
     let (_dir, root) = workspace();
-    let item = collection::create(&root, "  Q3 authentication  ", None, None).expect("create");
+    let item = collection::create(
+        &root,
+        "  Q3 authentication  ",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("create");
     assert_eq!(
         item.name, "Q3 authentication",
         "the write path trims, and that is the existing behaviour"
     );
-    let renamed = collection::rename(&root, &item.id, "  Q4  ").expect("rename");
+    let renamed =
+        collection::rename(&root, &item.id, "  Q4  ", engr::rules::Attempt::FIRST).expect("rename");
     assert_eq!(renamed.name, "Q4");
 
     for stored in ["  Q3 ", "Q3 ", " Q3", "Q3\t"] {
@@ -630,7 +829,16 @@ fn a_target_consumed_before_the_membership_is_written_is_not_admitted() {
             let root = root.clone();
             let plan = plan.id.clone();
             let target = target.clone();
-            move || collection::add_member(&root, &plan, &target, None, None)
+            move || {
+                collection::add_member(
+                    &root,
+                    &plan,
+                    &target,
+                    None,
+                    None,
+                    engr::rules::Attempt::FIRST,
+                )
+            }
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
         std::fs::remove_file(&path).expect("consume the target");
@@ -649,4 +857,15 @@ fn a_target_consumed_before_the_membership_is_written_is_not_admitted() {
             .is_empty(),
         "nothing that was never admissible may be persisted"
     );
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }

@@ -42,7 +42,7 @@ pub fn dir(root: &Path) -> PathBuf {
 /// action, type, state, role, field and path selectors until real use shows
 /// domain-wide application causing recurring friction. A narrower selector
 /// invented now would be a guess with a persisted representation.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Domain {
     Object,
@@ -85,7 +85,7 @@ impl Domain {
 /// happen; and Collection and Work have no v1 answer at all. Even `Reject` on an
 /// Object stops the *autonomous* path rather than forbidding the mutation — a
 /// human may initiate the same one and override the result through the gate.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum OnExhaustion {
     Reject,
@@ -158,12 +158,10 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
 /// One Rule's review policy, **with the defaults already applied**.
 ///
-/// This type never holds "unspecified". A Rule that omits `max_attempts` and one
-/// that writes `max_attempts: 5` produce the identical value here, which is the
-/// point: the effective semantics participate in review identity, and YAML
-/// spelling does not. Two rules that mean the same thing must not hash
-/// differently because one author was explicit.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+/// This type never holds "unspecified". Parsed policy uses effective values;
+/// artifact provenance separately binds the exact Rule-file bytes, so even a
+/// semantics-preserving spelling change invalidates an earlier review.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Review {
     pub max_attempts: u32,
     pub on_exhaustion: OnExhaustion,
@@ -305,7 +303,8 @@ pub struct Basis {
 }
 
 /// A basis resolved to the bytes an agent is required to have read.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedBasis {
     pub path: String,
     /// The exact commit whose content **is** the material that was reviewed,
@@ -584,6 +583,18 @@ pub struct Rule {
     /// Where it was found. Not part of identity and not hashed.
     #[serde(skip)]
     pub source: PathBuf,
+    /// The exact bytes this Rule was parsed from.
+    ///
+    /// Kept rather than re-read. `.engr/rules/` is deliberately editable
+    /// outside the workspace lock, so parsing the file and then reopening it
+    /// for provenance is two reads of a moving target: the binding would name
+    /// one file's semantics while claiming the next file's `content_sha256` and
+    /// commit. Artifact-exact Rule identity means the provenance identifies the
+    /// exact artifact whose semantics were reviewed, which is only true if both
+    /// come from one read. Not part of identity and not hashed — the fields
+    /// derived from it are.
+    #[serde(skip)]
+    pub raw: String,
 }
 
 impl Rule {
@@ -615,6 +626,13 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     // point. It deliberately does not touch the historical snapshot decoder,
     // which answers a different question about a different workspace.
     store::require_current(root)?;
+    load_all_for_migration(root)
+}
+
+/// Parse the complete Rule set while a recognized older workspace is inside
+/// the explicit migration preflight. The caller has already selected the
+/// source schema; ordinary semantic paths must use [`load_all`] instead.
+pub(crate) fn load_all_for_migration(root: &Path) -> Result<Vec<Rule>> {
     let dir = dir(root);
     // `exists()` follows links, so a dangling `rules` symlink answered "no" and
     // took the empty-set path — reporting that a workspace has no policy when
@@ -887,6 +905,7 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         review,
         body: body.to_owned(),
         source: path.to_path_buf(),
+        raw: raw.to_owned(),
     })
 }
 
@@ -966,8 +985,15 @@ pub struct ReviewBinding {
     rules: Vec<BoundRule>,
 }
 
+impl ReviewBinding {
+    pub(crate) fn has_rules(&self) -> bool {
+        !self.rules.is_empty()
+    }
+}
+
 /// One rule as it stood, with everything it rests on resolved.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct BoundRule {
     pub id: String,
     /// Sorted, because the set is semantically order-insensitive.
@@ -984,12 +1010,8 @@ pub struct BoundRule {
     pub review: Review,
     /// The normative text, exactly as written and never normalized.
     ///
-    /// Built from parsed semantics plus this exact body rather than from the
-    /// file's raw bytes. Raw bytes would make review identity depend on
-    /// incidental YAML spelling: reordering `applies.domains` changes nothing
-    /// about what the rule means or what a reviewer had to read, and it must
-    /// not invalidate an attestation. The body is the one part where every
-    /// byte is meaning, so it is carried untouched.
+    /// Parsed semantics retain this exact body. The `commit`/`content_sha256`
+    /// provenance below additionally binds the complete artifact bytes.
     pub body: String,
     /// The exact commit whose content is the Rule file that was reviewed, or
     /// `null` when no commit holds it.
@@ -1586,25 +1608,21 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
         canonical_set(&mut based_on, "basis")?;
         let mut domains = rule.domains;
         canonical_set(&mut domains, "domain")?;
-        // The Rule's own provenance, by the same rule as its bases. The file is
-        // read either way: `content_sha256` identifies the exact Rule-file
-        // bytes, and only the *commit lookup* depends on the file being inside
+        // The Rule's own provenance, from the same bytes the semantics above
+        // were parsed from. Not a second `read_to_string` of the locator:
+        // `.engr/rules/` is editable outside the workspace lock, so a second
+        // read can return a different artifact, and the binding would then name
+        // one file's normative text while claiming the other file's
+        // `content_sha256` and commit. Artifact-exact identity means the
+        // provenance identifies the exact artifact whose semantics were
+        // reviewed. Only the *commit lookup* depends on the file being inside
         // the repository.
         //
         // It hashed `rule.body` when there was no repository path, which
         // dropped the front matter from the artifact identity — two Rule files
         // with one body and different front matter would have shared an
         // identity, and this member is supposed to say which file was read.
-        let text = std::fs::read_to_string(&rule.source).map_err(|error| {
-            Error::new(
-                EXIT_NOT_FOUND,
-                format!(
-                    "rule {}: {} could not be read: {error}",
-                    rule.id,
-                    rule.source.display()
-                ),
-            )
-        })?;
+        let text = rule.raw;
         let provenance = match rule_relative_path(root, &rule.source) {
             Some(path) => Provenance::of(root, &path, &text),
             // Outside the repository entirely, so no commit can hold it. Not a
@@ -1669,6 +1687,32 @@ pub fn assess(root: &Path, domain: Domain, attempt: Attempt) -> Result<(bool, Ex
     let rules = bound_rules(root, domain)?;
     let governed = !rules.is_empty();
     Ok((governed, compose(domain, &rules, attempt)?))
+}
+
+/// The applicable-Rule boundary for a domain whose mutations apply directly.
+///
+/// Collection and Work have no prepared candidate to bind, so this is the whole
+/// of their Rule obligation, and it is not optional: a `domain: collection` or
+/// `domain: work` Rule that exists must be *establishable* before anything is
+/// written — every basis readable, every ceiling known — and the caller's
+/// attempt must be inside those ceilings. Skipping it let a Rule with missing
+/// material, or one already past its limit, sit in the workspace while every
+/// mutation proceeded exactly as if it were not there.
+///
+/// What an exhausted ceiling then *means* for these two domains is deliberately
+/// unsettled, so [`compose`] refuses rather than borrowing another domain's
+/// answer. That refusal is the fail-closed behaviour, not a gap in this one.
+pub fn direct(root: &Path, domain: Domain, attempt: Attempt) -> Result<()> {
+    match assess(root, domain, attempt)?.1 {
+        Exhaustion::NotReached => Ok(()),
+        other => Err(Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "a {} mutation was given the {other:?} verdict, which is not its own",
+                domain.as_str()
+            ),
+        )),
+    }
 }
 
 /// Check an attestation against the subject as it stands right now.

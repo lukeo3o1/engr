@@ -3,7 +3,7 @@
 //! is noticed.
 
 use engr::model::{Action, Content, Payload, Ref};
-use engr::{gate, ops, store, view};
+use engr::{gate, integrity, ops, store, view};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -66,13 +66,28 @@ fn new_object(root: &Path, title: &str) -> String {
     id
 }
 
+fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
+    let target = ops::effective(root, object).expect("reference target");
+    Ref::selective(
+        engr::dependency::admit(
+            root,
+            &target,
+            target.sha256.as_deref().expect("aggregate seal"),
+            section,
+            &[engr::dependency::SemanticField::Text],
+            commit,
+        )
+        .expect("admit selective reference"),
+    )
+}
+
 /// Edit the stored object the way a text editor would — content changed, hash
 /// left alone.
 fn tamper(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     let path = store::object_path(root, id);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
-    store::write_json(&path, &value).expect("write");
+    write_raw(&path, &value).expect("write");
 }
 
 #[test]
@@ -117,26 +132,19 @@ fn repointing_a_reference_is_detected() {
     let target = new_object(&root, "the target");
     admit(&root, payload(Action::SectionAdded, &target, "first"));
     admit(&root, payload(Action::SectionAdded, &target, "second"));
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
     let mut with_ref = payload(Action::SectionAdded, &source, "depends on the first");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
     // The hash has to cover `refs`, not just `text`. If it covered text alone,
     // swapping which section this depends on would pass verification.
     tamper(&root, &source, |value| {
-        value["sections"][0]["refs"][0]["section"] = Value::from(2);
+        value["sections"][0]["refs"][0]["target"] =
+            Value::String(engr::proof::section_target(&target, 2));
     });
 
     let report = ops::verify(&root, &source).expect("verify");
@@ -150,15 +158,29 @@ fn repointing_a_reference_is_detected() {
 fn reconcile_applies_an_event_the_projection_missed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "reconciliation");
-    let object = admit(&root, payload(Action::SectionAdded, &id, "one"));
-    assert_eq!(object.rev, 2);
-
-    // Rewind the projection, leaving the event log ahead of it.
-    tamper(&root, &id, |value| {
-        value["rev"] = Value::from(1);
-        value["sections"] = Value::Array(Vec::new());
-        value["next_section_id"] = Value::from(1);
-    });
+    let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "one"))
+        .expect("prepare crash tail");
+    append_admitted_raw(
+        &root,
+        &engr::model::Event {
+            format: engr::model::EVENT_FORMAT.to_owned(),
+            version: engr::EVENT_ENVELOPE_VERSION,
+            event_id: engr::model::new_id(),
+            rev: 2,
+            time: "2026-08-25T00:00:00Z".to_owned(),
+            payload: prepared.candidate.payload.clone(),
+            provenance: engr::model::Provenance::Tagged {
+                admission: engr::model::TaggedAdmission {
+                    kind: engr::semantics::Admission::Human,
+                    confirmation: Some(engr::model::HumanConfirmation {
+                        challenge: prepared.candidate.challenge.clone(),
+                        candidate_digest: prepared.candidate.candidate_digest.clone(),
+                    }),
+                    rule_review: None,
+                },
+            },
+        },
+    );
 
     let object_path = store::object_path(&root, &id);
     let events_path = store::events_path(&root, &id);
@@ -193,19 +215,11 @@ fn a_reference_is_drift_once_its_target_is_revised() {
         &root,
         payload(Action::SectionAdded, &target, "the original basis"),
     );
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
     let mut with_ref = payload(Action::SectionAdded, &source, "rests on the basis");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
 
     let object = store::load_object(&root, &source).expect("source");
@@ -271,7 +285,7 @@ fn show_marks_a_section_whose_content_does_not_match_its_hash() {
         "the header asserted the section was fine: {rendered}"
     );
     assert!(
-        rendered.contains("content does not match the hash confirmed at"),
+        rendered.contains("persisted Section does not match the seal admitted at"),
         "{rendered}"
     );
 }
@@ -303,12 +317,7 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
         &source,
         "Therefore the UI renders them as integers.",
     );
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned.clone(),
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
 
     let object = store::load_object(&root, &source).expect("source");
@@ -355,8 +364,66 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
     assert_eq!(report.standing_on_tampered[0].target, target);
 
     let rendered = view::render_show(&root, &object);
+    assert!(rendered.contains("current integrity failed"), "{rendered}");
+}
+
+#[test]
+fn a_historical_integrity_failure_names_the_historical_side() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "historical target");
+    admit(
+        &root,
+        payload(Action::SectionAdded, &target, "the committed dependency"),
+    );
+    let good_commit = commit_all(&root, "good target");
+
+    let source = new_object(&root, "source");
+    let mut with_ref = payload(Action::SectionAdded, &source, "depends on target text");
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &good_commit)];
+    let source_object = admit(&root, with_ref);
+
+    tamper(&root, &target, |value| {
+        value["sections"][0]["text"] = Value::String("tampered historical text".to_owned());
+    });
+    let bad_commit = commit_all(&root, "bad historical target");
+    let restored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "show",
+            &format!("{good_commit}:.engr/objects/{target}.json"),
+        ])
+        .output()
+        .expect("git show");
+    assert!(restored.status.success());
+    std::fs::write(store::object_path(&root, &target), restored.stdout).expect("restore target");
+
+    let original = source_object.sections[0].refs[0]
+        .as_selective()
+        .expect("selective ref");
+    let historical_ref = Ref::selective(
+        engr::dependency::SelectiveRef::stored(
+            original.target(),
+            original.fields().to_vec(),
+            bad_commit,
+            original.digest(),
+        )
+        .expect("historical ref"),
+    );
+    let source_seal = source_object.sha256.clone().expect("source seal");
+    let diagnostic_source = integrity::mutate(&source_object, &source_seal, |object| {
+        object.sections[0].refs[0] = historical_ref;
+        Ok(())
+    })
+    .expect("reseal fixture")
+    .object;
+
+    let status = &view::assess(&root, &diagnostic_source)[0].1;
+    assert!(status.stands_on_tampered());
+    assert_eq!(status.drifted[0].integrity_side, Some("historical"));
+    let rendered = view::render_show(&root, &diagnostic_source);
     assert!(
-        rendered.contains("does not match its own hash"),
+        rendered.contains("historical integrity failed"),
         "{rendered}"
     );
 }
@@ -412,19 +479,11 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
         &root,
         payload(Action::SectionAdded, &target, "Reason codes are numeric."),
     );
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
 
     // Sound to begin with.
@@ -436,7 +495,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     let path = store::object_path(&root, &target);
     let mut raw: serde_json::Value = store::read_json(&path).expect("read");
     raw["state"] = serde_json::json!("not-a-state");
-    store::write_json(&path, &raw).expect("write");
+    write_raw(&path, &raw).expect("write");
     assert!(
         ops::effective(&root, &target).is_err(),
         "the target must genuinely fail to load"
@@ -475,7 +534,7 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     // A target that is genuinely absent is the other answer, and stays drift.
     // Its events go too: a projection alone is not the authority, and while the
     // durable tail survives, the target is recoverable rather than gone.
-    store::write_json(&path, &raw).expect("restore the broken file");
+    write_raw(&path, &raw).expect("restore the broken file");
     std::fs::remove_file(&path).expect("remove");
     std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
     let object = ops::effective(&root, &source).expect("source");
@@ -509,19 +568,11 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
         &root,
         payload(Action::SectionAdded, &target, "Reason codes are numeric."),
     );
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -530,7 +581,7 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     let sound: Value = store::read_json(&path).expect("read");
     let mut broken = sound.clone();
     broken["state"] = Value::String("not-a-state".into());
-    store::write_json(&path, &broken).expect("write");
+    write_raw(&path, &broken).expect("write");
 
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed(), "unreadable authority is not a pass");
@@ -545,9 +596,11 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
         "and it says why"
     );
 
-    // (b) the target is gone entirely.
+    // (b) the target is gone entirely — projection and admitted history both.
+    let history = store::events_path(&root, &target);
+    let history_bytes = std::fs::read(&history).expect("history");
     std::fs::remove_file(&path).expect("remove");
-    std::fs::remove_file(store::events_path(&root, &target)).expect("remove events");
+    std::fs::remove_file(&history).expect("remove events");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(
         !report.passed(),
@@ -556,11 +609,14 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     assert_eq!(report.standing_on_missing.len(), 1);
     assert!(report.standing_on_unreadable.is_empty());
 
-    // (c) the target loads, but the referenced section is not in it.
-    store::write_json(&path, &sound).expect("restore");
+    // (c) the target loads, with its history, but the referenced section is not
+    // in it. The history goes back too: a projection with no admitted history at
+    // all is its own finding, and it would mask this one.
+    std::fs::write(&history, &history_bytes).expect("restore history");
+    write_raw(&path, &sound).expect("restore");
     let mut without: Value = store::read_json(&path).expect("read");
     without["sections"] = serde_json::json!([]);
-    store::write_json(&path, &without).expect("write");
+    write_raw(&path, &without).expect("write");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
     assert_eq!(
@@ -592,19 +648,11 @@ fn verify_reads_referenced_targets_through_effective_authority() {
         &root,
         payload(Action::SectionAdded, &target, "Reason codes are numeric."),
     );
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -664,24 +712,9 @@ fn verify_reads_referenced_targets_through_effective_authority() {
     );
 }
 
-/// A reference pins content identity, not the target's seal.
-///
-/// `section.sha256` is the target's confirmed integrity seal — a claim about
-/// what was admitted. `refs[].sha256` is what this section was actually written
-/// against. They are only ever allowed to be equal, and the way to establish
-/// that is to recompute the target's content rather than to copy its claim: a
-/// section rewritten outside the gate keeps its old seal while saying something
-/// else, so a pin taken from the seal would record agreement to wording nobody
-/// confirmed.
-///
-/// The invariant at admission is the whole chain:
-///
-/// ```text
-/// recompute(current target content)
-///   == target.section.sha256
-///   == refs[].sha256
-///   == recompute(target content at refs[].commit)
-/// ```
+/// A selective reference pins the semantic field it declares, not either
+/// resource seal. Integrity is established first; the Ref digest then answers
+/// the narrower dependency question over `fields=[text]`.
 #[test]
 fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
     let (_dir, root) = workspace();
@@ -690,22 +723,22 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
         &root,
         payload(Action::SectionAdded, &target, "Reason codes are numeric."),
     );
-    let stored = store::load_object(&root, &target).expect("target").sections[0].clone();
-    let recomputed = stored.recomputed_sha256().expect("recompute");
-    assert_eq!(
-        recomputed, stored.sha256,
-        "an intact target's content and seal agree, which is the only case a ref may be built from"
-    );
+    let target_before = std::fs::read(store::object_path(&root, &target)).expect("target bytes");
     let commit = commit_all(&root, "record target");
+    let reference = text_ref(&root, &target, 1, &commit);
+    let selective = reference.as_selective().expect("selective reference");
+    let section_seal = store::load_object(&root, &target).expect("target").sections[0]
+        .sha256
+        .clone();
+    assert_ne!(
+        selective.digest(),
+        section_seal,
+        "dependency identity and resource integrity are separate contracts"
+    );
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: recomputed.clone(),
-        commit: commit.clone(),
-    }];
+    with_ref.content.refs = vec![reference.clone()];
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -718,51 +751,25 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
     tamper(&root, &target, |value| {
         value["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
     });
-    let rewritten = store::load_object(&root, &target).expect("target").sections[0].clone();
-    assert_eq!(rewritten.sha256, recomputed, "the seal did not move");
-    assert_ne!(
-        rewritten.recomputed_sha256().expect("recompute"),
-        recomputed,
-        "the content did"
-    );
-
     let mut to_forged = payload(
         Action::SectionAdded,
         &source,
         "depends on rewritten wording",
     );
-    to_forged.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: recomputed.clone(),
-        commit: commit.clone(),
-    }];
+    to_forged.content.refs = vec![reference];
     let error = gate::prepare(&root, to_forged).expect_err("that target cannot be referenced");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(
-        error.message.contains("changed outside the gate"),
-        "{error}"
-    );
+    assert!(error.message.contains("TargetIntegrityFailure"), "{error}");
 
-    // And the existing reference reports it as tampering, with a current hash
-    // that followed the content rather than the claim.
+    // The existing reference reports target integrity failure, not ordinary
+    // semantic drift.
     let status = &view::assess(&root, &object)[0].1;
     assert!(status.stands_on_tampered());
-    assert_ne!(
-        status.drifted[0].current_sha256.as_deref(),
-        Some(recomputed.as_str())
-    );
 
-    // (b) Revised through the gate: content and seal move together, so it is
+    // (b) Revised through the gate: resource seals move coherently, so it is
     // drift rather than tampering — the distinction this whole scheme exists
     // to keep.
-    store::write_json(&store::object_path(&root, &target), &{
-        let mut restored: Value =
-            store::read_json(&store::object_path(&root, &target)).expect("read");
-        restored["sections"][0]["text"] = Value::String("Reason codes are numeric.".into());
-        restored
-    })
-    .expect("restore");
+    std::fs::write(store::object_path(&root, &target), target_before).expect("restore target");
     admit(
         &root,
         payload(
@@ -777,16 +784,9 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
         "a confirmed revision is not a forgery"
     );
     assert_eq!(status.drifted.len(), 1);
-    let revised = store::load_object(&root, &target).expect("target").sections[0].clone();
-    assert_eq!(
-        status.drifted[0].current_sha256.as_deref(),
-        Some(revised.recomputed_sha256().expect("recompute").as_str()),
-        "and the reported current identity is the target's actual content"
-    );
-    assert_eq!(
-        revised.sha256,
-        revised.recomputed_sha256().expect("recompute")
-    );
+    let revised = store::load_object(&root, &target).expect("target");
+    engr::integrity::check_stored_object_integrity(&revised)
+        .expect("the admitted revision carries coherent resource seals");
 }
 
 /// A section standing on a target that is gone does not verify, on any surface.
@@ -805,19 +805,11 @@ fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
         &root,
         payload(Action::SectionAdded, &target, "Reason codes are numeric."),
     );
-    let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
-        .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![Ref {
-        object: target.clone(),
-        section: 1,
-        sha256: pinned,
-        commit,
-    }];
+    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
     admit(&root, with_ref);
 
     let object = ops::effective(&root, &source).expect("source");
@@ -847,4 +839,75 @@ fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
     let report = ops::verify(&root, &source).expect("verify");
     assert!(!report.passed());
     assert_eq!(report.standing_on_missing.len(), 1);
+}
+
+/// Put JSON on disk without going through any write path, the way a hand edit,
+/// a git merge or another tool would.
+///
+/// The library has no public writer for a persisted resource, and that is the
+/// point being relied on here: these fixtures are simulating bytes that arrived
+/// from outside, so they write bytes from outside.
+fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
+    let text = engr::proof::canonical_bytes(value, "test fixture")?;
+    std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A duplicate member is where two conforming JSON readers may disagree.
+///
+/// Parsing into a value collapses a repeated key silently — one slot per name —
+/// so an exact-members check made after parsing can only ever see one. That is
+/// not a tidiness question: another conforming stack may reject the document or
+/// select the other occurrence, so the bytes no longer have one meaning. The
+/// canonical-bytes rule settles it without a second check, because the collapsed
+/// value no longer re-serializes to the bytes that had both.
+#[test]
+fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "one meaning");
+    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+
+    let path = store::object_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("object bytes");
+    store::load_object(&root, &id).expect("the canonical bytes load");
+
+    for (what, rewritten) in [
+        (
+            "a duplicated top-level member",
+            original.replacen('{', r#"{"state":"open","#, 1),
+        ),
+        (
+            "a duplicated Section member",
+            original.replacen(r#""sections":[{"#, r#""sections":[{"id":1,"#, 1),
+        ),
+    ] {
+        assert_ne!(
+            rewritten, original,
+            "{what}: the fixture must change something"
+        );
+        std::fs::write(&path, &rewritten).expect("write");
+        let error = store::load_object(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains("canonical"), "{what}: {error}");
+    }
+
+    std::fs::write(&path, &original).expect("restore");
+    store::load_object(&root, &id).expect("and it reads back");
+}
+
+/// Put an admitted Event in the log without going through any write path.
+///
+/// There is no public append — Event provenance is deliberately too thin to
+/// prove admission from, so the durable write lives behind the gate. What this
+/// reproduces is the state a crash leaves: the record is durable and the
+/// projection is not, which is exactly what recovery has to cope with. Written
+/// as the canonical JCS bytes, because that is what the read boundary requires.
+fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
+    let path = store::events_path(root, &event.payload.object);
+    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(&line);
+    existing.push('\n');
+    std::fs::write(&path, existing).expect("write event");
 }

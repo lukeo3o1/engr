@@ -303,12 +303,12 @@ impl Target {
     }
 }
 
-/// A confirmed typed semantic edge.
+/// An admitted typed semantic edge.
 ///
-/// Distinct from `refs[]`, which is a wording dependency and drifts when its
-/// target is reworded. A relation says what this assertion is related to, and
-/// each type defines its own target rules; there is no shared drift behaviour to
-/// inherit and none is applied.
+/// Distinct from `refs[]`, which selects semantic dependencies and drifts only
+/// when those selected values move. A relation says what this assertion is
+/// related to, and each type defines its own target rules; there is no shared
+/// drift behaviour to inherit and none is applied.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Relation {

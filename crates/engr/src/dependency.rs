@@ -12,13 +12,10 @@
 //! admission moves its seal and its Object's seal, and a Ref that selected only
 //! `text` has not drifted; one that selected `admission` has.
 //!
-//! # Nothing here is durable yet
-//!
-//! A persisted Ref today carries `{object, section, sha256, commit}`. The
-//! Phase-3 shape is `{target, fields, commit, digest}`, and it is not written
-//! anywhere: [`SelectiveRef`] is a separate type rather than a change to
-//! [`crate::model::Ref`], because editing that struct would change the bytes of
-//! every Section already on disk. #13's in-progress write boundary, again.
+//! Current persisted Refs carry `{target, fields, commit, digest}`. The retained
+//! `{object, section, sha256, commit}` shape is decoded only from predecessor
+//! workspaces and historical snapshots, so migration can recover its full
+//! semantic dependency without pretending it selected `admission`.
 
 use crate::model::{Object, Section};
 use crate::proof::{canonical_bytes, canonical_set, sha256_of};
@@ -38,7 +35,7 @@ use std::path::Path;
 /// silent `null` would let `fields: ["admited_at"]` produce a perfectly valid
 /// digest over a typo, and the Ref would then never drift because the thing it
 /// selected never existed.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticField {
     Admission,
@@ -629,17 +626,26 @@ fn historical_section(root: &Path, commit: &str, id: &str, section: u64) -> Hist
     match crate::git::object_at(root, commit, id) {
         Err(_) => Historical::SchemaMismatch,
         Ok(None) => Historical::Unavailable,
-        Ok(Some(object)) => match object.sections.into_iter().find(|held| held.id == section) {
-            None => Historical::Unavailable,
-            Some(section) => match section.recomputed_sha256() {
-                // Unable to compute the historical seal at all: the bytes are
-                // not interpretable under a contract this build applies, which
-                // is a different answer from "they were changed".
-                Err(_) => Historical::SchemaMismatch,
-                Ok(recomputed) if recomputed == section.sha256 => Historical::Found(section),
-                Ok(_) => Historical::IntegrityFailure,
-            },
-        },
+        Ok(Some(object)) => {
+            let current_generation = object.sha256.is_some();
+            if current_generation
+                && crate::integrity::check_stored_object_integrity(&object).is_err()
+            {
+                return Historical::IntegrityFailure;
+            }
+            match object.sections.into_iter().find(|held| held.id == section) {
+                None => Historical::Unavailable,
+                Some(section) if current_generation => Historical::Found(section),
+                Some(section) => match section.recomputed_sha256() {
+                    // Unable to compute the historical seal at all: the bytes are
+                    // not interpretable under a contract this build applies, which
+                    // is a different answer from "they were changed".
+                    Err(_) => Historical::SchemaMismatch,
+                    Ok(recomputed) if recomputed == section.sha256 => Historical::Found(section),
+                    Ok(_) => Historical::IntegrityFailure,
+                },
+            }
+        }
     }
 }
 
@@ -677,14 +683,11 @@ fn section_of(object: &Object, section: u64) -> Result<&Section> {
 /// the fields that happen to look intact would otherwise launder a tampered
 /// Section into a dependency somebody relies on.
 ///
-/// Step 9 is the caller's. Nothing here writes, and under the current write
-/// boundary nothing may — the returned value is the Ref that *would* be
-/// persisted.
+/// Step 9 is the caller's: the returned value is ready to persist in the source
+/// Section after that Section's own admission path has accepted the mutation.
 ///
-/// `current_seal` is passed rather than read from the Object for the reason
-/// given in [`crate::integrity`]: no workspace carries a Phase-3 aggregate seal
-/// yet, and a function that read one would be checking a v3 projection against
-/// a v2 value.
+/// `current_seal` is explicit so callers cannot accidentally validate against a
+/// stale value captured before acquiring the mutation lock.
 pub fn admit(
     root: &Path,
     current: &Object,
@@ -709,7 +712,7 @@ pub fn admit(
     let fields = canonical_fields(fields)?;
     // 4 + 5.
     check_commit_identity(root, commit)?;
-    let then = match historical_section(root, commit, &current.id, section) {
+    let mut then = match historical_section(root, commit, &current.id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => {
             return Err(Error::new(
@@ -737,6 +740,14 @@ pub fn admit(
             ))
         }
     };
+    if fields.contains(&SemanticField::Refs)
+        && then
+            .refs
+            .iter()
+            .any(|r| matches!(r, crate::model::Ref::Legacy(_)))
+    {
+        then = crate::migration::migrated_historical_section(root, commit, &current.id, section)?;
+    }
     // 6 + 7.
     check_not_stale_at_birth(&then, now, &fields)?;
     // 8.
@@ -806,7 +817,7 @@ pub fn evaluate(
     // above. Reporting it as one of §9's states would put a verdict on a
     // reference that does not say what it depends on.
     check_commit_identity(root, &reference.commit)?;
-    let then = match historical_section(root, &reference.commit, &id, section) {
+    let mut then = match historical_section(root, &reference.commit, &id, section) {
         Historical::Found(section) => section,
         Historical::Unavailable => return Ok(Dependency::ProvenanceUnavailable),
         Historical::SchemaMismatch => return Ok(Dependency::SchemaMismatch),
@@ -824,6 +835,22 @@ pub fn evaluate(
         // finds it at the line that would otherwise lose the distinction.
         Historical::IntegrityFailure => return Ok(Dependency::TargetIntegrityFailure),
     };
+    if reference.fields.contains(&SemanticField::Refs)
+        && then
+            .refs
+            .iter()
+            .any(|r| matches!(r, crate::model::Ref::Legacy(_)))
+    {
+        then = match crate::migration::migrated_historical_section(
+            root,
+            &reference.commit,
+            &id,
+            section,
+        ) {
+            Ok(section) => section,
+            Err(_) => return Ok(Dependency::SchemaMismatch),
+        };
+    }
     // #35 §9: a selected field that cannot be interpreted under the applicable
     // historical *or* current semantic contract is a schema mismatch. Letting
     // the error escape instead would hand the caller a failure where the

@@ -14,6 +14,7 @@ use std::process::Command;
 
 fn run(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .arg("-C")
         .arg(root)
         .args(args)
@@ -23,6 +24,21 @@ fn run(root: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn run_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn literal_path(path: &str) -> String {
+    format!(":(top,literal){path}")
 }
 
 pub fn is_repo(root: &Path) -> bool {
@@ -68,10 +84,13 @@ pub fn source_dirty(root: &Path) -> Option<bool> {
 /// `git diff` exits 1 for "differs", so the status code is the answer and a
 /// non-zero exit must not be read as failure; anything else is `None`.
 pub fn path_differs_at(root: &Path, commit: &str, path: &str) -> Option<bool> {
+    let repository = repo_root(root)?;
+    let path = literal_path(path);
     let output = Command::new("git")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .arg("-C")
-        .arg(root)
-        .args(["diff", "--quiet", commit, "--", path])
+        .arg(repository)
+        .args(["diff", "--quiet", commit, "--", &path])
         .output()
         .ok()?;
     match output.status.code() {
@@ -82,7 +101,9 @@ pub fn path_differs_at(root: &Path, commit: &str, path: &str) -> Option<bool> {
 }
 
 pub fn path_dirty(root: &Path, path: &str) -> Option<bool> {
-    let status = run(root, &["status", "--porcelain", "--", path])?;
+    let repository = repo_root(root)?;
+    let path = literal_path(path);
+    let status = run(&repository, &["status", "--porcelain", "--", &path])?;
     Some(!status.trim().is_empty())
 }
 
@@ -93,6 +114,7 @@ pub fn path_at(root: &Path, commit: &str, path: &str) -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoricalWorkspaceFormat {
     format: String,
     version: u32,
@@ -102,7 +124,64 @@ fn historical_path(commit: &str, path: &str) -> String {
     format!("{commit}:{path}")
 }
 
-fn validate_historical_format(path: &str, text: &str) -> Result<()> {
+/// Where the caller's directory sits in the repository, in **git's** own
+/// coordinates.
+///
+/// Not `strip_prefix(repo_root())`, which is what this was. `rev-parse
+/// --show-toplevel` answers in git's coordinates and the caller's root is
+/// whatever the caller passed, so stripping one from the other compares two
+/// spellings of the same directory. They agree on Linux and nowhere else: macOS
+/// puts temporary directories under `/var`, a symlink to `/private/var`, which
+/// git resolves and the caller does not; Windows answers `C:/…` with forward
+/// slashes, and may answer with an 8.3 short name, against a `C:\…` the caller
+/// built. `--show-prefix` asks git the question directly instead, so there is no
+/// comparison to get wrong.
+fn repo_prefix(root: &Path) -> Option<String> {
+    run(root, &["rev-parse", "--show-prefix"]).map(|prefix| prefix.trim_matches('/').to_owned())
+}
+
+/// One filesystem path as git names it: repository-relative, forward slashes.
+///
+/// A path that is already relative is passed through — that is how Rule
+/// provenance supplies one, having resolved it against the repository itself.
+fn repo_relative(root: &Path, path: &Path) -> Option<String> {
+    let inside = match path.strip_prefix(root) {
+        Ok(relative) => relative,
+        Err(_) if path.is_relative() => path,
+        Err(_) => return None,
+    };
+    let inside = inside
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let prefix = repo_prefix(root)?;
+    Some(if prefix.is_empty() {
+        inside
+    } else {
+        format!("{prefix}/{inside}")
+    })
+}
+
+fn workspace_prefix(root: &Path) -> Result<String> {
+    let prefix = repo_prefix(root).ok_or_else(|| {
+        Error::new(
+            EXIT_SCHEMA,
+            "could not determine repository root".to_owned(),
+        )
+    })?;
+    Ok(if prefix.is_empty() {
+        crate::store::DIR.to_owned()
+    } else {
+        format!("{prefix}/{}", crate::store::DIR)
+    })
+}
+
+fn historical_bytes(root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    Ok(run_bytes(root, &["show", &historical_path(commit, path)]))
+}
+
+fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     let format: HistoricalWorkspaceFormat = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
     ensure!(
@@ -124,13 +203,20 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
     // under the snapshot's own version rather than widening the check again.
     ensure!(
         format.version == WORKSPACE_VERSION
-            || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&format.version),
+            || crate::HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS.contains(&format.version),
         EXIT_SCHEMA,
         "{path}: workspace version {} is not supported by engr {}",
         format.version,
         crate::IMPLEMENTATION_VERSION
     );
-    Ok(())
+    if format.version == WORKSPACE_VERSION {
+        ensure!(
+            text == crate::proof::canonical_bytes(&value, path)?,
+            EXIT_SCHEMA,
+            "{path}: workspace-v3 format.json is not persisted as JCS"
+        );
+    }
+    Ok(format.version)
 }
 
 /// A format-less snapshot predates the workspace authority. It is readable only
@@ -138,10 +224,25 @@ fn validate_historical_format(path: &str, text: &str) -> Result<()> {
 /// the live legacy detector rather than guessing from whatever the target JSON
 /// happens to deserialize as today.
 fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
-    let objects = format!("{}/objects", crate::store::DIR);
+    let objects = format!("{}/objects", workspace_prefix(root)?);
+    // `--full-name` and a top-anchored literal pathspec, for the same reason the
+    // worktree helpers use one: `-C root` gives git a cwd prefix, so both the
+    // pathspec and the output would otherwise be read relative to it — a
+    // workspace at `project/.engr` would be looked for under
+    // `project/project/.engr`, and a real legacy snapshot would report itself as
+    // having no Objects at all.
+    let literal = literal_path(&objects);
     let paths = run(
         root,
-        &["ls-tree", "-r", "--name-only", commit, "--", &objects],
+        &[
+            "ls-tree",
+            "-r",
+            "--full-name",
+            "--name-only",
+            commit,
+            "--",
+            &literal,
+        ],
     )
     .ok_or_else(|| {
         Error::new(
@@ -159,13 +260,15 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
             continue;
         }
         found = true;
-        let text = run(root, &["show", &historical_path(commit, path)]).ok_or_else(|| {
+        let bytes = historical_bytes(root, commit, path)?.ok_or_else(|| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("could not read historical object {path} at commit {commit}"),
             )
         })?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+        let value: serde_json::Value = serde_json::from_str(text)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
         let object_value = value.as_object().ok_or_else(|| {
             Error::new(EXIT_SCHEMA, format!("{path}: object must be a JSON object"))
@@ -202,25 +305,37 @@ fn validate_legacy_workspace_at(root: &Path, commit: &str) -> Result<()> {
 /// than pairing the worktree's wording with an unrelated HEAD. The snapshot's
 /// own workspace authority decides which representation may be decoded.
 pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Object>> {
-    let format_path = format!("{}/format.json", crate::store::DIR);
-    match run(root, &["show", &historical_path(commit, &format_path)]) {
-        Some(text) => validate_historical_format(&format_path, &text)?,
-        None => validate_legacy_workspace_at(root, commit)?,
-    }
+    let prefix = workspace_prefix(root)?;
+    let format_path = format!("{prefix}/format.json");
+    let version = match historical_bytes(root, commit, &format_path)? {
+        Some(bytes) => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("{format_path}: {error}")))?;
+            validate_historical_format(&format_path, text)?
+        }
+        None => {
+            validate_legacy_workspace_at(root, commit)?;
+            0
+        }
+    };
 
-    let path = format!("{}/objects/{id}.json", crate::store::DIR);
-    let Some(text) = run(root, &["show", &historical_path(commit, &path)]) else {
+    let path = format!("{prefix}/objects/{id}.json");
+    let Some(bytes) = historical_bytes(root, commit, &path)? else {
         return Ok(None);
     };
-    let object: Object = serde_json::from_str(&text)
+    let text = std::str::from_utf8(&bytes)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
-    object.validate()?;
-    ensure!(
-        object.id == id,
-        EXIT_SCHEMA,
-        "{path}: object id {:?} does not match its filename",
-        object.id
-    );
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
+    let object = crate::store::decode_object_for_version(Path::new(&path), id, value, version)?;
+    if version == WORKSPACE_VERSION {
+        let canonical = crate::proof::canonical_bytes(&object, "historical Object")?;
+        ensure!(
+            bytes == canonical.as_bytes(),
+            EXIT_SCHEMA,
+            "{path}: workspace-v3 Object is not persisted as JCS"
+        );
+    }
     Ok(Some(object))
 }
 
@@ -275,17 +390,8 @@ pub fn distance(root: &Path, from: &str) -> Option<Distance> {
 /// The last commit that touched `path`. `show` uses it to hand the reader the
 /// command that recovers what a file said before it was edited.
 pub fn last_commit_for(root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let commit = run(
-        root,
-        &[
-            "log",
-            "-1",
-            "--format=%H",
-            "--",
-            &relative.to_string_lossy().replace('\\', "/"),
-        ],
-    )?;
+    let literal = literal_path(&repo_relative(root, path)?);
+    let commit = run(root, &["log", "-1", "--format=%H", "--", &literal])?;
     (!commit.is_empty()).then_some(commit)
 }
 
@@ -310,16 +416,8 @@ impl Distance {
 /// Whether a path has changes git has not recorded. Used to warn that current
 /// projections have not yet been committed as an additional tamper anchor.
 pub fn uncommitted(root: &Path, path: &Path) -> Option<bool> {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let status = run(
-        root,
-        &[
-            "status",
-            "--porcelain",
-            "--",
-            &relative.to_string_lossy().replace('\\', "/"),
-        ],
-    )?;
+    let literal = literal_path(&repo_relative(root, path)?);
+    let status = run(root, &["status", "--porcelain", "--", &literal])?;
     Some(!status.trim().is_empty())
 }
 
@@ -330,6 +428,7 @@ pub fn uncommitted(root: &Path, path: &Path) -> Option<bool> {
 /// stripped its last byte is not a basis.
 pub fn blob_at(root: &Path, commit: &str, path: &str) -> Option<String> {
     let output = Command::new("git")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .arg("-C")
         .arg(root)
         .args(["show", &format!("{commit}:{path}")])
@@ -369,6 +468,7 @@ pub fn object_type(root: &Path, oid: &str) -> Option<String> {
 /// alone cannot tell a regular file from a link — and a link whose target name
 /// happens to equal a later regular file's contents compares equal.
 pub fn tree_entry_mode(root: &Path, commit: &str, path: &str) -> Option<String> {
-    let listed = run(root, &["ls-tree", commit, "--", path])?;
+    let literal = literal_path(path);
+    let listed = run(root, &["ls-tree", commit, "--", &literal])?;
     listed.split_whitespace().next().map(str::to_owned)
 }
