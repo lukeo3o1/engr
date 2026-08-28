@@ -257,3 +257,71 @@ fn contention_on_one_object_leaves_a_contiguous_history() {
     assert_workspace_sound(&root);
     drop(dir);
 }
+
+/// The three candidate states are reachable, distinct, and each one behaves.
+///
+/// Phase 4, scope item 3. Only `Stale` was asserted anywhere before this:
+/// `Pending` and `AlreadyApplied` were reached incidentally by tests about
+/// something else, so nothing pinned what they mean. They are the states a
+/// crash and a race leave behind, which makes them exactly the ones worth
+/// stating.
+#[test]
+fn the_candidate_states_are_reachable_and_each_one_behaves() {
+    let (dir, root) = workspace();
+    let id = new_object(&root, "candidate states");
+
+    // Pending: freshly prepared, nothing has moved under it.
+    let prepared =
+        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
+    assert!(matches!(
+        gate::candidate_state(&root, &prepared.candidate).expect("classify"),
+        gate::CandidateState::Pending
+    ));
+
+    // AlreadyApplied: the Event landed and the envelope outlived it, which is
+    // what a crash between the append and the envelope's removal leaves behind.
+    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
+    let envelope = std::fs::read(&path).expect("candidate bytes");
+    gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge)).expect("confirm");
+    std::fs::write(&path, &envelope).expect("restore what a crash would have left");
+    let restored = gate::find(&root, &prepared.candidate.challenge).expect("it still reads");
+    assert!(matches!(
+        gate::candidate_state(&root, &restored).expect("classify"),
+        gate::CandidateState::AlreadyApplied(_)
+    ));
+
+    // And confirming it again is an idempotent retry, not a second admission —
+    // the property that makes crash recovery safe to attempt blindly.
+    let before = store::load_events(&root, &id).expect("history").len();
+    gate::confirm(&root, &format!("CONFIRM {}", restored.challenge)).expect("idempotent retry");
+    assert_eq!(
+        store::load_events(&root, &id).expect("history").len(),
+        before,
+        "a retry admits nothing a second time"
+    );
+
+    // Stale: prepared against a predecessor something else then moved past. An
+    // Agent rename advances the revision without superseding the envelope, so
+    // the candidate is left describing a state that no longer exists.
+    let stale = gate::prepare(&root, payload(Action::SectionAdded, &id, "stale")).expect("prepare");
+    gate::admit_agent(
+        &root,
+        payload(Action::ObjectRenamed, &id, "an agent got there first"),
+        None,
+    )
+    .expect("agent rename");
+    match gate::candidate_state(&root, &stale.candidate).expect("classify") {
+        gate::CandidateState::Stale { current_rev } => assert!(
+            current_rev > stale.candidate.binding.expected_rev,
+            "stale means the object moved past what this candidate bound"
+        ),
+        other => panic!("expected a stale candidate, got {other:?}"),
+    }
+    gate::confirm(&root, &format!("CONFIRM {}", stale.candidate.challenge))
+        .expect_err("a stale candidate cannot be admitted");
+
+    // It stays readable, though: a dead candidate must still explain itself.
+    gate::find(&root, &stale.candidate.challenge).expect("and it still reads");
+    assert_workspace_sound(&root);
+    drop(dir);
+}
