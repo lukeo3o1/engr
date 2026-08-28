@@ -1927,40 +1927,29 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
     let mut out = String::from(
         "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n",
     );
-    for (what, stored_value, provable_value) in [
-        ("title", stored.title.clone(), provable.title.clone()),
-        (
-            "state",
-            stored.state.as_str().to_owned(),
-            provable.state.as_str().to_owned(),
-        ),
-    ] {
-        if stored_value != provable_value {
-            out.push_str(&format!(
-                "  {what}\n    stored   {stored_value}\n    restore  {provable_value}\n"
-            ));
+    let differences = match view::repair_differences(&stored, &provable) {
+        Ok(differences) => differences,
+        Err(error) => {
+            return format!(
+                "{out}  the two states cannot be compared: {}\n\n",
+                error.message
+            )
         }
+    };
+    // Integrity failed, so something differs. Nothing listed would mean the
+    // comparison missed it, and saying so is better than an empty screen that
+    // reads like agreement.
+    if differences.is_empty() {
+        out.push_str(
+            "  integrity failed but no persisted member differs; do not confirm this without\n  looking at the file, because something is wrong with this comparison\n\n",
+        );
+        return out;
     }
-    for section in &provable.sections {
-        match stored.section(section.id) {
-            Ok(current) if current.text == section.text => {}
-            Ok(current) => out.push_str(&format!(
-                "  §{}\n    stored   {}\n    restore  {}\n",
-                section.id, current.text, section.text
-            )),
-            Err(_) => out.push_str(&format!(
-                "  §{}\n    stored   (absent)\n    restore  {}\n",
-                section.id, section.text
-            )),
-        }
-    }
-    for section in &stored.sections {
-        if provable.section(section.id).is_err() {
-            out.push_str(&format!(
-                "  §{}\n    stored   {}\n    restore  (removed; admitted history has no such section)\n",
-                section.id, section.text
-            ));
-        }
+    for difference in &differences {
+        out.push_str(&format!(
+            "  {}\n    stored   {}\n    restore  {}\n",
+            difference.at, difference.stored, difference.restore
+        ));
     }
     out.push('\n');
     out

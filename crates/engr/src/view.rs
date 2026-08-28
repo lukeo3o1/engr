@@ -10,7 +10,7 @@ use crate::backlog;
 use crate::git;
 use crate::model::{Object, Ref};
 use crate::semantics::{Relation, Supplement};
-use crate::{collection, ops, store, work, Result};
+use crate::{collection, ops, store, work, Error, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -1482,4 +1482,116 @@ pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
     });
     serde_json::to_string_pretty(&value)
         .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
+}
+
+/// One persisted difference between stored bytes and what history proves.
+pub struct RepairDifference {
+    /// Where it is, e.g. `title` or `§3.role`.
+    pub at: String,
+    /// What the integrity-invalid file holds.
+    pub stored: String,
+    /// What admitted history derives, and what repair will restore.
+    pub restore: String,
+}
+
+/// Every persisted difference between an integrity-invalid Object and the
+/// projection a repair would restore.
+///
+/// Derived from the canonical projection of both, deliberately, rather than
+/// from a list of fields. The first version of this comparison enumerated
+/// `title`, lifecycle `state` and Section `text`, and therefore showed *nothing
+/// at all* for an out-of-band edit to a Section's `role`, `refs` or any other
+/// sealed member — the case where a person most needs to see what they are
+/// about to discard. Walking the representation instead means a member this
+/// code has never heard of is still reported, and a member added later is
+/// covered the day it is added.
+///
+/// Seals are excluded at both levels. They are not the difference; they are how
+/// the difference was detected, and the repair's own seals are computed after it
+/// is admitted. Listing them would put a guaranteed, meaningless line at the top
+/// of every comparison, which is how a screen teaches people to skim.
+pub fn repair_differences(stored: &Object, restore: &Object) -> Result<Vec<RepairDifference>> {
+    let mut found = Vec::new();
+    walk_repair_difference(
+        "",
+        &comparable_projection(stored)?,
+        &comparable_projection(restore)?,
+        &mut found,
+    );
+    Ok(found)
+}
+
+/// The projection to compare, with Sections keyed by id rather than by position.
+///
+/// Position would make a deleted Section read as a change to every Section after
+/// it. Ids are what a person and every reference actually name.
+fn comparable_projection(object: &Object) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(object)
+        .map_err(|error| Error::new(crate::EXIT_SCHEMA, format!("comparing: {error}")))?;
+    if let Some(map) = value.as_object_mut() {
+        map.remove("sha256");
+        if let Some(sections) = map.get_mut("sections").and_then(|s| s.as_array_mut()) {
+            let mut keyed = serde_json::Map::new();
+            for mut section in sections.drain(..) {
+                let id = section.get("id").and_then(serde_json::Value::as_u64);
+                if let Some(entry) = section.as_object_mut() {
+                    entry.remove("sha256");
+                    entry.remove("id");
+                }
+                let at = id
+                    .map(|id| format!("§{id}"))
+                    .unwrap_or_else(|| "§?".to_owned());
+                keyed.insert(at, section);
+            }
+            map.insert("sections".to_owned(), serde_json::Value::Object(keyed));
+        }
+    }
+    Ok(value)
+}
+
+fn walk_repair_difference(
+    at: &str,
+    stored: &serde_json::Value,
+    restore: &serde_json::Value,
+    found: &mut Vec<RepairDifference>,
+) {
+    if stored == restore {
+        return;
+    }
+    if let (serde_json::Value::Object(left), serde_json::Value::Object(right)) = (stored, restore) {
+        let mut members: Vec<&str> = left
+            .keys()
+            .chain(right.keys())
+            .map(String::as_str)
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        for member in members {
+            let nested = if at.is_empty() {
+                member.to_owned()
+            } else {
+                format!("{at}.{member}")
+            };
+            walk_repair_difference(
+                &nested,
+                left.get(member).unwrap_or(&serde_json::Value::Null),
+                right.get(member).unwrap_or(&serde_json::Value::Null),
+                found,
+            );
+        }
+        return;
+    }
+    found.push(RepairDifference {
+        at: at.trim_start_matches("sections.").to_owned(),
+        stored: render_repair_value(stored),
+        restore: render_repair_value(restore),
+    });
+}
+
+fn render_repair_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "(absent)".to_owned(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }

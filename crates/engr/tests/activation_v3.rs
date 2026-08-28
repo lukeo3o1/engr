@@ -561,3 +561,107 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
         "refused as an authority violation: {error}"
     );
 }
+
+/// Break integrity through one non-text member of the stored Section.
+fn tamper_member(root: &Path, id: &str, member: &str, value: serde_json::Value) {
+    let path = store::object_path(root, id);
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("object bytes"))
+            .expect("object json");
+    stored["sections"][0][member] = value;
+    std::fs::write(
+        &path,
+        proof::canonical_bytes(&stored, "tampered object").expect("canonical"),
+    )
+    .expect("tamper");
+}
+
+/// The confirmation screen shows every discarded member, not only wording.
+///
+/// An out-of-band edit to a Section's `role` fails integrity and prepares a
+/// repair exactly like an edit to its text — but the first version of this
+/// screen compared only `title`, lifecycle `state` and Section `text`, so it
+/// asked for `CONFIRM` while showing no differing field at all. #35's 3B ruling
+/// is that the Human sees the invalid state, the provable state and their
+/// difference; a comparison that silently omits the difference does not satisfy
+/// it.
+#[test]
+fn the_repair_screen_shows_a_discarded_role_and_not_only_text() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184e";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording that is not what changed"));
+    tamper_member(
+        root,
+        id,
+        "role",
+        serde_json::Value::String("decision".to_owned()),
+    );
+
+    let stored = store::load_object(root, id).expect("stored");
+    integrity::check_stored_object_integrity(&stored).expect_err("the edit breaks integrity");
+    let provable = engr::ops::provable(root, id).expect("provable");
+    let differences = engr::view::repair_differences(&stored, &provable).expect("compare");
+    assert!(
+        differences
+            .iter()
+            .any(|difference| difference.at == "§1.role"),
+        "the discarded role must be on the screen: {:?}",
+        differences.iter().map(|d| &d.at).collect::<Vec<_>>()
+    );
+
+    // And it reaches the actual confirmation surface, not just the helper.
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(["repair", id])
+        .output()
+        .expect("run engr repair");
+    assert!(output.status.success(), "repair prepares");
+    let screen = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        screen.contains("§1.role") && screen.contains("decision"),
+        "the human-facing screen names what is being discarded:\n{screen}"
+    );
+}
+
+/// The same, for a member the comparison was never written to know about.
+///
+/// The point is structural rather than field-by-field: the comparison walks the
+/// canonical projection, so `refs[]`, `relations[]`, `based_on`, `admission`,
+/// `admitted_at` and anything added later are covered by construction rather
+/// than by remembering to add them.
+#[test]
+fn the_repair_screen_covers_sealed_members_it_was_never_taught() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184f";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording that is not what changed"));
+    tamper_member(
+        root,
+        id,
+        "content",
+        serde_json::json!([{ "type": "code.rs", "body": "fn nobody_admitted_this() {}" }]),
+    );
+
+    let stored = store::load_object(root, id).expect("stored");
+    integrity::check_stored_object_integrity(&stored).expect_err("the edit breaks integrity");
+    let provable = engr::ops::provable(root, id).expect("provable");
+    let differences = engr::view::repair_differences(&stored, &provable).expect("compare");
+    let named: Vec<&str> = differences
+        .iter()
+        .map(|difference| difference.at.as_str())
+        .collect();
+    assert!(
+        named.contains(&"§1.content"),
+        "supplementary content is sealed material too: {named:?}"
+    );
+    assert!(
+        !named.iter().any(|at| at.contains("sha256")),
+        "seals are how the difference was found, not the difference: {named:?}"
+    );
+}
