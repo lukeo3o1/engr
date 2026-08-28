@@ -1409,3 +1409,48 @@ fn a_reviewed_stale_candidate_ignores_unrelated_lost_provenance() {
         .expect("a reviewed stale candidate still explains itself");
     assert!(candidate.context.rule_review.is_some());
 }
+
+/// Migration is a maintenance window, and that is now normative.
+///
+/// #32's ruling on `5454597053` settles what a lock-free reader sees while a
+/// coordinated migration is incomplete: not the old state, not the new one, and
+/// never a mixture — `unavailable`, failing closed until `engr migrate`
+/// finishes. It is the one explicit exception to the old-or-new rule the rest of
+/// the protocol relies on.
+///
+/// Pinned because it is a contract a second implementation has to reproduce, not
+/// a side effect of how this one happens to order its checks. A reader is
+/// entitled to read the refusal as "mid-migration", so it must not quietly
+/// become "damaged" or, worse, a partial answer.
+#[test]
+fn reads_are_unavailable_while_a_coordinated_migration_is_incomplete() {
+    let interrupted = tempfile::tempdir().expect("interrupted");
+    let completed = tempfile::tempdir().expect("completed");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    for root in [interrupted.path(), completed.path()] {
+        predecessor(root, &[object(id, "readable until the window opens")]);
+    }
+    let root = interrupted.path();
+    // A readable predecessor before the window opens.
+    store::validate_format(root).expect("the predecessor reads");
+
+    staged_plan(root, completed.path(), id);
+
+    let error = store::validate_format(root).expect_err("the window is open");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("engr migrate"),
+        "the refusal says how to close the window: {error}"
+    );
+    // Not a partial answer, and not silence: the read surfaces refuse too.
+    engr::ops::effective(root, id).expect_err("no mixed-generation read");
+    store::load_object(root, id).expect_err("no current read either");
+
+    // And completing the migration restores availability.
+    store::migrate(root).expect("resume");
+    assert_eq!(
+        store::validate_format(root).expect("readable again"),
+        store::WorkspaceFormat::Current
+    );
+    engr::ops::effective(root, id).expect("and the record reads");
+}
