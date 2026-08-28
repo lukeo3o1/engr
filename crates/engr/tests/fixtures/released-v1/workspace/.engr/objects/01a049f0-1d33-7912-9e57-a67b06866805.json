@@ -1,0 +1,31 @@
+{
+  "id": "01a049f0-1d33-7912-9e57-a67b06866805",
+  "title": "Object and section record model, and the identifiers that survive deletion",
+  "state": "open",
+  "rev": 5,
+  "next_section_id": 3,
+  "sections": [
+    {
+      "id": 1,
+      "text": "An object is the durable knowledge aggregate and holds coherent sections. A section's text is its current confirmed wording: there is no competing current-text field and no stored staleness verdict.",
+      "based_on": "cce71a0d95c24780dcc7f71b20b5160c5dd3b477",
+      "refs": [
+        {
+          "object": "01a049f0-16fb-7c03-a75d-97980cc8c613",
+          "section": 1,
+          "sha256": "8a85d09e275cc76f6d8ba72ff3307bc60c77a55efe036453e045e54190b2d55b",
+          "commit": "cce71a0d95c24780dcc7f71b20b5160c5dd3b477"
+        }
+      ],
+      "sha256": "73a53479c0b448c9a2a6c530ad8992f6381ca775dd3cc9d19dcc19875545ac81",
+      "confirmed_at": "2026-08-28T19:54:29.096654598Z"
+    },
+    {
+      "id": 2,
+      "text": "Object identifiers are UUIDv7 and resolve by unique prefix. Section identifiers are monotonic integers scoped to their object and are never reused, so deleting a section cannot silently retarget a reference that named it.",
+      "refs": [],
+      "sha256": "a6f95d79acd666f7109776a7adc237453828feadaf517afedd6015cefe809774",
+      "confirmed_at": "2026-08-28T19:54:29.722372991Z"
+    }
+  ]
+}

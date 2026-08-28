@@ -10,3 +10,9 @@
 #
 # Nothing in this repository wants CRLF, so there is no exception list.
 * text=auto eol=lf
+
+# Migration fixtures are hashed bytes and a pack file. Git normalizing either
+# would change what the tests are testing: a seal is over the exact octets, and
+# a bundle is not text at all.
+crates/engr/tests/fixtures/** -text
+*.bundle binary

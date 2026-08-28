@@ -1,0 +1,1237 @@
+//! The published release's workspace, brought forward under this binary.
+//!
+//! Everything here runs against `tests/fixtures/released-v1`, which the
+//! published `latest` release wrote through its own Human Gate. That is the
+//! point: a hand-authored file proves the migrator accepts a shape somebody
+//! believed version 1 had, and only the release's own output proves it accepts
+//! what the release actually wrote. See the fixture's `PROVENANCE.md`.
+//!
+//! The suite is arranged as the claim it has to support. First that the fixture
+//! is what it says it is, then that it migrates, then that migration preserved
+//! every semantic the predecessor proved and invented none, then that each way
+//! of being wrong is still refused, then that the coordinated window still
+//! behaves, and last that the result is an ordinary current workspace rather
+//! than a structure that passes one assertion.
+
+use engr::model::{
+    Action, Content, Event, HumanConfirmation, Payload, Provenance, TaggedAdmission,
+};
+use engr::semantics::Admission;
+use engr::store::WorkspaceFormat;
+use engr::{backlog, collection, dependency, gate, integrity, proof, rules, store, work};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tempfile::TempDir;
+
+/// The Objects the release admitted, by what they are about.
+const AUTHORITY: &str = "01a049f0-16fb-7c03-a75d-97980cc8c613";
+const MODEL: &str = "01a049f0-1d33-7912-9e57-a67b06866805";
+const PROVENANCE_OBJECT: &str = "01a049f0-271b-7971-aee7-674dbbadb7f0";
+const PROJECTION: &str = "01a049f0-3711-7ca2-8438-7e1f7b620b7a";
+
+/// The commits its two legacy references pin, and the tip they were taken at.
+const AUTHORITY_COMMIT: &str = "cce71a0d95c24780dcc7f71b20b5160c5dd3b477";
+const MODEL_COMMIT: &str = "cda4069e13d750b84be0b91d6d605ce526ecc194";
+const HEAD: &str = "7140a349b81c34fd7027a9d81f04e5ea6e0dfcf6";
+
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("released-v1")
+}
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A working copy of the released workspace, history and all.
+///
+/// Cloned rather than copied, because the record's references pin commits and
+/// resolving one reads the Object out of the commit it names. A `.engr` without
+/// its history is a different fixture that happens to have the same files in it.
+///
+/// The line-ending settings are not defensive tidiness. Every Section carries a
+/// seal over its exact octets, so a checkout that helpfully rewrote them would
+/// turn the whole fixture into a forgery report on a platform that configures
+/// `core.autocrlf` globally.
+fn released_v1() -> (TempDir, PathBuf) {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path().join("project");
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
+        ])
+        .arg(fixture().join("history.bundle"))
+        .arg(&root)
+        .output()
+        .expect("git clone");
+    assert!(
+        output.status.success(),
+        "clone the released fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), HEAD);
+    (temp, root)
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+fn write(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+}
+
+fn stored(root: &Path, id: &str) -> Value {
+    serde_json::from_str(&read(&store::object_path(root, id))).expect("stored object")
+}
+
+/// Rewrite one predecessor Object, the way a hand edit or another tool would.
+fn edit_stored(root: &Path, id: &str, change: impl FnOnce(&mut Value)) {
+    let mut value = stored(root, id);
+    change(&mut value);
+    write(
+        &store::object_path(root, id),
+        &format!("{}\n", serde_json::to_string_pretty(&value).expect("json")),
+    );
+}
+
+fn stage(root: &Path) -> PathBuf {
+    store::engr_dir(root).join("migration-v3")
+}
+
+/// A Backlog subject and a Collection member name a resource by its compact
+/// reference, not by the UUID the file is called after.
+fn compact_object_ref(id: &str) -> String {
+    format!(
+        "obj:{}",
+        engr::reference::encode_uuid_str(id).expect("compact")
+    )
+}
+
+/// What the declared authority says, without going through the read path that
+/// refuses to answer while a stage exists.
+fn declared_version(root: &Path) -> u64 {
+    let format: Value =
+        serde_json::from_str(&read(&store::engr_dir(root).join("format.json"))).expect("format");
+    format["version"].as_u64().expect("version")
+}
+
+/// One named way of breaking a legacy reference, the exit code it has to be
+/// refused with, and a phrase its message has to carry.
+type BrokenReference = (&'static str, Box<dyn Fn(&mut Value)>, i32, &'static str);
+
+/// One named way a predecessor workspace can fail to be one, and the exit code
+/// it has to be refused with.
+type Malformation = (&'static str, Box<dyn Fn(&Path)>, i32);
+
+/// Every relative path under `.engr`, with the digest of its bytes.
+///
+/// `lock` is left out: it is a mutex for this machine, the predecessor
+/// generation gitignored it, and taking the workspace lock is what any command
+/// does before it decides whether it may do anything at all. Counting it would
+/// make "preflight wrote nothing" fail on a migration that wrote nothing.
+fn fingerprint(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let base = store::engr_dir(root);
+    let mut found = std::collections::BTreeMap::new();
+    let mut pending = vec![base.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if entry.file_type().expect("file type").is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.file_name().is_some_and(|name| name == "lock") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&base)
+                .expect("inside .engr")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            found.insert(relative, proof::sha256_of(&read(&path)));
+        }
+    }
+    found
+}
+
+// ---------------------------------------------------------------- the fixture
+
+/// The readable copy and the history are the same workspace.
+///
+/// `workspace/` exists so the version 1 bytes can be reviewed in a diff instead
+/// of only inside a pack file, which is worth nothing if the two can drift. So
+/// they are compared rather than trusted, and the comparison is byte for byte:
+/// every seal in the record is over exact octets.
+#[test]
+fn the_readable_fixture_is_the_history_it_was_taken_from() {
+    let (_temp, root) = released_v1();
+    let readable = fixture().join("workspace");
+
+    let mut checked = 0;
+    for relative in [
+        ".engr/.gitignore",
+        ".engr/format.json",
+        ".engr/objects/01a049f0-16fb-7c03-a75d-97980cc8c613.json",
+        ".engr/objects/01a049f0-1d33-7912-9e57-a67b06866805.json",
+        ".engr/objects/01a049f0-271b-7971-aee7-674dbbadb7f0.json",
+        ".engr/objects/01a049f0-3711-7ca2-8438-7e1f7b620b7a.json",
+        ".engr/events/01a049f0-16fb-7c03-a75d-97980cc8c613.jsonl",
+        ".engr/events/01a049f0-1d33-7912-9e57-a67b06866805.jsonl",
+        ".engr/events/01a049f0-271b-7971-aee7-674dbbadb7f0.jsonl",
+        ".engr/events/01a049f0-3711-7ca2-8438-7e1f7b620b7a.jsonl",
+        "README.md",
+        "ARCHITECTURE.md",
+    ] {
+        let from_history = std::fs::read(root.join(relative)).expect("cloned file");
+        let from_readable = std::fs::read(readable.join(relative)).expect("readable file");
+        assert_eq!(from_history, from_readable, "{relative}");
+        checked += 1;
+    }
+    assert_eq!(checked, 12);
+
+    let format: Value =
+        serde_json::from_str(&read(&store::engr_dir(&root).join("format.json"))).expect("format");
+    assert_eq!(format["format"], "engr-workspace");
+    assert_eq!(format["version"], 1, "the released generation");
+}
+
+/// The released generation is recognized, readable, and not writable.
+///
+/// Before this, all three of `ls`, `show` and `verify` failed the same way as a
+/// corrupt workspace: `workspace version 1 is not supported`. A person holding
+/// a record the shipped binary wrote could not tell from the message whether
+/// their workspace was too old, broken, or needed a tool they did not have.
+#[test]
+fn a_released_v1_workspace_reads_and_says_what_it_needs() {
+    let (_temp, root) = released_v1();
+
+    assert_eq!(
+        store::validate_format(&root).expect("recognized"),
+        WorkspaceFormat::OlderVersion(1)
+    );
+    let object = store::load_object(&root, AUTHORITY).expect("v1 Objects still read");
+    assert_eq!(object.title, "Human authority and the admission boundary");
+
+    let error = store::require_current(&root).expect_err("but nothing may be written to it");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("engr migrate"),
+        "the refusal names the next action: {error}"
+    );
+}
+
+/// A version this build has never heard of is a different refusal.
+///
+/// Recognized-but-older has a next action. A version above this build's does
+/// not, and saying "run `engr migrate`" to somebody holding a newer workspace
+/// would send them to a command that cannot help.
+#[test]
+fn an_unknown_generation_is_refused_without_offering_migration() {
+    let (_temp, root) = released_v1();
+    write(
+        &store::engr_dir(&root).join("format.json"),
+        "{\"format\":\"engr-workspace\",\"version\":9}",
+    );
+
+    let error = store::validate_format(&root).expect_err("a future generation");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("newer engr"), "{error}");
+    assert!(!error.message.contains("migrate"), "{error}");
+}
+
+// --------------------------------------------------------------- the migration
+
+/// The path the compatibility ruling requires: released v1, one command, v3.
+#[test]
+fn a_released_v1_workspace_migrates_to_the_current_generation() {
+    let (_temp, root) = released_v1();
+
+    store::migrate(&root).expect("released v1 migrates directly");
+
+    assert_eq!(
+        store::validate_format(&root).expect("format"),
+        WorkspaceFormat::Current
+    );
+    assert_eq!(
+        read(&store::engr_dir(&root).join("format.json")),
+        "{\"format\":\"engr-workspace\",\"version\":3}",
+        "the authority is itself a current resource, so it is JCS"
+    );
+    assert!(!stage(&root).exists(), "nothing is left staged");
+
+    for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+        let object = store::load_object(&root, id).expect("every Object loads as current");
+        integrity::check_stored_object_integrity(&object).expect("and verifies");
+        let effective = engr::ops::effective(&root, id).expect("and its history still projects");
+        assert_eq!(effective.rev, object.rev);
+    }
+}
+
+/// Everything the predecessor proved survives, and nothing it did not is added.
+#[test]
+fn migration_preserves_what_the_release_admitted_and_invents_nothing() {
+    let (_temp, root) = released_v1();
+    let before: Vec<Value> = [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION]
+        .iter()
+        .map(|id| stored(&root, id))
+        .collect();
+
+    store::migrate(&root).expect("migrate");
+
+    for predecessor in &before {
+        let id = predecessor["id"].as_str().expect("id");
+        let object = store::load_object(&root, id).expect("migrated");
+
+        assert_eq!(object.id, id, "Object identity");
+        assert_eq!(object.title, predecessor["title"], "title");
+        assert_eq!(object.state.as_str(), predecessor["state"], "lifecycle");
+        assert_eq!(object.rev, predecessor["rev"].as_u64().expect("rev"), "rev");
+        assert_eq!(
+            object.next_section_id,
+            predecessor["next_section_id"].as_u64().expect("counter"),
+            "the counter that keeps deleted Section ids from being handed out again"
+        );
+        assert_eq!(
+            object.object_type, None,
+            "the predecessor classified nothing, so the migration classifies nothing"
+        );
+
+        let sections = predecessor["sections"].as_array().expect("sections");
+        assert_eq!(object.sections.len(), sections.len());
+        for (migrated, predecessor) in object.sections.iter().zip(sections) {
+            assert_eq!(
+                migrated.id,
+                predecessor["id"].as_u64().expect("section id"),
+                "Section identity"
+            );
+            assert_eq!(migrated.text, predecessor["text"], "durable wording");
+            assert_eq!(
+                migrated.admission,
+                Admission::Human,
+                "§{}: the release had one door, and migrating is not walking through another",
+                migrated.id
+            );
+            assert_eq!(
+                migrated.admitted_at, predecessor["confirmed_at"],
+                "§{}: the instant a human confirmed it, under the authority-neutral name",
+                migrated.id
+            );
+            assert_eq!(
+                migrated.based_on.as_deref(),
+                predecessor["based_on"].as_str(),
+                "§{}: the committed basis, including its absence",
+                migrated.id
+            );
+            assert_eq!(
+                migrated.refs.len(),
+                predecessor["refs"].as_array().unwrap().len()
+            );
+            assert!(migrated.relations.is_empty());
+            assert!(migrated.content.is_empty());
+            assert_eq!(migrated.role, None);
+        }
+    }
+
+    // The one Section the release admitted with no repository basis at all. v1
+    // left the member out of the file; v3 spells absence as an explicit null,
+    // and neither is a basis.
+    let model = store::load_object(&root, MODEL).expect("model");
+    assert_eq!(model.sections[1].based_on, None);
+    assert_eq!(stored(&root, MODEL)["sections"][1]["based_on"], Value::Null);
+
+    // Section ids are the record's own claim about identity surviving deletion:
+    // four were added, two were merged into a fifth, and the third was removed.
+    let provenance = store::load_object(&root, PROVENANCE_OBJECT).expect("provenance");
+    assert_eq!(
+        provenance
+            .sections
+            .iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>(),
+        [4, 5]
+    );
+    assert_eq!(provenance.next_section_id, 6);
+
+    let projection = store::load_object(&root, PROJECTION).expect("projection");
+    assert_eq!(projection.state, engr::semantics::State::Closed);
+}
+
+/// Retained history stays under the contract that wrote it.
+///
+/// Migration reads Event v1 to prove the projection is derivable, and that is
+/// all it does with it. Rewriting those bytes to look current would turn an
+/// immutable record of what happened into a second statement of what is true
+/// now, which is exactly the thing the generation split exists to prevent.
+#[test]
+fn admitted_history_proves_the_projection_and_is_not_rewritten() {
+    let (_temp, root) = released_v1();
+    let history: Vec<(PathBuf, String)> = [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION]
+        .iter()
+        .map(|id| {
+            let path = store::events_path(&root, id);
+            let text = read(&path);
+            (path, text)
+        })
+        .collect();
+
+    store::migrate(&root).expect("migrate");
+
+    for (path, before) in &history {
+        assert_eq!(&read(path), before, "{}", path.display());
+    }
+    let events = store::load_events(&root, PROVENANCE_OBJECT).expect("history still reads");
+    assert_eq!(events.len(), 7);
+    for event in &events {
+        assert_eq!(event.version, 1, "history keeps its own generation");
+        assert!(matches!(event.provenance, Provenance::Confirmed { .. }));
+    }
+}
+
+// -------------------------------------------------------------- legacy refs
+
+/// A whole-Section reference becomes a selective one over the same material.
+///
+/// Both of the fixture's references are checked, and the second is the one that
+/// matters most: its target carries a reference of its own, so converting it
+/// rewrites the very member the predecessor seal covers.
+#[test]
+fn legacy_references_convert_and_still_resolve() {
+    let (_temp, root) = released_v1();
+
+    store::migrate(&root).expect("migrate");
+
+    for (holder, section, target_id, commit) in [
+        (MODEL, 1, AUTHORITY, AUTHORITY_COMMIT),
+        (PROVENANCE_OBJECT, 4, MODEL, MODEL_COMMIT),
+    ] {
+        let object = store::load_object(&root, holder).expect("holder");
+        let held = object
+            .sections
+            .iter()
+            .find(|candidate| candidate.id == section)
+            .expect("section");
+        let selective = held.refs[0].as_selective().expect("selective now");
+        assert_eq!(
+            selective.commit(),
+            commit,
+            "the commit the release pinned is the commit that is still pinned"
+        );
+        assert_eq!(
+            selective.target(),
+            proof::section_target(target_id, 1),
+            "and the same Section"
+        );
+        let fields: Vec<_> = selective
+            .fields()
+            .iter()
+            .map(|field| field.as_str())
+            .collect();
+        assert_eq!(
+            fields,
+            ["based_on", "content", "refs", "relations", "role", "text"],
+            "a whole-Section pin selects every semantic field, and no more"
+        );
+
+        let target = store::load_object(&root, target_id).expect("target");
+        assert_eq!(
+            dependency::evaluate(
+                &root,
+                &target,
+                target.sha256.as_deref().expect("object seal"),
+                selective,
+            )
+            .expect("evaluate"),
+            dependency::Dependency::Unchanged,
+            "{holder} §{section} still depends on exactly what it depended on"
+        );
+    }
+}
+
+/// A pin whose target says something else at the commit it names is refused,
+/// and refused as a broken pin rather than as broken material.
+///
+/// The commit is rewritten to hold a version of the target that is internally
+/// perfect — resealed against its own new wording — so nothing about it is
+/// detectably damaged. What is wrong is only that it is not what the reference
+/// claimed, which is the whole job of pinning a seal.
+#[test]
+fn a_reference_to_a_tampered_historical_target_is_refused() {
+    let (_temp, root) = released_v1();
+    let commit_as_test = |root: &Path, message: &str| {
+        git(root, &["add", ".engr"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=engr test",
+                "-c",
+                "user.email=engr@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+        git(root, &["rev-parse", "HEAD"])
+    };
+
+    edit_stored(&root, AUTHORITY, |object| {
+        object["sections"][0]["text"] = Value::String("wording nobody confirmed".to_owned());
+    });
+    reseal_predecessor(&root, AUTHORITY, 0);
+    let rewritten = commit_as_test(&root, "a past that says something else");
+    // Put the working tree back, so the only thing that is not what it was is
+    // what the newly pinned commit holds.
+    git(&root, &["checkout", HEAD, "--", ".engr"]);
+    edit_stored(&root, MODEL, |object| {
+        object["sections"][0]["refs"][0]["commit"] = Value::String(rewritten.clone());
+    });
+    reseal_predecessor(&root, MODEL, 0);
+
+    let error = store::migrate(&root).expect_err("a pin the target does not support");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("not the legacy reference seal"),
+        "{error}"
+    );
+    assert_eq!(
+        store::validate_format(&root).expect("format"),
+        WorkspaceFormat::OlderVersion(1),
+        "and the workspace is still the predecessor"
+    );
+}
+
+/// The three ways a legacy reference can fail to resolve stay three answers.
+///
+/// #35 keeps these apart at read time — absence is not integrity failure, a
+/// lost commit is not drift — and migration is where a pin stops being a claim
+/// and becomes a v3 digest, so it is the last place they may be collapsed.
+/// None of them converts into a reference that resolves to nothing.
+#[test]
+fn unresolvable_references_stay_distinguishable_and_stop_the_migration() {
+    let cases: Vec<BrokenReference> = vec![
+        (
+            // The commit is gone, so there is no workspace to inspect there.
+            "provenance unavailable",
+            Box::new(|object: &mut Value| {
+                object["sections"][0]["refs"][0]["commit"] = Value::String("f".repeat(40));
+            }),
+            engr::EXIT_SCHEMA,
+            "historical workspace at commit",
+        ),
+        (
+            "target missing",
+            Box::new(|object: &mut Value| {
+                object["sections"][0]["refs"][0]["object"] =
+                    Value::String("018f7d58-4ca7-7a2e-98f1-9b3014681848".to_owned());
+            }),
+            engr::EXIT_NOT_FOUND,
+            "is absent at",
+        ),
+        (
+            "the Section is not in the target",
+            Box::new(|object: &mut Value| {
+                object["sections"][0]["refs"][0]["section"] = Value::from(97u64);
+            }),
+            engr::EXIT_NOT_FOUND,
+            "does not exist",
+        ),
+    ];
+
+    for (what, break_it, code, says) in cases {
+        let (_temp, root) = released_v1();
+        edit_stored(&root, MODEL, break_it);
+        reseal_predecessor(&root, MODEL, 0);
+
+        let error = store::migrate(&root).expect_err(what);
+        assert_eq!(error.code, code, "{what}: {}", error.message);
+        assert!(error.message.contains(says), "{what}: {error}");
+        assert_eq!(
+            store::validate_format(&root).expect("format"),
+            WorkspaceFormat::OlderVersion(1),
+            "{what}: nothing was published"
+        );
+    }
+}
+
+/// Reseal one predecessor Section against its edited content, and re-derive the
+/// history that has to agree with it.
+///
+/// A test that changes a Section without doing this is testing the seal check,
+/// which has tests of its own. These want the *reference* rules to be what
+/// refuses, so everything else about the workspace has to stay true.
+fn reseal_predecessor(root: &Path, id: &str, index: usize) {
+    let mut object = stored(root, id);
+    let content: Content =
+        serde_json::from_value(object["sections"][index].clone()).expect("legacy content");
+    let seal = content.sha256().expect("seal");
+    object["sections"][index]["sha256"] = Value::String(seal);
+    write(
+        &store::object_path(root, id),
+        &format!("{}\n", serde_json::to_string_pretty(&object).expect("json")),
+    );
+
+    // The stored projection has to remain derivable from admitted history, so
+    // the admitting Event moves with it. The Event is rewritten here only
+    // because the fixture is being deliberately altered; migration itself never
+    // does this.
+    let path = store::events_path(root, id);
+    let section = object["sections"][index]["id"]
+        .as_u64()
+        .expect("section id");
+    let mut lines = Vec::new();
+    for line in read(&path).lines() {
+        let mut event: Value = serde_json::from_str(line).expect("event");
+        let names_it = event["action"] == "section_added"
+            || event["action"] == "section_revised" && event["section"] == section;
+        if names_it && event["text"] == object["sections"][index]["text"] {
+            event["refs"] = object["sections"][index]["refs"].clone();
+            let payload: Payload =
+                serde_json::from_value(event.clone()).expect("payload from event");
+            event["confirmation"]["payload_sha256"] =
+                Value::String(payload.sha256().expect("payload seal"));
+        }
+        lines.push(serde_json::to_string(&event).expect("event json"));
+    }
+    write(&path, &format!("{}\n", lines.join("\n")));
+}
+
+// -------------------------------------------------- malformed v1 predecessors
+
+/// A v1 Object that still carries the pre-release per-resource envelope is
+/// named as an unfinished conversion, not as an unrecognizable file.
+#[test]
+fn a_v1_object_still_in_the_v0_envelope_is_named_as_such() {
+    let (_temp, root) = released_v1();
+    edit_stored(&root, AUTHORITY, |object| {
+        let map = object.as_object_mut().expect("object");
+        let state = map.remove("state").expect("state");
+        map.insert("status".to_owned(), state);
+        map.insert("format".to_owned(), Value::String("engr-object".to_owned()));
+        map.insert("version".to_owned(), Value::from(1u64));
+    });
+
+    let error = store::migrate(&root).expect_err("a half-converted predecessor");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("legacy v0 per-resource envelope"),
+        "{error}"
+    );
+}
+
+/// Each way a released v1 workspace can fail to be one, refused before
+/// anything is written.
+///
+/// One test rather than nine, because the assertion is the same in every case
+/// and only the malformation varies: it is refused with the fault class it
+/// actually is, nothing is published, and the workspace is left exactly as it
+/// was found. The list is what a predecessor can be wrong about — its Object
+/// envelope, a Section's shape, a seal, the derivation from admitted history,
+/// the generation of that history, a number outside the shared domain, and
+/// material that is already current.
+#[test]
+fn malformed_v1_predecessors_are_refused_and_publish_nothing() {
+    let cases: Vec<Malformation> = vec![
+        (
+            "an Object claiming both lifecycle spellings",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["status"] = Value::String("open".to_owned());
+                })
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "an Object already carrying a v3 aggregate seal",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sha256"] = Value::String("a".repeat(64));
+                })
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section carrying an admission member the generation had no door for",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sections"][0]["admission"] = Value::String("agent".to_owned());
+                })
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section timestamp spelled the current way",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    let section = object["sections"][0].as_object_mut().expect("section");
+                    let at = section.remove("confirmed_at").expect("confirmed_at");
+                    section.insert("admitted_at".to_owned(), at);
+                })
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section seal that does not cover its own content",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sections"][0]["text"] =
+                        Value::String("wording nobody confirmed".to_owned());
+                })
+            }),
+            engr::EXIT_INVARIANT,
+        ),
+        (
+            "a projection that admitted history does not derive",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["title"] = Value::String("a title nobody confirmed".to_owned());
+                })
+            }),
+            engr::EXIT_INVARIANT,
+        ),
+        (
+            "an Event from a generation this workspace never had",
+            Box::new(|root: &Path| {
+                let path = store::events_path(root, AUTHORITY);
+                let text = read(&path);
+                write(&path, &text.replace("\"version\":1", "\"version\":2"));
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section id outside the shared safe-integer domain",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["next_section_id"] = Value::from(9_007_199_254_740_993u64);
+                })
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a reference already in the current spelling",
+            Box::new(|root: &Path| {
+                edit_stored(root, MODEL, |object| {
+                    object["sections"][0]["refs"] = serde_json::json!([{
+                        "target": proof::section_target(AUTHORITY, 1),
+                        "fields": ["text"],
+                        "commit": AUTHORITY_COMMIT,
+                        "digest": format!("1:{}", "0".repeat(64)),
+                    }]);
+                });
+                // Resealed, so the reference *spelling* is what refuses rather
+                // than the seal that no longer covers it. A predecessor that
+                // already holds current material is not a predecessor.
+                reseal_predecessor(root, MODEL, 0);
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+    ];
+
+    for (what, malform, code) in cases {
+        let (_temp, root) = released_v1();
+        let before = fingerprint(&root);
+        malform(&root);
+        let after_edit = fingerprint(&root);
+
+        let error = store::migrate(&root).expect_err(what);
+        assert_eq!(error.code, code, "{what}: {}", error.message);
+        assert_eq!(
+            store::validate_format(&root).expect("format"),
+            WorkspaceFormat::OlderVersion(1),
+            "{what}: the generation did not advance"
+        );
+        assert!(!stage(&root).exists(), "{what}: nothing was staged");
+        assert_eq!(
+            fingerprint(&root),
+            after_edit,
+            "{what}: preflight wrote nothing"
+        );
+        assert_ne!(
+            before, after_edit,
+            "{what}: the fixture was actually changed"
+        );
+    }
+}
+
+/// A v1 Rule that writes a `review:` block never loaded under v1, so it does not
+/// load its way into v3 either.
+///
+/// This is the one thing the two generations disagree about. A v1 Rule with no
+/// block is migrated unchanged and acquires the effective defaults, which is
+/// the whole content of the step and what `engr migrate` authorizes. A block
+/// that was written out is a member version 1 had no schema for.
+#[test]
+fn a_v1_rule_cannot_carry_a_review_block_the_generation_never_had() {
+    let (_temp, root) = released_v1();
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    let path = rules::dir(&root).join("object-policy.md");
+    write(
+        &path,
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 5\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+    );
+
+    let error = store::migrate(&root).expect_err("a rule version 1 could not load");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("review block"), "{error}");
+
+    // Written without the block, the same rule migrates and means the defaults.
+    write(
+        &path,
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+    );
+    let before = read(&path);
+    store::migrate(&root).expect("a v1 rule migrates");
+    assert_eq!(read(&path), before, "the bytes are the author's, untouched");
+    let rules = rules::load_all(&root).expect("rules");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].review, rules::Review::default());
+    assert!(!rules[0].written_review);
+}
+
+// ------------------------------------------------- the coordinated window
+
+/// Reads are unavailable while a stage exists, whatever generation it came from.
+#[test]
+fn the_maintenance_window_fails_closed_for_a_v1_source() {
+    let (_temp, root) = released_v1();
+    std::fs::create_dir_all(stage(&root)).expect("marker");
+
+    let error = store::validate_format(&root).expect_err("no reads during migration");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("engr migrate"), "{error}");
+    assert!(
+        store::load_object(&root, AUTHORITY).is_err(),
+        "and no mixed-generation reading of the Objects underneath"
+    );
+}
+
+/// Build the stage a crashed v1 migration would have left behind.
+///
+/// `interrupted` keeps its predecessor `format.json`, which is what makes it a
+/// crash rather than a finished migration: the plan is installed, the authority
+/// has not moved, and every Object still on disk is the one preflight read.
+fn staged_v1_plan(interrupted: &Path, published: &[&str]) -> PathBuf {
+    let (_reference_temp, reference) = released_v1();
+    store::migrate(&reference).expect("reference migration");
+
+    let staged = stage(interrupted);
+    std::fs::create_dir_all(staged.join("objects")).expect("stage objects");
+    let mut objects = serde_json::Map::new();
+    let mut source = serde_json::Map::new();
+    for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+        let migrated = read(&store::object_path(&reference, id));
+        write(
+            &staged.join("objects").join(format!("{id}.json")),
+            &migrated,
+        );
+        objects.insert(id.to_owned(), Value::String(proof::sha256_of(&migrated)));
+        source.insert(
+            format!("objects/{id}.json"),
+            Value::String(proof::sha256_of(&read(&store::object_path(
+                interrupted,
+                id,
+            )))),
+        );
+        source.insert(
+            format!("events/{id}.jsonl"),
+            Value::String(proof::sha256_of(&read(&store::events_path(
+                interrupted,
+                id,
+            )))),
+        );
+        // A crash can leave any prefix of the copy loop installed. Re-copying
+        // the sealed plan has to be idempotent, so the ones named here are
+        // already at their target while the authority still says version 1.
+        if published.contains(&id) {
+            write(&store::object_path(interrupted, id), &migrated);
+        }
+    }
+    write(
+        &staged.join("manifest.json"),
+        &proof::canonical_bytes(
+            &serde_json::json!({
+                "source_version": 1,
+                "target_version": engr::WORKSPACE_VERSION,
+                "objects": objects,
+                "resources": {},
+                "source": source,
+            }),
+            "manifest",
+        )
+        .expect("manifest"),
+    );
+    staged
+}
+
+/// An interruption partway through publication resumes and finishes.
+#[test]
+fn an_interrupted_publication_resumes_from_its_own_stage() {
+    let (_temp, root) = released_v1();
+    let staged = staged_v1_plan(&root, &[AUTHORITY, MODEL]);
+
+    assert!(
+        store::validate_format(&root).is_err(),
+        "the window is closed while the stage stands"
+    );
+    store::migrate(&root).expect("resume");
+
+    assert_eq!(
+        store::validate_format(&root).expect("format"),
+        WorkspaceFormat::Current
+    );
+    assert!(!staged.exists());
+    for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+        let object = store::load_object(&root, id).expect("published");
+        integrity::check_stored_object_integrity(&object).expect("verifies");
+    }
+}
+
+/// A resume derives the published Object again rather than trusting the stage.
+///
+/// The staging directory outlives a crash inside the repository, and Section
+/// and aggregate seals are unkeyed — so a staged Object can be rewritten,
+/// resealed and re-digested into a plan that agrees with itself everywhere.
+/// What it cannot agree with is the predecessor it claims to have come from.
+#[test]
+fn a_staged_v1_object_that_the_predecessor_does_not_derive_is_not_published() {
+    let (_temp, root) = released_v1();
+    let staged = staged_v1_plan(&root, &[]);
+
+    let path = staged.join("objects").join(format!("{AUTHORITY}.json"));
+    let staged_object: engr::model::Object =
+        serde_json::from_str(&read(&path)).expect("the stage holds a current v3 Object");
+    let seal = staged_object.sha256.clone().expect("aggregate seal");
+    let forged = integrity::mutate(&staged_object, &seal, |next| {
+        next.title = "a title nobody admitted".to_owned();
+        Ok(())
+    })
+    .expect("reseal")
+    .object;
+    integrity::check_stored_object_integrity(&forged)
+        .expect("the substitution is self-consistent, which is the point");
+    let bytes = proof::canonical_bytes(&forged, "forged object").expect("bytes");
+    write(&path, &bytes);
+    let manifest_path = staged.join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&read(&manifest_path)).expect("manifest");
+    manifest["objects"][AUTHORITY] = Value::String(proof::sha256_of(&bytes));
+    write(
+        &manifest_path,
+        &proof::canonical_bytes(&manifest, "manifest").expect("manifest bytes"),
+    );
+
+    let before = read(&store::object_path(&root, AUTHORITY));
+    let error = store::migrate(&root).expect_err("a stage is not authority");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error
+            .message
+            .contains("not the canonical migration of the captured predecessor"),
+        "{error}"
+    );
+    assert_eq!(declared_version(&root), 1, "the authority did not advance");
+    assert_eq!(
+        read(&store::object_path(&root, AUTHORITY)),
+        before,
+        "and the predecessor the stage claimed to come from never moved"
+    );
+}
+
+/// A manifest cannot relabel the generation it was prepared from.
+///
+/// The stage is durable operational state sitting in the repository. Letting it
+/// say the workspace is a version it is not would decide which decoder runs
+/// from a file anyone who can reach the workspace can edit.
+#[test]
+fn a_manifest_cannot_relabel_the_generation_it_was_prepared_from() {
+    let (_temp, root) = released_v1();
+    store::migrate(&root).expect("first migration");
+
+    let staged = stage(&root);
+    std::fs::create_dir_all(&staged).expect("stage");
+    write(
+        &staged.join("manifest.json"),
+        &serde_json::to_string(&serde_json::json!({
+            "source_version": 2,
+            "target_version": engr::WORKSPACE_VERSION,
+            "objects": {},
+            "resources": {},
+            "source": {},
+        }))
+        .expect("manifest"),
+    );
+    // Put the workspace back to the generation the plan claims not to be from.
+    write(
+        &store::engr_dir(&root).join("format.json"),
+        "{\"format\":\"engr-workspace\",\"version\":1}\n",
+    );
+
+    let error = store::migrate(&root).expect_err("a plan cannot choose its own source");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("prepared from workspace version"),
+        "{error}"
+    );
+}
+
+/// A predecessor that moved between preflight and publication is caught.
+#[test]
+fn a_source_edited_after_preflight_stops_the_publication() {
+    let (_temp, root) = released_v1();
+    store::migrate(&root).expect("migrate");
+
+    // Rebuild the situation: a stage whose manifest describes a predecessor the
+    // workspace no longer matches.
+    let (_other, source) = released_v1();
+    let staged = stage(&root);
+    std::fs::create_dir_all(staged.join("objects")).expect("stage objects");
+    let migrated = read(&store::object_path(&root, AUTHORITY));
+    write(
+        &staged.join("objects").join(format!("{AUTHORITY}.json")),
+        &migrated,
+    );
+    write(
+        &staged.join("manifest.json"),
+        &serde_json::to_string(&serde_json::json!({
+            "source_version": 1,
+            "target_version": engr::WORKSPACE_VERSION,
+            "objects": { AUTHORITY: proof::sha256_of(&migrated) },
+            "resources": {},
+            "source": {
+                format!("objects/{AUTHORITY}.json"): "0".repeat(64),
+                format!("events/{AUTHORITY}.jsonl"):
+                    proof::sha256_of(&read(&store::events_path(&source, AUTHORITY))),
+            },
+        }))
+        .expect("manifest"),
+    );
+    write(
+        &store::engr_dir(&root).join("format.json"),
+        "{\"format\":\"engr-workspace\",\"version\":1}\n",
+    );
+    write(
+        &store::object_path(&root, AUTHORITY),
+        &read(&store::object_path(&source, AUTHORITY)),
+    );
+
+    let error = store::migrate(&root).expect_err("the predecessor is not what was validated");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("after migration preflight"),
+        "{error}"
+    );
+}
+
+/// Two independent migrations of the same predecessor publish the same bytes.
+#[test]
+fn publication_is_deterministic() {
+    let (_first_temp, first) = released_v1();
+    let (_second_temp, second) = released_v1();
+
+    store::migrate(&first).expect("first");
+    store::migrate(&second).expect("second");
+
+    assert_eq!(fingerprint(&first), fingerprint(&second));
+}
+
+// ------------------------------------------------------------ continuation
+
+/// The migrated workspace is an ordinary current workspace.
+///
+/// The strongest thing this suite can say is not that migration produced a
+/// structure that passes an assertion, but that the same `.engr` then does
+/// everything a workspace created today does — a Human admission through the
+/// gate, an Agent admission under a reviewed Rule, and each of the
+/// non-authoritative domains — with the record the release wrote still in it.
+#[test]
+fn the_migrated_workspace_carries_on_as_a_current_one() {
+    let (_temp, root) = released_v1();
+    store::migrate(&root).expect("migrate");
+
+    // A Human mutation on an Object the release admitted, through the gate.
+    let human = Payload {
+        action: Action::SectionAdded,
+        object: AUTHORITY.to_owned(),
+        becomes: None,
+        content: Content {
+            text: "Admission is unchanged across the generation boundary: a human still reads the exact proposal and answers its exact challenge.".to_owned(),
+            ..Content::default()
+        },
+    };
+    let prepared = gate::prepare(&root, human).expect("prepare");
+    let admitted = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+        .expect("confirm");
+    assert_eq!(admitted.event.version, engr::EVENT_ENVELOPE_VERSION);
+    assert_eq!(admitted.object.rev, 4, "the release left it at rev 3");
+    assert_eq!(admitted.object.sections.len(), 3);
+    assert_eq!(admitted.object.sections[0].admission, Admission::Human);
+
+    // An Agent mutation on another, under a passing Rule Review. The Rule is
+    // written now rather than at the top, because a governed mutation is
+    // governed whoever is making it: adding it first would make the Human
+    // admission above a review-bearing one, and that is a different test.
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write(
+        &rules::dir(&root).join("object-policy.md"),
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nAn agent-admitted section states one settled fact.\n",
+    );
+    let agent = Payload {
+        action: Action::SectionAdded,
+        object: MODEL.to_owned(),
+        becomes: None,
+        content: Content {
+            text: "A migrated section keeps the admission it was admitted under, and a new one carries its own.".to_owned(),
+            ..Content::default()
+        },
+    };
+    let review = attestation(&root, &agent, Admission::Agent);
+    let agent_admitted = gate::admit_agent(&root, agent, Some(review)).expect("agent admit");
+    let model = store::load_object(&root, MODEL).expect("model");
+    assert_eq!(agent_admitted.object.rev, 6);
+    assert_eq!(
+        model.sections[0].admission,
+        Admission::Human,
+        "§1 was the release's"
+    );
+    assert_eq!(
+        model.sections[2].admission,
+        Admission::Agent,
+        "§3 is the agent's"
+    );
+
+    // The non-authoritative domains, which a released v1 workspace never had a
+    // directory for.
+    let item = backlog::create(
+        &root,
+        "cumulative-migration",
+        "whether a fourth generation should migrate from v1 as directly as this one did",
+        vec![backlog::Subject::engr(compact_object_ref(PROJECTION))],
+        &backlog::Prepared::attempt(rules::Attempt::FIRST),
+    )
+    .expect("backlog item");
+    backlog::add_section(
+        &root,
+        &item.id,
+        "the released generation is the floor, and the floor is what has to keep working",
+        Vec::new(),
+        &backlog::Prepared::attempt(rules::Attempt::FIRST)
+            .against(backlog::Precondition::section_absent(&root, &item.id).expect("observe")),
+    )
+    .expect("backlog section");
+
+    let plan = collection::create(
+        &root,
+        "generation boundary",
+        None,
+        None,
+        rules::Attempt::FIRST,
+    )
+    .expect("collection");
+    collection::add_member(
+        &root,
+        &plan.id,
+        &compact_object_ref(AUTHORITY),
+        Some(10),
+        None,
+        rules::Attempt::FIRST,
+    )
+    .expect("member");
+
+    work::start(
+        &root,
+        MODEL,
+        Some("carrying the record forward"),
+        rules::Attempt::FIRST,
+    )
+    .expect("work");
+    work::add_item(
+        &root,
+        MODEL,
+        "rerun the dogfood against the migrated record",
+        rules::Attempt::FIRST,
+    )
+    .expect("work item");
+
+    // The release's own wording is still exactly what it admitted, still says
+    // when it was confirmed, and has not been dragged forward by anything that
+    // happened above it.
+    assert_eq!(
+        model.sections[0].admitted_at,
+        "2026-08-28T19:54:29.096654598Z"
+    );
+    assert_eq!(
+        model.sections[0].text,
+        "An object is the durable knowledge aggregate and holds coherent sections. A section's text is its current confirmed wording: there is no competing current-text field and no stored staleness verdict."
+    );
+    assert_eq!(
+        model.sections[0].refs[0]
+            .as_selective()
+            .expect("selective")
+            .commit(),
+        AUTHORITY_COMMIT
+    );
+
+    // And everything still verifies, including the four Objects the release
+    // admitted and the history behind them.
+    for id in store::object_ids(&root).expect("ids") {
+        let object = store::load_object(&root, &id).expect("loads");
+        integrity::check_stored_object_integrity(&object).expect("verifies");
+        let effective = engr::ops::effective(&root, &id).expect("projects");
+        assert_eq!(effective.rev, object.rev, "{id}");
+    }
+    assert_eq!(store::object_ids(&root).expect("ids").len(), 4);
+}
+
+/// A passing review of exactly the mutation being admitted.
+fn attestation(root: &Path, payload: &Payload, admission: Admission) -> gate::ReviewAttestation {
+    let before = store::load_object(root, &payload.object).expect("before");
+    let mut after = before.clone();
+    let event = Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: before.rev + 1,
+        time: "2026-08-29T00:00:00Z".to_owned(),
+        payload: payload.clone(),
+        provenance: Provenance::Tagged {
+            admission: TaggedAdmission {
+                kind: admission,
+                confirmation: (admission == Admission::Human).then(|| HumanConfirmation {
+                    challenge: "ABCD-EFGH".to_owned(),
+                    candidate_digest: format!("1:{}", "0".repeat(64)),
+                }),
+                rule_review: None,
+            },
+        },
+    };
+    engr::model::project(&mut after, &event).expect("project");
+    let mutation = proof::object_review_mutation(&before, &after, payload).expect("mutation");
+    let binding = rules::bind_object(root, &mutation, before.rev).expect("binding");
+    gate::ReviewAttestation {
+        review_digest: binding.digest().expect("digest").to_string(),
+        reviewed_rules: binding.rule_ids(),
+        attempt: 1,
+        result: proof::ReviewResult::Passed,
+        explanation: None,
+    }
+}
