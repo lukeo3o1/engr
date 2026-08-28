@@ -852,9 +852,26 @@ fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
     store::require_current(root)?;
     let prepared = gate::prepare_repair(root, object)?;
     if json {
+        // Both sides, not just the candidate. The candidate binds only what is
+        // being restored — the invalid bytes are deliberately outside it and
+        // outside its digest — so a reader given the candidate alone cannot see
+        // what the repair discards. The comparison is reported beside it, as
+        // diagnostic material rather than as anything being admitted.
+        let document = serde_json::json!({
+            "candidate": prepared.candidate,
+            "repair": {
+                "stored_verifies": store::load_object(root, object)
+                    .ok()
+                    .is_some_and(|stored| {
+                        engr::integrity::check_stored_object_integrity(&stored).is_ok()
+                    }),
+                "restores": engr::ops::provable(root, object).ok(),
+                "stored": store::load_object(root, object).ok(),
+            }
+        });
         println!(
             "{}",
-            serde_json::to_string_pretty(&prepared.candidate)
+            serde_json::to_string_pretty(&document)
                 .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
         );
         return Ok(());
@@ -1866,6 +1883,89 @@ fn render_basis(basis: Option<&str>) -> String {
 /// Backlog ids — borrowing the Object width can print two different unresolved
 /// points identically on the one screen that says which of them confirming
 /// consumes.
+/// What a repair discards, beside what it restores.
+///
+/// #35's ruling requires the person confirming a repair to see three things: the
+/// last provable admitted projection, the integrity-invalid stored state, and
+/// the difference. Only the first is in the candidate — binding the invalid
+/// bytes into a CandidateDigest would make a digest that could never be
+/// recomputed from history, which is the one property every durable candidate
+/// digest has to keep. So they are read here, at render time, and stay
+/// diagnostic: nothing on this screen is authority, and confirming does not
+/// admit any of it.
+///
+/// Being unable to read them is not a reason to hide the screen. A repair whose
+/// comparison cannot be built is exactly the one a person should be told about
+/// before answering.
+fn render_repair_comparison(root: &Path, id: &str) -> String {
+    let provable = match engr::ops::provable(root, id) {
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  admitted history cannot rebuild this record: {}\n",
+                error.message
+            )
+        }
+    };
+    let stored = match store::load_object(root, id) {
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  the stored record cannot be read: {}\n",
+                error.message
+            )
+        }
+    };
+    // A pending repair candidate rendered again after the record already
+    // verifies — someone repaired it another way, or the edit was reverted.
+    // Say so rather than showing an empty comparison.
+    if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
+        return "Integrity  the stored record verifies again, so there is nothing left to repair\n"
+            .to_owned();
+    }
+
+    let mut out = String::from(
+        "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n",
+    );
+    for (what, stored_value, provable_value) in [
+        ("title", stored.title.clone(), provable.title.clone()),
+        (
+            "state",
+            stored.state.as_str().to_owned(),
+            provable.state.as_str().to_owned(),
+        ),
+    ] {
+        if stored_value != provable_value {
+            out.push_str(&format!(
+                "  {what}\n    stored   {stored_value}\n    restore  {provable_value}\n"
+            ));
+        }
+    }
+    for section in &provable.sections {
+        match stored.section(section.id) {
+            Ok(current) if current.text == section.text => {}
+            Ok(current) => out.push_str(&format!(
+                "  §{}\n    stored   {}\n    restore  {}\n",
+                section.id, current.text, section.text
+            )),
+            Err(_) => out.push_str(&format!(
+                "  §{}\n    stored   (absent)\n    restore  {}\n",
+                section.id, section.text
+            )),
+        }
+    }
+    for section in &stored.sections {
+        if provable.section(section.id).is_err() {
+            out.push_str(&format!(
+                "  §{}\n    stored   {}\n    restore  (removed; admitted history has no such section)\n",
+                section.id, section.text
+            ));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
     let mut out = String::new();
@@ -1923,6 +2023,13 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         shorten(&candidate.payload.object, width),
         title
     ));
+    // A repair is confirmed against a comparison, not against wording. It
+    // carries no content of its own, so without this the screen would say only
+    // that something is being restored, and a person would be assenting to the
+    // discarding of material they were never shown.
+    if matches!(candidate.payload.action, Action::ObjectRepaired) {
+        out.push_str(&render_repair_comparison(root, &candidate.payload.object));
+    }
     // A title is a label, not wording written against code, so the commit it
     // happened to be typed at says nothing about the change being confirmed.
     // It stays in the payload; it just does not belong on this screen, where

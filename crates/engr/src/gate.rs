@@ -1589,6 +1589,14 @@ fn admit_agent_locked(
     review: Option<ReviewAttestation>,
 ) -> Result<Admitted> {
     store::require_current(root)?;
+    // Before anything else, and unconditionally. The reducer refuses an
+    // Agent-admitted repair too, but a door that is only closed further in is
+    // one somebody has to reason about; this one is shut at the entrance.
+    ensure!(
+        !matches!(payload.action, Action::ObjectRepaired),
+        EXIT_INVARIANT,
+        "object.repaired is admitted through the human gate only; prepare it with `engr repair`"
+    );
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
     if payload.action.carries_title() {

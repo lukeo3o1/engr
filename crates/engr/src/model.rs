@@ -1554,6 +1554,20 @@ pub fn check_admitting_authority(
         "{} sets the object's own lifecycle, which is a human admission",
         payload.action.label()
     );
+    // Repair is not lifecycle, so it gets its own refusal and its own reason:
+    // it re-establishes authority that stopped verifying, and #35's ruling puts
+    // that behind the Human Gate whatever admission class the Sections being
+    // restored carry.
+    //
+    // Here rather than only at the gate, because `project` is also how stored
+    // history is read. An Event-v2 record tagged `agent` carrying this action is
+    // refused on the way in *and* every time it is replayed, so writing one into
+    // a log by hand cannot establish an Agent repair after the fact.
+    ensure!(
+        !matches!(payload.action, Action::ObjectRepaired),
+        EXIT_INVARIANT,
+        "object.repaired restores authority that failed integrity, which is a human admission"
+    );
     if let Action::SectionDeleted { section } = &payload.action {
         let target = object.section(*section)?;
         ensure!(

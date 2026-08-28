@@ -469,9 +469,21 @@ fn repair_is_available_as_a_supported_command() {
         "repair must be reachable without hand-editing .engr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let candidate: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("candidate json");
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("repair json");
+    let candidate = &document["candidate"];
     assert_eq!(candidate["action"], "object_repaired");
+
+    // The 3B comparison travels with it: what is restored, what is on disk, and
+    // that the stored record does not verify.
+    assert_eq!(document["repair"]["stored_verifies"], false);
+    assert_eq!(
+        document["repair"]["restores"]["sections"][0]["text"],
+        "wording admitted before the edit"
+    );
+    assert_eq!(
+        document["repair"]["stored"]["sections"][0]["text"],
+        "wording nobody admitted"
+    );
 
     let challenge = candidate["challenge"].as_str().expect("challenge");
     let confirmed = Command::new(env!("CARGO_BIN_EXE_engr"))
@@ -487,4 +499,65 @@ fn repair_is_available_as_a_supported_command() {
     );
     integrity::check_stored_object_integrity(&store::load_object(root, id).expect("repaired"))
         .expect("the workspace verifies again");
+}
+
+/// Repair is Human-only as a property of the schema, not of one caller.
+///
+/// The CLI reaching repair only through `prepare_repair` is not the invariant;
+/// it is one caller behaving. An Agent asking for it directly must be refused,
+/// and so must a stored Event-v2 record that claims an Agent repair happened —
+/// otherwise a hand-written log could establish one after the fact, which is
+/// the whole thing the Human Gate is here to prevent.
+#[test]
+fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184d";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording admitted through the gate"));
+
+    let repair = Payload {
+        action: engr::model::Action::ObjectRepaired,
+        object: id.to_owned(),
+        becomes: None,
+        content: Content::default(),
+    };
+    let error = gate::admit_agent(root, repair.clone(), None).expect_err("no agent repair");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("human gate only"), "{error}");
+
+    // And the same refusal when it arrives as durable history rather than as a
+    // call: append an Event-v2 record tagged `agent` carrying the action.
+    let path = store::events_path(root, id);
+    let history = std::fs::read_to_string(&path).expect("history");
+    let forged = Event {
+        format: engr::model::EVENT_FORMAT.to_owned(),
+        version: engr::EVENT_ENVELOPE_VERSION,
+        event_id: engr::model::new_id(),
+        rev: store::load_object(root, id).expect("object").rev + 1,
+        time: "2026-08-27T00:00:00Z".to_owned(),
+        payload: repair,
+        provenance: Provenance::Tagged {
+            admission: TaggedAdmission {
+                kind: Admission::Agent,
+                confirmation: None,
+                // A passing review, so the forgery gets past the check that an
+                // Agent event carries one and reaches the authority rule this
+                // test is actually about.
+                rule_review: Some(engr::model::ReviewProvenance {
+                    outcome: engr::model::ReviewOutcome::Passed,
+                    review_digest: format!("1:{}", "0".repeat(64)),
+                }),
+            },
+        },
+    };
+    let line = proof::canonical_bytes(&forged, "forged repair").expect("canonical");
+    std::fs::write(&path, format!("{history}{line}\n")).expect("append");
+
+    let error = store::load_events(root, id).expect_err("a stored agent repair is not history");
+    assert!(
+        error.message.contains("human admission"),
+        "refused as an authority violation: {error}"
+    );
 }
