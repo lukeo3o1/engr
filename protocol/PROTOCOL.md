@@ -2212,9 +2212,25 @@ which is what keeps a historical serializer out of the permanent contract — an
 what avoids depending on historical output whose bytes may not satisfy the
 frozen predecessor contract that follows it.
 
-One pipeline can serve both because versions 1 and 2 persist an Object, an
-Event and every retained resource identically. What moved at that boundary was
-Rule *interpretation*, and that is where the difference is checked; see
+One pipeline can serve both because the version-2 persisted shape is a strict
+**superset** of the version-1 one: everything version 2 added — `type` on an
+Object, `role`, `content` and `relations` on a Section, `becomes` on a payload,
+and the `object_classified` and `object_superseded` actions — is optional and
+absent from a version-1 file. Each generation is decoded under its own schema
+and arrives at the same internal representation.
+
+Superset is not sameness, and an implementation MUST NOT treat it as such. Each
+supported predecessor generation MUST enumerate the exact members it persisted —
+for the Object, the Section, the Event envelope and its payload, including which
+actions that generation's reducer had — and MUST enforce that set **before** any
+current-model decoding. A model that carries several generations necessarily
+defaults the members the older ones lacked, so a file validated only by
+prohibition decodes as a well-formed member of a generation it does not belong
+to, and everything downstream then reads those defaults as things the
+predecessor said. A version-1 history carrying `object_classified`
+reconstructs a classified Object and publishes a classification no human made.
+
+The remaining v1-to-v2 difference changes meaning without changing bytes; see
 [What the workspace version is for](#what-the-workspace-version-is-for).
 
 ### What the admitting path may do
@@ -2417,9 +2433,11 @@ A **historical** snapshot carries the version that was current when it was taken
 and is readable at any version this build recognizes. Refusing an older snapshot
 would make every reference pinned before a migration unresolvable — moving the
 workspace forward would retroactively break provenance that was correct when it
-was recorded. Versions 1 and 2 share the predecessor Object representation;
-version 3 decodes those snapshots under that representation and decodes v3 under
-the exact current representation. It never widens the current decoder.
+was recorded. A snapshot MUST be decoded under **its own** version's persisted
+schema rather than under the loosest one the build recognizes: reading a
+version-1 snapshot by version-2 rules is the same reinterpretation as reading a
+version-1 workspace by them. Version 3 decodes v3 snapshots under the exact
+current representation, and never widens the current decoder.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain

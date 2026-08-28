@@ -421,6 +421,23 @@ fn predecessor_projection(
     };
 
     let events_path = store::events_path(root, id);
+    // Ahead of decoding, for the same reason the Object envelope is: the
+    // current Event model reads a predecessor line with its later members
+    // defaulted, so a v2-only action or member in a v1 history would decode
+    // cleanly and then reconstruct a projection the predecessor generation
+    // could not have produced.
+    for (index, line) in history.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {error}", events_path.display(), index + 1),
+            )
+        })?;
+        store::check_predecessor_event_shape(&events_path, index + 1, source_version, &value)?;
+    }
     let events = store::decode_events(root, &events_path, id, history)?;
     for event in &events {
         ensure!(
@@ -689,9 +706,9 @@ fn validate_retained_resources(
 /// The one thing a version 1 predecessor and a version 2 predecessor do not
 /// agree about.
 ///
-/// Every persisted resource is spelled identically in both generations, which
-/// is why one pipeline takes either of them forward. What moved at the v1 -> v2
-/// boundary was meaning, not bytes: version 2 is the first to define
+/// Their persisted *shapes* are already separated, generation by generation, by
+/// the enumerated schemas in [`crate::store`]. What is left is the difference
+/// that changes meaning without changing bytes: version 2 is the first to define
 /// `review.max_attempts` and `review.on_exhaustion`, so a rule file with no
 /// `review:` block carries an effective ceiling and exhaustion action here and
 /// carried neither there — and an explicit block was an *unknown field* to a

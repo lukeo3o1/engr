@@ -507,6 +507,64 @@ fn a_reference_to_a_section_that_has_its_own_references_still_migrates() {
     );
 }
 
+/// The members version 2 added part-way through its own window still migrate.
+///
+/// `role`, `content` and `relations` arrived on a Section during the v2 window,
+/// so an early v2 workspace has none of them and a late one does. Both are
+/// version 2. Enumerating each generation's persisted members closed a hole
+/// where a *version 1* file could carry them — and the failure mode of that fix
+/// is over-tightening, which would strand exactly the workspaces the members
+/// were added for. So the optional half of the schema gets a test of its own.
+#[test]
+fn a_late_v2_section_keeps_the_members_that_generation_added() {
+    let temp = tempfile::tempdir().expect("temp");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let content = Content {
+        role: Some(engr::semantics::Role::Decision),
+        text: "a late v2 section carries everything its generation had".to_owned(),
+        content: vec![engr::semantics::Supplement::new(
+            "code.rust",
+            "fn late() {}",
+        )],
+        relations: vec![engr::semantics::Relation {
+            relation: engr::semantics::RelationType::ImplementedBy,
+            target: engr::semantics::Target::File {
+                path: "src/lib.rs".to_owned(),
+                commit: "a".repeat(40),
+            },
+        }],
+        ..Content::default()
+    };
+    let late = json!({
+        "id": id,
+        "title": "migration",
+        "state": "open",
+        "rev": 2,
+        "next_section_id": 2,
+        "sections": [{
+            "id": 1,
+            "role": content.role,
+            "text": content.text,
+            "content": content.content,
+            "refs": content.refs,
+            "relations": content.relations,
+            "sha256": content.sha256().expect("seal"),
+            "confirmed_at": "2026-08-25T00:00:00Z"
+        }]
+    });
+    predecessor(temp.path(), &[late]);
+
+    store::migrate(temp.path()).expect("a late v2 Section migrates");
+
+    let migrated = store::load_object(temp.path(), id).expect("object");
+    let section = &migrated.sections[0];
+    assert_eq!(section.role, Some(engr::semantics::Role::Decision));
+    assert_eq!(section.content, content.content);
+    assert_eq!(section.relations, content.relations);
+    assert_eq!(section.admission, engr::semantics::Admission::Human);
+    integrity::check_stored_object_integrity(&migrated).expect("integrity");
+}
+
 /// Put JSON on disk without going through any write path, the way a hand edit,
 /// a git merge or another tool would.
 ///

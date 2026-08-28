@@ -578,9 +578,14 @@ fn unresolvable_references_stay_distinguishable_and_stop_the_migration() {
 /// Reseal one predecessor Section against its edited content, and re-derive the
 /// history that has to agree with it.
 ///
-/// A test that changes a Section without doing this is testing the seal check,
-/// which has tests of its own. These want the *reference* rules to be what
-/// refuses, so everything else about the workspace has to stay true.
+/// A forgery that skips this is not testing what it thinks it is. A Section
+/// whose seal no longer covers it is caught by the seal check, and a projection
+/// its history does not derive is caught by the derivation check — both of
+/// which have tests of their own. To find out whether the *generation boundary*
+/// holds, the workspace has to be internally perfect and wrong only about which
+/// generation it belongs to. That means resealing the Section and carrying the
+/// same edit into the Event that admitted it, exactly as a build with those
+/// members would have written both.
 fn reseal_predecessor(root: &Path, id: &str, index: usize) {
     let mut object = stored(root, id);
     let content: Content =
@@ -592,21 +597,29 @@ fn reseal_predecessor(root: &Path, id: &str, index: usize) {
         &format!("{}\n", serde_json::to_string_pretty(&object).expect("json")),
     );
 
-    // The stored projection has to remain derivable from admitted history, so
-    // the admitting Event moves with it. The Event is rewritten here only
-    // because the fixture is being deliberately altered; migration itself never
-    // does this.
+    // Every semantic member, not just `refs`: the derivation check compares the
+    // whole Section, so a forgery that moved `role` and left the Event behind
+    // would be refused for the wrong reason.
     let path = store::events_path(root, id);
-    let section = object["sections"][index]["id"]
-        .as_u64()
-        .expect("section id");
+    let section = &object["sections"][index];
+    let id_of = section["id"].as_u64().expect("section id");
     let mut lines = Vec::new();
     for line in read(&path).lines() {
         let mut event: Value = serde_json::from_str(line).expect("event");
         let names_it = event["action"] == "section_added"
-            || event["action"] == "section_revised" && event["section"] == section;
-        if names_it && event["text"] == object["sections"][index]["text"] {
-            event["refs"] = object["sections"][index]["refs"].clone();
+            || event["action"] == "section_revised" && event["section"] == id_of;
+        if names_it && event["text"] == section["text"] {
+            let members = event.as_object_mut().expect("event object");
+            for member in ["role", "content", "based_on", "refs", "relations"] {
+                match section.get(member) {
+                    Some(value) => {
+                        members.insert(member.to_owned(), value.clone());
+                    }
+                    None => {
+                        members.remove(member);
+                    }
+                }
+            }
             let payload: Payload =
                 serde_json::from_value(event.clone()).expect("payload from event");
             event["confirmation"]["payload_sha256"] =
@@ -615,6 +628,51 @@ fn reseal_predecessor(root: &Path, id: &str, index: usize) {
         lines.push(serde_json::to_string(&event).expect("event json"));
     }
     write(&path, &format!("{}\n", lines.join("\n")));
+}
+
+/// Append an Event to a predecessor history and advance the projection with it,
+/// as the generation that wrote both would have.
+fn append_predecessor_event(root: &Path, id: &str, mut event: Value) {
+    let path = store::events_path(root, id);
+    let history = read(&path);
+    let last: Value =
+        serde_json::from_str(history.lines().last().expect("history")).expect("event");
+    let rev = last["rev"].as_u64().expect("rev") + 1;
+    event["format"] = Value::String(engr::model::EVENT_FORMAT.to_owned());
+    event["version"] = Value::from(1u64);
+    event["event_id"] = Value::String(engr::model::new_id());
+    event["rev"] = Value::from(rev);
+    event["time"] = Value::String("2026-08-29T00:00:00Z".to_owned());
+    event["object"] = Value::String(id.to_owned());
+    seal_event(&mut event);
+    write(
+        &path,
+        &format!(
+            "{history}{}\n",
+            serde_json::to_string(&event).expect("event json")
+        ),
+    );
+    edit_stored(root, id, |object| object["rev"] = Value::from(rev));
+}
+
+/// Rewrite the last Event of a predecessor history in place, resealing it.
+fn edit_last_predecessor_event(root: &Path, id: &str, change: impl FnOnce(&mut Value)) {
+    let path = store::events_path(root, id);
+    let mut lines: Vec<String> = read(&path).lines().map(str::to_owned).collect();
+    let last = lines.pop().expect("history");
+    let mut event: Value = serde_json::from_str(&last).expect("event");
+    change(&mut event);
+    seal_event(&mut event);
+    lines.push(serde_json::to_string(&event).expect("event json"));
+    write(&path, &format!("{}\n", lines.join("\n")));
+}
+
+fn seal_event(event: &mut Value) {
+    let payload: Payload = serde_json::from_value(event.clone()).expect("payload from event");
+    event["confirmation"] = serde_json::json!({
+        "challenge": "234567",
+        "payload_sha256": payload.sha256().expect("payload seal"),
+    });
 }
 
 // -------------------------------------------------- malformed v1 predecessors
@@ -638,6 +696,127 @@ fn a_v1_object_still_in_the_v0_envelope_is_named_as_such() {
         error.message.contains("legacy v0 per-resource envelope"),
         "{error}"
     );
+}
+
+/// A v1 workspace cannot carry members the v1 generation never had.
+///
+/// This is the boundary the whole change rests on, and it is not the same
+/// question as "is this file damaged". Each forgery below is *internally
+/// perfect*: the Section is resealed against its new content, the Event that
+/// admitted it carries the same members, and the stored projection is exactly
+/// derivable from that history. Every check the migrator makes about integrity
+/// and derivation passes. The only thing wrong is the generation.
+///
+/// The members are real v3 semantics, and each is a different way of smuggling
+/// meaning past a human. `type` and `state` classify an Object; `role` says
+/// what a Section *is*, and `supersession` is the reason an Object was retired;
+/// `relations` carries `superseded_by` and `implemented_by`, which are claims
+/// the record then acts on; `content` carries verbatim supplementary bodies.
+/// None existed when a v1 build wrote a workspace, so a v1 file carrying one is
+/// a later generation's semantics wearing an older generation's label — and
+/// admitting it means the migration, not a human, decided the record says
+/// something new.
+#[test]
+fn a_v1_predecessor_cannot_carry_members_its_generation_never_had() {
+    let cases: Vec<Malformation> = vec![
+        (
+            "an Object classified, which v1 had no vocabulary for",
+            Box::new(|root: &Path| {
+                append_predecessor_event(
+                    root,
+                    AUTHORITY,
+                    serde_json::json!({
+                        "action": "object_classified",
+                        "type": "decision",
+                        "state": "accepted",
+                        "text": "",
+                        "refs": [],
+                    }),
+                );
+                edit_stored(root, AUTHORITY, |object| {
+                    object["type"] = Value::String("decision".to_owned());
+                    object["state"] = Value::String("accepted".to_owned());
+                });
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section with a role",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sections"][0]["role"] = Value::String("supersession".to_owned());
+                });
+                reseal_predecessor(root, AUTHORITY, 0);
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section carrying relations",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sections"][0]["relations"] = serde_json::json!([{
+                        "type": "implemented_by",
+                        "target": {
+                            "kind": "file",
+                            "path": "src/lib.rs",
+                            "commit": "a".repeat(40),
+                        },
+                    }]);
+                });
+                reseal_predecessor(root, AUTHORITY, 0);
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "a Section carrying supplementary bodies",
+            Box::new(|root: &Path| {
+                edit_stored(root, AUTHORITY, |object| {
+                    object["sections"][0]["content"] = serde_json::json!([{
+                        "type": "code.rust",
+                        "body": "fn smuggled() {}",
+                    }]);
+                });
+                reseal_predecessor(root, AUTHORITY, 0);
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+        (
+            "an Event carrying a destination, which v1 had no member for",
+            Box::new(|root: &Path| {
+                edit_last_predecessor_event(root, AUTHORITY, |event| {
+                    event["becomes"] = serde_json::json!({
+                        "type": "decision",
+                        "state": "proposed",
+                    });
+                });
+                edit_stored(root, AUTHORITY, |object| {
+                    object["type"] = Value::String("decision".to_owned());
+                    object["state"] = Value::String("proposed".to_owned());
+                });
+            }),
+            engr::EXIT_SCHEMA,
+        ),
+    ];
+
+    for (what, forge, code) in cases {
+        let (_temp, root) = released_v1();
+        forge(&root);
+        let after_forgery = fingerprint(&root);
+
+        let error = store::migrate(&root).expect_err(what);
+        assert_eq!(error.code, code, "{what}: {}", error.message);
+        assert_eq!(
+            declared_version(&root),
+            1,
+            "{what}: the generation did not advance"
+        );
+        assert!(!stage(&root).exists(), "{what}: nothing was staged");
+        assert_eq!(
+            fingerprint(&root),
+            after_forgery,
+            "{what}: preflight wrote nothing"
+        );
+    }
 }
 
 /// Each way a released v1 workspace can fail to be one, refused before

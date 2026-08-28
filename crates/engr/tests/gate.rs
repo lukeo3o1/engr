@@ -776,7 +776,15 @@ fn historical_references_decode_the_snapshot_workspace_format() {
             serde_json::from_slice(&std::fs::read(path).expect("object")).expect("object");
         let mut object: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("object")).expect("json");
-        object.as_object_mut().expect("object").remove("sha256");
+        // Every member v0 did not have, not only the ones whose names changed.
+        // A downgrade that leaves `type`, `role`, `content` and `relations`
+        // behind produces a file no v0 build could have written, and the
+        // snapshot decoder is entitled to say so. Their v3 values here are the
+        // empty ones, which the content hash omits, so the legacy seals below
+        // are unaffected by removing them.
+        let members = object.as_object_mut().expect("object");
+        members.remove("sha256");
+        members.remove("type");
         object["format"] = serde_json::Value::String("engr-object".to_owned());
         object["version"] = serde_json::Value::from(1);
         let state = object
@@ -790,6 +798,9 @@ fn historical_references_decode_the_snapshot_workspace_format() {
             let id = stored["id"].as_u64().expect("section id");
             let section = decoded.section(id).expect("decoded section");
             stored.remove("admission");
+            for later in ["role", "content", "relations"] {
+                stored.remove(later);
+            }
             let admitted_at = stored.remove("admitted_at").expect("admitted_at");
             stored.insert("confirmed_at".to_owned(), admitted_at);
             stored.insert(

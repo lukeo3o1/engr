@@ -610,29 +610,239 @@ fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<
     Ok(())
 }
 
-/// Validate one stored Object against the envelope its own generation wrote.
+/// What one predecessor generation actually persisted.
 ///
-/// Each predecessor generation gets its own arm, and each arm names the exact
-/// members that generation persisted rather than asking whether the modern
-/// model happens to deserialize the bytes. The modern model is deliberately
-/// permissive across generations — `status` is an alias for `state`, `admission`
-/// and `sha256` default — so decoding first and inspecting afterwards would let
-/// a file from one generation pass as a file of another with defaults quietly
-/// filled in. This runs before [`decode_object`] for that reason.
+/// The member lists are transcribed from the builds themselves, not inferred
+/// from the current model, and the difference matters: the in-memory model is
+/// deliberately permissive across generations. `status` is an alias for
+/// `state`; `admission`, `sha256`, `role`, `content`, `relations` and `type`
+/// all have serde defaults. So a file of one generation deserializes cleanly as
+/// a file of another, with the members it never had quietly filled in — and
+/// then everything downstream treats those defaults as things the predecessor
+/// said. Enumerating the members ahead of decoding is what stops that, and it
+/// is why the lists are exhaustive rather than a set of prohibitions.
 ///
-/// Version 1 and version 2 share an arm because they share an envelope, and
-/// that is a fact about those two generations rather than a shortcut: the
-/// v1 -> v2 step moved how a project Rule's `review:` block is interpreted and
-/// changed no persisted resource at all. The Rule difference is the one thing
-/// that needs the source version, and it is checked where Rules are read, in
-/// `migration::check_predecessor_rules`. If a future generation ever changes
-/// the Object representation, it gets an arm of its own here instead of
-/// widening this one.
+/// Which build each list comes from:
+///
+/// ```text
+/// v0  1d95dbe  per-resource markers, `status`, no workspace authority
+/// v1  e7d9f99  the published `latest` release
+/// v2  a645020^ the last build before the v3 generation
+/// ```
+///
+/// v2 is a strict superset of v1: everything it added — `type` on an Object,
+/// and `role`, `content` and `relations` on a Section — is optional, absent
+/// from a v1 file, and absent from an early v2 file too, because those members
+/// arrived partway through the v2 window. That is what lets one pipeline take
+/// either generation forward. It is *not* the same as the two persisting an
+/// Object identically, and treating it that way is what let a v1 workspace
+/// carry v2 semantics.
+struct Generation {
+    object_required: &'static [&'static str],
+    object_optional: &'static [&'static str],
+    section_required: &'static [&'static str],
+    section_optional: &'static [&'static str],
+    /// The reducer's action vocabulary, each with the parameters it flattens
+    /// into the payload alongside its own name.
+    actions: &'static [ActionShape],
+    /// Payload members every action carries, outside its own parameters.
+    payload_required: &'static [&'static str],
+    payload_optional: &'static [&'static str],
+}
+
+struct ActionShape {
+    label: &'static str,
+    required: &'static [&'static str],
+    optional: &'static [&'static str],
+}
+
+const NOTHING: &[&str] = &[];
+
+/// The eight actions every predecessor generation had. v2 adds two more.
+const SHARED_ACTIONS: &[ActionShape] = &[
+    ActionShape {
+        label: "object_created",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_renamed",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_added",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_revised",
+        required: &["section"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_merged",
+        required: &["absorbs"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_deleted",
+        required: &["section"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_closed",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_reopened",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+];
+
+const V2_ACTIONS: &[ActionShape] = &[
+    ActionShape {
+        label: "object_created",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_renamed",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_added",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_revised",
+        required: &["section"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_merged",
+        required: &["absorbs"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "section_deleted",
+        required: &["section"],
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_closed",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_reopened",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+    ActionShape {
+        label: "object_classified",
+        required: &["state"],
+        optional: &["type"],
+    },
+    ActionShape {
+        label: "object_superseded",
+        required: NOTHING,
+        optional: NOTHING,
+    },
+];
+
+const GENERATION_V0: Generation = Generation {
+    object_required: &[
+        "format",
+        "version",
+        "id",
+        "title",
+        "status",
+        "rev",
+        "next_section_id",
+        "sections",
+    ],
+    object_optional: NOTHING,
+    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
+    section_optional: &["based_on"],
+    actions: SHARED_ACTIONS,
+    payload_required: &["object", "text", "refs"],
+    payload_optional: &["based_on"],
+};
+
+const GENERATION_V1: Generation = Generation {
+    object_required: &["id", "title", "state", "rev", "next_section_id", "sections"],
+    // Retained when a v0 workspace was converted in place by the released
+    // build, which renamed the lifecycle key and left these where they were.
+    object_optional: &["format", "version"],
+    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
+    section_optional: &["based_on"],
+    actions: SHARED_ACTIONS,
+    payload_required: &["object", "text", "refs"],
+    payload_optional: &["based_on"],
+};
+
+const GENERATION_V2: Generation = Generation {
+    object_required: &["id", "title", "state", "rev", "next_section_id", "sections"],
+    object_optional: &["format", "version", "type"],
+    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
+    section_optional: &["based_on", "role", "content", "relations"],
+    actions: V2_ACTIONS,
+    payload_required: &["object", "text", "refs"],
+    payload_optional: &["based_on", "becomes", "role", "content", "relations"],
+};
+
+fn generation(source_version: u32) -> Result<&'static Generation> {
+    match source_version {
+        0 => Ok(&GENERATION_V0),
+        1 => Ok(&GENERATION_V1),
+        2 => Ok(&GENERATION_V2),
+        other => Err(Error::new(
+            EXIT_SCHEMA,
+            format!("workspace version {other} has no persisted predecessor schema"),
+        )),
+    }
+}
+
+/// Every required member is there, and nothing outside the generation's set is.
+fn check_generation_members(
+    path: &Path,
+    what: &str,
+    value: &serde_json::Map<String, serde_json::Value>,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<()> {
+    for member in required {
+        ensure!(
+            value.contains_key(*member),
+            EXIT_SCHEMA,
+            "{}: {what} is missing {member:?}, which its generation always wrote",
+            path.display()
+        );
+    }
+    for member in value.keys() {
+        ensure!(
+            required.contains(&member.as_str()) || optional.contains(&member.as_str()),
+            EXIT_SCHEMA,
+            "{}: {what} carries {member:?}, which its generation never had",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Validate one stored Object against the exact envelope its own generation
+/// wrote, before anything decodes it.
 pub(crate) fn check_predecessor_object_shape(
     path: &Path,
     source_version: u32,
     value: &serde_json::Value,
 ) -> Result<()> {
+    let schema = generation(source_version)?;
     let object = value.as_object().ok_or_else(|| {
         Error::new(
             EXIT_SCHEMA,
@@ -645,41 +855,41 @@ pub(crate) fn check_predecessor_object_shape(
         "{}: predecessor Object cannot already carry a v3 aggregate seal",
         path.display()
     );
-    let markers = object.get("format").and_then(serde_json::Value::as_str)
-        == Some(crate::model::OBJECT_FORMAT)
-        && object.get("version").and_then(serde_json::Value::as_u64)
-            == Some(crate::LEGACY_OBJECT_VERSION_V0.into());
-    if source_version == 0 {
-        ensure!(
-            markers && object.contains_key("status") && !object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: not a recognized legacy v0 Object",
-            path.display()
-        );
-    } else {
-        // Said separately from the general envelope refusal below, because it
-        // is the one wrong shape that has a next action. A workspace that
-        // declares a version while its Objects still carry the per-resource
-        // markers and spell the lifecycle `status` is a v0 conversion the
-        // predecessor build began and did not finish — its own migration
-        // renamed the key file by file with no staging — and the reader needs
-        // to be told that rather than reading "does not have its generation's
-        // canonical envelope" about a file that is recognizably something.
+    if source_version > 0 {
+        // Said before the member check, because it is the one wrong shape that
+        // has a next action. A workspace that declares a version while its
+        // Objects still carry the per-resource markers and spell the lifecycle
+        // `status` is a v0 conversion the predecessor build began and did not
+        // finish — its own migration renamed the key file by file with no
+        // staging — and the reader needs to be told that rather than reading
+        // "carries `status`, which its generation never had".
+        let markers = object.get("format").and_then(serde_json::Value::as_str)
+            == Some(crate::model::OBJECT_FORMAT)
+            && object.get("version").and_then(serde_json::Value::as_u64)
+                == Some(crate::LEGACY_OBJECT_VERSION_V0.into());
         ensure!(
             !(markers && object.contains_key("status")),
             EXIT_SCHEMA,
             "{}: workspace-v{source_version} declares its generation, but this Object still carries the legacy v0 per-resource envelope, so the v0 conversion never finished",
             path.display()
         );
+    }
+    check_generation_members(
+        path,
+        &format!("workspace-v{source_version} Object"),
+        object,
+        schema.object_required,
+        schema.object_optional,
+    )?;
+    if source_version == 0 {
         ensure!(
-            !object.contains_key("format")
-                && !object.contains_key("version")
-                && object.contains_key("state")
-                && !object.contains_key("status"),
+            object.get("format").and_then(serde_json::Value::as_str)
+                == Some(crate::model::OBJECT_FORMAT)
+                && object.get("version").and_then(serde_json::Value::as_u64)
+                    == Some(crate::LEGACY_OBJECT_VERSION_V0.into()),
             EXIT_SCHEMA,
-            "{}: workspace-v{} Object does not have its generation's canonical envelope",
-            path.display(),
-            source_version
+            "{}: not a recognized legacy v0 Object",
+            path.display()
         );
     }
     let sections = object
@@ -698,16 +908,84 @@ pub(crate) fn check_predecessor_object_shape(
                 format!("{}: a section must be a JSON object", path.display()),
             )
         })?;
-        ensure!(
-            section.contains_key("confirmed_at")
-                && !section.contains_key("admitted_at")
-                && !section.contains_key("admission"),
-            EXIT_SCHEMA,
-            "{}: predecessor Sections use confirmed_at and carry no admission member",
-            path.display()
-        );
+        check_generation_members(
+            path,
+            &format!("workspace-v{source_version} Section"),
+            section,
+            schema.section_required,
+            schema.section_optional,
+        )?;
     }
     Ok(())
+}
+
+/// Validate one retained Event line against the exact envelope its generation
+/// wrote, before anything decodes it.
+///
+/// Retained history is read to prove a projection is derivable, so an Event
+/// carrying a later generation's action or member is not a curiosity: it is the
+/// route by which a projection nobody admitted becomes derivable. An
+/// `object_classified` line in a version 1 history reconstructs a classified
+/// Object, and the migration then publishes a classification no human ever made
+/// — from a generation whose reducer had no such action at all.
+pub(crate) fn check_predecessor_event_shape(
+    path: &Path,
+    line: usize,
+    source_version: u32,
+    value: &serde_json::Value,
+) -> Result<()> {
+    let schema = generation(source_version)?;
+    let where_ = format!("{}:{line}", path.display());
+    let event = value
+        .as_object()
+        .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{where_}: an event is a JSON object")))?;
+    let label = event
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{where_}: an event names its action")))?;
+    let action = schema
+        .actions
+        .iter()
+        .find(|shape| shape.label == label)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!(
+                    "{where_}: {label:?} is not an action workspace version {source_version} had"
+                ),
+            )
+        })?;
+
+    let mut required: Vec<&str> = vec!["format", "version", "event_id", "rev", "time", "action"];
+    required.extend_from_slice(schema.payload_required);
+    required.extend_from_slice(action.required);
+    required.push("confirmation");
+    let mut optional: Vec<&str> = schema.payload_optional.to_vec();
+    optional.extend_from_slice(action.optional);
+    check_generation_members(
+        Path::new(&where_),
+        &format!("workspace-v{source_version} Event"),
+        event,
+        &required,
+        &optional,
+    )?;
+
+    let confirmation = event
+        .get("confirmation")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{where_}: confirmation is a JSON object"),
+            )
+        })?;
+    check_generation_members(
+        Path::new(&where_),
+        &format!("workspace-v{source_version} confirmation"),
+        confirmation,
+        &["challenge", "payload_sha256"],
+        NOTHING,
+    )
 }
 
 pub fn migrate(root: &Path) -> Result<()> {
