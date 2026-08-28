@@ -40,9 +40,25 @@ struct HistoricalKey {
     section: u64,
 }
 
+/// One historical Section, in both spellings that matter.
+///
+/// A legacy Ref pins the seal the *predecessor* took over the *predecessor's*
+/// content, and the v3 digest has to be taken over the migrated content. Those
+/// are two different hashes of the same Section whenever it carries references
+/// of its own, so the conversion needs both and must not derive one from the
+/// other.
+#[derive(Clone)]
+struct HistoricalSection {
+    /// The seal the predecessor generation recorded, proven against the
+    /// predecessor content before anything was converted.
+    legacy_seal: String,
+    /// The same Section with its references in the current spelling.
+    migrated: Section,
+}
+
 struct RefClosure<'a> {
     root: &'a Path,
-    cache: BTreeMap<HistoricalKey, Section>,
+    cache: BTreeMap<HistoricalKey, HistoricalSection>,
     visiting: BTreeSet<HistoricalKey>,
 }
 
@@ -95,15 +111,23 @@ impl<'a> RefClosure<'a> {
             section: reference.section,
         };
         let historical = self.historical_section(key.clone())?;
-        let legacy_seal = historical.recomputed_sha256()?;
+        // Against the seal the predecessor took, not against a hash of the
+        // migrated Section. They are the same number only when the target
+        // carries no references of its own, because converting one rewrites
+        // exactly the member both hashes cover — so comparing the pin against
+        // the migrated hash accused every chained reference of being forged
+        // and made the workspace holding it unmigratable. What the pin claims
+        // is a statement in the predecessor's own terms, and it is checked in
+        // those terms; `check_legacy_section` has already proved that seal
+        // against the predecessor content it came with.
         ensure!(
-            legacy_seal == reference.sha256,
+            historical.legacy_seal == reference.sha256,
             EXIT_INVARIANT,
             "{} §{} at {} seals as {}, not the legacy reference seal {}",
             reference.object,
             reference.section,
             reference.commit,
-            legacy_seal,
+            historical.legacy_seal,
             reference.sha256
         );
         let fields = dependency::canonical_fields(&[
@@ -118,7 +142,7 @@ impl<'a> RefClosure<'a> {
         let snapshot = dependency::ref_snapshot(
             target.clone(),
             &fields,
-            &historical,
+            &historical.migrated,
             reference.commit.clone(),
         )?;
         dependency::SelectiveRef::stored(
@@ -129,7 +153,7 @@ impl<'a> RefClosure<'a> {
         )
     }
 
-    fn historical_section(&mut self, key: HistoricalKey) -> Result<Section> {
+    fn historical_section(&mut self, key: HistoricalKey) -> Result<HistoricalSection> {
         if let Some(section) = self.cache.get(&key) {
             return Ok(section.clone());
         }
@@ -154,8 +178,15 @@ impl<'a> RefClosure<'a> {
                     )
                 })?;
             let section = object.section(key.section)?.clone();
+            // Proves the predecessor seal against the predecessor content,
+            // which is the only moment both are in hand. Read it after this
+            // and it is a checked fact rather than a stored claim.
             check_legacy_section(&section)?;
-            self.convert_section(section)
+            let legacy_seal = section.sha256.clone();
+            Ok(HistoricalSection {
+                legacy_seal,
+                migrated: self.convert_section(section)?,
+            })
         })();
         self.visiting.remove(&key);
         let section = result?;
@@ -170,11 +201,13 @@ pub(crate) fn migrated_historical_section(
     object: &str,
     section: u64,
 ) -> Result<Section> {
-    RefClosure::new(root).historical_section(HistoricalKey {
-        commit: commit.to_owned(),
-        object: object.to_owned(),
-        section,
-    })
+    RefClosure::new(root)
+        .historical_section(HistoricalKey {
+            commit: commit.to_owned(),
+            object: object.to_owned(),
+            section,
+        })
+        .map(|historical| historical.migrated)
 }
 
 /// The migrated-v3 reading of an Object reconstructed from retained Event-v1
@@ -533,7 +566,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         predecessor.insert(id.clone(), projection);
     }
 
-    let resources = validate_retained_resources(root, &predecessor, &mut source)?;
+    let resources = validate_retained_resources(root, source_version, &predecessor, &mut source)?;
 
     let mut closure = RefClosure::new(root);
     let mut migrated = BTreeMap::new();
@@ -583,6 +616,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
 /// needs no rewrite and gets none.
 fn validate_retained_resources(
     root: &Path,
+    source_version: u32,
     objects: &BTreeMap<String, Object>,
     source: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
@@ -621,7 +655,9 @@ fn validate_retained_resources(
     // fingerprint it is a second read of a file that is editable outside the
     // workspace lock, so the manifest could name bytes the loader never
     // accepted. `Rule::raw` is the text that was parsed.
-    for rule in crate::rules::load_all_for_migration(root)? {
+    let rules = crate::rules::load_all_for_migration(root)?;
+    check_predecessor_rules(source_version, &rules)?;
+    for rule in rules {
         source.insert(relative_to_engr(root, &rule.source)?, sha256_of(&rule.raw));
     }
     // Anything else living under `rules/` is captured too, and only so the
@@ -650,6 +686,47 @@ fn validate_retained_resources(
     Ok(rewrites)
 }
 
+/// The one thing a version 1 predecessor and a version 2 predecessor do not
+/// agree about.
+///
+/// Every persisted resource is spelled identically in both generations, which
+/// is why one pipeline takes either of them forward. What moved at the v1 -> v2
+/// boundary was meaning, not bytes: version 2 is the first to define
+/// `review.max_attempts` and `review.on_exhaustion`, so a rule file with no
+/// `review:` block carries an effective ceiling and exhaustion action here and
+/// carried neither there — and an explicit block was an *unknown field* to a
+/// version 1 build, which refused the file outright.
+///
+/// Both halves of that matter, and they need opposite treatment.
+///
+/// A v1 Rule that writes no block is migrated unchanged and acquires the
+/// defaults. That reinterpretation is not a side effect to be avoided; it is
+/// the entire content of the v1 -> v2 step, and `engr migrate` is the explicit
+/// act that authorizes it. Nothing is written into the file: `Review::default`
+/// is what the Rule means, and the bytes stay exactly as their author left
+/// them.
+///
+/// A v1 Rule that writes a block is refused. Those bytes never loaded under the
+/// generation that owns them, so no v1 workspace containing one was ever usable,
+/// and accepting it now would let migration admit a file its own predecessor
+/// rejected — reading a member into force that the source generation had no
+/// member for. Fail closed and say which file.
+fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) -> Result<()> {
+    if source_version >= 2 {
+        return Ok(());
+    }
+    for rule in rules {
+        ensure!(
+            !rule.written_review,
+            EXIT_SCHEMA,
+            "{}: rule {} writes a review block, and workspace version {source_version} has no review member, so this is not a rule that generation could load",
+            rule.source.display(),
+            rule.id
+        );
+    }
+    Ok(())
+}
+
 fn plan_rewrite(
     root: &Path,
     path: &Path,
@@ -666,8 +743,9 @@ fn plan_rewrite(
 
 fn migratable_source_version(version: u32) -> bool {
     // Format-less legacy workspaces carry a representation explicitly handled
-    // by this converter. The governed Phase-3 migration itself is frozen as
-    // v2 -> v3; accepting v1 here would silently invent a cumulative contract.
+    // by this converter. Everything with a declared version is decided by the
+    // one list, so what this build claims it can migrate and what it will
+    // actually attempt cannot drift apart.
     version == 0 || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version)
 }
 

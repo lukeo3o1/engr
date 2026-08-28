@@ -402,6 +402,111 @@ fn legacy_refs_become_full_selective_refs_without_gaining_admission() {
     );
 }
 
+/// A reference to a section that has references of its own still migrates.
+///
+/// A legacy Ref pins the seal the predecessor took over the predecessor's
+/// content. Conversion rewrites `refs`, which that seal covers — so the
+/// migrated target hashes to something else, necessarily and correctly. The
+/// two numbers are the same only when the target carries no references, which
+/// is why every reference in the suite above happened to pass while a chained
+/// one could not migrate at all: it was refused as `seals as X, not the legacy
+/// reference seal Y`, an accusation of tampering against an untouched
+/// workspace. What the pin claims has to be checked in the terms it was
+/// written in.
+///
+/// This is a v2 predecessor, so it pins the defect where it lives rather than
+/// where it was found. The released-v1 fixture carries the same shape.
+#[test]
+fn a_reference_to_a_section_that_has_its_own_references_still_migrates() {
+    let temp = tempfile::tempdir().expect("temp");
+    let base = "018f7d58-4ca7-7a2e-98f1-9b3014681847";
+    let middle = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    let source = "018f7d58-4ca7-7a2e-98f1-9b3014681849";
+    let commit = |message: &str| {
+        git(temp.path(), &["add", ".engr"]);
+        git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=engr test",
+                "-c",
+                "user.email=engr@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+        git(temp.path(), &["rev-parse", "HEAD"])
+    };
+    let referring = |id: &str, text: &str, reference: engr::model::Ref| {
+        let content = Content {
+            text: text.to_owned(),
+            refs: vec![reference],
+            ..Content::default()
+        };
+        json!({
+            "id": id,
+            "title": "migration",
+            "state": "open",
+            "rev": 2,
+            "next_section_id": 2,
+            "sections": [{
+                "id": 1,
+                "text": content.text,
+                "refs": content.refs,
+                "sha256": content.sha256().expect("seal"),
+                "confirmed_at": "2026-08-25T00:00:00Z"
+            }]
+        })
+    };
+
+    let base_object = object(base, "the bottom of the chain depends on nothing");
+    predecessor(temp.path(), std::slice::from_ref(&base_object));
+    git(temp.path(), &["init"]);
+    let base_commit = commit("the base");
+
+    let base_seal = base_object["sections"][0]["sha256"]
+        .as_str()
+        .expect("base seal");
+    let middle_object = referring(
+        middle,
+        "the middle of the chain depends on the base",
+        engr::model::Ref::legacy(base, 1, base_seal, &base_commit),
+    );
+    predecessor(temp.path(), &[base_object.clone(), middle_object.clone()]);
+    let middle_commit = commit("the middle, which the source will pin");
+
+    let middle_seal = middle_object["sections"][0]["sha256"]
+        .as_str()
+        .expect("middle seal");
+    let source_object = referring(
+        source,
+        "the source depends on a section that itself depends on something",
+        engr::model::Ref::legacy(middle, 1, middle_seal, &middle_commit),
+    );
+    predecessor(temp.path(), &[base_object, middle_object, source_object]);
+
+    store::migrate(temp.path()).expect("a chained legacy reference migrates");
+
+    let source = store::load_object(temp.path(), source).expect("source");
+    let selective = source.sections[0].refs[0]
+        .as_selective()
+        .expect("selective ref");
+    assert_eq!(selective.commit(), middle_commit);
+    let middle = store::load_object(temp.path(), middle).expect("middle");
+    assert_eq!(
+        engr::dependency::evaluate(
+            temp.path(),
+            &middle,
+            middle.sha256.as_deref().expect("object seal"),
+            selective,
+        )
+        .expect("dependency"),
+        engr::dependency::Dependency::Unchanged,
+        "the converted pin names the migrated target it was taken from"
+    );
+}
+
 /// Put JSON on disk without going through any write path, the way a hand edit,
 /// a git merge or another tool would.
 ///
@@ -645,9 +750,17 @@ fn staged_plan(root: &Path, reference: &Path, id: &str) -> std::path::PathBuf {
     stage
 }
 
+/// A stage cannot hand itself authority the binary does not have.
+///
+/// The versions here are the ones with no defined route into v3, which since
+/// the released-v1 compatibility ruling means the ones above it: 0, 1 and 2 are
+/// all migratable now, so a plan claiming one of those is testing something
+/// else — that it matches the workspace it was prepared from, which
+/// `a_manifest_cannot_relabel_the_generation_it_was_prepared_from` in the
+/// released-v1 suite covers.
 #[test]
 fn staged_migration_refuses_unrecognized_or_unfrozen_source_versions() {
-    for version in [1, 4] {
+    for version in [4, 9] {
         let interrupted = tempfile::tempdir().expect("interrupted");
         let completed = tempfile::tempdir().expect("completed");
         let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
