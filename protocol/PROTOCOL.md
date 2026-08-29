@@ -2190,13 +2190,81 @@ independent of anything local:
 
 `.engr/format.json` is the sole schema/version authority for a current
 workspace, and this build writes **version 3**. Current resource files do not
-repeat those fields. A version-2 workspace is the defined direct predecessor
-for this migration; version 1 remains readable as a historical snapshot, but
-has no cumulative version-1-to-3 migration contract. A workspace without the
-authority may also be recognized from its legacy resource markers. Every
-migratable predecessor remains read-only until `engr migrate` is explicitly
-run. Unknown, newer, and not-directly-migratable workspace versions are never
-mutated and never read as current authority.
+repeat those fields. Workspace versions **1 and 2** are both defined direct
+predecessors of this migration, and a workspace without the authority may also
+be recognized from its legacy resource markers. Every migratable predecessor
+remains read-only until `engr migrate` is explicitly run. Unknown, newer, and
+not-directly-migratable workspace versions are never mutated and never read as
+current authority.
+
+Version 1 is a predecessor because it is the **released** generation: the
+published `latest` release writes `.engr/format.json` version 1, so a version-1
+workspace is what the shipped tool produced rather than an artifact of
+development history. A record a person built with the released binary MUST have
+a supported path forward under this one, and reaching it MUST NOT require
+locating and running an intermediate historical build.
+
+"Released generation" is the whole of what version 1 means here, and it is
+narrower than "every workspace whose `format.json` said 1". Compatibility is
+promised for persisted contracts that were actually published; a shared
+development-time version number is not evidence that a schema introduced before
+the next bump belongs to the released contract. A supported version-1
+predecessor therefore owns exactly:
+
+```text
+format.json
+objects/
+events/
+candidates/
+```
+
+`lock` is local process state and never migration authority. `rules/`,
+`backlog/`, `work/` and `collections/` arrived in later, unpublished builds that
+still declared version 1. They are **not** version-1 engr state, and a declared
+version-1 workspace holding any of them MUST fail migration closed, before a
+stage is installed and before anything is written, with a diagnostic that names
+the generation mismatch.
+
+The Rule case is the one that changes what the record can do, and it is why the
+rule is a refusal rather than a quiet omission. A rule file is authored by a
+human and never written by engr, so its presence beside a workspace says nothing
+about which build made that workspace — and carrying it forward would make
+policy the released build never recognized begin governing agent admission,
+bought with nothing but somebody running `engr migrate`. Authority MUST NOT
+arrive through a representation change.
+
+Workspaces genuinely written by a later version-1 build are outside this path.
+Preserving them is a separate compatibility decision and MUST NOT be inferred
+from the shared version number.
+
+That is one migration, not a chain. There is no v1-to-v2 step: the migrator
+decodes whichever generation the workspace declares, validates it under that
+generation's own rules, and derives version 3 from that single validated
+predecessor. Nothing is ever written in an intermediate generation's spelling,
+which is what keeps a historical serializer out of the permanent contract — and
+what avoids depending on historical output whose bytes may not satisfy the
+frozen predecessor contract that follows it.
+
+One pipeline can serve both because the version-2 persisted shape is a strict
+**superset** of the version-1 one: everything version 2 added — `type` on an
+Object, `role`, `content` and `relations` on a Section, `becomes` on a payload,
+and the `object_classified` and `object_superseded` actions — is optional and
+absent from a version-1 file. Each generation is decoded under its own schema
+and arrives at the same internal representation.
+
+Superset is not sameness, and an implementation MUST NOT treat it as such. Each
+supported predecessor generation MUST enumerate the exact members it persisted —
+for the Object, the Section, the Event envelope and its payload, including which
+actions that generation's reducer had — and MUST enforce that set **before** any
+current-model decoding. A model that carries several generations necessarily
+defaults the members the older ones lacked, so a file validated only by
+prohibition decodes as a well-formed member of a generation it does not belong
+to, and everything downstream then reads those defaults as things the
+predecessor said. A version-1 history carrying `object_classified`
+reconstructs a classified Object and publishes a classification no human made.
+
+The remaining v1-to-v2 difference changes meaning without changing bytes; see
+[What the workspace version is for](#what-the-workspace-version-is-for).
 
 ### What the admitting path may do
 
@@ -2244,8 +2312,8 @@ rather than left for a later write to refuse.
 A migration to version 3 activates mixed Section authority, `admitted_at`, exact
 Section encoding, Section and Object integrity, selective Ref digests, Candidate
 generation 3 and Event generation 2 as one contract. None is activated lazily
-per Object. Its direct predecessor is workspace version 2; this migration does
-not infer a cumulative version-1-to-3 conversion.
+per Object. Its direct predecessors are workspace versions 1 and 2, taken
+forward by the same pipeline and never through one another.
 
 Before writing one authoritative Object, migration MUST preflight the whole
 workspace: predecessor Object and Event reconstruction, every predecessor
@@ -2341,6 +2409,26 @@ silently acquire `admission`. Confirmed Event v1 history is retained, not
 rewritten. Pending candidates are neither migrated nor discarded; old envelopes
 fail closed when used and must be prepared again.
 
+### Four ways a workspace can refuse to be read as current
+
+They are different facts about a workspace and lead to different next actions,
+so an implementation MUST keep them distinguishable rather than collapsing them
+into one refusal:
+
+```text
+recognized migratable predecessor -> readable, read-only, run `engr migrate`
+incomplete migration              -> unavailable, run `engr migrate` to resume
+unsupported generation            -> refused; a newer one needs a newer engr
+malformed or corrupt              -> refused, and named as damage
+```
+
+A predecessor a build can migrate is not damaged and MUST NOT be reported as if
+it were; a workspace from a generation the build has never heard of MUST NOT be
+offered migration, because no migration exists to offer. In particular a build
+MUST NOT hold a **newer** generation to its own persisted-representation rules:
+that generation decides its own encoding, so reporting it as non-canonical
+reports a workspace from the future as a damaged one.
+
 ### What the workspace version is for
 
 It governs how **persisted data is interpreted**, including data whose bytes do
@@ -2356,6 +2444,20 @@ This is distinct from the review binding's own version, which identifies the
 deterministic binding contract and changes when *that* contract changes. A Rule
 does **not** carry a schema version of its own; the workspace answers for it.
 
+Because that is the whole of the version-1-to-2 difference, it is the whole of
+what migrating a version-1 workspace has to decide about a Rule, and the two
+halves need opposite treatment:
+
+* A version-1 Rule that writes **no** `review:` block migrates unchanged and
+  acquires the effective defaults. That reinterpretation is not a side effect to
+  be avoided; it is the content of the step, and running `engr migrate` is the
+  explicit act that authorizes it. No bytes are written into the file: the
+  defaults are what the Rule *means*, not what it says.
+* A version-1 Rule that **does** write one MUST be refused. Those bytes never
+  loaded under the generation that owns them — the member did not exist in that
+  schema — so accepting them now would admit into version 3 a file its own
+  predecessor rejected.
+
 A prepared Rule Review attestation does not survive a migration that changes Rule
 interpretation. It named a subject computed under the old semantics, so it is
 stale by definition and must be prepared again.
@@ -2364,9 +2466,11 @@ A **historical** snapshot carries the version that was current when it was taken
 and is readable at any version this build recognizes. Refusing an older snapshot
 would make every reference pinned before a migration unresolvable — moving the
 workspace forward would retroactively break provenance that was correct when it
-was recorded. Versions 1 and 2 share the predecessor Object representation;
-version 3 decodes those snapshots under that representation and decodes v3 under
-the exact current representation. It never widens the current decoder.
+was recorded. A snapshot MUST be decoded under **its own** version's persisted
+schema rather than under the loosest one the build recognizes: reading a
+version-1 snapshot by version-2 rules is the same reinterpretation as reading a
+version-1 workspace by them. Version 3 decodes v3 snapshots under the exact
+current representation, and never widens the current decoder.
 
 Migration **classifies nothing**. `status = open|closed` becomes
 `state = open|closed` with no type, because the stored record does not contain

@@ -1082,11 +1082,16 @@ fn a_migrated_workspace_carries_no_invented_classification() {
         payload(Action::ObjectClosed, &id, Content::default()),
     );
 
-    // Put it back into the v0 shape a Phase 0 workspace really had.
+    // Put it back into the v0 shape a Phase 0 workspace really had — which
+    // means dropping every member that generation did not have, not only
+    // renaming the two whose spelling changed. `type`, `role`, `content` and
+    // `relations` all arrived later, and their values here are the empty ones
+    // the content hash omits, so the legacy seals below are unaffected.
     let current = store::load_object(&root, &id).expect("current object");
     rewrite(&root, &id, |value| {
         let object = value.as_object_mut().expect("object");
         object.remove("sha256");
+        object.remove("type");
         object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
         object.insert("version".to_owned(), Value::from(1));
         let state = object.remove("state").expect("state");
@@ -1096,6 +1101,9 @@ fn a_migrated_workspace_carries_no_invented_classification() {
             let section_id = stored["id"].as_u64().expect("section id");
             let section = current.section(section_id).expect("current section");
             stored.remove("admission");
+            for later in ["role", "content", "relations"] {
+                stored.remove(later);
+            }
             let admitted_at = stored.remove("admitted_at").expect("admitted_at");
             stored.insert("confirmed_at".to_owned(), admitted_at);
             stored.insert(

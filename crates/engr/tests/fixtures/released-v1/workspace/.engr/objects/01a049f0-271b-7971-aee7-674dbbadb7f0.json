@@ -1,0 +1,32 @@
+{
+  "id": "01a049f0-271b-7971-aee7-674dbbadb7f0",
+  "title": "Git basis, drift, and recoverable provenance",
+  "state": "open",
+  "rev": 7,
+  "next_section_id": 6,
+  "sections": [
+    {
+      "id": 4,
+      "text": "A reference pins the target section's hash and the commit it was read at, so a moved basis and a changed dependency are different findings and the earlier wording stays recoverable.",
+      "based_on": "cda4069e13d750b84be0b91d6d605ce526ecc194",
+      "refs": [
+        {
+          "object": "01a049f0-1d33-7912-9e57-a67b06866805",
+          "section": 1,
+          "sha256": "73a53479c0b448c9a2a6c530ad8992f6381ca775dd3cc9d19dcc19875545ac81",
+          "commit": "cda4069e13d750b84be0b91d6d605ce526ecc194"
+        }
+      ],
+      "sha256": "80f3273905b23bad966c38e50f8e1dc285ac3408766d532fabadca5def07de24",
+      "confirmed_at": "2026-08-28T19:54:33.293552844Z"
+    },
+    {
+      "id": 5,
+      "text": "Every section records the committed git basis its wording was confirmed against, and basis movement is computed at read time and reported as information rather than as an automatic semantic verdict.",
+      "based_on": "cda4069e13d750b84be0b91d6d605ce526ecc194",
+      "refs": [],
+      "sha256": "522d501ebfbbe4739779d9b63f49db99a1878742166445570644a47cb0eacf22",
+      "confirmed_at": "2026-08-28T19:54:33.81728633Z"
+    }
+  ]
+}

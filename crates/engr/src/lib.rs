@@ -41,15 +41,50 @@ pub const WORKSPACE_VERSION: u32 = 3;
 pub const PHASE_3_WORKSPACE_VERSION: u32 = WORKSPACE_VERSION;
 /// Older workspace versions this build can migrate directly into v3.
 ///
-/// Version 1 remains recognizable as immutable historical material, but no
-/// cumulative v1 -> v3 migration has been defined. Conflating historical
-/// decoding with a live rewrite would make the migrator invent that contract.
-pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[2];
+/// Version 1 is in this set because it is the *released* generation: the
+/// published `latest` release is commit `e7d9f99`, and that build writes
+/// `.engr/format.json` version 1. So a version 1 workspace is not a curiosity
+/// of development history — it is what every workspace the released tool
+/// created says it is, and leaving it out made the record a person built with
+/// the shipped binary unreachable from the shipped binary's own successor.
+///
+/// "Released generation" is also the *limit* of what version 1 means here. It
+/// owns `format.json`, `objects/`, `events/` and `candidates/` and nothing
+/// else; `rules/`, `backlog/`, `work/` and `collections/` arrived in later
+/// builds that were never published, and a declared v1 workspace holding one is
+/// refused by `migration::check_released_v1_domains` before anything is
+/// written.
+///
+/// Both entries are *direct* migrations rather than a chain. There is
+/// deliberately no v1 -> v2 step in this process: the migrator decodes the
+/// generation the workspace declares, validates it under that generation's own
+/// rules, and derives v3 from that one validated predecessor. Nothing is ever
+/// written in an intermediate generation's spelling, which is what stops a
+/// historical serializer from becoming part of the permanent contract.
+///
+/// What makes one pipeline able to serve both is that the v2 persisted shape is
+/// a strict *superset* of the v1 one: everything v2 added — `type` on an
+/// Object, `role`, `content` and `relations` on a Section, `becomes` on a
+/// payload, and the `object_classified` and `object_superseded` actions — is
+/// optional and absent from a v1 file. So each generation decodes under its own
+/// enumerated schema and arrives at the same internal representation.
+///
+/// Superset is not "the same", and the difference is the whole safety
+/// argument. Those members reached the v2 window part-way through, they carry
+/// real v3 semantics, and the in-memory model defaults every one of them — so a
+/// v1 file carrying `object_classified` decoded cleanly, reconstructed a
+/// classified Object, and published a classification no human ever made. What
+/// stops that is `store::check_predecessor_object_shape` and
+/// `store::check_predecessor_event_shape` enumerating each generation's exact
+/// members ahead of any decoding. The v1 -> v2 semantic step — how a Rule's
+/// `review:` block is read — is separate again, in
+/// `migration::check_predecessor_rules`.
+pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
 /// Older versions whose historical Object representation this build can read.
 ///
-/// A snapshot is governed by the authority that wrote it. Version 1 and 2
-/// share the predecessor Object representation, even though only v2 has the
-/// separately frozen direct migration to v3.
+/// A snapshot is governed by the authority that wrote it, and is decoded under
+/// that version's own persisted schema — which is also why one migration
+/// pipeline can take either of them forward.
 pub const HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
 /// Version carried by the supported Phase 0 Object envelope.
 pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;

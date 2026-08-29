@@ -1,0 +1,9 @@
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. events/ is safe to commit too: the challenge codes in it have
+# already been spent, and a spent code resolves to nothing.
+#
+# These two are local only:
+#   lock         a mutex for this machine, nothing to share
+#   candidates/  each file is named after a *live* challenge code
+/lock
+/candidates/

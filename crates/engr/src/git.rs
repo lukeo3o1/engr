@@ -196,11 +196,12 @@ fn validate_historical_format(path: &str, text: &str) -> Result<u32> {
     //
     // Reading an older snapshot is safe here for a reason worth stating rather
     // than assuming: what this function guards is decoding a historical
-    // *Object*, and every version this build recognizes represents an Object
-    // identically. The version 2 change is to how a project Rule is
-    // interpreted, and no Rule is read out of a historical snapshot. If a future
-    // version ever changes the Object representation itself, this must decode
-    // under the snapshot's own version rather than widening the check again.
+    // *Object*, and the version it answers with is carried straight into
+    // `decode_object_for_version`, which validates the snapshot against that
+    // version's own enumerated persisted schema. So a v1 snapshot is held to
+    // the v1 member set and a v2 snapshot to the v2 one, rather than both being
+    // read under whichever is loosest. No Rule is read out of a historical
+    // snapshot, so the v1 -> v2 semantic difference does not arise here.
     ensure!(
         format.version == WORKSPACE_VERSION
             || crate::HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS.contains(&format.version),

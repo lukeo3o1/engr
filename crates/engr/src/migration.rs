@@ -40,9 +40,25 @@ struct HistoricalKey {
     section: u64,
 }
 
+/// One historical Section, in both spellings that matter.
+///
+/// A legacy Ref pins the seal the *predecessor* took over the *predecessor's*
+/// content, and the v3 digest has to be taken over the migrated content. Those
+/// are two different hashes of the same Section whenever it carries references
+/// of its own, so the conversion needs both and must not derive one from the
+/// other.
+#[derive(Clone)]
+struct HistoricalSection {
+    /// The seal the predecessor generation recorded, proven against the
+    /// predecessor content before anything was converted.
+    legacy_seal: String,
+    /// The same Section with its references in the current spelling.
+    migrated: Section,
+}
+
 struct RefClosure<'a> {
     root: &'a Path,
-    cache: BTreeMap<HistoricalKey, Section>,
+    cache: BTreeMap<HistoricalKey, HistoricalSection>,
     visiting: BTreeSet<HistoricalKey>,
 }
 
@@ -95,15 +111,23 @@ impl<'a> RefClosure<'a> {
             section: reference.section,
         };
         let historical = self.historical_section(key.clone())?;
-        let legacy_seal = historical.recomputed_sha256()?;
+        // Against the seal the predecessor took, not against a hash of the
+        // migrated Section. They are the same number only when the target
+        // carries no references of its own, because converting one rewrites
+        // exactly the member both hashes cover — so comparing the pin against
+        // the migrated hash accused every chained reference of being forged
+        // and made the workspace holding it unmigratable. What the pin claims
+        // is a statement in the predecessor's own terms, and it is checked in
+        // those terms; `check_legacy_section` has already proved that seal
+        // against the predecessor content it came with.
         ensure!(
-            legacy_seal == reference.sha256,
+            historical.legacy_seal == reference.sha256,
             EXIT_INVARIANT,
             "{} §{} at {} seals as {}, not the legacy reference seal {}",
             reference.object,
             reference.section,
             reference.commit,
-            legacy_seal,
+            historical.legacy_seal,
             reference.sha256
         );
         let fields = dependency::canonical_fields(&[
@@ -118,7 +142,7 @@ impl<'a> RefClosure<'a> {
         let snapshot = dependency::ref_snapshot(
             target.clone(),
             &fields,
-            &historical,
+            &historical.migrated,
             reference.commit.clone(),
         )?;
         dependency::SelectiveRef::stored(
@@ -129,7 +153,7 @@ impl<'a> RefClosure<'a> {
         )
     }
 
-    fn historical_section(&mut self, key: HistoricalKey) -> Result<Section> {
+    fn historical_section(&mut self, key: HistoricalKey) -> Result<HistoricalSection> {
         if let Some(section) = self.cache.get(&key) {
             return Ok(section.clone());
         }
@@ -154,8 +178,15 @@ impl<'a> RefClosure<'a> {
                     )
                 })?;
             let section = object.section(key.section)?.clone();
+            // Proves the predecessor seal against the predecessor content,
+            // which is the only moment both are in hand. Read it after this
+            // and it is a checked fact rather than a stored claim.
             check_legacy_section(&section)?;
-            self.convert_section(section)
+            let legacy_seal = section.sha256.clone();
+            Ok(HistoricalSection {
+                legacy_seal,
+                migrated: self.convert_section(section)?,
+            })
         })();
         self.visiting.remove(&key);
         let section = result?;
@@ -170,11 +201,13 @@ pub(crate) fn migrated_historical_section(
     object: &str,
     section: u64,
 ) -> Result<Section> {
-    RefClosure::new(root).historical_section(HistoricalKey {
-        commit: commit.to_owned(),
-        object: object.to_owned(),
-        section,
-    })
+    RefClosure::new(root)
+        .historical_section(HistoricalKey {
+            commit: commit.to_owned(),
+            object: object.to_owned(),
+            section,
+        })
+        .map(|historical| historical.migrated)
 }
 
 /// The migrated-v3 reading of an Object reconstructed from retained Event-v1
@@ -297,7 +330,12 @@ impl Migrated {
 pub(crate) fn run(root: &Path) -> Result<()> {
     let stage = stage_dir(root);
     if stage.exists() {
-        store::ensure_migration_ignored(root)?;
+        // `ensure_migration_ignored` used to run here, before anything about
+        // the stage had been read. It now runs inside `commit_stage`, after the
+        // plan has been validated and after the released-generation floor has
+        // been applied to it — so a resume that is going to be refused writes
+        // nothing at all, rather than amending `.gitignore` on its way to the
+        // refusal.
         return commit_stage(root, &stage);
     }
     let before = store::validate_format(root)?;
@@ -388,6 +426,23 @@ fn predecessor_projection(
     };
 
     let events_path = store::events_path(root, id);
+    // Ahead of decoding, for the same reason the Object envelope is: the
+    // current Event model reads a predecessor line with its later members
+    // defaulted, so a v2-only action or member in a v1 history would decode
+    // cleanly and then reconstruct a projection the predecessor generation
+    // could not have produced.
+    for (index, line) in history.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("{}:{}: {error}", events_path.display(), index + 1),
+            )
+        })?;
+        store::check_predecessor_event_shape(&events_path, index + 1, source_version, &value)?;
+    }
     let events = store::decode_events(root, &events_path, id, history)?;
     for event in &events {
         ensure!(
@@ -470,6 +525,84 @@ fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Res
     Ok(resealed.object)
 }
 
+/// The `.engr` domains that arrived after the released version 1 generation.
+///
+/// One list, named once, so the preflight floor and the resume floor cannot
+/// drift apart — a floor that two call sites each spell out separately is a
+/// floor with a hole in it the moment a fifth domain is added.
+type DomainDir = fn(&Path) -> PathBuf;
+
+const LATER_THAN_RELEASED_V1: &[(&str, DomainDir)] = &[
+    ("rules", crate::rules::dir),
+    ("backlog", crate::backlog::dir),
+    ("work", crate::work::dir),
+    ("collections", crate::collection::dir),
+];
+
+/// What the released version 1 generation's `.engr` actually held.
+///
+/// #32's ruling `5460403574` fixes what "workspace version 1" means for
+/// compatibility: the generation the published `latest` release shipped at
+/// `e7d9f99`, not the whole unreleased development window during which
+/// `format.json` still happened to say 1. That release wrote `format.json`,
+/// `objects/`, `events/` and `candidates/`, and had no Rule, Backlog, Work or
+/// Collection subsystem at all — those landed later, in builds that were never
+/// published.
+///
+/// So a declared v1 workspace holding one of them is refused, and refused
+/// *here*: before the `.gitignore` is touched, before a plan is staged, before
+/// anything at all is written. Carrying them forward would migrate bytes the
+/// generation did not recognize as engr state into current resources.
+///
+/// `rules/` is the one that changes what the record can do. A rule file is
+/// authored by a human and never by engr, so its presence says nothing about
+/// which build made the workspace — and migrating it would make policy the
+/// released build never recognized start governing agent admission, because
+/// somebody ran `engr migrate`. That is authority arriving through a
+/// representation change, which is the thing the whole generation boundary
+/// exists to prevent.
+///
+/// A workspace really written by a later version-1 build is out of scope by the
+/// same ruling: preserving those is a separate compatibility decision, and the
+/// ruling says explicitly it must not be inferred from the shared version
+/// number. The diagnostic says so rather than implying the data is worthless.
+///
+/// The format-less v0 path is deliberately not covered, and that is a decision
+/// rather than an oversight. The ruling says "for source version 1", and the
+/// owner was asked directly and chose to leave v0 as it is. The same gap is
+/// open there in principle — v0 predates all four domains too — but a v0
+/// workspace comes from a build that shipped before the release and carries no
+/// `format.json` at all, so it is close to unreachable in practice. Widening
+/// this to v0 needs a ruling, not a judgement call here.
+fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
+    if source_version != 1 {
+        return Ok(());
+    }
+    for (domain, locate) in LATER_THAN_RELEASED_V1 {
+        let path = locate(root);
+        // `symlink_metadata`, so a dangling link counts as present. Absence is
+        // the only answer that lets the migration continue.
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(tool_error(path.display(), error)),
+            Ok(_) => {}
+        }
+        let authority = if *domain == "rules" {
+            " Activating it would make a rule the released build never recognized govern agent admission."
+        } else {
+            ""
+        };
+        return Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{}: workspace version 1 is the generation the published release wrote, which had objects/, events/ and candidates/ and no {domain} subsystem at all, so this migration does not carry {domain}/ forward as version 1 state.{authority} If it came from a later build that still declared version 1, that is a separate compatibility path and not this one.",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
     ensure!(
         migratable_source_version(source_version),
@@ -477,6 +610,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         "workspace version {source_version} has no defined migration to version {}",
         crate::WORKSPACE_VERSION
     );
+    check_released_v1_domains(root, source_version)?;
     let mut source = BTreeMap::new();
     let mut stored = BTreeMap::new();
     for id in store::object_ids(root)? {
@@ -533,7 +667,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         predecessor.insert(id.clone(), projection);
     }
 
-    let resources = validate_retained_resources(root, &predecessor, &mut source)?;
+    let resources = validate_retained_resources(root, source_version, &predecessor, &mut source)?;
 
     let mut closure = RefClosure::new(root);
     let mut migrated = BTreeMap::new();
@@ -583,6 +717,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
 /// needs no rewrite and gets none.
 fn validate_retained_resources(
     root: &Path,
+    source_version: u32,
     objects: &BTreeMap<String, Object>,
     source: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
@@ -621,7 +756,9 @@ fn validate_retained_resources(
     // fingerprint it is a second read of a file that is editable outside the
     // workspace lock, so the manifest could name bytes the loader never
     // accepted. `Rule::raw` is the text that was parsed.
-    for rule in crate::rules::load_all_for_migration(root)? {
+    let rules = crate::rules::load_all_for_migration(root)?;
+    check_predecessor_rules(source_version, &rules)?;
+    for rule in rules {
         source.insert(relative_to_engr(root, &rule.source)?, sha256_of(&rule.raw));
     }
     // Anything else living under `rules/` is captured too, and only so the
@@ -650,6 +787,122 @@ fn validate_retained_resources(
     Ok(rewrites)
 }
 
+/// A Rule whose `review:` block the source generation had no schema for.
+///
+/// Version 2 is the first to define `review.max_attempts` and
+/// `review.on_exhaustion`, so an explicit block was an *unknown field* to
+/// anything older, which refused the file outright. Accepting one now would let
+/// migration admit a file its own predecessor rejected.
+///
+/// Only the format-less v0 path reaches this. Under #32's released-generation
+/// ruling `5460403574`, a version 1 workspace holding `rules/` at all is
+/// refused by [`check_released_v1_domains`] long before any rule is parsed —
+/// the released v1 build had no Rule subsystem, so the question of how it would
+/// have read a `review:` block does not arise. The ruling did not speak to the
+/// format-less generation, which predates the release and equally had none, so
+/// this stays as the narrower guard on the path it left alone.
+fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) -> Result<()> {
+    if source_version >= 2 {
+        return Ok(());
+    }
+    for rule in rules {
+        ensure!(
+            !rule.written_review,
+            EXIT_SCHEMA,
+            "{}: rule {} writes a review block, and workspace version {source_version} has no review member, so this is not a rule that generation could load",
+            rule.source.display(),
+            rule.id
+        );
+    }
+    Ok(())
+}
+
+/// What a version 1 plan captured, judged as a fact about the plan.
+///
+/// A version 1 plan that captured `rules/agent-policy.md` as an expected
+/// predecessor was prepared by a binary reading an older compatibility floor.
+/// That is true of the plan whichever phase a crash left it in, so it is asked
+/// on both — and it is the one check that can *name* the situation, which is
+/// more use to whoever is holding it than reporting whichever downstream
+/// fingerprint comparison happened to fail first.
+///
+/// The already-published phase is the dangerous one, and it is not obvious.
+/// There the Objects are on disk and `format.json` already says 3, so the only
+/// thing left is removing the marker — and removing the marker is precisely
+/// what makes the workspace readable again. An earlier version of this check
+/// sat *after* that path's early return, reasoning that a v3 workspace may hold
+/// rules legitimately because they were admitted after it advanced. That
+/// reasoning does not hold: while the marker exists ordinary reads and writes
+/// fail closed, so nothing can have been admitted inside the crash window. For
+/// a version 1 plan a later domain in `source` is evidence of the obsolete
+/// interpretation, not of legitimate post-migration state.
+///
+/// The two phases get different recoveries, because they are in genuinely
+/// different positions and the wrong advice is worse than none. Before
+/// publication nothing has advanced and the plan is disposable. After it the
+/// migration is done and the marker is held on purpose: clearing it is the act
+/// that decides what that domain becomes, and that is a human's call rather
+/// than a resume's.
+fn check_staged_v1_manifest(
+    stage: &Path,
+    manifest: &Manifest,
+    workspace_version: u32,
+) -> Result<()> {
+    if manifest.source_version != 1 {
+        return Ok(());
+    }
+    for path in manifest.source.keys() {
+        let domain = path.split('/').next().unwrap_or_default();
+        if !LATER_THAN_RELEASED_V1
+            .iter()
+            .any(|(later, _)| *later == domain)
+        {
+            continue;
+        }
+        let situation = format!(
+            "this staged migration captured {path:?} as a workspace version 1 predecessor, and {domain}/ was not part of the released version 1 generation, so the plan was prepared under a reading of the compatibility floor that no longer holds."
+        );
+        let recovery = if workspace_version == manifest.target_version {
+            format!(
+                " Its publication already completed — `format.json` names version {} — so all that is left is the marker at {}, and it is held on purpose: removing it is what would make {domain}/ current. Decide what {domain}/ should be in this workspace, then clear the marker yourself.",
+                manifest.target_version,
+                stage.display()
+            )
+        } else {
+            format!(
+                " `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
+                stage.display()
+            )
+        };
+        return Err(Error::new(EXIT_SCHEMA, format!("{situation}{recovery}")));
+    }
+    Ok(())
+}
+
+/// The released-generation floor, applied to the workspace a plan is about to
+/// publish onto.
+///
+/// The invariant, as distinct from what the plan happens to say: a plan whose
+/// manifest is clean can still be sitting on a workspace that has since grown a
+/// `rules/`, and publishing would activate it just the same.
+///
+/// Only reached before publication, so the recovery is the simple one. Saying
+/// it matters, because refusing here leaves a workspace that can neither resume
+/// nor be read — the marker sees to the second — and without a way out somebody
+/// is stuck between two closed doors.
+fn check_staged_v1_workspace(root: &Path, stage: &Path, manifest: &Manifest) -> Result<()> {
+    check_released_v1_domains(root, manifest.source_version).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "{} `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
+                error.message,
+                stage.display()
+            ),
+        )
+    })
+}
+
 fn plan_rewrite(
     root: &Path,
     path: &Path,
@@ -666,8 +919,9 @@ fn plan_rewrite(
 
 fn migratable_source_version(version: u32) -> bool {
     // Format-less legacy workspaces carry a representation explicitly handled
-    // by this converter. The governed Phase-3 migration itself is frozen as
-    // v2 -> v3; accepting v1 here would silently invent a cumulative contract.
+    // by this converter. Everything with a declared version is decided by the
+    // one list, so what this build claims it can migrate and what it will
+    // actually attempt cannot drift apart.
     version == 0 || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version)
 }
 
@@ -1191,11 +1445,30 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         manifest.source_version,
         workspace_version
     );
+    // Before the target-version return, not after it. What the plan captured is
+    // a fact about the plan, and it is equally disqualifying whichever phase the
+    // crash landed in: removing the marker is the act that makes the workspace
+    // readable again, so on the already-published path it is the act that would
+    // put a Rule the released generation never owned into force.
+    check_staged_v1_manifest(stage, &manifest, workspace_version)?;
     if workspace_version == manifest.target_version {
         verify_published_stage(root, &manifest)?;
         fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
         return Ok(());
     }
+    // Past that return the workspace is still at the source version, so this
+    // resume is about to publish. The live workspace gets the floor too: a plan
+    // whose own manifest is clean can still be sitting on a workspace that has
+    // since grown one of the later domains, and publishing would activate it
+    // just the same.
+    //
+    // This half is deliberately *not* applied on the already-published path.
+    // There the workspace is v3, so a later domain that appeared during the
+    // crash window is a v3 workspace holding something a v3 workspace may hold
+    // — and it is caught by `verify_published_stage` anyway, as a path that
+    // appeared after preflight.
+    check_staged_v1_workspace(root, stage, &manifest)?;
+    store::ensure_migration_ignored(root)?;
     // The Object set the plan was built from is the set of *predecessor
     // projections*, which the manifest names in `source`. It is not the set the
     // plan publishes: an Object whose projection was missing and whose admitted
