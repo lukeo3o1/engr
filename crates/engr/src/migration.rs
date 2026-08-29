@@ -547,6 +547,14 @@ fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Res
 /// same ruling: preserving those is a separate compatibility decision, and the
 /// ruling says explicitly it must not be inferred from the shared version
 /// number. The diagnostic says so rather than implying the data is worthless.
+///
+/// The format-less v0 path is deliberately not covered, and that is a decision
+/// rather than an oversight. The ruling says "for source version 1", and the
+/// owner was asked directly and chose to leave v0 as it is. The same gap is
+/// open there in principle — v0 predates all four domains too — but a v0
+/// workspace comes from a build that shipped before the release and carries no
+/// `format.json` at all, so it is close to unreachable in practice. Widening
+/// this to v0 needs a ruling, not a judgement call here.
 fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
     if source_version != 1 {
         return Ok(());
