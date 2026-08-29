@@ -817,51 +817,90 @@ fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) ->
     Ok(())
 }
 
-/// The released-generation floor, applied to a plan that is about to publish.
+/// What a version 1 plan captured, judged as a fact about the plan.
 ///
-/// Two questions, because a resumable plan and the workspace under it can
-/// disagree, and each disagreement means something different.
-///
-/// The manifest is asked first, and it is the one that can name the situation:
-/// a version 1 plan that captured `rules/agent-policy.md` as an expected
+/// A version 1 plan that captured `rules/agent-policy.md` as an expected
 /// predecessor was prepared by a binary reading an older compatibility floor.
-/// Saying that is more use to whoever is holding it than reporting whichever
-/// downstream fingerprint comparison happened to fail first.
+/// That is true of the plan whichever phase a crash left it in, so it is asked
+/// on both — and it is the one check that can *name* the situation, which is
+/// more use to whoever is holding it than reporting whichever downstream
+/// fingerprint comparison happened to fail first.
 ///
-/// The live workspace is asked second, and that one is the invariant. A plan
-/// whose manifest is clean can still be sitting on a workspace that has since
-/// grown a `rules/`, and publishing then would activate it just the same.
+/// The already-published phase is the dangerous one, and it is not obvious.
+/// There the Objects are on disk and `format.json` already says 3, so the only
+/// thing left is removing the marker — and removing the marker is precisely
+/// what makes the workspace readable again. An earlier version of this check
+/// sat *after* that path's early return, reasoning that a v3 workspace may hold
+/// rules legitimately because they were admitted after it advanced. That
+/// reasoning does not hold: while the marker exists ordinary reads and writes
+/// fail closed, so nothing can have been admitted inside the crash window. For
+/// a version 1 plan a later domain in `source` is evidence of the obsolete
+/// interpretation, not of legitimate post-migration state.
 ///
-/// Both refusals carry the way out, because refusing here leaves a workspace
-/// that cannot resume *and* cannot be read — the marker sees to that. Nothing
-/// has advanced, so the plan is disposable; the message says so rather than
-/// leaving somebody stuck between two closed doors.
-fn check_staged_v1_floor(root: &Path, stage: &Path, manifest: &Manifest) -> Result<()> {
+/// The two phases get different recoveries, because they are in genuinely
+/// different positions and the wrong advice is worse than none. Before
+/// publication nothing has advanced and the plan is disposable. After it the
+/// migration is done and the marker is held on purpose: clearing it is the act
+/// that decides what that domain becomes, and that is a human's call rather
+/// than a resume's.
+fn check_staged_v1_manifest(
+    stage: &Path,
+    manifest: &Manifest,
+    workspace_version: u32,
+) -> Result<()> {
     if manifest.source_version != 1 {
         return Ok(());
     }
-    let recovery = |message: String| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!(
-                "{message} `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
-                stage.display()
-            ),
-        )
-    };
     for path in manifest.source.keys() {
         let domain = path.split('/').next().unwrap_or_default();
-        if LATER_THAN_RELEASED_V1
+        if !LATER_THAN_RELEASED_V1
             .iter()
             .any(|(later, _)| *later == domain)
         {
-            return Err(recovery(format!(
-                "this staged migration captured {path:?} as a workspace version 1 predecessor, and {domain}/ was not part of the released version 1 generation, so the plan was prepared under a reading of the compatibility floor that no longer holds."
-            )));
+            continue;
         }
+        let situation = format!(
+            "this staged migration captured {path:?} as a workspace version 1 predecessor, and {domain}/ was not part of the released version 1 generation, so the plan was prepared under a reading of the compatibility floor that no longer holds."
+        );
+        let recovery = if workspace_version == manifest.target_version {
+            format!(
+                " Its publication already completed — `format.json` names version {} — so all that is left is the marker at {}, and it is held on purpose: removing it is what would make {domain}/ current. Decide what {domain}/ should be in this workspace, then clear the marker yourself.",
+                manifest.target_version,
+                stage.display()
+            )
+        } else {
+            format!(
+                " `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
+                stage.display()
+            )
+        };
+        return Err(Error::new(EXIT_SCHEMA, format!("{situation}{recovery}")));
     }
-    check_released_v1_domains(root, manifest.source_version)
-        .map_err(|error| recovery(error.message))
+    Ok(())
+}
+
+/// The released-generation floor, applied to the workspace a plan is about to
+/// publish onto.
+///
+/// The invariant, as distinct from what the plan happens to say: a plan whose
+/// manifest is clean can still be sitting on a workspace that has since grown a
+/// `rules/`, and publishing would activate it just the same.
+///
+/// Only reached before publication, so the recovery is the simple one. Saying
+/// it matters, because refusing here leaves a workspace that can neither resume
+/// nor be read — the marker sees to the second — and without a way out somebody
+/// is stuck between two closed doors.
+fn check_staged_v1_workspace(root: &Path, stage: &Path, manifest: &Manifest) -> Result<()> {
+    check_released_v1_domains(root, manifest.source_version).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "{} `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
+                error.message,
+                stage.display()
+            ),
+        )
+    })
 }
 
 fn plan_rewrite(
@@ -1406,28 +1445,29 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         manifest.source_version,
         workspace_version
     );
+    // Before the target-version return, not after it. What the plan captured is
+    // a fact about the plan, and it is equally disqualifying whichever phase the
+    // crash landed in: removing the marker is the act that makes the workspace
+    // readable again, so on the already-published path it is the act that would
+    // put a Rule the released generation never owned into force.
+    check_staged_v1_manifest(stage, &manifest, workspace_version)?;
     if workspace_version == manifest.target_version {
         verify_published_stage(root, &manifest)?;
         fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
         return Ok(());
     }
     // Past that return the workspace is still at the source version, so this
-    // resume is about to publish. The released-generation floor is a property
-    // of the workspace and of the contract, not of the binary that happened to
-    // build the plan — and a durable marker outlives the binary that wrote it.
-    // A stage built before ruling `5460403574` was implemented legitimately
-    // captured a Rule in `manifest.source`, so every later check agrees with
-    // it: the fingerprints match, the derivations hold, and publication would
-    // advance `format.json` and leave the Rule governing agent admission. The
-    // floor has to be re-applied here or it is only as strong as whichever
-    // engr happened to run first.
+    // resume is about to publish. The live workspace gets the floor too: a plan
+    // whose own manifest is clean can still be sitting on a workspace that has
+    // since grown one of the later domains, and publishing would activate it
+    // just the same.
     //
-    // Deliberately *after* the target-version return above. A completed
-    // migration being cleaned up is a v3 workspace, and a v3 workspace may hold
-    // rules perfectly legitimately — they were admitted after it advanced.
-    // Applying a version 1 floor there would refuse to tidy up a migration that
-    // already succeeded.
-    check_staged_v1_floor(root, stage, &manifest)?;
+    // This half is deliberately *not* applied on the already-published path.
+    // There the workspace is v3, so a later domain that appeared during the
+    // crash window is a v3 workspace holding something a v3 workspace may hold
+    // — and it is caught by `verify_published_stage` anyway, as a path that
+    // appeared after preflight.
+    check_staged_v1_workspace(root, stage, &manifest)?;
     store::ensure_migration_ignored(root)?;
     // The Object set the plan was built from is the set of *predecessor
     // projections*, which the manifest names in `source`. It is not the set the

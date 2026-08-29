@@ -1254,6 +1254,78 @@ fn a_v1_stage_prepared_before_the_ruling_cannot_resume_past_it() {
     );
 }
 
+/// The crash window where publication finished and the marker did not get
+/// removed.
+///
+/// The most dangerous shape of the same plan, and the least obvious. Everything
+/// is already published: the Objects are on disk, `format.json` says 3, and the
+/// only thing left to do is delete the marker. So the refusal has to reach a
+/// path that does almost nothing.
+///
+/// Deleting that marker is not housekeeping. While it exists, ordinary reads
+/// and writes fail closed — which is also why the reasoning that "a v3
+/// workspace may hold rules legitimately, they were admitted after it advanced"
+/// is wrong here: *nothing* can have been admitted inside this window. The Rule
+/// present is the one the obsolete plan captured, and removing the marker is
+/// exactly the act that would put it into force over agent admission.
+///
+/// So the marker must survive the refusal. A workspace that stays closed is the
+/// correct outcome; one that opens onto policy nobody chose is not.
+#[test]
+fn a_published_v1_stage_cannot_be_cleaned_up_into_activating_a_rule() {
+    let (_temp, root) = released_v1();
+    let rule = rules::dir(&root).join("agent-policy.md");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write(
+        &rule,
+        "---\nid: agent-policy\napplies:\n  domains:\n    - object\n---\n\n# Agent policy\n\nAnything an agent admits cites the commit it came from.\n",
+    );
+
+    // Publication ran to completion under the old implementation: every staged
+    // Object installed, the authority advanced, the marker not yet cleared.
+    let staged = staged_v1_plan(&root, &[AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION]);
+    let manifest_path = staged.join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&read(&manifest_path)).expect("manifest");
+    manifest["source"]["rules/agent-policy.md"] = Value::String(proof::sha256_of(&read(&rule)));
+    write(
+        &manifest_path,
+        &proof::canonical_bytes(&manifest, "manifest").expect("manifest bytes"),
+    );
+    write(
+        &store::engr_dir(&root).join("format.json"),
+        "{\"format\":\"engr-workspace\",\"version\":3}",
+    );
+    let before = fingerprint(&root);
+
+    let error = store::migrate(&root).expect_err("cleanup is not a way around the floor");
+
+    assert_eq!(error.code, engr::EXIT_SCHEMA, "{}", error.message);
+    assert!(
+        error.message.contains("publication already completed"),
+        "the refusal says which phase this is: {error}"
+    );
+    assert!(
+        error.message.contains("clear the marker yourself"),
+        "and that clearing it is a human's call, not a resume's: {error}"
+    );
+    assert!(
+        !error.message.contains("can be discarded"),
+        "and does not offer the pre-publication advice, which would be wrong here: {error}"
+    );
+
+    assert!(
+        staged.exists(),
+        "the marker survives, so the workspace stays closed rather than opening onto \
+         policy nobody chose"
+    );
+    assert!(
+        store::validate_format(&root).is_err(),
+        "and reads are still unavailable"
+    );
+    assert!(rules::load_all(&root).is_err(), "so the rule is not policy");
+    assert_eq!(fingerprint(&root), before, "nothing was written or removed");
+}
+
 /// The other half: a plan whose own manifest is clean, sitting on a workspace
 /// that has since grown one of the later domains.
 ///
