@@ -10,7 +10,7 @@ use crate::model::{LegacyRef, Object, Provenance, Ref, Section};
 use crate::proof::{sha256_of, stored_within_safe_integers};
 use crate::semantics::Admission;
 use crate::store::{self, WorkspaceFormat};
-use crate::{ensure, tool_error, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA};
+use crate::{ensure, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1427,7 +1427,28 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         "{} is not a migration staging directory",
         stage.display()
     );
-    let manifest: Manifest = store::read_current_json(&stage.join(MANIFEST))?;
+    let manifest_path = stage.join(MANIFEST);
+    let manifest: Manifest = store::read_current_json(&manifest_path).map_err(|error| {
+        if error.code == EXIT_NOT_FOUND {
+            let version = store::declared_workspace_version(root)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let recovery = if version == crate::WORKSPACE_VERSION {
+                format!(
+                    " `format.json` already names version {version}; publication may have completed, so do not remove the marker. Restore its manifest from the migration plan before resuming."
+                )
+            } else {
+                format!(
+                    " `format.json` still names version {version}, so the workspace has not advanced and the incomplete plan at {} can be discarded and prepared again.",
+                    stage.display()
+                )
+            };
+            Error::new(error.code, format!("{};{recovery}", error.message))
+        } else {
+            error
+        }
+    })?;
     ensure!(
         manifest.target_version == crate::WORKSPACE_VERSION,
         EXIT_SCHEMA,

@@ -352,7 +352,7 @@ pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
 }
 
 fn detect_legacy(root: &Path) -> Result<bool> {
-    let ids = object_ids(root)?;
+    let ids = crate::ops::object_ids(root)?;
     if ids.is_empty() {
         return Ok(false);
     }

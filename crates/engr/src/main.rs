@@ -307,6 +307,14 @@ impl ReviewArg {
             engr::EXIT_USAGE,
             "this needs --expect: run `engr backlog show <item> --json`, read the point, and pass its expect value back"
         );
+        ensure!(
+            self.expect.iter().all(|token| token.len() == 64
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+            engr::EXIT_USAGE,
+            "--expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`"
+        );
         let bound = binds()?;
         let mut wanted = Vec::new();
         for precondition in &bound {
@@ -822,6 +830,12 @@ fn content_order(matches: &clap::ArgMatches) -> Vec<ContentSource> {
 }
 
 fn main() {
+    #[cfg(unix)]
+    unsafe {
+        // Rust ignores SIGPIPE and its printing macros panic on EPIPE. Restore
+        // the ordinary Unix command-line contract at the output boundary.
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     // The long way round `Cli::parse()`, which is exactly this pair, because the
     // matches are thrown away by `parse` and one thing here needs them.
     let matches = Cli::command().get_matches();
@@ -925,6 +939,12 @@ fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
     store::validate_format(&root)?;
+    if matches!(
+        cli.command,
+        Command::Backlog(_) | Command::Work { .. } | Command::Collection { .. } | Command::Rules(_)
+    ) {
+        store::require_current(&root)?;
+    }
 
     match cli.command {
         Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
@@ -958,8 +978,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
             let object = if store::validate_format(&root)? == store::WorkspaceFormat::Current {
-                let stored = store::load_object(&root, &id)?;
-                if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
+                let stored = store::load_object(&root, &id);
+                if stored.as_ref().is_ok_and(|stored| {
+                    engr::integrity::check_stored_object_integrity(stored).is_ok()
+                }) {
                     // Reconciliation is a write and shares the same lock as
                     // admission. The integrity check is repeated inside the
                     // lock by `reconcile`; this first check only decides
@@ -1151,9 +1173,17 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let prepared = review
                 .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
-            let outcome = backlog::Produced::object(
-                backlog::EngrTarget::new(target.clone()).reference.clone(),
+            let reference = engr::reference::EngrRef::parse_standalone(&target)
+                .map_err(|error| malformed_argument("--target", &target, error))?
+                .canonicalize(|revision| git::resolve(root, revision))
+                .map_err(|error| malformed_argument("--target", &target, error))?;
+            ensure!(
+                reference.kind() == engr::reference::ResourceKind::Object
+                    && reference.snapshot().is_none(),
+                EXIT_USAGE,
+                "--target {target:?} must identify a current Object or Object section"
             );
+            let outcome = backlog::Produced::object(reference.embedded());
             if forget {
                 if backlog::forget_produced(root, &id, section, &outcome, &prepared)? {
                     println!("§{section} no longer records that outcome");
@@ -2271,7 +2301,7 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
 
 fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
-    for id in store::object_ids(root)? {
+    for id in ops::object_ids(root)? {
         let object = ops::effective(root, &id)?;
         if all || object.needs_attention() {
             objects.push(object);
@@ -2319,7 +2349,7 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
 fn verify(root: &Path, object: Option<&str>) -> Result<()> {
     let ids = match object {
         Some(prefix) => vec![resolve_object_argument(root, "verify", prefix)?],
-        None => store::object_ids(root)?,
+        None => ops::object_ids(root)?,
     };
     if ids.is_empty() {
         return Err(Error::new(EXIT_NOT_FOUND, "no objects to verify"));
@@ -2338,6 +2368,11 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
         );
         if report.object_tampered {
             println!("          current Object integrity failed");
+        }
+        if report.projection_missing {
+            println!(
+                "          required Object projection is missing; admitted history reconstructs it"
+            );
         }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");
