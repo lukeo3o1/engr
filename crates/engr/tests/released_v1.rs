@@ -1182,6 +1182,116 @@ fn staged_v1_plan(interrupted: &Path, published: &[&str]) -> PathBuf {
     staged
 }
 
+/// A plan built under the older reading of the floor cannot resume its way past
+/// the ruling.
+///
+/// This is the case a durable marker creates and a preflight check cannot
+/// reach. `run` skips preflight entirely when a stage exists, so a version 1
+/// plan prepared *before* ruling `5460403574` was implemented — by an earlier
+/// binary, which legitimately captured a Rule into `manifest.source` — arrives
+/// at the commit phase with everything agreeing: the fingerprints match, the
+/// derivations hold, and publication would advance `format.json` and leave the
+/// Rule governing agent admission.
+///
+/// So the safety property would have depended on which binary happened to build
+/// the stage, which is exactly what a plan that outlives its binary must not do.
+/// The floor is re-applied at the commit phase, and the refusal must leave the
+/// workspace no worse than it found it — including the stage, so the situation
+/// stays diagnosable rather than being cleaned up out from under the caller.
+#[test]
+fn a_v1_stage_prepared_before_the_ruling_cannot_resume_past_it() {
+    let (_temp, root) = released_v1();
+    let rule = rules::dir(&root).join("agent-policy.md");
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write(
+        &rule,
+        "---\nid: agent-policy\napplies:\n  domains:\n    - object\n---\n\n# Agent policy\n\nAnything an agent admits cites the commit it came from.\n",
+    );
+
+    // The plan the previous implementation would have produced: a complete,
+    // internally consistent v1 stage whose manifest captured the Rule as an
+    // expected predecessor, exactly as `validate_retained_resources` did.
+    let staged = staged_v1_plan(&root, &[]);
+    let manifest_path = staged.join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&read(&manifest_path)).expect("manifest");
+    manifest["source"]["rules/agent-policy.md"] = Value::String(proof::sha256_of(&read(&rule)));
+    write(
+        &manifest_path,
+        &proof::canonical_bytes(&manifest, "manifest").expect("manifest bytes"),
+    );
+    let before = fingerprint(&root);
+
+    let error = store::migrate(&root).expect_err("a stage cannot outrank the contract");
+
+    assert_eq!(error.code, engr::EXIT_SCHEMA, "{}", error.message);
+    assert!(
+        error.message.contains("rules"),
+        "the refusal names the domain: {error}"
+    );
+    assert!(
+        error
+            .message
+            .contains("can be discarded and prepared again"),
+        "and leaves the caller a way out: {error}"
+    );
+    assert_eq!(
+        declared_version(&root),
+        1,
+        "the workspace authority did not advance"
+    );
+    assert!(
+        staged.exists(),
+        "and the plan is still there to be looked at rather than silently destroyed"
+    );
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "nothing was written, including `.gitignore`"
+    );
+    assert!(
+        rules::load_all(&root).is_err(),
+        "and the rule never became policy"
+    );
+}
+
+/// The other half: a plan whose own manifest is clean, sitting on a workspace
+/// that has since grown one of the later domains.
+///
+/// The manifest check above can only speak about what the plan captured. This
+/// one is the invariant — publishing would activate the Rule just the same, and
+/// the plan being innocent of it changes nothing.
+#[test]
+fn a_clean_v1_stage_cannot_publish_onto_a_workspace_that_grew_a_rule() {
+    let (_temp, root) = released_v1();
+    let staged = staged_v1_plan(&root, &[]);
+
+    // After the plan was built, which is why its manifest says nothing about it.
+    std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
+    write(
+        &rules::dir(&root).join("agent-policy.md"),
+        "---\nid: agent-policy\napplies:\n  domains:\n    - object\n---\n\n# Agent policy\n\nAnything an agent admits cites the commit it came from.\n",
+    );
+    let before = fingerprint(&root);
+
+    let error = store::migrate(&root).expect_err("the floor is about the workspace, not the plan");
+
+    assert_eq!(error.code, engr::EXIT_SCHEMA, "{}", error.message);
+    assert!(
+        error.message.contains("govern agent admission"),
+        "the refusal says what publishing would have done: {error}"
+    );
+    assert!(
+        error
+            .message
+            .contains("can be discarded and prepared again"),
+        "and leaves a way out: {error}"
+    );
+    assert_eq!(declared_version(&root), 1);
+    assert!(staged.exists());
+    assert_eq!(fingerprint(&root), before, "nothing was written");
+    assert!(rules::load_all(&root).is_err());
+}
+
 /// An interruption partway through publication resumes and finishes.
 #[test]
 fn an_interrupted_publication_resumes_from_its_own_stage() {

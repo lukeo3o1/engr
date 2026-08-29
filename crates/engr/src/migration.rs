@@ -330,7 +330,12 @@ impl Migrated {
 pub(crate) fn run(root: &Path) -> Result<()> {
     let stage = stage_dir(root);
     if stage.exists() {
-        store::ensure_migration_ignored(root)?;
+        // `ensure_migration_ignored` used to run here, before anything about
+        // the stage had been read. It now runs inside `commit_stage`, after the
+        // plan has been validated and after the released-generation floor has
+        // been applied to it — so a resume that is going to be refused writes
+        // nothing at all, rather than amending `.gitignore` on its way to the
+        // refusal.
         return commit_stage(root, &stage);
     }
     let before = store::validate_format(root)?;
@@ -520,6 +525,20 @@ fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Res
     Ok(resealed.object)
 }
 
+/// The `.engr` domains that arrived after the released version 1 generation.
+///
+/// One list, named once, so the preflight floor and the resume floor cannot
+/// drift apart — a floor that two call sites each spell out separately is a
+/// floor with a hole in it the moment a fifth domain is added.
+type DomainDir = fn(&Path) -> PathBuf;
+
+const LATER_THAN_RELEASED_V1: &[(&str, DomainDir)] = &[
+    ("rules", crate::rules::dir),
+    ("backlog", crate::backlog::dir),
+    ("work", crate::work::dir),
+    ("collections", crate::collection::dir),
+];
+
 /// What the released version 1 generation's `.engr` actually held.
 ///
 /// #32's ruling `5460403574` fixes what "workspace version 1" means for
@@ -559,12 +578,8 @@ fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
     if source_version != 1 {
         return Ok(());
     }
-    for (domain, path) in [
-        ("rules", crate::rules::dir(root)),
-        ("backlog", crate::backlog::dir(root)),
-        ("work", crate::work::dir(root)),
-        ("collections", crate::collection::dir(root)),
-    ] {
+    for (domain, locate) in LATER_THAN_RELEASED_V1 {
+        let path = locate(root);
         // `symlink_metadata`, so a dangling link counts as present. Absence is
         // the only answer that lets the migration continue.
         match fs::symlink_metadata(&path) {
@@ -572,7 +587,7 @@ fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
             Err(error) => return Err(tool_error(path.display(), error)),
             Ok(_) => {}
         }
-        let authority = if domain == "rules" {
+        let authority = if *domain == "rules" {
             " Activating it would make a rule the released build never recognized govern agent admission."
         } else {
             ""
@@ -800,6 +815,53 @@ fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) ->
         );
     }
     Ok(())
+}
+
+/// The released-generation floor, applied to a plan that is about to publish.
+///
+/// Two questions, because a resumable plan and the workspace under it can
+/// disagree, and each disagreement means something different.
+///
+/// The manifest is asked first, and it is the one that can name the situation:
+/// a version 1 plan that captured `rules/agent-policy.md` as an expected
+/// predecessor was prepared by a binary reading an older compatibility floor.
+/// Saying that is more use to whoever is holding it than reporting whichever
+/// downstream fingerprint comparison happened to fail first.
+///
+/// The live workspace is asked second, and that one is the invariant. A plan
+/// whose manifest is clean can still be sitting on a workspace that has since
+/// grown a `rules/`, and publishing then would activate it just the same.
+///
+/// Both refusals carry the way out, because refusing here leaves a workspace
+/// that cannot resume *and* cannot be read — the marker sees to that. Nothing
+/// has advanced, so the plan is disposable; the message says so rather than
+/// leaving somebody stuck between two closed doors.
+fn check_staged_v1_floor(root: &Path, stage: &Path, manifest: &Manifest) -> Result<()> {
+    if manifest.source_version != 1 {
+        return Ok(());
+    }
+    let recovery = |message: String| {
+        Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{message} `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
+                stage.display()
+            ),
+        )
+    };
+    for path in manifest.source.keys() {
+        let domain = path.split('/').next().unwrap_or_default();
+        if LATER_THAN_RELEASED_V1
+            .iter()
+            .any(|(later, _)| *later == domain)
+        {
+            return Err(recovery(format!(
+                "this staged migration captured {path:?} as a workspace version 1 predecessor, and {domain}/ was not part of the released version 1 generation, so the plan was prepared under a reading of the compatibility floor that no longer holds."
+            )));
+        }
+    }
+    check_released_v1_domains(root, manifest.source_version)
+        .map_err(|error| recovery(error.message))
 }
 
 fn plan_rewrite(
@@ -1349,6 +1411,24 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
         fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
         return Ok(());
     }
+    // Past that return the workspace is still at the source version, so this
+    // resume is about to publish. The released-generation floor is a property
+    // of the workspace and of the contract, not of the binary that happened to
+    // build the plan — and a durable marker outlives the binary that wrote it.
+    // A stage built before ruling `5460403574` was implemented legitimately
+    // captured a Rule in `manifest.source`, so every later check agrees with
+    // it: the fingerprints match, the derivations hold, and publication would
+    // advance `format.json` and leave the Rule governing agent admission. The
+    // floor has to be re-applied here or it is only as strong as whichever
+    // engr happened to run first.
+    //
+    // Deliberately *after* the target-version return above. A completed
+    // migration being cleaned up is a v3 workspace, and a v3 workspace may hold
+    // rules perfectly legitimately — they were admitted after it advanced.
+    // Applying a version 1 floor there would refuse to tidy up a migration that
+    // already succeeded.
+    check_staged_v1_floor(root, stage, &manifest)?;
+    store::ensure_migration_ignored(root)?;
     // The Object set the plan was built from is the set of *predecessor
     // projections*, which the manifest names in `source`. It is not the set the
     // plan publishes: an Object whose projection was missing and whose admitted
