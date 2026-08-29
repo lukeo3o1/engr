@@ -5396,14 +5396,39 @@ fn work_addresses_its_owner_by_canonical_reference() {
     assert!(rows.contains("backlog"), "{rows}");
     assert!(rows.contains("obj"), "{rows}");
 
-    // And the structured surface carries the owner as a kind plus an id, not a
-    // bare identity a consumer would have to guess the namespace of.
+    // And the structured surface names the owner as an engr target, not as a
+    // bare identity a consumer would have to guess the namespace of — in the
+    // one embedded representation every other engr target already uses.
+    let compact = engr::reference::encode_uuid_str(&item).expect("compact");
     let shown = run_engr(root, &["work", "show", &item_ref, "--format", "json"]);
     let value: Value = serde_json::from_slice(&shown.stdout).expect("json");
-    assert_eq!(value["owner"]["kind"], "backlog");
-    assert_eq!(value["owner"]["id"], item);
-    assert_eq!(value["owner"]["reference"], item_ref);
+    assert_eq!(
+        value["subject"],
+        serde_json::json!({ "kind": "engr", "ref": format!("backlog:{compact}") })
+    );
+    assert!(
+        value.get("object").is_none() && value.get("owner").is_none(),
+        "the withdrawn spellings are gone rather than carried alongside: {value}"
+    );
     assert_eq!(value["authority"], "execution_memory");
+
+    // The Object case says the same thing in the same shape.
+    let shown = run_engr(root, &["work", "show", &object, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(
+        value["subject"],
+        serde_json::json!({
+            "kind": "engr",
+            "ref": format!("obj:{}", engr::reference::encode_uuid_str(&object).expect("compact")),
+        })
+    );
+
+    // And it round-trips: what the structured surface printed is what the
+    // command line accepts back.
+    let round_trip = format!("engr:{}", value["subject"]["ref"].as_str().expect("ref"));
+    assert!(run_engr(root, &["work", "show", &round_trip])
+        .status
+        .success());
 }
 
 /// The owner-lifetime invariant, as a caller meets it.

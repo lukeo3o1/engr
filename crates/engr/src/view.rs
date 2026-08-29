@@ -1327,17 +1327,15 @@ pub fn render_work_show(root: &Path, owner: &work::Owner, item: &work::Work) -> 
 
 pub fn render_work_json(owner: &work::Owner, item: &work::Work) -> Result<String> {
     let value = serde_json::json!({
-        // One `owner` object rather than the bare `object` id this used to
-        // carry. A sidecar's owner is now a kind *and* an id, and a consumer
-        // that read the id alone would have no way to tell an Object's
-        // execution memory from a Backlog item's — the two namespaces mint the
-        // same shape of identity. `reference` is the spelling that goes back
-        // into any engr command that takes one.
-        "owner": {
-            "kind": owner.kind().token(),
-            "id": owner.id(),
-            "reference": owner.reference(),
-        },
+        // The shared embedded target, replacing the bare `object` id this used
+        // to carry. A sidecar's owner is now a namespace *and* an id, and a
+        // consumer reading the id alone could not tell an Object's execution
+        // memory from a Backlog item's — the two namespaces mint the same shape
+        // of identity. Saying it the way every other engr target is said keeps
+        // that from being a second identity representation to parse: it is the
+        // form `dependencies[]` and `blockers[]` in this very document already
+        // use.
+        "subject": owner.subject(),
         // Structured output is the surface that travels furthest from any
         // banner — straight into another tool, with no screen in between — so
         // the boundary has to be a field rather than a line somebody printed.

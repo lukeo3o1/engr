@@ -1536,6 +1536,28 @@ listing column or a structured field — does not say whether execution memory
 belongs to durable knowledge or to an unresolved point, and those are different
 claims about how settled the thing is.
 
+Structured output names the owner as `subject`, in the shared embedded engr
+target form:
+
+```json
+{
+  "subject": { "kind": "engr", "ref": "backlog:<id>" }
+}
+```
+
+`ref` is `obj:<id>` for an object-owned sidecar and `backlog:<id>` for a
+backlog-owned one, and it MUST identify a whole current resource of one of those
+two kinds — never a Section, a snapshot, a Collection, or another sidecar. This
+is the same representation `dependencies[]` and `blockers[]` use in the same
+document, which is the point: an implementation MUST NOT emit a work-specific
+identity object beside it, because a second way to write a resource identity is
+a second thing every consumer has to learn and a second thing that can disagree.
+
+There is no top-level `object` member. It was the pre-#63 spelling, it could
+only name one of the two owner kinds, and it is **withdrawn rather than
+retained**: carrying it alongside `subject` would leave a field that is correct
+for one kind of sidecar and absent or misleading for the other.
+
 Text surfaces must say more than backlog's banner does, because the failure worth
 preventing here is not a reader trusting unadmitted wording but a reader taking
 a finished checklist for a settled object.

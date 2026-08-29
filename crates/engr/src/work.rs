@@ -102,20 +102,38 @@ impl Owner {
         }
     }
 
+    /// The namespace-relative spelling, `obj:<id>` or `backlog:<id>`.
+    ///
+    /// Falls back to the stored id if the compact encoding somehow fails, which
+    /// is reachable only for an id that is not a UUID at all — every load path
+    /// refuses one. Printing it beats printing nothing, because the message it
+    /// lands in is about that id being wrong.
+    fn embedded(&self) -> String {
+        let token = self.kind().token();
+        match crate::reference::encode_uuid_str(self.id()) {
+            Ok(compact) => format!("{token}:{compact}"),
+            Err(_) => format!("{token}:{}", self.id()),
+        }
+    }
+
     /// The owner in the spelling a caller can retype.
     ///
     /// Diagnostics name owners this way rather than by bare id, because a bare
     /// id no longer says which namespace it is in, and a message that leaves the
     /// reader to guess between two resources is the kind of thing #61 was about.
     pub fn reference(&self) -> String {
-        let token = self.kind().token();
-        match crate::reference::encode_uuid_str(self.id()) {
-            Ok(compact) => format!("engr:{token}:{compact}"),
-            // Reachable only for a stored id that is not a UUID at all, which
-            // every load path refuses. The raw id beats nothing here, because
-            // the message is about that id being wrong.
-            Err(_) => format!("engr:{token}:{}", self.id()),
-        }
+        format!("engr:{}", self.embedded())
+    }
+
+    /// The owner as the shared embedded target, for structured output.
+    ///
+    /// `{ "kind": "engr", "ref": "backlog:<id>" }` — the same representation
+    /// this domain's own `dependencies[]` and `blockers[]` already use, and the
+    /// one every other engr target is written in. A work-specific identity
+    /// object would have been a second way to say a thing the workspace already
+    /// has one way to say.
+    pub fn subject(&self) -> EngrTarget {
+        EngrTarget::new(self.embedded())
     }
 }
 
