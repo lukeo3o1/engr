@@ -10,7 +10,8 @@ fn predecessor(root: &Path, objects: &[Value]) {
         store::events_dir(root),
         store::candidates_dir(root),
         engr::backlog::dir(root),
-        engr::work::dir(root),
+        engr::work::dirs(root)[0].clone(),
+        engr::work::dirs(root)[1].clone(),
         engr::collection::dir(root),
     ] {
         std::fs::create_dir_all(path).expect("directory");
@@ -684,7 +685,7 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         format!("{}\n", serde_json::to_string_pretty(&item).expect("json")),
     )
     .expect("a v2 backlog item");
-    let work_path = engr::work::path(root, id);
+    let work_path = engr::work::path(root, &obj(id));
     let work = json!({
         "state": "active",
         "updated_at": "2026-08-25T00:00:00Z",
@@ -701,6 +702,17 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         format!("{}\n", serde_json::to_string_pretty(&work).expect("json")),
     )
     .expect("a v2 work sidecar");
+
+    // The second subject kind, retained through the same pass. Its subject is not
+    // in the migrated projection — Backlog items are not projected — so this
+    // also covers the branch that checks it against the items instead.
+    let owned_work_path = engr::work::path(root, &engr::work::Subject::Backlog(item_id.to_owned()));
+    std::fs::create_dir_all(owned_work_path.parent().expect("parent")).expect("work/backlog");
+    std::fs::write(
+        &owned_work_path,
+        format!("{}\n", serde_json::to_string_pretty(&work).expect("json")),
+    )
+    .expect("a v2 backlog-owned work sidecar");
 
     store::migrate(root).expect("migrate");
 
@@ -720,12 +732,69 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         vec![1, 2],
         "migration normalizes the ordered child list"
     );
-    let work = engr::work::load(root, id).expect("migrated sidecar");
+    let work = engr::work::load(root, &obj(id)).expect("migrated sidecar");
     assert_eq!(
         work.items.iter().map(|item| item.id).collect::<Vec<_>>(),
         vec![1, 2],
         "migration normalizes work items too"
     );
+    let owned = engr::work::load(root, &engr::work::Subject::Backlog(item_id.to_owned()))
+        .expect("the backlog-owned sidecar migrated too");
+    assert_eq!(
+        owned.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let after = std::fs::read_to_string(&owned_work_path).expect("migrated sidecar bytes");
+    let value: Value = serde_json::from_str(&after).expect("json");
+    assert_eq!(
+        after,
+        engr::proof::canonical_bytes(&value, "work").expect("canonical"),
+        "both subject kinds are held to the same current representation"
+    );
+}
+
+/// The subject-lifetime invariant survives the representation change.
+///
+/// A sidecar whose subject is not in the migrated workspace is refused before
+/// anything is published, the same way an Object-owned one is — and a Backlog
+/// subject has to be checked against the retained items, because Backlog is not
+/// part of the rebuilt projection an Object is checked against.
+#[test]
+fn a_work_sidecar_owned_by_no_backlog_item_stops_the_migration() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    predecessor(root, &[object(id, "with an orphan sidecar")]);
+
+    let absent = "018f7d58-4ca7-7a2e-98f1-9b301468184b";
+    let path = engr::work::path(root, &engr::work::Subject::Backlog(absent.to_owned()));
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("work/backlog");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "state": "active",
+                "updated_at": "2026-08-25T00:00:00Z",
+                "next_item_id": 1,
+                "dependencies": [],
+                "blockers": [],
+                "items": []
+            }))
+            .expect("json")
+        ),
+    )
+    .expect("an orphan sidecar");
+
+    let error = store::migrate(root).expect_err("its subject is not there");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("belongs to no backlog item"),
+        "{error}"
+    );
+    let format: Value =
+        store::read_json(&store::engr_dir(root).join("format.json")).expect("format");
+    assert_eq!(format["version"], 2, "and the workspace did not advance");
 }
 
 /// The staged artifact that was validated is the one that gets published.
@@ -1663,4 +1732,9 @@ fn reads_are_unavailable_while_a_coordinated_migration_is_incomplete() {
         store::WorkspaceFormat::Current
     );
     engr::ops::effective(root, id).expect("and the record reads");
+}
+
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> engr::work::Subject {
+    engr::work::Subject::Object(id.to_owned())
 }

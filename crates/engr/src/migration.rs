@@ -33,6 +33,34 @@ struct Manifest {
     source: BTreeMap<String, String>,
 }
 
+impl Manifest {
+    /// The subject-lifetime invariant, asked of the plan rather than the workspace.
+    ///
+    /// The two kinds are established by different parts of the plan, and neither
+    /// substitutes for the other. An Object is in the migrated projection this
+    /// manifest carries. A Backlog item is not projected at all — what proves it
+    /// was there is the predecessor capture, since preflight reads every item it
+    /// retains, so a sidecar whose subject was never captured has no subject.
+    ///
+    /// Asked on the staged path as well as at preflight, because a stage is
+    /// resumable local state that an editor can reach between the two.
+    fn require_work_subject(&self, subject: &crate::work::Subject) -> Result<()> {
+        let present = match subject {
+            crate::work::Subject::Object(id) => self.objects.contains_key(id),
+            crate::work::Subject::Backlog(id) => self
+                .source
+                .contains_key(&format!("{}/{id}.json", crate::backlog::DIR)),
+        };
+        ensure!(
+            present,
+            EXIT_SCHEMA,
+            "staged work sidecar {subject} belongs to no {} in the migration plan",
+            subject.noun()
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct HistoricalKey {
     commit: String,
@@ -535,7 +563,11 @@ type DomainDir = fn(&Path) -> PathBuf;
 const LATER_THAN_RELEASED_V1: &[(&str, DomainDir)] = &[
     ("rules", crate::rules::dir),
     ("backlog", crate::backlog::dir),
-    ("work", crate::work::dir),
+    // The whole domain, not one subject kind's subdirectory: a floor that checked
+    // `work/objects` alone would wave through a predecessor holding
+    // `work/backlog`, while its own message claimed the generation had no Work
+    // subsystem at all.
+    ("work", crate::work::root_dir),
     ("collections", crate::collection::dir),
 ];
 
@@ -569,7 +601,7 @@ const LATER_THAN_RELEASED_V1: &[(&str, DomainDir)] = &[
 ///
 /// The format-less v0 path is deliberately not covered, and that is a decision
 /// rather than an oversight. The ruling says "for source version 1", and the
-/// owner was asked directly and chose to leave v0 as it is. The same gap is
+/// subject was asked directly and chose to leave v0 as it is. The same gap is
 /// open there in principle — v0 predates all four domains too — but a v0
 /// workspace comes from a build that shipped before the release and carries no
 /// `format.json` at all, so it is close to unreachable in practice. Widening
@@ -722,6 +754,9 @@ fn validate_retained_resources(
     source: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
     let mut rewrites = BTreeMap::new();
+    // Kept, because a Work sidecar may now be owned by one of these and the
+    // subject-lifetime invariant has to hold across the migration too.
+    let mut backlog = BTreeSet::new();
     for id in crate::backlog::ids(root)? {
         let path = crate::backlog::item_path(root, &id);
         let text = capture(source, root, &path)?;
@@ -729,6 +764,7 @@ fn validate_retained_resources(
         crate::backlog::canonicalize_sets(&mut item)?;
         let canonical = crate::proof::canonical_bytes(&item, "backlog item")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
+        backlog.insert(id);
     }
     for id in crate::collection::ids(root)? {
         let path = crate::collection::path(root, &id);
@@ -738,14 +774,22 @@ fn validate_retained_resources(
         let canonical = crate::proof::canonical_bytes(&collection, "collection")?;
         plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
     }
-    for id in crate::work::ids(root)? {
-        let path = crate::work::path(root, &id);
+    for subject in crate::work::ids(root)? {
+        let path = crate::work::path(root, &subject);
         let text = capture(source, root, &path)?;
-        let mut work = crate::work::decode_for_migration(&path, &id, &text)?;
+        let mut work = crate::work::decode_for_migration(&path, &subject, &text)?;
+        // Each subject kind is checked against the thing that establishes it in
+        // the migrated workspace: an Object against the rebuilt projection, a
+        // Backlog item against the items this same pass just validated.
+        let owned = match &subject {
+            crate::work::Subject::Object(id) => objects.contains_key(id),
+            crate::work::Subject::Backlog(id) => backlog.contains(id),
+        };
         ensure!(
-            objects.contains_key(&id),
+            owned,
             EXIT_SCHEMA,
-            "work sidecar {id} belongs to no Object in the migrated projection"
+            "work sidecar {subject} belongs to no {} in the migrated workspace",
+            subject.noun()
         );
         crate::work::canonicalize_work(&mut work)?;
         let canonical = crate::proof::canonical_bytes(&work, "work")?;
@@ -991,7 +1035,7 @@ fn staged_object_id(path: &str) -> Option<&str> {
 enum RetainedResource {
     Backlog(String),
     Collection(String),
-    Work(String),
+    Work(crate::work::Subject),
 }
 
 fn retained_resource(relative: &str) -> Result<RetainedResource> {
@@ -1018,7 +1062,15 @@ fn retained_resource(relative: &str) -> Result<RetainedResource> {
     match pieces.as_slice() {
         ["backlog", name] => Ok(RetainedResource::Backlog(file_id(name)?)),
         ["collections", name] => Ok(RetainedResource::Collection(file_id(name)?)),
-        ["work", "objects", name] => Ok(RetainedResource::Work(file_id(name)?)),
+        // The subject kind is in the path and nowhere else, so parsing it here is
+        // what gives the rest of this file a subject to check against. An
+        // unrecognized third subdirectory falls through to the refusal below.
+        ["work", "objects", name] => Ok(RetainedResource::Work(crate::work::Subject::Object(
+            file_id(name)?,
+        ))),
+        ["work", "backlog", name] => Ok(RetainedResource::Work(crate::work::Subject::Backlog(
+            file_id(name)?,
+        ))),
         _ => Err(Error::new(
             EXIT_SCHEMA,
             format!("staged retained resource {relative:?} is not a known .engr resource path"),
@@ -1037,11 +1089,11 @@ impl RetainedResource {
                 .join("resources")
                 .join("collections")
                 .join(format!("{id}.json")),
-            Self::Work(id) => stage
+            Self::Work(subject) => stage
                 .join("resources")
-                .join("work")
-                .join("objects")
-                .join(format!("{id}.json")),
+                .join(crate::work::DIR)
+                .join(subject.folder())
+                .join(format!("{}.json", subject.id())),
         }
     }
 
@@ -1049,16 +1101,11 @@ impl RetainedResource {
         match self {
             Self::Backlog(id) => crate::backlog::item_path(root, id),
             Self::Collection(id) => crate::collection::path(root, id),
-            Self::Work(id) => crate::work::path(root, id),
+            Self::Work(subject) => crate::work::path(root, subject),
         }
     }
 
-    fn validate_staged(
-        &self,
-        staged: &Path,
-        text: &str,
-        objects: &BTreeMap<String, String>,
-    ) -> Result<()> {
+    fn validate_staged(&self, staged: &Path, text: &str, manifest: &Manifest) -> Result<()> {
         match self {
             Self::Backlog(id) => {
                 crate::backlog::decode_current_staged(staged, id, text)?;
@@ -1066,13 +1113,9 @@ impl RetainedResource {
             Self::Collection(id) => {
                 crate::collection::decode_current_staged(staged, id, text)?;
             }
-            Self::Work(id) => {
-                ensure!(
-                    objects.contains_key(id),
-                    EXIT_SCHEMA,
-                    "staged work sidecar {id} belongs to no Object in the migration plan"
-                );
-                crate::work::decode_current_staged(staged, id, text)?;
+            Self::Work(subject) => {
+                manifest.require_work_subject(subject)?;
+                crate::work::decode_current_staged(staged, subject, text)?;
             }
         }
         Ok(())
@@ -1125,13 +1168,9 @@ impl RetainedResource {
                 crate::collection::canonicalize_members(&mut collection)?;
                 crate::proof::canonical_bytes(&collection, "collection")?
             }
-            Self::Work(id) => {
-                ensure!(
-                    manifest.objects.contains_key(id),
-                    EXIT_SCHEMA,
-                    "staged work sidecar {id} belongs to no Object in the migration plan"
-                );
-                let mut work = crate::work::decode_for_migration(&source_path, id, &source)?;
+            Self::Work(subject) => {
+                manifest.require_work_subject(subject)?;
+                let mut work = crate::work::decode_for_migration(&source_path, subject, &source)?;
                 crate::work::canonicalize_work(&mut work)?;
                 crate::proof::canonical_bytes(&work, "work")?
             }
@@ -1413,7 +1452,7 @@ fn verify_published_stage(root: &Path, manifest: &Manifest) -> Result<()> {
             "{} is not the staged target resource",
             path.display()
         );
-        resource.validate_staged(&path, &bytes, &manifest.objects)?;
+        resource.validate_staged(&path, &bytes, manifest)?;
     }
     Ok(())
 }
@@ -1605,7 +1644,7 @@ fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
             "{} changed after migration preflight",
             staged.display()
         );
-        resource.validate_staged(&staged, &bytes, &manifest.objects)?;
+        resource.validate_staged(&staged, &bytes, &manifest)?;
         if workspace_version == manifest.source_version {
             resource.verify_derivation(root, relative, &bytes, &manifest)?;
         }

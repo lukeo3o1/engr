@@ -194,14 +194,17 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         "{} already exists",
         dir.display()
     );
-    for path in [
+    let mut layout = vec![
         objects_dir(root),
         events_dir(root),
         candidates_dir(root),
         crate::backlog::dir(root),
-        crate::work::dir(root),
         crate::collection::dir(root),
-    ] {
+    ];
+    // Work has one directory per subject kind, and asks for them by list so a
+    // third kind could not be created here and forgotten everywhere else.
+    layout.extend(crate::work::dirs(root));
+    for path in layout {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
     write_json(

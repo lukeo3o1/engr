@@ -1053,6 +1053,12 @@ two lines is a field that lets finished work go on looking pending, which is the
 failure backlog exists to prevent. Removing the last Section removes the item:
 an item is a topic that still has unresolved work in it.
 
+Because that removal takes the item with it, it is the one Backlog mutation the
+Work domain constrains: an item that still owns a work sidecar MUST NOT be
+removed, and the consume that would remove it MUST be refused until the sidecar
+is discarded explicitly. Every other consume is unaffected, and so is a merge —
+see "A sidecar may not outlive its subject".
+
 Section ids are monotonic and never reused, for the reason the record's are —
 `max(existing) + 1` would hand back the id of a consumed Section and silently
 repoint every subject aimed at it.
@@ -1383,13 +1389,33 @@ of what a record `PASS` claims.
 
 ## Work
 
-**Execution memory an agent keeps for one object.** It answers "where does this
-currently stand" and nothing else. Like backlog it is agent-managed, git-tracked
-and admitted by nobody; unlike backlog it is not a domain of its own but a
-**sidecar** hanging off an object.
+**Execution memory an agent keeps for one object or one backlog item.** It
+answers "where does this currently stand" and nothing else. Like backlog it is
+agent-managed, git-tracked and admitted by nobody; unlike backlog it is not a
+domain of its own but a **sidecar** hanging off its subject.
 
 ```text
-work object
+subject = object | backlog item
+```
+
+A subject has at most one sidecar. The question work answers is the same whether
+execution started from an unresolved backlog point or from durable knowledge
+already in the record, so the sidecar follows the thing being worked on while
+authority and identity stay with the subject. Nothing else about work varies
+with the subject kind: one shape, one set of limits, one rule domain, one set of
+permitted dependency targets.
+
+**Subject**, not *owner*: the relationship is "the thing this execution is
+about", and an owner is a person or a team. A domain word that reads as
+responsibility in every other engineering tool is the wrong word for something
+that carries no responsibility at all.
+
+Backlog's own `subjects[]` is a different thing under a shared word — a weak
+observation of files and symbols an unresolved point concerns, not a scoping
+relationship — and neither one may be read as the other.
+
+```text
+work sidecar
 ├── state                 active | paused
 ├── summary?              the shortest useful checkpoint
 ├── updated_at            RFC3339
@@ -1410,8 +1436,8 @@ work object
 ```
 
 The four lists are **required and may be empty**: an omitted list and an empty
-one MUST NOT be two spellings of the same sidecar. More generally, a stored work
-object MUST be held to exactly what the write path can produce — a reader that
+one MUST NOT be two spellings of the same sidecar. More generally, a stored
+sidecar MUST be held to exactly what the write path can produce — a reader that
 accepts shapes the API refuses is a second, larger schema that only ever gets
 discovered by something that came to depend on it. A fault in a stored file is a
 **schema** fault, not a usage error: nobody currently running a command wrote it.
@@ -1423,24 +1449,72 @@ separate observations. `items[]` is ordered by monotonically allocated `id`, not
 by the order an agent happened to describe steps. Those classifications apply on
 both read and write; their order is representation, not execution priority.
 
-`updated_at` MUST be a valid RFC3339 timestamp, and anything ordering work
-objects by it MUST compare **instants** rather than text — two valid values
+`updated_at` MUST be a valid RFC3339 timestamp, and anything ordering sidecars
+by it MUST compare **instants** rather than text — two valid values
 written in different offsets do not sort correctly as strings. The stored
 spelling is preserved for display.
 
-Stored at `.engr/work/objects/<object-id>.json`, one per object, carrying no
-`format` or `version` of its own — `.engr/format.json` remains the single schema
-authority. Most objects have none, and absence means only that engr holds no
-operational memory.
+Stored by subject kind, carrying no `format` or `version` of its own —
+`.engr/format.json` remains the single schema authority:
 
-A work object MUST correspond to an existing object, and that MUST be held on
-**read** as well as on write. A sidecar names its object in its filename, so a
+```text
+.engr/work/objects/<object-id>.json
+.engr/work/backlog/<backlog-id>.json
+```
+
+Most subjects have none, and absence means only that engr holds no operational
+memory. The directory is the only statement of the subject kind and the filename
+the only statement of the subject id: a stored sidecar MUST NOT carry a subject
+member of its own, because a second spelling of the same fact is a second thing
+that can be wrong. Both kinds of subject id are UUIDv7, so the path is what
+distinguishes them, and anything enumerating work MUST cover both directories —
+a check that reads one of them is a check with a hole in it.
+
+There is **no `engr:work:` reference**. Work is not an addressable resource,
+nothing points at it, and it has no identity beyond the subject it belongs to.
+CLI surfaces name a subject by its canonical standalone reference,
+`engr:obj:<id>` or `engr:backlog:<id>`; nothing gains a subject-kind flag or a
+work-specific spelling.
+
+### A sidecar may not outlive its subject
+
+A work sidecar MUST correspond to an existing subject, and that MUST be held on
+**read** as well as on write. A sidecar names its subject in its path, so a
 copied file can name one that never existed; an implementation that only checked
 when writing would then read, list and hand back operational memory for nothing.
 An orphan sidecar is invalid work, not a row with a missing title.
 
-There is **no `engr:work:` reference**. Work is not an addressable resource,
-nothing points at it, and it has no identity beyond the object it belongs to.
+Objects satisfy that for free, because no mutation removes one. A backlog item
+is the case where it has to be enforced, since being removed is how it is
+resolved. The rule is stated at the subject's lifetime rather than as a backlog
+special case:
+
+```text
+a mutation that would remove a subject while a sidecar exists MUST be refused
+mutations that preserve the subject are unaffected by work
+```
+
+For the current backlog model that is exactly one site:
+
+```text
+consume a Section that is not the last  -> allowed
+merge Sections                          -> allowed
+consume the last Section                -> refused while a sidecar exists
+```
+
+The refusal MUST name the explicit removal that clears it. An implementation
+MUST NOT instead delete the sidecar as part of the subject's removal, and MUST
+NOT leave the orphan. A cascade would discard a `paused` sidecar — a human's stop
+signal — inside an operation about something else, which is the silent
+disappearance the work domain reports rather than performs; an orphan would
+leave the workspace holding memory for nothing. The presence check is on the
+file, not on whether it loads, so corrupting a sidecar is not a way past the
+invariant.
+
+This constrains **removal only**. Work never decides whether an individual
+unresolved point can be resolved, and completing or discarding a sidecar
+resolves nothing and consumes nothing: the backlog lifecycle above remains the
+whole of how a point leaves.
 
 ### It owns no authority
 
@@ -1463,7 +1537,35 @@ output, for the same reason they exclude backlog. Every work surface MUST say
 what it is showing, **including the structured one**: a machine-readable
 non-authoritative discriminator is required there, because JSON is the surface
 that travels furthest from any banner and `{"state": "active"}` on its own is
-indistinguishable from an object's own state.
+indistinguishable from a subject's own state.
+
+Every work surface MUST also say which **kind** of subject it is about, and MUST
+NOT leave that to the id. Both namespaces mint UUIDv7, so an id alone — in a
+listing column or a structured field — does not say whether execution memory
+belongs to durable knowledge or to an unresolved point, and those are different
+claims about how settled the thing is.
+
+Structured output names the subject as `subject`, in the shared embedded engr
+target form:
+
+```json
+{
+  "subject": { "kind": "engr", "ref": "backlog:<id>" }
+}
+```
+
+`ref` is `obj:<id>` for an object-owned sidecar and `backlog:<id>` for a
+backlog-owned one, and it MUST identify a whole current resource of one of those
+two kinds — never a Section, a snapshot, a Collection, or another sidecar. This
+is the same representation `dependencies[]` and `blockers[]` use in the same
+document, which is the point: an implementation MUST NOT emit a work-specific
+identity object beside it, because a second way to write a resource identity is
+a second thing every consumer has to learn and a second thing that can disagree.
+
+There is no top-level `object` member. It was the pre-#63 spelling, it could
+only name one of the two subject kinds, and it is **withdrawn rather than
+retained**: carrying it alongside `subject` would leave a field that is correct
+for one kind of sidecar and absent or misleading for the other.
 
 Text surfaces must say more than backlog's banner does, because the failure worth
 preventing here is not a reader trusting unadmitted wording but a reader taking
@@ -1481,8 +1583,8 @@ from an empty item list, not from an agent's own judgement that the work should
 wait. An agent MUST NOT set it, and MUST NOT clear it, without explicit human
 direction.
 
-The same rule covers deletion: an agent MUST NOT delete a paused work object
-without explicit human direction.
+The same rule covers deletion: an agent MUST NOT delete a paused work
+sidecar without explicit human direction.
 
 All of that is **normative on the agent**, not mechanical. engr cannot check it,
 because it cannot tell an agent from a human — so it lives here and in the Skill,
@@ -1491,16 +1593,17 @@ lifecycle rule by refusing the deletion: that would stop no agent willing to
 clear `paused` first, it would make a human's own instruction impossible to carry
 out directly, and it would invent a persisted transition whose only purpose is to
 satisfy the refusal. What an implementation SHOULD do is make sure the signal
-never disappears in silence — say, when a paused work object is deleted, that a
+never disappears in silence — say, when a paused sidecar is deleted, that a
 human's stop signal went with it.
 
 Whether human direction should have a mechanical representation at all is an open
 question; see [What v0 does not
 solve](#work-has-no-mechanical-notion-of-human-direction).
 
-A work object may otherwise be deleted freely once it no longer carries useful
-handoff. Deleting says only that no operational memory is being kept; the object
-is untouched. Completed items may likewise be pruned once they stop helping the
+A sidecar may otherwise be deleted freely once it no longer carries useful
+handoff, and for a backlog subject that deletion is also what clears the way for
+the item to be resolved. Deleting says only that no operational memory is being
+kept; the subject is untouched. Completed items may likewise be pruned once they stop helping the
 next agent. There is no archive: git holds what the sidecar used to say.
 
 ### Derived standing
@@ -1512,10 +1615,9 @@ paused                 -> paused
 ```
 
 `blocked` is **derived and never stored**, for the same reason attention is: two
-fields that can disagree eventually do. There is deliberately no `done` state at
-the work-object level either, and that absence is load-bearing — a completed
-sidecar must never become a second answer to "is this settled" competing with the
-object's own state.
+fields that can disagree eventually do. There is deliberately no `done` state on the
+sidecar either, and that absence is load-bearing — a completed sidecar must never
+become a second answer to "is this settled" competing with its subject's own state.
 
 ### Dependencies and blockers are different things
 
@@ -2523,6 +2625,7 @@ it said under the authority path that admitted it.
   rules/*.md               project review policy
   backlog/<uuid>.json      unresolved staging   commit this
   work/objects/<uuid>.json execution memory      commit this
+  work/backlog/<uuid>.json execution memory      commit this
   collections/<id>.json    planning metadata      commit this
 ```
 
@@ -2613,9 +2716,8 @@ bring it in:
 | A collection type (`milestone`, `roadmap`) | Real behaviour depends on which kind of plan it is, rather than the two merely reading differently |
 | Collection hierarchy | A plan has to contain a plan, and expressing it as two collections and a shared member loses something |
 | A persisted `overdue`, or any date-derived status | Something must act on it mechanically, which first means a reader cannot compute it |
-| A `done` state on a work object | Something must distinguish "no items left" from "the work is over" that the object's own state cannot say |
-| Work sidecars for backlog items | Unresolved staging needs dependencies or blockers — and then they belong as fields of the backlog model, since no authority boundary separates them |
-| Owners, estimates, deadlines or labels on work | Work has to answer a question a bounded handoff cannot, at which point it has stopped being execution memory |
+| A `done` state on a work sidecar | Something must distinguish "no items left" from "the work is over" that the subject's own state cannot say |
+| A responsible person, estimates, deadlines or labels on work | Work has to answer a question a bounded handoff cannot, at which point it has stopped being execution memory |
 | An archive for pruned work items | A pruned item has to be recoverable without git |
 | Splitting untyped `closed` into done and abandoned | Needing to count them apart, or to ask why something was dropped |
 | Untyped states between open and closed (`deferred`, `blocked`) | An untyped record is neither being worked on nor settled, and calling it one of the two loses something someone needed |

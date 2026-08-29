@@ -3404,7 +3404,7 @@ fn every_surface_agrees_that_the_paused_rule_is_the_agents_to_follow() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        protocol.contains("MUST NOT delete a paused work object"),
+        protocol.contains("MUST NOT delete a paused work sidecar"),
         "the protocol states the normative rule"
     );
     assert!(
@@ -4364,7 +4364,7 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     .expect("backlog");
     engr::work::start(
         root,
-        &healthy,
+        &engr::work::Subject::Object(healthy.clone()),
         Some("underway"),
         engr::rules::Attempt::FIRST,
     )
@@ -5336,4 +5336,165 @@ fn a_current_object_without_an_aggregate_seal_is_not_reported_healthy() {
         !shown.status.success(),
         "show must not exit 0 on unsealed authority"
     );
+}
+
+/// Naming a Work subject uses the reference spelling every other surface uses.
+///
+/// Both namespaces mint UUIDv7, so a bare id cannot say which one it is in.
+/// Rather than a `--backlog` flag or a second positional, the subject is written
+/// the way #59 settled that a CLI names a resource — and a bare id keeps meaning
+/// an Object, so nothing that already worked changed.
+#[test]
+fn work_addresses_its_subject_by_canonical_reference() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let created = prepare(root, &["prepare", "--new", "--text", "durable knowledge"]);
+    confirm(root, &created);
+    let object = created["object"].as_str().expect("object id").to_owned();
+    let item = engr::backlog::create(
+        root,
+        "unresolved topic",
+        "the only point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog item")
+    .id;
+    let item_ref = format!(
+        "engr:backlog:{}",
+        engr::reference::encode_uuid_str(&item).expect("compact")
+    );
+
+    // The canonical reference works for both kinds.
+    let started = run_engr(root, &["work", "start", &item_ref, "--summary", "underway"]);
+    assert!(
+        started.status.success(),
+        "start: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(String::from_utf8_lossy(&started.stdout).contains("Backlog"));
+    assert!(run_engr(root, &["work", "start", &object]).status.success());
+
+    // A bare backlog id is a usage error that says how to write it.
+    let bare = run_engr(root, &["work", "show", &item]);
+    assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
+    let complaint = String::from_utf8_lossy(&bare.stderr);
+    assert!(
+        complaint.contains("it is a backlog item") && complaint.contains(&item_ref),
+        "the refusal names the spelling that works: {complaint}"
+    );
+
+    // A section reference is a legal thing to write and the wrong thing here.
+    let section = run_engr(root, &["work", "show", &format!("{item_ref}:1")]);
+    assert_eq!(section.status.code(), Some(engr::EXIT_USAGE));
+
+    // Listing says which kind each row is about, because the ids cannot.
+    let listed = run_engr(root, &["work", "ls"]);
+    let rows = String::from_utf8_lossy(&listed.stdout);
+    assert!(rows.contains("backlog"), "{rows}");
+    assert!(rows.contains("obj"), "{rows}");
+
+    // And the structured surface names the subject as an engr target, not as a
+    // bare identity a consumer would have to guess the namespace of — in the
+    // one embedded representation every other engr target already uses.
+    let compact = engr::reference::encode_uuid_str(&item).expect("compact");
+    let shown = run_engr(root, &["work", "show", &item_ref, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(
+        value["subject"],
+        serde_json::json!({ "kind": "engr", "ref": format!("backlog:{compact}") })
+    );
+    assert!(
+        value.get("object").is_none() && value.get("owner").is_none(),
+        "the withdrawn spellings are gone rather than carried alongside: {value}"
+    );
+    assert_eq!(value["authority"], "execution_memory");
+
+    // The Object case says the same thing in the same shape.
+    let shown = run_engr(root, &["work", "show", &object, "--format", "json"]);
+    let value: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(
+        value["subject"],
+        serde_json::json!({
+            "kind": "engr",
+            "ref": format!("obj:{}", engr::reference::encode_uuid_str(&object).expect("compact")),
+        })
+    );
+
+    // And it round-trips: what the structured surface printed is what the
+    // command line accepts back.
+    let round_trip = format!("engr:{}", value["subject"]["ref"].as_str().expect("ref"));
+    assert!(run_engr(root, &["work", "show", &round_trip])
+        .status
+        .success());
+}
+
+/// The subject-lifetime invariant, as a caller meets it.
+///
+/// Resolving the last point removes the item, and the refusal has to leave the
+/// caller holding a command that gets them through rather than a fact about
+/// internal state.
+#[test]
+fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let item = engr::backlog::create(
+        root,
+        "one point",
+        "the only point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog item")
+    .id;
+    let item_ref = format!(
+        "engr:backlog:{}",
+        engr::reference::encode_uuid_str(&item).expect("compact")
+    );
+    assert!(run_engr(root, &["work", "start", &item_ref])
+        .status
+        .success());
+
+    let refused = run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &item,
+            "--section",
+            "1",
+            "--expect",
+            &expect_token(root, &item, Some(1)),
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_INVARIANT));
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains(&format!("engr work rm {item_ref}")),
+        "the refusal hands over the next command: {complaint}"
+    );
+
+    assert!(run_engr(root, &["work", "rm", &item_ref]).status.success());
+    let consumed = run_engr(
+        root,
+        &[
+            "backlog",
+            "consume",
+            &item,
+            "--section",
+            "1",
+            "--expect",
+            &expect_token(root, &item, Some(1)),
+        ],
+    );
+    assert!(
+        consumed.status.success(),
+        "consume: {}",
+        String::from_utf8_lossy(&consumed.stderr)
+    );
+    assert!(engr::backlog::load(root, &item).is_err());
 }
