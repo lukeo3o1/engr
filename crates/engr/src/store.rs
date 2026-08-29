@@ -1304,6 +1304,9 @@ pub fn abbrev_len(ids: &[String]) -> usize {
 /// Resolve a unique id prefix, the way `git` resolves a short commit. Keeps
 /// uuids out of the way without needing a separate alias registry.
 pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
+    let projected = object_ids(root)?;
+    let mut ids = crate::ops::object_ids(root)?;
+    ids.retain(|id| projected.contains(id) || crate::ops::effective(root, id).is_ok());
     if prefix.starts_with("engr:") {
         let reference = crate::reference::EngrRef::parse_standalone(prefix)?;
         ensure!(
@@ -1313,17 +1316,22 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
             EXIT_NOT_FOUND,
             "{prefix:?} is not a current Object reference"
         );
-        return Ok(crate::reference::decode_uuid(reference.id())?.to_string());
+        let id = crate::reference::decode_uuid(reference.id())?.to_string();
+        ensure!(
+            ids.contains(&id),
+            EXIT_NOT_FOUND,
+            "no object matches {prefix:?}"
+        );
+        return Ok(id);
     }
     if prefix.len() == 26 {
         if let Ok(id) = crate::reference::decode_uuid(prefix) {
             let id = id.to_string();
-            if object_path(root, &id).exists() {
+            if ids.contains(&id) {
                 return Ok(id);
             }
         }
     }
-    let ids = object_ids(root)?;
     if ids.iter().any(|id| id == prefix) {
         return Ok(prefix.to_owned());
     }

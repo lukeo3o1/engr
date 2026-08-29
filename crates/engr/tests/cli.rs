@@ -15,6 +15,66 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[test]
+fn missing_object_projection_remains_addressable_on_every_cli_read_surface() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--text",
+            "history survives projection loss",
+        ],
+    );
+    confirm(root, &created);
+    let id = created["object"].as_str().expect("object id");
+    let projection = store::object_path(root, id);
+    std::fs::remove_file(&projection).expect("remove projection");
+
+    let shown = run_engr(root, &["show", id]);
+    assert!(
+        shown.status.success(),
+        "show: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("history survives projection loss"));
+
+    let verified = run_engr(root, &["verify", id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains("required Object projection is missing")
+    );
+    assert!(!String::from_utf8_lossy(&verified.stderr).contains("no object matches"));
+
+    let listed = run_engr(root, &["ls", "--all"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("history survives projection loss"));
+    assert!(
+        !projection.exists(),
+        "read surfaces must not recreate authority"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_stdout_is_normal_pipe_termination_not_a_rust_panic() {
+    let protocol = run_with_closed_stdout(None, &["protocol"]);
+    assert_ne!(protocol.status.code(), Some(101));
+    assert!(!String::from_utf8_lossy(&protocol.stderr).contains("panicked"));
+
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "verify output"]);
+    confirm(root, &created);
+    let verify = run_with_closed_stdout(Some(root), &["verify"]);
+    assert_ne!(verify.status.code(), Some(101));
+    assert!(!String::from_utf8_lossy(&verify.stderr).contains("panicked"));
+}
+
 fn run_engr(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_engr"))
         .arg("--root")
@@ -22,6 +82,22 @@ fn run_engr(root: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("run engr")
+}
+
+#[cfg(unix)]
+fn run_with_closed_stdout(root: Option<&Path>, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_engr"));
+    if let Some(root) = root {
+        command.arg("--root").arg(root);
+    }
+    let mut child = command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn engr");
+    drop(child.stdout.take().expect("child stdout"));
+    child.wait_with_output().expect("wait for engr")
 }
 
 fn prepare(root: &Path, args: &[&str]) -> Value {
@@ -3672,6 +3748,63 @@ fn a_read_surface_prints_the_reference_every_flag_asks_for() {
             "{what} refused what engr itself printed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    for (what, args) in [
+        (
+            "collection order --target",
+            vec![
+                "collection",
+                "order",
+                &plan_id,
+                "--target",
+                &reference,
+                "--order",
+                "7",
+            ],
+        ),
+        (
+            "collection priority --target",
+            vec![
+                "collection",
+                "priority",
+                &plan_id,
+                "--target",
+                &reference,
+                "--priority",
+                "high",
+            ],
+        ),
+        (
+            "collection rm --target",
+            vec!["collection", "rm", &plan_id, "--target", &reference],
+        ),
+        (
+            "work undepend --on",
+            vec!["work", "undepend", &id, "--on", &staged_reference],
+        ),
+    ] {
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let bare_object = reference
+        .strip_prefix("engr:")
+        .expect("canonical Object ref");
+    for args in [
+        vec!["collection", "add", &plan_id, "--target", bare_object],
+        vec!["collection", "rm", &plan_id, "--target", bare_object],
+        vec!["collection", "order", &plan_id, "--target", bare_object],
+        vec!["collection", "priority", &plan_id, "--target", bare_object],
+        vec!["work", "undepend", &id, "--on", bare_object],
+    ] {
+        let output = run_engr(root, &args);
+        assert_eq!(output.status.code(), Some(engr::EXIT_USAGE), "{args:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must begin with `engr:`"));
     }
 }
 

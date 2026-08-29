@@ -2691,7 +2691,7 @@ fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<(
         }
         Work::Undepend { object, on } => {
             let id = resolve_object_argument(root, "object", &object)?;
-            let target = on.strip_prefix("engr:").unwrap_or(&on).to_owned();
+            let target = standalone_embedded_target("--on", &on)?;
             let item = work::remove_dependency(root, &id, &target, attempt)?;
             print!("{}", view::render_work_show(root, &id, &item));
         }
@@ -2935,14 +2935,25 @@ impl From<LevelArg> for collection::Level {
 /// what a plan could contain depended on which door it came through. The rule
 /// lives in `collection::add_member` now, and this only translates the spelling.
 fn collection_target(spec: &str) -> Result<String> {
-    spec.strip_prefix("engr:")
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_USAGE,
-                format!("--target {spec:?} must be an engr: reference"),
-            )
-        })
+    standalone_embedded_target("--target", spec)
+}
+
+fn standalone_embedded_target(field: &str, spec: &str) -> Result<String> {
+    let parsed = engr::reference::EngrRef::parse_standalone(spec)
+        .map_err(|error| malformed_argument(field, spec, error))?;
+    ensure!(
+        matches!(
+            parsed.kind(),
+            engr::reference::ResourceKind::Object | engr::reference::ResourceKind::Backlog
+        ) && parsed.section().is_none()
+            && parsed.snapshot_selector().is_none(),
+        EXIT_USAGE,
+        "{field} {spec:?} must identify a current whole Object or Backlog item"
+    );
+    Ok(spec
+        .strip_prefix("engr:")
+        .expect("standalone parser checked prefix")
+        .to_owned())
 }
 
 fn priority_of(
@@ -3054,7 +3065,7 @@ fn collection_command(
         }
         CollectionCommand::Rm { collection, target } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let target = collection_target(&target)?;
             let item = collection::remove_member(root, &id, &target, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
@@ -3064,7 +3075,7 @@ fn collection_command(
             order,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let target = collection_target(&target)?;
             let item = collection::set_order(root, &id, &target, order, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
@@ -3075,7 +3086,7 @@ fn collection_command(
             reason,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
             let item = collection::set_priority(root, &id, &target, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
