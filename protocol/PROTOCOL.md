@@ -1117,6 +1117,12 @@ doubt goes into backlog instead, and is later settled by a normal record action.
 *This unresolved point concerns these things.* Deliberately weaker than `refs[]`:
 no dependency, no authority, no ordering, and no claim the target must change.
 
+Weaker in **protocol coupling**, and only there. A subject is not a weaker fact
+about the point than its wording is — what an unresolved point concerns is
+central to reading it, and a surface that treats these as decoration is showing
+less than the point says. What "weak" withholds is consequence: nothing here
+constrains another domain, gates a mutation, or survives as provenance.
+
 An `engr` subject may name an Object, an Object Section, another backlog item or
 one of its Sections. **Backlog-to-backlog cycles are valid** — this is a
 navigation relation, not a dependency graph. Authoritative `refs[]` MUST NOT
@@ -1410,9 +1416,27 @@ about", and an owner is a person or a team. A domain word that reads as
 responsibility in every other engineering tool is the wrong word for something
 that carries no responsibility at all.
 
-Backlog's own `subjects[]` is a different thing under a shared word — a weak
-observation of files and symbols an unresolved point concerns, not a scoping
-relationship — and neither one may be read as the other.
+Backlog Section `subjects[]` shares the word deliberately, and that is not a
+collision. Both answer *what the containing thing is about* — one shared
+aboutness vocabulary — while each domain defines its own cardinality and its own
+protocol consequences:
+
+```text
+work subject          exactly one object or backlog item
+                      strong scoping/attachment
+                      determines storage and lifetime
+
+backlog subjects[]    zero or more substantively relevant things
+                      central context and navigation
+                      weak protocol relation only
+                      no ownership, dependency, authority, provenance,
+                      ordering or lifetime semantics
+```
+
+Neither MUST be renamed to make the difference in coupling visible in the name;
+the difference is what the owning domain says about it, and the shared core is
+real. "Weak" in the backlog sense describes the **absence of protocol coupling**,
+never weak relevance to the unresolved point.
 
 ```text
 work sidecar
