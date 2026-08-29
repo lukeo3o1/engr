@@ -2204,6 +2204,39 @@ development history. A record a person built with the released binary MUST have
 a supported path forward under this one, and reaching it MUST NOT require
 locating and running an intermediate historical build.
 
+"Released generation" is the whole of what version 1 means here, and it is
+narrower than "every workspace whose `format.json` said 1". Compatibility is
+promised for persisted contracts that were actually published; a shared
+development-time version number is not evidence that a schema introduced before
+the next bump belongs to the released contract. A supported version-1
+predecessor therefore owns exactly:
+
+```text
+format.json
+objects/
+events/
+candidates/
+```
+
+`lock` is local process state and never migration authority. `rules/`,
+`backlog/`, `work/` and `collections/` arrived in later, unpublished builds that
+still declared version 1. They are **not** version-1 engr state, and a declared
+version-1 workspace holding any of them MUST fail migration closed, before a
+stage is installed and before anything is written, with a diagnostic that names
+the generation mismatch.
+
+The Rule case is the one that changes what the record can do, and it is why the
+rule is a refusal rather than a quiet omission. A rule file is authored by a
+human and never written by engr, so its presence beside a workspace says nothing
+about which build made that workspace — and carrying it forward would make
+policy the released build never recognized begin governing agent admission,
+bought with nothing but somebody running `engr migrate`. Authority MUST NOT
+arrive through a representation change.
+
+Workspaces genuinely written by a later version-1 build are outside this path.
+Preserving them is a separate compatibility decision and MUST NOT be inferred
+from the shared version number.
+
 That is one migration, not a chain. There is no v1-to-v2 step: the migrator
 decodes whichever generation the workspace declares, validates it under that
 generation's own rules, and derives version 3 from that single validated

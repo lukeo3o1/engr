@@ -520,6 +520,66 @@ fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Res
     Ok(resealed.object)
 }
 
+/// What the released version 1 generation's `.engr` actually held.
+///
+/// #32's ruling `5460403574` fixes what "workspace version 1" means for
+/// compatibility: the generation the published `latest` release shipped at
+/// `e7d9f99`, not the whole unreleased development window during which
+/// `format.json` still happened to say 1. That release wrote `format.json`,
+/// `objects/`, `events/` and `candidates/`, and had no Rule, Backlog, Work or
+/// Collection subsystem at all — those landed later, in builds that were never
+/// published.
+///
+/// So a declared v1 workspace holding one of them is refused, and refused
+/// *here*: before the `.gitignore` is touched, before a plan is staged, before
+/// anything at all is written. Carrying them forward would migrate bytes the
+/// generation did not recognize as engr state into current resources.
+///
+/// `rules/` is the one that changes what the record can do. A rule file is
+/// authored by a human and never by engr, so its presence says nothing about
+/// which build made the workspace — and migrating it would make policy the
+/// released build never recognized start governing agent admission, because
+/// somebody ran `engr migrate`. That is authority arriving through a
+/// representation change, which is the thing the whole generation boundary
+/// exists to prevent.
+///
+/// A workspace really written by a later version-1 build is out of scope by the
+/// same ruling: preserving those is a separate compatibility decision, and the
+/// ruling says explicitly it must not be inferred from the shared version
+/// number. The diagnostic says so rather than implying the data is worthless.
+fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
+    if source_version != 1 {
+        return Ok(());
+    }
+    for (domain, path) in [
+        ("rules", crate::rules::dir(root)),
+        ("backlog", crate::backlog::dir(root)),
+        ("work", crate::work::dir(root)),
+        ("collections", crate::collection::dir(root)),
+    ] {
+        // `symlink_metadata`, so a dangling link counts as present. Absence is
+        // the only answer that lets the migration continue.
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(tool_error(path.display(), error)),
+            Ok(_) => {}
+        }
+        let authority = if domain == "rules" {
+            " Activating it would make a rule the released build never recognized govern agent admission."
+        } else {
+            ""
+        };
+        return Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{}: workspace version 1 is the generation the published release wrote, which had objects/, events/ and candidates/ and no {domain} subsystem at all, so this migration does not carry {domain}/ forward as version 1 state.{authority} If it came from a later build that still declared version 1, that is a separate compatibility path and not this one.",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
     ensure!(
         migratable_source_version(source_version),
@@ -527,6 +587,7 @@ fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
         "workspace version {source_version} has no defined migration to version {}",
         crate::WORKSPACE_VERSION
     );
+    check_released_v1_domains(root, source_version)?;
     let mut source = BTreeMap::new();
     let mut stored = BTreeMap::new();
     for id in store::object_ids(root)? {
@@ -703,31 +764,20 @@ fn validate_retained_resources(
     Ok(rewrites)
 }
 
-/// The one thing a version 1 predecessor and a version 2 predecessor do not
-/// agree about.
+/// A Rule whose `review:` block the source generation had no schema for.
 ///
-/// Their persisted *shapes* are already separated, generation by generation, by
-/// the enumerated schemas in [`crate::store`]. What is left is the difference
-/// that changes meaning without changing bytes: version 2 is the first to define
-/// `review.max_attempts` and `review.on_exhaustion`, so a rule file with no
-/// `review:` block carries an effective ceiling and exhaustion action here and
-/// carried neither there — and an explicit block was an *unknown field* to a
-/// version 1 build, which refused the file outright.
+/// Version 2 is the first to define `review.max_attempts` and
+/// `review.on_exhaustion`, so an explicit block was an *unknown field* to
+/// anything older, which refused the file outright. Accepting one now would let
+/// migration admit a file its own predecessor rejected.
 ///
-/// Both halves of that matter, and they need opposite treatment.
-///
-/// A v1 Rule that writes no block is migrated unchanged and acquires the
-/// defaults. That reinterpretation is not a side effect to be avoided; it is
-/// the entire content of the v1 -> v2 step, and `engr migrate` is the explicit
-/// act that authorizes it. Nothing is written into the file: `Review::default`
-/// is what the Rule means, and the bytes stay exactly as their author left
-/// them.
-///
-/// A v1 Rule that writes a block is refused. Those bytes never loaded under the
-/// generation that owns them, so no v1 workspace containing one was ever usable,
-/// and accepting it now would let migration admit a file its own predecessor
-/// rejected — reading a member into force that the source generation had no
-/// member for. Fail closed and say which file.
+/// Only the format-less v0 path reaches this. Under #32's released-generation
+/// ruling `5460403574`, a version 1 workspace holding `rules/` at all is
+/// refused by [`check_released_v1_domains`] long before any rule is parsed —
+/// the released v1 build had no Rule subsystem, so the question of how it would
+/// have read a `review:` block does not arise. The ruling did not speak to the
+/// format-less generation, which predates the release and equally had none, so
+/// this stays as the narrower guard on the path it left alone.
 fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) -> Result<()> {
     if source_version >= 2 {
         return Ok(());

@@ -48,6 +48,13 @@ pub const PHASE_3_WORKSPACE_VERSION: u32 = WORKSPACE_VERSION;
 /// created says it is, and leaving it out made the record a person built with
 /// the shipped binary unreachable from the shipped binary's own successor.
 ///
+/// "Released generation" is also the *limit* of what version 1 means here. It
+/// owns `format.json`, `objects/`, `events/` and `candidates/` and nothing
+/// else; `rules/`, `backlog/`, `work/` and `collections/` arrived in later
+/// builds that were never published, and a declared v1 workspace holding one is
+/// refused by `migration::check_released_v1_domains` before anything is
+/// written.
+///
 /// Both entries are *direct* migrations rather than a chain. There is
 /// deliberately no v1 -> v2 step in this process: the migrator decodes the
 /// generation the workspace declares, validates it under that generation's own

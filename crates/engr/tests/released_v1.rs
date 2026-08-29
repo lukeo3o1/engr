@@ -140,6 +140,9 @@ fn declared_version(root: &Path) -> u64 {
 /// refused with, and a phrase its message has to carry.
 type BrokenReference = (&'static str, Box<dyn Fn(&mut Value)>, i32, &'static str);
 
+/// A named way to place a later resource domain beside a v1 workspace.
+type PlacedDomain = (&'static str, Box<dyn Fn(&Path)>);
+
 /// One named way a predecessor workspace can fail to be one, and the exit code
 /// it has to be refused with.
 type Malformation = (&'static str, Box<dyn Fn(&Path)>, i32);
@@ -953,39 +956,155 @@ fn malformed_v1_predecessors_are_refused_and_publish_nothing() {
     }
 }
 
-/// A v1 Rule that writes a `review:` block never loaded under v1, so it does not
-/// load its way into v3 either.
+/// A later resource domain in a version 1 workspace fails closed.
 ///
-/// This is the one thing the two generations disagree about. A v1 Rule with no
-/// block is migrated unchanged and acquires the effective defaults, which is
-/// the whole content of the step and what `engr migrate` authorizes. A block
-/// that was written out is a member version 1 had no schema for.
+/// #32's ruling `5460403574` settles what "workspace version 1" means for
+/// compatibility: the generation the published release shipped, which held
+/// `format.json`, `objects/`, `events/` and `candidates/` and nothing else.
+/// Rules, Backlog, Work and Collection all arrived afterwards, in builds that
+/// were never published, so none of them is version 1 engr state.
+///
+/// Every resource below is *valid* — a rule that parses, resources the current
+/// loaders accept. Being well-formed is not the question. The question is which
+/// generation they belong to, and the answer for all four is: not this one.
+///
+/// `rules/` is the case with teeth, and it is checked twice. A rule file is
+/// authored by a human and never by engr, so its presence beside a released
+/// workspace says nothing about which build wrote that workspace — and
+/// migrating it would hand a rule the released build never recognized authority
+/// over agent admission, purchased with nothing but somebody running `engr
+/// migrate`.
 #[test]
-fn a_v1_rule_cannot_carry_a_review_block_the_generation_never_had() {
+fn a_later_resource_domain_in_a_v1_workspace_fails_closed() {
+    let domains: Vec<PlacedDomain> = vec![
+        (
+            "rules",
+            Box::new(|root: &Path| {
+                std::fs::create_dir_all(rules::dir(root)).expect("rules dir");
+                write(
+                    &rules::dir(root).join("agent-policy.md"),
+                    "---\nid: agent-policy\napplies:\n  domains:\n    - object\n---\n\n# Agent policy\n\nAnything an agent admits cites the commit it came from.\n",
+                );
+            }),
+        ),
+        (
+            "backlog",
+            Box::new(|root: &Path| {
+                std::fs::create_dir_all(backlog::dir(root)).expect("backlog dir");
+                let id = "01a04a06-0000-7000-8000-000000000001";
+                write(
+                    &backlog::item_path(root, id),
+                    &serde_json::to_string(&serde_json::json!({
+                        "id": id,
+                        "topic": "placed",
+                        "next_section_id": 2,
+                        "sections": [{
+                            "id": 1,
+                            "text": "an unresolved point beside a released v1 record",
+                            "updated_at": "2026-08-29T00:00:00Z",
+                            "subjects": [],
+                            "produced": [],
+                        }],
+                    }))
+                    .expect("item"),
+                );
+            }),
+        ),
+        (
+            "work",
+            Box::new(|root: &Path| {
+                std::fs::create_dir_all(work::dir(root).join("objects")).expect("work dir");
+                write(
+                    &work::path(root, AUTHORITY),
+                    &serde_json::to_string(&serde_json::json!({
+                        "object": AUTHORITY,
+                        "state": "active",
+                        "updated_at": "2026-08-29T00:00:00Z",
+                        "items": [],
+                    }))
+                    .expect("work"),
+                );
+            }),
+        ),
+        (
+            "collections",
+            Box::new(|root: &Path| {
+                std::fs::create_dir_all(collection::dir(root)).expect("collections dir");
+                write(
+                    &collection::path(root, "qevf6gz4ce"),
+                    &serde_json::to_string(&serde_json::json!({
+                        "id": "qevf6gz4ce",
+                        "name": "placed",
+                        "state": "open",
+                        "members": [],
+                    }))
+                    .expect("collection"),
+                );
+            }),
+        ),
+    ];
+
+    for (domain, place) in domains {
+        let (_temp, root) = released_v1();
+        place(&root);
+        let before = fingerprint(&root);
+
+        let error = store::migrate(&root).expect_err(domain);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{domain}: {}", error.message);
+        assert!(
+            error
+                .message
+                .contains("workspace version 1 is the generation"),
+            "{domain}: the refusal names the generation mismatch: {error}"
+        );
+        assert!(
+            error.message.contains(domain),
+            "{domain}: and names what it found: {error}"
+        );
+
+        assert_eq!(
+            declared_version(&root),
+            1,
+            "{domain}: format.json is intact"
+        );
+        assert!(!stage(&root).exists(), "{domain}: nothing was staged");
+        assert!(
+            !store::engr_dir(&root).join("migration-v3.tmp").exists(),
+            "{domain}: and nothing was half-staged either"
+        );
+        // Byte-identical, which covers the authoritative Objects, their history,
+        // and `.engr/.gitignore` — migration adds its staging entries to that
+        // file, so an unchanged one proves the refusal came before any write at
+        // all rather than after a first side effect.
+        assert_eq!(fingerprint(&root), before, "{domain}: nothing was written");
+    }
+}
+
+/// The rule that would have governed is not merely uncarried — it never gets
+/// the chance to be read as policy.
+#[test]
+fn a_v1_rule_never_becomes_governing_policy_by_migration() {
     let (_temp, root) = released_v1();
     std::fs::create_dir_all(rules::dir(&root)).expect("rules dir");
-    let path = rules::dir(&root).join("object-policy.md");
     write(
-        &path,
-        "---\nid: object-policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 5\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+        &rules::dir(&root).join("agent-policy.md"),
+        "---\nid: agent-policy\napplies:\n  domains:\n    - object\n    - backlog\n---\n\n# Agent policy\n\nAnything an agent admits cites the commit it came from.\n",
     );
 
-    let error = store::migrate(&root).expect_err("a rule version 1 could not load");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("review block"), "{error}");
-
-    // Written without the block, the same rule migrates and means the defaults.
-    write(
-        &path,
-        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+    let error = store::migrate(&root).expect_err("a rule the released build never had");
+    assert!(
+        error.message.contains("govern agent admission"),
+        "the refusal says what activating it would have done: {error}"
     );
-    let before = read(&path);
-    store::migrate(&root).expect("a v1 rule migrates");
-    assert_eq!(read(&path), before, "the bytes are the author's, untouched");
-    let rules = rules::load_all(&root).expect("rules");
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].review, rules::Review::default());
-    assert!(!rules[0].written_review);
+    assert_eq!(
+        store::validate_format(&root).expect("format"),
+        WorkspaceFormat::OlderVersion(1),
+        "the workspace is still its own generation"
+    );
+    assert!(
+        rules::load_all(&root).is_err(),
+        "and nothing here is current policy"
+    );
 }
 
 // ------------------------------------------------- the coordinated window
