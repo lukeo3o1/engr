@@ -394,7 +394,7 @@ fn the_survey_warns_on_stderr_and_leaves_its_columns_alone() {
     drop(dir);
 }
 
-/// A Work owner from a bare Object id, which is what these tests hold.
-fn obj(id: &str) -> work::Owner {
-    work::Owner::Object(id.to_owned())
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Subject {
+    work::Subject::Object(id.to_owned())
 }

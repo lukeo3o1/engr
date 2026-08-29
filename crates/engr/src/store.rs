@@ -201,7 +201,7 @@ pub fn init(root: &Path) -> Result<PathBuf> {
         crate::backlog::dir(root),
         crate::collection::dir(root),
     ];
-    // Work has one directory per owner kind, and asks for them by list so a
+    // Work has one directory per subject kind, and asks for them by list so a
     // third kind could not be created here and forgotten everywhere else.
     layout.extend(crate::work::dirs(root));
     for path in layout {

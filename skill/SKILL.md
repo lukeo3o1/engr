@@ -381,25 +381,25 @@ shortest useful handoff to whoever picks this up next, hanging off one Object or
 one Backlog item — whichever the execution is actually about.
 
 ```bash
-engr work ls                             # owners with execution memory
-engr work show <owner>                   # where this one stands
-engr work start <owner> --summary "..."
-engr work summary <owner> --text "..."   # replace the checkpoint
-engr work item add <owner> --text "one step"
-engr work item state <owner> --item 2 --state active
-engr work item result <owner> --item 2 --text "what it produced"
-engr work item commit <owner> --item 2 --commit HEAD
-engr work item rm <owner> --item 2       # prune it once it stops helping
-engr work depend <owner> --on engr:obj:<id> --reason "why it matters here"
-engr work block <owner> --reason "waiting for the customer"
-engr work unblock <owner> --index 0
-engr work rm <owner>                     # when there is nothing left to hand off
+engr work ls                               # subjects with execution memory
+engr work show <subject>                   # where this one stands
+engr work start <subject> --summary "..."
+engr work summary <subject> --text "..."   # replace the checkpoint
+engr work item add <subject> --text "one step"
+engr work item state <subject> --item 2 --state active
+engr work item result <subject> --item 2 --text "what it produced"
+engr work item commit <subject> --item 2 --commit HEAD
+engr work item rm <subject> --item 2       # prune it once it stops helping
+engr work depend <subject> --on engr:obj:<id> --reason "why it matters here"
+engr work block <subject> --reason "waiting for the customer"
+engr work unblock <subject> --index 0
+engr work rm <subject>                     # when there is nothing left to hand off
 ```
 
-`<owner>` is an Object id, or the canonical reference of either kind:
+`<subject>` is an Object id, or the canonical reference of either kind:
 `engr:obj:<id>` for durable knowledge, `engr:backlog:<id>` for an unresolved
 point you are working through. A bare id means an Object — both namespaces use
-the same kind of identity, so a Backlog owner has to be written out.
+the same kind of identity, so a Backlog subject has to be written out.
 
 One thing follows from the second kind. A Backlog item is removed when its last
 point is consumed, and a sidecar cannot outlive what it belongs to, so **that

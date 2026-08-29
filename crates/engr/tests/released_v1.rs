@@ -1033,10 +1033,11 @@ fn a_later_resource_domain_in_a_v1_workspace_fails_closed() {
         (
             "work",
             Box::new(|root: &Path| {
-                let owner = work::Owner::Backlog("01a04a06-0000-7000-8000-000000000001".to_owned());
-                std::fs::create_dir_all(work::dir(root, &owner)).expect("work dir");
+                let subject =
+                    work::Subject::Backlog("01a04a06-0000-7000-8000-000000000001".to_owned());
+                std::fs::create_dir_all(work::dir(root, &subject)).expect("work dir");
                 write(
-                    &work::path(root, &owner),
+                    &work::path(root, &subject),
                     &serde_json::to_string(&serde_json::json!({
                         "state": "active",
                         "updated_at": "2026-08-29T00:00:00Z",
@@ -1715,7 +1716,7 @@ fn attestation(root: &Path, payload: &Payload, admission: Admission) -> gate::Re
     }
 }
 
-/// A Work owner from a bare Object id, which is what these tests hold.
-fn obj(id: &str) -> work::Owner {
-    work::Owner::Object(id.to_owned())
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Subject {
+    work::Subject::Object(id.to_owned())
 }

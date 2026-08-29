@@ -703,10 +703,10 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
     )
     .expect("a v2 work sidecar");
 
-    // The second owner kind, retained through the same pass. Its owner is not
+    // The second subject kind, retained through the same pass. Its subject is not
     // in the migrated projection — Backlog items are not projected — so this
     // also covers the branch that checks it against the items instead.
-    let owned_work_path = engr::work::path(root, &engr::work::Owner::Backlog(item_id.to_owned()));
+    let owned_work_path = engr::work::path(root, &engr::work::Subject::Backlog(item_id.to_owned()));
     std::fs::create_dir_all(owned_work_path.parent().expect("parent")).expect("work/backlog");
     std::fs::write(
         &owned_work_path,
@@ -738,7 +738,7 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
         vec![1, 2],
         "migration normalizes work items too"
     );
-    let owned = engr::work::load(root, &engr::work::Owner::Backlog(item_id.to_owned()))
+    let owned = engr::work::load(root, &engr::work::Subject::Backlog(item_id.to_owned()))
         .expect("the backlog-owned sidecar migrated too");
     assert_eq!(
         owned.items.iter().map(|item| item.id).collect::<Vec<_>>(),
@@ -749,15 +749,15 @@ fn retained_resources_are_rewritten_into_the_current_representation() {
     assert_eq!(
         after,
         engr::proof::canonical_bytes(&value, "work").expect("canonical"),
-        "both owner kinds are held to the same current representation"
+        "both subject kinds are held to the same current representation"
     );
 }
 
-/// The owner-lifetime invariant survives the representation change.
+/// The subject-lifetime invariant survives the representation change.
 ///
-/// A sidecar whose owner is not in the migrated workspace is refused before
+/// A sidecar whose subject is not in the migrated workspace is refused before
 /// anything is published, the same way an Object-owned one is — and a Backlog
-/// owner has to be checked against the retained items, because Backlog is not
+/// subject has to be checked against the retained items, because Backlog is not
 /// part of the rebuilt projection an Object is checked against.
 #[test]
 fn a_work_sidecar_owned_by_no_backlog_item_stops_the_migration() {
@@ -767,7 +767,7 @@ fn a_work_sidecar_owned_by_no_backlog_item_stops_the_migration() {
     predecessor(root, &[object(id, "with an orphan sidecar")]);
 
     let absent = "018f7d58-4ca7-7a2e-98f1-9b301468184b";
-    let path = engr::work::path(root, &engr::work::Owner::Backlog(absent.to_owned()));
+    let path = engr::work::path(root, &engr::work::Subject::Backlog(absent.to_owned()));
     std::fs::create_dir_all(path.parent().expect("parent")).expect("work/backlog");
     std::fs::write(
         &path,
@@ -786,7 +786,7 @@ fn a_work_sidecar_owned_by_no_backlog_item_stops_the_migration() {
     )
     .expect("an orphan sidecar");
 
-    let error = store::migrate(root).expect_err("its owner is not there");
+    let error = store::migrate(root).expect_err("its subject is not there");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(
         error.message.contains("belongs to no backlog item"),
@@ -1734,7 +1734,7 @@ fn reads_are_unavailable_while_a_coordinated_migration_is_incomplete() {
     engr::ops::effective(root, id).expect("and the record reads");
 }
 
-/// A Work owner from a bare Object id, which is what these tests hold.
-fn obj(id: &str) -> engr::work::Owner {
-    engr::work::Owner::Object(id.to_owned())
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> engr::work::Subject {
+    engr::work::Subject::Object(id.to_owned())
 }

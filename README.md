@@ -165,7 +165,7 @@ Object or one Backlog item, holding the shortest useful handoff to whoever picks
 it up next:
 
 ```bash
-engr work ls                                 # owners with execution memory
+engr work ls                                 # subjects with execution memory
 engr work show <id>                          # where this one stands
 engr work start <id> --summary "parser done; show still on the old resolver"
 engr work start engr:backlog:<id>            # or on the point you are working through
@@ -190,9 +190,9 @@ Grouping something changes nothing about it. An object in a plan means exactly
 what its admitted Sections say, and calling a plan complete is a declaration
 about the plan rather than a claim about its members.
 
-Work is deliberately weak. Finishing every item settles nothing: the owner is
+Work is deliberately weak. Finishing every item settles nothing: the subject is
 exactly where it was, because only a confirmation moves it. The one thing it does
-constrain is its own owner disappearing — resolving a Backlog item's last point
+constrain is its own subject disappearing — resolving a Backlog item's last point
 is refused while a sidecar is still hanging off it, so a handoff is discarded
 deliberately rather than swept away by an unrelated command. `paused` is the one
 signal that belongs to the human rather than the agent — and engr cannot tell

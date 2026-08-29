@@ -53,8 +53,8 @@ fn compact(id: &str) -> String {
 type Corruption = (&'static str, fn(&mut Value));
 
 /// Edit the sidecar the way a text editor would.
-fn rewrite(root: &Path, owner: &work::Owner, edit: impl FnOnce(&mut Value)) {
-    let path = work::path(root, owner);
+fn rewrite(root: &Path, subject: &work::Subject, edit: impl FnOnce(&mut Value)) {
+    let path = work::path(root, subject);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
     write_raw(&path, &value).expect("write");
@@ -769,7 +769,7 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
 
 /// A sidecar that belongs to no Object is invalid Work, not a row with a hole.
 ///
-/// The owner invariant has to hold on the way out as well as the way in. A
+/// The subject invariant has to hold on the way out as well as the way in. A
 /// sidecar names its Object in its filename, so a copied file can name one that
 /// never existed — and a check that only ran on the write path would let this
 /// build read, list and hand back operational memory for nothing.
@@ -1033,16 +1033,16 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
 
 /// A sidecar whose Object will not load says so, rather than that it is absent.
 ///
-/// The owner check answered with `is_ok()`, which collapsed "the Object is not
+/// The subject check answered with `is_ok()`, which collapsed "the Object is not
 /// there" and "the Object will not load" into one sentence — and picked the
 /// wrong one. A reader told the Object does not exist goes and creates a record
 /// that is already on disk, while the fault that actually needs looking at goes
 /// unmentioned. Unreadable authority is not absence, on this path as on every
 /// other.
 #[test]
-fn work_says_its_owner_is_unreadable_rather_than_absent() {
+fn work_says_its_subject_is_unreadable_rather_than_absent() {
     let (_dir, root) = workspace();
-    let object = new_object(&root, "the owner");
+    let object = new_object(&root, "the subject");
     work::start(
         &root,
         &obj(&object),
@@ -1050,7 +1050,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
         engr::rules::Attempt::FIRST,
     )
     .expect("start");
-    work::load(&root, &obj(&object)).expect("a sound owner");
+    work::load(&root, &obj(&object)).expect("a sound subject");
 
     // Present on disk, and not loadable.
     let path = store::object_path(&root, &object);
@@ -1058,7 +1058,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     stored["state"] = serde_json::json!("not-a-state");
     write_raw(&path, &stored).expect("write");
 
-    let error = work::load(&root, &obj(&object)).expect_err("the owner will not load");
+    let error = work::load(&root, &obj(&object)).expect_err("the subject will not load");
     assert!(
         error.message.contains("cannot be read"),
         "the refusal must name the real fault: {error}"
@@ -1072,7 +1072,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     // kept rather than merely a different message.
     std::fs::remove_file(&path).expect("remove");
     std::fs::remove_file(store::events_path(&root, &object)).expect("remove events");
-    let error = work::load(&root, &obj(&object)).expect_err("the owner is gone");
+    let error = work::load(&root, &obj(&object)).expect_err("the subject is gone");
     assert!(error.message.contains("does not exist"), "{error}");
 }
 
@@ -1087,27 +1087,27 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
     std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }
 
-/// A Work owner from a bare Object id, which is what these tests hold.
-fn obj(id: &str) -> work::Owner {
-    work::Owner::Object(id.to_owned())
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Subject {
+    work::Subject::Object(id.to_owned())
 }
 
 // ---------------------------------------------------------------------------
-// Owner = Object | Backlog
+// Subject = Object | Backlog
 // ---------------------------------------------------------------------------
 //
-// #63 moved ownership without moving anything else: Work is still
+// #63 moved what a sidecar hangs off without moving anything else: Work is still
 // agent-managed, still non-authoritative, still has no identity of its own. The
 // tests below pin the two halves of that. The first is that a Backlog item's
 // sidecar is the same sidecar — same shape, same rules, a separate file. The
-// rest are the one thing the second owner kind actually costs, which is that a
+// rest are the one thing the second subject kind actually costs, which is that a
 // Backlog item, unlike an Object, can be removed.
 
 use engr::backlog::Prepared as BacklogPrepared;
 
-/// A Work owner from a bare Backlog id.
-fn bl(id: &str) -> work::Owner {
-    work::Owner::Backlog(id.to_owned())
+/// A Work subject from a bare Backlog id.
+fn bl(id: &str) -> work::Subject {
+    work::Subject::Backlog(id.to_owned())
 }
 
 fn backlog_item(root: &Path, topic: &str, text: &str) -> String {
@@ -1132,9 +1132,9 @@ fn on_backlog_merge(root: &Path, id: &str, destination: u64, source: u64) -> Bac
     )
 }
 
-/// The second owner kind is the same sidecar in a different directory.
+/// The second subject kind is the same sidecar in a different directory.
 ///
-/// Nothing about the shape, the limits or the API changes with the owner — the
+/// Nothing about the shape, the limits or the API changes with the subject — the
 /// only visible difference is where the file lands and what `ids` calls it.
 #[test]
 fn a_backlog_item_keeps_execution_memory_the_same_way_an_object_does() {
@@ -1163,11 +1163,11 @@ fn a_backlog_item_keeps_execution_memory_the_same_way_an_object_does() {
         .join(format!("{item}.json"));
     assert!(
         expected.is_file(),
-        "the owner kind is the directory, and nothing else says it"
+        "the subject kind is the directory, and nothing else says it"
     );
     assert_eq!(work::path(&root, &bl(&item)), expected);
 
-    // Two owners, two sidecars, no shared state.
+    // Two subjects, two sidecars, no shared state.
     work::add_item(&root, &obj(&object), "a step", engr::rules::Attempt::FIRST).expect("step");
     assert!(work::load(&root, &bl(&item))
         .expect("load")
@@ -1208,7 +1208,7 @@ fn work_cannot_be_started_for_a_backlog_item_that_does_not_exist() {
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
 }
 
-/// The owner invariant holds on read for the second kind too.
+/// The subject invariant holds on read for the second kind too.
 #[test]
 fn an_orphan_backlog_sidecar_is_refused_rather_than_listed() {
     let (_dir, root) = workspace();
@@ -1232,7 +1232,7 @@ fn an_orphan_backlog_sidecar_is_refused_rather_than_listed() {
 
 /// Work does not decide whether an individual point can be resolved.
 ///
-/// The guard is on the owner's *removal*, not on Backlog's lifecycle. Consuming
+/// The guard is on the subject's *removal*, not on Backlog's lifecycle. Consuming
 /// a point that leaves the item standing is untouched by it, which is what keeps
 /// execution memory from becoming a precondition for ordinary progress.
 #[test]
@@ -1270,7 +1270,7 @@ fn a_point_that_is_not_the_last_is_consumed_while_work_is_kept() {
 
 /// Merging points is not a site for the guard at all.
 ///
-/// The destination survives a merge, so the owner does, so a sidecar cannot be
+/// The destination survives a merge, so the subject does, so a sidecar cannot be
 /// orphaned by one. A guard here would refuse something that was never a risk.
 #[test]
 fn merging_backlog_points_is_not_blocked_by_execution_memory() {
@@ -1295,7 +1295,7 @@ fn merging_backlog_points_is_not_blocked_by_execution_memory() {
         Vec::new(),
         &on_backlog_merge(&root, &item, 1, source),
     )
-    .expect("a merge keeps its destination, so the owner survives");
+    .expect("a merge keeps its destination, so the subject survives");
 
     assert_eq!(
         engr::backlog::load(&root, &item)
@@ -1383,9 +1383,9 @@ fn the_last_point_is_not_consumed_while_the_item_still_owns_work() {
 ///
 /// The guard asks whether the file is there, not whether it loads — otherwise
 /// corrupting a sidecar would be the way past the invariant, and the workspace
-/// would be left holding bytes for an owner that no longer exists.
+/// would be left holding bytes for a subject that no longer exists.
 #[test]
-fn a_corrupt_sidecar_still_holds_the_owner_in_place() {
+fn a_corrupt_sidecar_still_holds_the_subject_in_place() {
     let (_dir, root) = workspace();
     let item = backlog_item(&root, "one point", "the only point");
     work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("start");

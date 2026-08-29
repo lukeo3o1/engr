@@ -57,7 +57,7 @@ fn commit_all(root: &Path, message: &str) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
-/// An admitted Object, so a Work sidecar has an owner that exists.
+/// An admitted Object, so a Work sidecar has a subject that exists.
 fn admitted_object(root: &Path) -> String {
     let id = engr::model::new_id();
     let payload = engr::model::Payload {
@@ -2971,7 +2971,7 @@ fn a_rule_binding_never_mixes_two_reads_of_the_file() {
     );
 }
 
-/// A Work owner from a bare Object id, which is what these tests hold.
-fn obj(id: &str) -> engr::work::Owner {
-    engr::work::Owner::Object(id.to_owned())
+/// A Work subject from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> engr::work::Subject {
+    engr::work::Subject::Object(id.to_owned())
 }

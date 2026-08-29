@@ -4364,7 +4364,7 @@ fn a_malformed_object_does_not_take_the_other_domains_down_with_it() {
     .expect("backlog");
     engr::work::start(
         root,
-        &engr::work::Owner::Object(healthy.clone()),
+        &engr::work::Subject::Object(healthy.clone()),
         Some("underway"),
         engr::rules::Attempt::FIRST,
     )
@@ -5338,14 +5338,14 @@ fn a_current_object_without_an_aggregate_seal_is_not_reported_healthy() {
     );
 }
 
-/// Naming a Work owner uses the reference spelling every other surface uses.
+/// Naming a Work subject uses the reference spelling every other surface uses.
 ///
 /// Both namespaces mint UUIDv7, so a bare id cannot say which one it is in.
-/// Rather than a `--backlog` flag or a second positional, the owner is written
+/// Rather than a `--backlog` flag or a second positional, the subject is written
 /// the way #59 settled that a CLI names a resource — and a bare id keeps meaning
 /// an Object, so nothing that already worked changed.
 #[test]
-fn work_addresses_its_owner_by_canonical_reference() {
+fn work_addresses_its_subject_by_canonical_reference() {
     let workspace = TempDir::new().expect("workspace");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -5396,7 +5396,7 @@ fn work_addresses_its_owner_by_canonical_reference() {
     assert!(rows.contains("backlog"), "{rows}");
     assert!(rows.contains("obj"), "{rows}");
 
-    // And the structured surface names the owner as an engr target, not as a
+    // And the structured surface names the subject as an engr target, not as a
     // bare identity a consumer would have to guess the namespace of — in the
     // one embedded representation every other engr target already uses.
     let compact = engr::reference::encode_uuid_str(&item).expect("compact");
@@ -5431,7 +5431,7 @@ fn work_addresses_its_owner_by_canonical_reference() {
         .success());
 }
 
-/// The owner-lifetime invariant, as a caller meets it.
+/// The subject-lifetime invariant, as a caller meets it.
 ///
 /// Resolving the last point removes the item, and the refusal has to leave the
 /// caller holding a command that gets them through rather than a fact about

@@ -1786,7 +1786,7 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
 
 /// A Backlog item may not be removed while it still owns execution memory.
 ///
-/// #63's owner-lifetime invariant: **a sidecar may exist only while its owner
+/// #63's subject-lifetime invariant: **a sidecar may exist only while its subject
 /// does**. Objects satisfy it for free, because no mutation removes one. A
 /// Backlog item is the case where the invariant has to be enforced, since being
 /// removed is how it is resolved.
@@ -1796,23 +1796,23 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
 /// Work has nothing to say about it — and refusing there would make execution
 /// memory a precondition for resolving individual points, which is Work
 /// deciding Backlog lifecycle rather than merely outliving it. Section merge is
-/// not a site at all: the destination survives, so the owner does.
+/// not a site at all: the destination survives, so the subject does.
 ///
 /// The alternatives were an implicit cascade or a tolerated orphan, and both
 /// lose something that cannot be recovered. A cascade deletes a `paused`
 /// sidecar inside an operation about something else, which is exactly the
 /// silent disappearance [`crate::work::remove`] exists to report. An orphan
 /// leaves the workspace holding memory for nothing, and `engr work ls` would
-/// have to render a row whose owner is gone. Refusing costs one explicit
+/// have to render a row whose subject is gone. Refusing costs one explicit
 /// command and keeps both.
 fn require_no_work(root: &Path, id: &str) -> Result<()> {
-    let owner = crate::work::Owner::Backlog(id.to_owned());
+    let subject = crate::work::Subject::Backlog(id.to_owned());
     ensure!(
-        !crate::work::exists(root, &owner),
+        !crate::work::exists(root, &subject),
         EXIT_INVARIANT,
         "this was the last unresolved point, so resolving it removes the item — but it still \
          has execution memory, which cannot outlive what it belongs to. Discard it with \
-         `engr work rm {owner}` and consume again, or record what it was for first"
+         `engr work rm {subject}` and consume again, or record what it was for first"
     );
     Ok(())
 }
