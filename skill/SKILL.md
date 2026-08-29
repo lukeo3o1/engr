@@ -377,23 +377,36 @@ anything unconfirmed.
 ## Where execution stands
 
 Backlog is for what is not decided. **Work** is for what is being done: the
-shortest useful handoff to whoever picks this up next, hanging off one Object.
+shortest useful handoff to whoever picks this up next, hanging off one Object or
+one Backlog item — whichever the execution is actually about.
 
 ```bash
-engr work ls                             # objects with execution memory
-engr work show <object>                  # where this one stands
-engr work start <object> --summary "..."
-engr work summary <object> --text "..."  # replace the checkpoint
-engr work item add <object> --text "one step"
-engr work item state <object> --item 2 --state active
-engr work item result <object> --item 2 --text "what it produced"
-engr work item commit <object> --item 2 --commit HEAD
-engr work item rm <object> --item 2      # prune it once it stops helping
-engr work depend <object> --on engr:obj:<id> --reason "why it matters here"
-engr work block <object> --reason "waiting for the customer"
-engr work unblock <object> --index 0
-engr work rm <object>                    # when there is nothing left to hand off
+engr work ls                             # owners with execution memory
+engr work show <owner>                   # where this one stands
+engr work start <owner> --summary "..."
+engr work summary <owner> --text "..."   # replace the checkpoint
+engr work item add <owner> --text "one step"
+engr work item state <owner> --item 2 --state active
+engr work item result <owner> --item 2 --text "what it produced"
+engr work item commit <owner> --item 2 --commit HEAD
+engr work item rm <owner> --item 2       # prune it once it stops helping
+engr work depend <owner> --on engr:obj:<id> --reason "why it matters here"
+engr work block <owner> --reason "waiting for the customer"
+engr work unblock <owner> --index 0
+engr work rm <owner>                     # when there is nothing left to hand off
 ```
+
+`<owner>` is an Object id, or the canonical reference of either kind:
+`engr:obj:<id>` for durable knowledge, `engr:backlog:<id>` for an unresolved
+point you are working through. A bare id means an Object — both namespaces use
+the same kind of identity, so a Backlog owner has to be written out.
+
+One thing follows from the second kind. A Backlog item is removed when its last
+point is consumed, and a sidecar cannot outlive what it belongs to, so **that
+consume is refused while execution memory exists**. Run `engr work rm
+engr:backlog:<id>` first, deliberately, once you have moved anything worth
+keeping into the record. Ordinary consumes and merges are unaffected: work never
+decides whether a point can be resolved.
 
 No confirmation, no challenge code — you write this directly, like backlog. What
 makes that safe is that **finishing it settles nothing**. You can mark every item
@@ -408,8 +421,8 @@ refused — v1 has not settled what an exhausted rule means here, and engr will
 not guess on your behalf.
 
 Start by reading it, not by writing it. `engr work ls` is the first thing to run
-when resuming: it says which Objects have execution memory, which are blocked and
-which a human stopped.
+when resuming: it says which Objects and Backlog items have execution memory,
+which are blocked and which a human stopped.
 
 **Write the shortest useful handoff, not the history of the work.** One action or
 point per item, concrete verbs, outcomes rather than reasoning. The limits are

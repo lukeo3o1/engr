@@ -126,7 +126,7 @@ fn staging_and_admission_can_run_at_the_same_time() {
     )
     .expect("backlog item");
     let plan = collection::create(&root, "plan", None, None, attempt()).expect("collection");
-    work::start(&root, &id, None, attempt()).expect("work sidecar");
+    work::start(&root, &obj(&id), None, attempt()).expect("work sidecar");
 
     let barrier = Arc::new(Barrier::new(4));
     std::thread::scope(|scope| {
@@ -167,7 +167,7 @@ fn staging_and_admission_can_run_at_the_same_time() {
                         .expect("collection state");
                     }
                     _ => {
-                        work::add_item(&root, &id, "remembered under contention", attempt())
+                        work::add_item(&root, &obj(&id), "remembered under contention", attempt())
                             .expect("work item");
                     }
                 }
@@ -192,7 +192,7 @@ fn staging_and_admission_can_run_at_the_same_time() {
         "the collection state landed"
     );
     assert_eq!(
-        work::load(&root, &id).expect("work").items.len(),
+        work::load(&root, &obj(&id)).expect("work").items.len(),
         1,
         "the work item landed"
     );
@@ -392,4 +392,9 @@ fn the_survey_warns_on_stderr_and_leaves_its_columns_alone() {
         "and the columns did not shift under the reader"
     );
     drop(dir);
+}
+
+/// A Work owner from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Owner {
+    work::Owner::Object(id.to_owned())
 }

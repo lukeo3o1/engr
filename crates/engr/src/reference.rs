@@ -13,7 +13,12 @@ pub enum ResourceKind {
 }
 
 impl ResourceKind {
-    fn token(self) -> &'static str {
+    /// The namespace word in `engr:<token>:<id>`.
+    ///
+    /// Public because anything that builds a reference for a caller to retype
+    /// needs this exact spelling, and a second copy of the mapping is a second
+    /// thing to get wrong.
+    pub fn token(self) -> &'static str {
         match self {
             Self::Object => "obj",
             Self::Backlog => "backlog",

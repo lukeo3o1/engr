@@ -161,12 +161,14 @@ engr backlog rm <id> --section 2             # removing it is what says "settled
 ```
 
 Where execution currently stands goes somewhere else again — a sidecar on one
-object, holding the shortest useful handoff to whoever picks it up next:
+Object or one Backlog item, holding the shortest useful handoff to whoever picks
+it up next:
 
 ```bash
-engr work ls                                 # objects with execution memory
+engr work ls                                 # owners with execution memory
 engr work show <id>                          # where this one stands
 engr work start <id> --summary "parser done; show still on the old resolver"
+engr work start engr:backlog:<id>            # or on the point you are working through
 engr work item add <id> --text "migrate engr show"
 engr work block <id> --reason "waiting for the compatibility result"
 ```
@@ -188,8 +190,11 @@ Grouping something changes nothing about it. An object in a plan means exactly
 what its admitted Sections say, and calling a plan complete is a declaration
 about the plan rather than a claim about its members.
 
-Work is deliberately weak. Finishing every item settles nothing: the object is
-exactly where it was, because only a confirmation moves it. `paused` is the one
+Work is deliberately weak. Finishing every item settles nothing: the owner is
+exactly where it was, because only a confirmation moves it. The one thing it does
+constrain is its own owner disappearing — resolving a Backlog item's last point
+is refused while a sidecar is still hanging off it, so a handoff is discarded
+deliberately rather than swept away by an unrelated command. `paused` is the one
 signal that belongs to the human rather than the agent — and engr cannot tell
 them apart, so it enforces none of it. What it does instead is say what happened:
 deleting paused work reports that a human's stop signal went with it.

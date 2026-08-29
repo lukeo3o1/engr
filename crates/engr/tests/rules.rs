@@ -2786,7 +2786,7 @@ fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
 fn a_collection_or_work_rule_with_unusable_material_blocks_its_domain() {
     let (_dir, root) = workspace();
     let object = admitted_object(&root);
-    engr::work::start(&root, &object, Some("stands here"), attempt(1)).expect("start");
+    engr::work::start(&root, &obj(&object), Some("stands here"), attempt(1)).expect("start");
     let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
 
     write_rule(
@@ -2807,7 +2807,7 @@ based_on:
 ",
     );
 
-    let refused = engr::work::add_item(&root, &object, "a step", attempt(1))
+    let refused = engr::work::add_item(&root, &obj(&object), "a step", attempt(1))
         .expect_err("the applicable Rule cannot be established");
     assert_ne!(refused.code, 0);
     let refused = engr::collection::rename(&root, &plan.id, "renamed", attempt(1))
@@ -2819,7 +2819,7 @@ based_on:
         "nothing was written"
     );
     assert!(
-        engr::work::load(&root, &object)
+        engr::work::load(&root, &obj(&object))
             .expect("load")
             .items
             .is_empty(),
@@ -2833,7 +2833,7 @@ fn a_usable_collection_or_work_rule_admits_an_attempt_within_its_ceiling() {
     let (_dir, root) = workspace();
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let object = admitted_object(&root);
-    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    engr::work::start(&root, &obj(&object), None, attempt(1)).expect("start");
     let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
     write_rule(
         &root,
@@ -2855,7 +2855,7 @@ based_on:
 ",
     );
 
-    engr::work::add_item(&root, &object, "a step", attempt(2)).expect("inside the ceiling");
+    engr::work::add_item(&root, &obj(&object), "a step", attempt(2)).expect("inside the ceiling");
     engr::collection::rename(&root, &plan.id, "renamed", attempt(2)).expect("inside the ceiling");
 }
 
@@ -2871,7 +2871,7 @@ fn an_exhausted_collection_or_work_attempt_refuses_rather_than_guessing() {
     let (_dir, root) = workspace();
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let object = admitted_object(&root);
-    engr::work::start(&root, &object, None, attempt(1)).expect("start");
+    engr::work::start(&root, &obj(&object), None, attempt(1)).expect("start");
     let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
     write_rule(
         &root,
@@ -2896,7 +2896,7 @@ based_on:
     for (what, error) in [
         (
             "work",
-            engr::work::add_item(&root, &object, "a step", attempt(2)).map(|_| ()),
+            engr::work::add_item(&root, &obj(&object), "a step", attempt(2)).map(|_| ()),
         ),
         (
             "collection",
@@ -2917,7 +2917,7 @@ based_on:
         "a refused mutation writes nothing"
     );
     assert!(
-        engr::work::load(&root, &object)
+        engr::work::load(&root, &obj(&object))
             .expect("load")
             .items
             .is_empty(),
@@ -2969,4 +2969,9 @@ fn a_rule_binding_never_mixes_two_reads_of_the_file() {
         Some(engr::proof::sha256_of(&second_text).as_str()),
         "and so is the provenance — never one of each"
     );
+}
+
+/// A Work owner from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> engr::work::Owner {
+    engr::work::Owner::Object(id.to_owned())
 }

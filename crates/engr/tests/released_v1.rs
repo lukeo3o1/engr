@@ -1013,13 +1013,36 @@ fn a_later_resource_domain_in_a_v1_workspace_fails_closed() {
         (
             "work",
             Box::new(|root: &Path| {
-                std::fs::create_dir_all(work::dir(root).join("objects")).expect("work dir");
+                std::fs::create_dir_all(work::dir(root, &obj(AUTHORITY))).expect("work dir");
                 write(
-                    &work::path(root, AUTHORITY),
+                    &work::path(root, &obj(AUTHORITY)),
                     &serde_json::to_string(&serde_json::json!({
                         "object": AUTHORITY,
                         "state": "active",
                         "updated_at": "2026-08-29T00:00:00Z",
+                        "items": [],
+                    }))
+                    .expect("work"),
+                );
+            }),
+        ),
+        // The other half of the same domain. `work/objects` and `work/backlog`
+        // are one subsystem, and a floor that checked only the first would wave
+        // through a predecessor holding the second while its own message said
+        // the generation had no Work at all.
+        (
+            "work",
+            Box::new(|root: &Path| {
+                let owner = work::Owner::Backlog("01a04a06-0000-7000-8000-000000000001".to_owned());
+                std::fs::create_dir_all(work::dir(root, &owner)).expect("work dir");
+                write(
+                    &work::path(root, &owner),
+                    &serde_json::to_string(&serde_json::json!({
+                        "state": "active",
+                        "updated_at": "2026-08-29T00:00:00Z",
+                        "next_item_id": 1,
+                        "dependencies": [],
+                        "blockers": [],
                         "items": [],
                     }))
                     .expect("work"),
@@ -1615,14 +1638,14 @@ fn the_migrated_workspace_carries_on_as_a_current_one() {
 
     work::start(
         &root,
-        MODEL,
+        &obj(MODEL),
         Some("carrying the record forward"),
         rules::Attempt::FIRST,
     )
     .expect("work");
     work::add_item(
         &root,
-        MODEL,
+        &obj(MODEL),
         "rerun the dogfood against the migrated record",
         rules::Attempt::FIRST,
     )
@@ -1690,4 +1713,9 @@ fn attestation(root: &Path, payload: &Payload, admission: Admission) -> gate::Re
         result: proof::ReviewResult::Passed,
         explanation: None,
     }
+}
+
+/// A Work owner from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Owner {
+    work::Owner::Object(id.to_owned())
 }

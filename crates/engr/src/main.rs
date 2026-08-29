@@ -1576,6 +1576,69 @@ fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<Strin
     store::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
+/// The owner of a Work sidecar, which may be an Object or a Backlog item.
+///
+/// A bare id still means an Object. Both namespaces mint UUIDv7, so a bare id
+/// cannot say which one it is in, and the abbreviation a caller types could
+/// match in both — so the second owner kind is named the way #59 settled that
+/// every CLI surface names a resource, with its canonical `engr:` reference. No
+/// new syntax, no `--backlog` flag, and no change to what already worked.
+///
+/// A bare id that is not an Object but *is* a Backlog item gets told so rather
+/// than "no such object", because the caller is one prefix away from what they
+/// meant and the tool knows it.
+fn resolve_work_owner(root: &Path, field: &str, spec: &str) -> Result<work::Owner> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_argument(field, spec, error))?;
+        if reference.section().is_some() || reference.snapshot_selector().is_some() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} must identify a current whole Object or Backlog item; a \
+                     sidecar belongs to the whole thing, not to a part of it or to how it once read"
+                ),
+            ));
+        }
+        return match reference.kind() {
+            engr::reference::ResourceKind::Object => Ok(work::Owner::Object(
+                resolve_object_argument(root, field, spec)?,
+            )),
+            engr::reference::ResourceKind::Backlog => Ok(work::Owner::Backlog(
+                resolve_backlog_argument(root, field, spec)?,
+            )),
+            engr::reference::ResourceKind::Collection => Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} names a Collection, which is planning metadata and has no \
+                     execution to remember; work is kept for an Object or a Backlog item"
+                ),
+            )),
+        };
+    }
+    let error = match store::resolve_id(root, spec) {
+        Ok(id) => return Ok(work::Owner::Object(id)),
+        Err(error) => error,
+    };
+    // Only absence sends the question to the other namespace. An ambiguous
+    // prefix or an Object that will not load are answers about the Object
+    // namespace, and reporting either as "that is a backlog item" would send a
+    // caller somewhere else with their actual problem still there.
+    if error.code == EXIT_NOT_FOUND {
+        if let Ok(id) = backlog::resolve_id(root, spec) {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} is not an object, but it is a backlog item. Name it as \
+                     {} — a bare id cannot say which namespace it is in",
+                    work::Owner::Backlog(id)
+                ),
+            ));
+        }
+    }
+    Err(malformed_argument(field, spec, error))
+}
+
 /// The same boundary for the Backlog namespace. Every `engr backlog` command
 /// addresses a whole item, so a Section reference is a legal thing to write and
 /// the wrong thing to write here — a usage error, not a missing resource.
@@ -2446,7 +2509,7 @@ fn warn_uncommitted(root: &Path, id: &str) {
     }
 }
 
-/// Execution memory an agent keeps for an Object.
+/// Execution memory an agent keeps for an Object or a Backlog item.
 ///
 /// Its own namespace, like `backlog`, and for the same reason: nothing here
 /// goes through the gate, so it must not be reachable by a command that looks
@@ -2454,36 +2517,36 @@ fn warn_uncommitted(root: &Path, id: &str) {
 /// and nothing else.
 #[derive(Subcommand)]
 enum Work {
-    /// Begin keeping execution memory for an Object
+    /// Begin keeping execution memory. The owner is engr:obj:<id> or engr:backlog:<id>
     Start {
-        object: String,
+        owner: String,
         /// Where execution currently stands
         #[arg(long)]
         summary: Option<String>,
     },
-    /// List the Objects with execution memory
+    /// List the owners with execution memory
     Ls,
-    /// Show one Object's execution memory
+    /// Show one owner's execution memory
     Show {
-        object: String,
+        owner: String,
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
     /// Replace the checkpoint. Omit --text to clear it
     Summary {
-        object: String,
+        owner: String,
         #[arg(long)]
         text: Option<String>,
     },
     /// Suspend autonomous execution. Only on explicit human direction
-    Pause { object: String },
+    Pause { owner: String },
     /// Resume it. Only on explicit human direction
-    Resume { object: String },
+    Resume { owner: String },
     /// Stop keeping execution memory. Deleting paused work says so
-    Rm { object: String },
+    Rm { owner: String },
     /// Record something this work relies on
     Depend {
-        object: String,
+        owner: String,
         /// engr:obj:<id> or engr:backlog:<id>
         #[arg(long = "on", value_name = "ENGR_REF")]
         on: String,
@@ -2493,13 +2556,13 @@ enum Work {
     },
     /// Drop a dependency
     Undepend {
-        object: String,
+        owner: String,
         #[arg(long = "on", value_name = "ENGR_REF")]
         on: String,
     },
     /// Record a condition preventing useful progress
     Block {
-        object: String,
+        owner: String,
         #[arg(long)]
         reason: Option<String>,
         /// engr:obj:<id> or engr:backlog:<id>
@@ -2508,7 +2571,7 @@ enum Work {
     },
     /// Clear a blocker by its position
     Unblock {
-        object: String,
+        owner: String,
         #[arg(long)]
         index: usize,
     },
@@ -2521,13 +2584,13 @@ enum Work {
 enum WorkItem {
     /// Add a step
     Add {
-        object: String,
+        owner: String,
         #[arg(long)]
         text: String,
     },
     /// Reword a step
     Revise {
-        object: String,
+        owner: String,
         #[arg(long)]
         item: u64,
         #[arg(long)]
@@ -2535,7 +2598,7 @@ enum WorkItem {
     },
     /// Move a step's progress
     State {
-        object: String,
+        owner: String,
         #[arg(long)]
         item: u64,
         #[arg(long, value_enum)]
@@ -2543,7 +2606,7 @@ enum WorkItem {
     },
     /// Record what a step produced. Omit --text to clear it
     Result {
-        object: String,
+        owner: String,
         #[arg(long)]
         item: u64,
         #[arg(long)]
@@ -2551,7 +2614,7 @@ enum WorkItem {
     },
     /// Point a step at a commit, as navigation rather than proof
     Commit {
-        object: String,
+        owner: String,
         #[arg(long)]
         item: u64,
         #[arg(long, value_name = "REVISION")]
@@ -2559,7 +2622,7 @@ enum WorkItem {
     },
     /// Prune a step. Its id is not reused
     Rm {
-        object: String,
+        owner: String,
         #[arg(long)]
         item: u64,
     },
@@ -2625,18 +2688,19 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
 
 fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<()> {
     match command {
-        Work::Start { object, summary } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            work::start(root, &id, summary.as_deref(), attempt)?;
+        Work::Start { owner, summary } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            work::start(root, &owner, summary.as_deref(), attempt)?;
             print!(
                 "{}",
-                view::render_work_show(root, &id, &work::load(root, &id)?)
+                view::render_work_show(root, &owner, &work::load(root, &owner)?)
             );
         }
         Work::Ls => {
             let mut entries = Vec::new();
-            for id in work::ids(root)? {
-                entries.push((id.clone(), work::load(root, &id)?));
+            for owner in work::ids(root)? {
+                let item = work::load(root, &owner)?;
+                entries.push((owner, item));
             }
             // As instants, not as strings: two valid RFC3339 values written in
             // different offsets do not compare correctly as text, and the most
@@ -2644,36 +2708,33 @@ fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<(
             entries.sort_by_key(|(_, item)| std::cmp::Reverse(item.updated_at()));
             print!("{}", view::render_work_ls(root, &entries));
         }
-        Work::Show { object, format } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::load(root, &id)?;
+        Work::Show { owner, format } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::load(root, &owner)?;
             match format {
-                Format::Text => print!("{}", view::render_work_show(root, &id, &item)),
-                Format::Json => println!("{}", view::render_work_json(&id, &item)?),
+                Format::Text => print!("{}", view::render_work_show(root, &owner, &item)),
+                Format::Json => println!("{}", view::render_work_json(&owner, &item)?),
             }
         }
-        Work::Summary { object, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_summary(root, &id, text.as_deref(), attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Summary { owner, text } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::set_summary(root, &owner, text.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
-        Work::Pause { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Paused, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Pause { owner } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::set_state(root, &owner, work::State::Paused, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
-        Work::Resume { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Active, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Resume { owner } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::set_state(root, &owner, work::State::Active, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
-        Work::Rm { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let removed = work::remove(root, &id, attempt)?;
-            println!(
-                "no execution memory for {}",
-                shorten(&id, view::width(root))
-            );
+        Work::Rm { owner } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let removed = work::remove(root, &owner, attempt)?;
+            println!("no execution memory for {} {owner}", owner.noun());
             // Reported, not refused. Whether a human directed this is not
             // something engr can know, so it carries the deletion out and says
             // what went with it — a stop signal disappearing in silence is the
@@ -2683,34 +2744,35 @@ fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<(
                 println!("that work was paused; a human's stop signal went with it");
             }
         }
-        Work::Depend { object, on, reason } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+        Work::Depend { owner, on, reason } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
             let target = work_target(root, "--on", &on)?;
-            let item = work::add_dependency(root, &id, &target, reason.as_deref(), attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+            let item = work::add_dependency(root, &owner, &target, reason.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
-        Work::Undepend { object, on } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+        Work::Undepend { owner, on } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
             let target = standalone_embedded_target("--on", &on)?;
-            let item = work::remove_dependency(root, &id, &target, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+            let item = work::remove_dependency(root, &owner, &target, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
         Work::Block {
-            object,
+            owner,
             reason,
             target,
         } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+            let owner = resolve_work_owner(root, "owner", &owner)?;
             let target = target
                 .map(|spec| work_target(root, "--target", &spec))
                 .transpose()?;
-            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref(), attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+            let item =
+                work::add_blocker(root, &owner, reason.as_deref(), target.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
-        Work::Unblock { object, index } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::remove_blocker(root, &id, index, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Unblock { owner, index } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::remove_blocker(root, &owner, index, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &item));
         }
         Work::Item(command) => return work_item_command(root, command, attempt),
     }
@@ -2719,40 +2781,36 @@ fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<(
 
 fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) -> Result<()> {
     match command {
-        WorkItem::Add { object, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::add_item(root, &id, &text, attempt)?;
+        WorkItem::Add { owner, text } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let item = work::add_item(root, &owner, &text, attempt)?;
             println!("work item {item}");
             print!(
                 "{}",
-                view::render_work_show(root, &id, &work::load(root, &id)?)
+                view::render_work_show(root, &owner, &work::load(root, &owner)?)
             );
         }
-        WorkItem::Revise { object, item, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_text(root, &id, item, &text, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Revise { owner, item, text } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let work = work::set_item_text(root, &owner, item, &text, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &work));
         }
-        WorkItem::State {
-            object,
-            item,
-            state,
-        } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_state(root, &id, item, state.into(), attempt)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::State { owner, item, state } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let work = work::set_item_state(root, &owner, item, state.into(), attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &work));
         }
-        WorkItem::Result { object, item, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_result(root, &id, item, text.as_deref(), attempt)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Result { owner, item, text } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let work = work::set_item_result(root, &owner, item, text.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &work));
         }
         WorkItem::Commit {
-            object,
+            owner,
             item,
             commit,
         } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+            let owner = resolve_work_owner(root, "owner", &owner)?;
             // Resolved here so `HEAD` and short ids are accepted as input while
             // the sidecar stores the full object id — the same rule every other
             // commit in engr follows, even though this one anchors nothing.
@@ -2762,13 +2820,13 @@ fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) ->
                     format!("--commit {commit:?} does not name a commit in this repository"),
                 )
             })?;
-            let work = work::add_item_commit(root, &id, item, &resolved, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+            let work = work::add_item_commit(root, &owner, item, &resolved, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &work));
         }
-        WorkItem::Rm { object, item } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::remove_item(root, &id, item, attempt)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Rm { owner, item } => {
+            let owner = resolve_work_owner(root, "owner", &owner)?;
+            let work = work::remove_item(root, &owner, item, attempt)?;
+            print!("{}", view::render_work_show(root, &owner, &work));
         }
     }
     Ok(())

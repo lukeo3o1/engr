@@ -1187,53 +1187,93 @@ fn work_target(root: &Path, target: &crate::reference::EngrTarget) -> String {
     )
 }
 
-/// One line per Object that has execution memory.
+/// One line per owner that has execution memory.
 ///
 /// The state column shows the derived standing rather than the stored field,
 /// because `blocked` is the answer someone scanning this actually wants and
 /// `active` on a sidecar with three blockers would be true and useless.
-pub fn render_work_ls(root: &Path, entries: &[(String, work::Work)]) -> String {
-    let w = width(root);
+///
+/// The owner kind gets a column of its own rather than being left to the id,
+/// because the two namespaces look identical in an abbreviation and a reader
+/// scanning this has to know which resource a row is about before the title
+/// tells them anything.
+pub fn render_work_ls(root: &Path, entries: &[(work::Owner, work::Work)]) -> String {
+    // Over the ids actually listed, rather than either namespace's own width.
+    // A listing that spans two namespaces cannot borrow one of them to shorten
+    // the other: an Object-derived prefix says nothing about whether two Backlog
+    // ids in this table still differ at that length.
+    let listed: Vec<String> = entries
+        .iter()
+        .map(|(owner, _)| owner.id().to_owned())
+        .collect();
+    let w = store::abbrev_len(&listed);
     let mut out = String::from(WORK_BANNER);
     if entries.is_empty() {
         out.push_str("no execution memory\n");
         return out;
     }
-    for (id, item) in entries {
+    for (owner, item) in entries {
         let open = item
             .items
             .iter()
             .filter(|entry| entry.state != work::ItemState::Done)
             .count();
-        // Loading a sidecar holds the owner invariant, so by the time a row is
-        // rendered the Object exists. No "(object not found)" fallback: an
-        // orphan is invalid Work and is refused as such, not drawn as a row.
-        let title = ops::effective(root, id)
-            .map(|object| object.title)
-            .unwrap_or_default();
         out.push_str(&format!(
-            "{}  {:<8}  {:>2} open  {}  {}\n",
-            abbrev(id, w),
+            "{}  {:<8}  {:<8}  {:>2} open  {}  {}\n",
+            abbrev(owner.id(), w),
+            owner.kind().token(),
             item.standing(),
             open,
             to_the_second(&item.updated_at),
-            title
+            owner_title(root, owner)
         ));
     }
     out
 }
 
+/// What the owner is called, in whichever way its kind says who it is.
+///
+/// Loading a sidecar holds the owner invariant, so by the time a row is rendered
+/// the owner exists. No "(not found)" fallback: an orphan is invalid Work and is
+/// refused as such, not drawn as a row.
+fn owner_title(root: &Path, owner: &work::Owner) -> String {
+    match owner {
+        work::Owner::Object(id) => ops::effective(root, id)
+            .map(|object| object.title)
+            .unwrap_or_default(),
+        work::Owner::Backlog(id) => backlog::load(root, id)
+            .map(|item| item.topic)
+            .unwrap_or_default(),
+    }
+}
+
 /// The whole sidecar, in the order a resuming agent reads it: where things
 /// stand, what is stopping them, what is left, what was already done.
-pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
-    let w = width(root);
+pub fn render_work_show(root: &Path, owner: &work::Owner, item: &work::Work) -> String {
+    // Each namespace's own abbreviation, because a prefix means "unambiguous
+    // among these ids" and the two sets are not one set.
+    let w = match owner {
+        work::Owner::Object(_) => width(root),
+        work::Owner::Backlog(_) => backlog_width(root),
+    };
     let mut out = String::from(WORK_BANNER);
+    // The owner line names the kind, because "Object" over a Backlog item's
+    // sidecar was the whole confusion this domain must not cause.
     out.push_str(&format!(
-        "Object     {}\nState      {}\nUpdated    {}\n",
-        abbrev(id, w),
+        "{:<10} {}\nState      {}\nUpdated    {}\n",
+        match owner {
+            work::Owner::Object(_) => "Object",
+            work::Owner::Backlog(_) => "Backlog",
+        },
+        abbrev(owner.id(), w),
         item.standing(),
         to_the_second(&item.updated_at)
     ));
+    // The same line the record's and Backlog's `show` carry, and it earns its
+    // place here for one more reason: naming this owner to another command is
+    // the one thing an abbreviation cannot do now that a bare id no longer says
+    // which namespace it is in.
+    out.push_str(&format!("{owner}\n"));
     if item.state == work::State::Paused {
         out.push_str("           a human stopped this; do not resume it on your own\n");
     }
@@ -1285,13 +1325,23 @@ pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
     out
 }
 
-pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
+pub fn render_work_json(owner: &work::Owner, item: &work::Work) -> Result<String> {
     let value = serde_json::json!({
-        "object": id,
+        // One `owner` object rather than the bare `object` id this used to
+        // carry. A sidecar's owner is now a kind *and* an id, and a consumer
+        // that read the id alone would have no way to tell an Object's
+        // execution memory from a Backlog item's — the two namespaces mint the
+        // same shape of identity. `reference` is the spelling that goes back
+        // into any engr command that takes one.
+        "owner": {
+            "kind": owner.kind().token(),
+            "id": owner.id(),
+            "reference": owner.reference(),
+        },
         // Structured output is the surface that travels furthest from any
         // banner — straight into another tool, with no screen in between — so
         // the boundary has to be a field rather than a line somebody printed.
-        // `{"state": "active"}` on its own is indistinguishable from an Object's
+        // `{"state": "active"}` on its own is indistinguishable from an owner's
         // own state, which is exactly the confusion this domain must not cause.
         "authority": "execution_memory",
         "state": item.state.as_str(),

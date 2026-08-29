@@ -1767,6 +1767,13 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
         )?;
         let mut item = load(root, id)?;
         item.section(section)?;
+        // Asked before anything moves. `section` is known to exist by the line
+        // above, so one remaining Section means this consume is the one that
+        // takes the item with it — and that is the only consume Work has any
+        // say over.
+        if item.sections.len() == 1 {
+            require_no_work(root, id)?;
+        }
         item.sections.retain(|candidate| candidate.id != section);
         if item.sections.is_empty() {
             remove(root, id)?;
@@ -1775,4 +1782,37 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
         save(root, &item)?;
         Ok(false)
     })
+}
+
+/// A Backlog item may not be removed while it still owns execution memory.
+///
+/// #63's owner-lifetime invariant: **a sidecar may exist only while its owner
+/// does**. Objects satisfy it for free, because no mutation removes one. A
+/// Backlog item is the case where the invariant has to be enforced, since being
+/// removed is how it is resolved.
+///
+/// The guard is deliberately narrow, and where it sits is the whole of that.
+/// Consuming a Section that is not the last one leaves the item standing, so
+/// Work has nothing to say about it — and refusing there would make execution
+/// memory a precondition for resolving individual points, which is Work
+/// deciding Backlog lifecycle rather than merely outliving it. Section merge is
+/// not a site at all: the destination survives, so the owner does.
+///
+/// The alternatives were an implicit cascade or a tolerated orphan, and both
+/// lose something that cannot be recovered. A cascade deletes a `paused`
+/// sidecar inside an operation about something else, which is exactly the
+/// silent disappearance [`crate::work::remove`] exists to report. An orphan
+/// leaves the workspace holding memory for nothing, and `engr work ls` would
+/// have to render a row whose owner is gone. Refusing costs one explicit
+/// command and keeps both.
+fn require_no_work(root: &Path, id: &str) -> Result<()> {
+    let owner = crate::work::Owner::Backlog(id.to_owned());
+    ensure!(
+        !crate::work::exists(root, &owner),
+        EXIT_INVARIANT,
+        "this was the last unresolved point, so resolving it removes the item — but it still \
+         has execution memory, which cannot outlive what it belongs to. Discard it with \
+         `engr work rm {owner}` and consume again, or record what it was for first"
+    );
+    Ok(())
 }

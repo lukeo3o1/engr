@@ -53,8 +53,8 @@ fn compact(id: &str) -> String {
 type Corruption = (&'static str, fn(&mut Value));
 
 /// Edit the sidecar the way a text editor would.
-fn rewrite(root: &Path, object: &str, edit: impl FnOnce(&mut Value)) {
-    let path = work::path(root, object);
+fn rewrite(root: &Path, owner: &work::Owner, edit: impl FnOnce(&mut Value)) {
+    let path = work::path(root, owner);
     let mut value: Value = store::read_json(&path).expect("read");
     edit(&mut value);
     write_raw(&path, &value).expect("write");
@@ -64,23 +64,23 @@ fn rewrite(root: &Path, object: &str, edit: impl FnOnce(&mut Value)) {
 fn work_item_order_and_allocation_ceiling_are_current_boundaries() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "work ordering");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
-    work::add_item(&root, &id, "first", engr::rules::Attempt::FIRST).expect("first");
-    work::add_item(&root, &id, "second", engr::rules::Attempt::FIRST).expect("second");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
+    work::add_item(&root, &obj(&id), "first", engr::rules::Attempt::FIRST).expect("first");
+    work::add_item(&root, &obj(&id), "second", engr::rules::Attempt::FIRST).expect("second");
 
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["items"].as_array_mut().expect("items").reverse()
     });
-    let error = work::load(&root, &id).expect_err("writer-only ordering is not accepted");
+    let error = work::load(&root, &obj(&id)).expect_err("writer-only ordering is not accepted");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["items"].as_array_mut().expect("items").reverse();
         value["next_item_id"] = json!(engr::proof::MAX_SAFE_INTEGER);
     });
-    let path = work::path(&root, &id);
+    let path = work::path(&root, &obj(&id));
     let before = std::fs::read(&path).expect("before");
-    let error = work::add_item(&root, &id, "one too far", engr::rules::Attempt::FIRST)
+    let error = work::add_item(&root, &obj(&id), "one too far", engr::rules::Attempt::FIRST)
         .expect_err("allocation beyond the safe domain");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(error.message.contains("safe-integer"), "{error}");
@@ -97,25 +97,30 @@ fn work_set_collections_are_canonical_and_optional_members_are_omitted() {
     let id = new_object(&root, "work sets");
     let first = new_object(&root, "first prerequisite");
     let second = new_object(&root, "second prerequisite");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
     for target in [first, second] {
         work::add_dependency(
             &root,
-            &id,
+            &obj(&id),
             &format!("obj:{}", compact(&target)),
             None,
             engr::rules::Attempt::FIRST,
         )
         .expect("dependency");
     }
-    let item =
-        work::add_item(&root, &id, "record commits", engr::rules::Attempt::FIRST).expect("item");
+    let item = work::add_item(
+        &root,
+        &obj(&id),
+        "record commits",
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("item");
     for commit in ["f".repeat(40), "0".repeat(40)] {
-        work::add_item_commit(&root, &id, item, &commit, engr::rules::Attempt::FIRST)
+        work::add_item_commit(&root, &obj(&id), item, &commit, engr::rules::Attempt::FIRST)
             .expect("commit");
     }
 
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["dependencies"]
             .as_array_mut()
             .expect("dependencies")
@@ -125,10 +130,10 @@ fn work_set_collections_are_canonical_and_optional_members_are_omitted() {
             .expect("commits")
             .reverse();
     });
-    let error = work::load(&root, &id).expect_err("set order is part of current bytes");
+    let error = work::load(&root, &obj(&id)).expect_err("set order is part of current bytes");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["dependencies"]
             .as_array_mut()
             .expect("dependencies")
@@ -139,7 +144,7 @@ fn work_set_collections_are_canonical_and_optional_members_are_omitted() {
             .reverse();
         value["summary"] = Value::Null;
     });
-    let error = work::load(&root, &id).expect_err("the writer omits absent summary");
+    let error = work::load(&root, &obj(&id)).expect_err("the writer omits absent summary");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("exact shape"), "{error}");
 }
@@ -154,30 +159,30 @@ fn a_sidecar_belongs_to_an_object_and_is_not_a_resource_itself() {
     let id = new_object(&root, "the object");
 
     // Absent is the ordinary state, and never an error.
-    assert!(work::find(&root, &id).expect("find").is_none());
-    let missing = work::load(&root, &id).expect_err("nothing recorded yet");
+    assert!(work::find(&root, &obj(&id)).expect("find").is_none());
+    let missing = work::load(&root, &obj(&id)).expect_err("nothing recorded yet");
     assert_eq!(missing.code, engr::EXIT_NOT_FOUND);
 
     work::start(
         &root,
-        &id,
+        &obj(&id),
         Some("where things stand"),
         engr::rules::Attempt::FIRST,
     )
     .expect("start");
-    assert!(work::find(&root, &id).expect("find").is_some());
-    assert_eq!(work::ids(&root).expect("ids"), vec![id.clone()]);
+    assert!(work::find(&root, &obj(&id)).expect("find").is_some());
+    assert_eq!(work::ids(&root).expect("ids"), vec![obj(&id)]);
 
     // Twice is refused: there is one sidecar per Object, changed rather than
     // replaced, or the second `start` would silently discard a handoff.
-    let again = work::start(&root, &id, None, engr::rules::Attempt::FIRST)
+    let again = work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST)
         .expect_err("one sidecar per object");
     assert_eq!(again.code, engr::EXIT_INVARIANT);
 
     // An Object that does not exist has nothing to keep memory for.
     let absent = engr::model::new_id();
-    let error =
-        work::start(&root, &absent, None, engr::rules::Attempt::FIRST).expect_err("no such object");
+    let error = work::start(&root, &obj(&absent), None, engr::rules::Attempt::FIRST)
+        .expect_err("no such object");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
 
     // And there is no `engr:work:` namespace to address one with.
@@ -190,7 +195,7 @@ fn a_sidecar_belongs_to_an_object_and_is_not_a_resource_itself() {
 
     // The sidecar carries no format or version of its own; `.engr/format.json`
     // is the single schema authority for the workspace.
-    let raw: Value = store::read_json(&work::path(&root, &id)).expect("raw");
+    let raw: Value = store::read_json(&work::path(&root, &obj(&id))).expect("raw");
     assert!(raw.get("format").is_none(), "{raw}");
     assert!(raw.get("version").is_none(), "{raw}");
 }
@@ -204,14 +209,14 @@ fn a_sidecar_belongs_to_an_object_and_is_not_a_resource_itself() {
 fn the_only_stored_states_are_active_and_paused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "state");
-    let item = work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    let item = work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
     assert_eq!(item.state, State::Active);
     assert_eq!(item.standing(), "active");
     assert!(!item.is_blocked());
 
     let item = work::add_blocker(
         &root,
-        &id,
+        &obj(&id),
         Some("waiting on approval"),
         None,
         engr::rules::Attempt::FIRST,
@@ -220,22 +225,22 @@ fn the_only_stored_states_are_active_and_paused() {
     assert_eq!(item.state, State::Active, "blocked is not stored");
     assert!(item.is_blocked());
     assert_eq!(item.standing(), "blocked");
-    let raw: Value = store::read_json(&work::path(&root, &id)).expect("raw");
+    let raw: Value = store::read_json(&work::path(&root, &obj(&id))).expect("raw");
     assert_eq!(raw["state"], "active", "{raw}");
 
     // Paused wins over blocked on the screen: what a human said outranks what
     // the sidecar noticed.
-    let item =
-        work::set_state(&root, &id, State::Paused, engr::rules::Attempt::FIRST).expect("pause");
+    let item = work::set_state(&root, &obj(&id), State::Paused, engr::rules::Attempt::FIRST)
+        .expect("pause");
     assert_eq!(item.standing(), "paused");
 
     // Nothing else deserializes into the field.
     for invalid in ["blocked", "done", "closed", ""] {
-        rewrite(&root, &id, |value| {
+        rewrite(&root, &obj(&id), |value| {
             value["state"] = Value::String(invalid.to_owned());
         });
         assert!(
-            work::load(&root, &id).is_err(),
+            work::load(&root, &obj(&id)).is_err(),
             "{invalid:?} is not a Work state"
         );
     }
@@ -253,22 +258,22 @@ fn the_only_stored_states_are_active_and_paused() {
 fn deleting_a_paused_sidecar_is_carried_out_and_reported_rather_than_refused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "pause");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
-    work::set_state(&root, &id, State::Paused, engr::rules::Attempt::FIRST).expect("pause");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
+    work::set_state(&root, &obj(&id), State::Paused, engr::rules::Attempt::FIRST).expect("pause");
 
-    let removed = work::remove(&root, &id, engr::rules::Attempt::FIRST)
+    let removed = work::remove(&root, &obj(&id), engr::rules::Attempt::FIRST)
         .expect("the rule is the agent's, not the tool's");
     assert!(
         removed.was_paused,
         "and what was discarded is reported rather than swallowed"
     );
-    assert!(work::find(&root, &id).expect("find").is_none());
+    assert!(work::find(&root, &obj(&id)).expect("find").is_none());
 
     // Nothing about deleting an active one is different, except that there is
     // no stop signal to mention.
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start again");
-    let removed =
-        work::remove(&root, &id, engr::rules::Attempt::FIRST).expect("active work may be deleted");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start again");
+    let removed = work::remove(&root, &obj(&id), engr::rules::Attempt::FIRST)
+        .expect("active work may be deleted");
     assert!(!removed.was_paused);
 
     // Deleting says nothing about the Object, either way.
@@ -286,26 +291,32 @@ fn deleting_a_paused_sidecar_is_carried_out_and_reported_rather_than_refused() {
 fn item_ids_are_monotonic_and_never_reused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "items");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
 
     assert_eq!(
-        work::add_item(&root, &id, "first", engr::rules::Attempt::FIRST).expect("add"),
+        work::add_item(&root, &obj(&id), "first", engr::rules::Attempt::FIRST).expect("add"),
         1
     );
     assert_eq!(
-        work::add_item(&root, &id, "second", engr::rules::Attempt::FIRST).expect("add"),
+        work::add_item(&root, &obj(&id), "second", engr::rules::Attempt::FIRST).expect("add"),
         2
     );
-    work::set_item_state(&root, &id, 1, ItemState::Done, engr::rules::Attempt::FIRST)
-        .expect("done");
-    work::remove_item(&root, &id, 1, engr::rules::Attempt::FIRST).expect("prune");
+    work::set_item_state(
+        &root,
+        &obj(&id),
+        1,
+        ItemState::Done,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("done");
+    work::remove_item(&root, &obj(&id), 1, engr::rules::Attempt::FIRST).expect("prune");
 
     assert_eq!(
-        work::add_item(&root, &id, "third", engr::rules::Attempt::FIRST).expect("add"),
+        work::add_item(&root, &obj(&id), "third", engr::rules::Attempt::FIRST).expect("add"),
         3,
         "the pruned id is gone, not free"
     );
-    let item = work::load(&root, &id).expect("load");
+    let item = work::load(&root, &obj(&id)).expect("load");
     assert_eq!(
         item.items.iter().map(|entry| entry.id).collect::<Vec<_>>(),
         vec![2, 3]
@@ -314,16 +325,16 @@ fn item_ids_are_monotonic_and_never_reused() {
 
     // Stored data is held to it too: an id that was never allocated, or one that
     // appears twice, is not a sidecar this build will read.
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["items"][0]["id"] = json!(99);
     });
-    let error = work::load(&root, &id).expect_err("99 was never allocated");
+    let error = work::load(&root, &obj(&id)).expect_err("99 was never allocated");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["items"][0]["id"] = json!(3);
     });
-    let error = work::load(&root, &id).expect_err("3 is already taken");
+    let error = work::load(&root, &obj(&id)).expect_err("3 is already taken");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("never reused"), "{error}");
 }
@@ -340,15 +351,15 @@ fn a_dependency_needs_a_target_and_a_blocker_needs_at_least_something() {
     let id = new_object(&root, "edges");
     let other = new_object(&root, "the prerequisite");
     let target = format!("obj:{}", compact(&other));
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
 
-    let item = work::add_dependency(&root, &id, &target, None, engr::rules::Attempt::FIRST)
+    let item = work::add_dependency(&root, &obj(&id), &target, None, engr::rules::Attempt::FIRST)
         .expect("bare dependency");
     assert_eq!(item.dependencies[0].target.reference, target);
     assert!(item.dependencies[0].reason.is_none());
     let repeat = work::add_dependency(
         &root,
-        &id,
+        &obj(&id),
         &target,
         Some("again"),
         engr::rules::Attempt::FIRST,
@@ -366,31 +377,35 @@ fn a_dependency_needs_a_target_and_a_blocker_needs_at_least_something() {
     ] {
         work::add_blocker(
             &root,
-            &id,
+            &obj(&id),
             blocker.0,
             blocker.1,
             engr::rules::Attempt::FIRST,
         )
         .expect("a blocker with something");
     }
-    let empty = work::add_blocker(&root, &id, None, None, engr::rules::Attempt::FIRST)
+    let empty = work::add_blocker(&root, &obj(&id), None, None, engr::rules::Attempt::FIRST)
         .expect_err("an empty blocker");
     assert_eq!(empty.code, engr::EXIT_SCHEMA);
     assert!(empty.message.contains("says nothing"), "{empty}");
 
     // Blockers have no ids because they are conditions, not things: one that
     // cleared is gone, and the rest keep their positions.
-    let item = work::remove_blocker(&root, &id, 0, engr::rules::Attempt::FIRST).expect("unblock");
+    let item =
+        work::remove_blocker(&root, &obj(&id), 0, engr::rules::Attempt::FIRST).expect("unblock");
     assert_eq!(item.blockers.len(), 2);
-    let past_end = work::remove_blocker(&root, &id, 9, engr::rules::Attempt::FIRST)
+    let past_end = work::remove_blocker(&root, &obj(&id), 9, engr::rules::Attempt::FIRST)
         .expect_err("no such blocker");
     assert_eq!(past_end.code, engr::EXIT_NOT_FOUND);
 
     // A stored blocker with neither field is refused as authority too.
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["blockers"] = json!([{}]);
     });
-    assert!(work::load(&root, &id).is_err(), "an empty stored blocker");
+    assert!(
+        work::load(&root, &obj(&id)).is_err(),
+        "an empty stored blocker"
+    );
 }
 
 /// Work points at whole Objects and Backlog items, and nothing finer.
@@ -411,14 +426,20 @@ fn work_targets_only_whole_objects_and_backlog_items() {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
 
     for allowed in [
         format!("obj:{}", compact(&other)),
         format!("backlog:{}", compact(&item.id)),
     ] {
-        work::add_dependency(&root, &id, &allowed, None, engr::rules::Attempt::FIRST)
-            .expect("a legal target");
+        work::add_dependency(
+            &root,
+            &obj(&id),
+            &allowed,
+            None,
+            engr::rules::Attempt::FIRST,
+        )
+        .expect("a legal target");
     }
 
     for refused in [
@@ -428,8 +449,14 @@ fn work_targets_only_whole_objects_and_backlog_items() {
         format!("engr:obj:{}", compact(&other)),
         "obj:not-a-compact-id".to_owned(),
     ] {
-        let error = work::add_dependency(&root, &id, &refused, None, engr::rules::Attempt::FIRST)
-            .expect_err("Work does not point there");
+        let error = work::add_dependency(
+            &root,
+            &obj(&id),
+            &refused,
+            None,
+            engr::rules::Attempt::FIRST,
+        )
+        .expect_err("Work does not point there");
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{refused}");
     }
 }
@@ -445,12 +472,12 @@ fn every_work_text_field_is_bounded() {
     let id = new_object(&root, "limits");
     let other = new_object(&root, "target");
     let target = format!("obj:{}", compact(&other));
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
     let long = |limit: usize| "x".repeat(limit + 1);
 
     let error = work::set_summary(
         &root,
-        &id,
+        &obj(&id),
         Some(&long(work::SUMMARY_MAX)),
         engr::rules::Attempt::FIRST,
     )
@@ -459,7 +486,7 @@ fn every_work_text_field_is_bounded() {
     assert!(error.message.contains("backlog"), "{error}");
     work::set_summary(
         &root,
-        &id,
+        &obj(&id),
         Some(&"x".repeat(work::SUMMARY_MAX)),
         engr::rules::Attempt::FIRST,
     )
@@ -467,15 +494,16 @@ fn every_work_text_field_is_bounded() {
 
     assert!(work::add_item(
         &root,
-        &id,
+        &obj(&id),
         &long(work::ITEM_TEXT_MAX),
         engr::rules::Attempt::FIRST
     )
     .is_err());
-    let entry = work::add_item(&root, &id, "a step", engr::rules::Attempt::FIRST).expect("add");
+    let entry =
+        work::add_item(&root, &obj(&id), "a step", engr::rules::Attempt::FIRST).expect("add");
     assert!(work::set_item_result(
         &root,
-        &id,
+        &obj(&id),
         entry,
         Some(&long(work::ITEM_RESULT_MAX)),
         engr::rules::Attempt::FIRST
@@ -483,7 +511,7 @@ fn every_work_text_field_is_bounded() {
     .is_err());
     assert!(work::add_dependency(
         &root,
-        &id,
+        &obj(&id),
         &target,
         Some(&long(work::REASON_MAX)),
         engr::rules::Attempt::FIRST
@@ -491,7 +519,7 @@ fn every_work_text_field_is_bounded() {
     .is_err());
     assert!(work::add_blocker(
         &root,
-        &id,
+        &obj(&id),
         Some(&long(work::REASON_MAX)),
         None,
         engr::rules::Attempt::FIRST
@@ -499,14 +527,15 @@ fn every_work_text_field_is_bounded() {
     .is_err());
 
     // Empty is not "short", it is missing.
-    assert!(work::add_item(&root, &id, "   ", engr::rules::Attempt::FIRST).is_err());
-    assert!(work::set_summary(&root, &id, Some(""), engr::rules::Attempt::FIRST).is_err());
+    assert!(work::add_item(&root, &obj(&id), "   ", engr::rules::Attempt::FIRST).is_err());
+    assert!(work::set_summary(&root, &obj(&id), Some(""), engr::rules::Attempt::FIRST).is_err());
 
     // Clearing is a different thing from writing nothing, and is allowed.
-    let item = work::set_summary(&root, &id, None, engr::rules::Attempt::FIRST).expect("clear");
-    assert!(item.summary.is_none());
     let item =
-        work::set_item_result(&root, &id, entry, None, engr::rules::Attempt::FIRST).expect("clear");
+        work::set_summary(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("clear");
+    assert!(item.summary.is_none());
+    let item = work::set_item_result(&root, &obj(&id), entry, None, engr::rules::Attempt::FIRST)
+        .expect("clear");
     assert!(item.items[0].result.is_none());
 }
 
@@ -520,23 +549,23 @@ fn every_work_text_field_is_bounded() {
 fn commits_are_navigation_and_their_absence_is_never_corruption() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "commits");
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
     let done = work::add_item(
         &root,
-        &id,
+        &obj(&id),
         "research, which produced no commit",
         engr::rules::Attempt::FIRST,
     )
     .expect("add");
     work::set_item_state(
         &root,
-        &id,
+        &obj(&id),
         done,
         ItemState::Done,
         engr::rules::Attempt::FIRST,
     )
     .expect("done");
-    let item = work::load(&root, &id).expect("load");
+    let item = work::load(&root, &obj(&id)).expect("load");
     assert!(
         item.items[0].commits.is_empty(),
         "done does not require a commit"
@@ -544,7 +573,7 @@ fn commits_are_navigation_and_their_absence_is_never_corruption() {
 
     let pending = work::add_item(
         &root,
-        &id,
+        &obj(&id),
         "started, and already pushed",
         engr::rules::Attempt::FIRST,
     )
@@ -552,7 +581,7 @@ fn commits_are_navigation_and_their_absence_is_never_corruption() {
     let unreachable = "0".repeat(40);
     work::add_item_commit(
         &root,
-        &id,
+        &obj(&id),
         pending,
         &unreachable,
         engr::rules::Attempt::FIRST,
@@ -560,7 +589,7 @@ fn commits_are_navigation_and_their_absence_is_never_corruption() {
     .expect("a commit no walk will find");
     let repeat = work::add_item_commit(
         &root,
-        &id,
+        &obj(&id),
         pending,
         &unreachable,
         engr::rules::Attempt::FIRST,
@@ -568,13 +597,19 @@ fn commits_are_navigation_and_their_absence_is_never_corruption() {
     .expect_err("once");
     assert_eq!(repeat.code, engr::EXIT_INVARIANT);
 
-    let item = work::load(&root, &id).expect("a dead signpost is not corruption");
+    let item = work::load(&root, &obj(&id)).expect("a dead signpost is not corruption");
     assert_eq!(item.items[1].state, ItemState::Pending);
     assert_eq!(item.items[1].commits, vec![unreachable]);
 
     // The shape is still held: an abbreviation is not a commit id.
-    let error = work::add_item_commit(&root, &id, pending, "0000000", engr::rules::Attempt::FIRST)
-        .expect_err("abbreviated");
+    let error = work::add_item_commit(
+        &root,
+        &obj(&id),
+        pending,
+        "0000000",
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("abbreviated");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
 
@@ -603,25 +638,32 @@ fn completing_every_item_changes_nothing_about_the_object() {
 
     work::start(
         &root,
-        &id,
+        &obj(&id),
         Some("implementing it"),
         engr::rules::Attempt::FIRST,
     )
     .expect("start");
     for text in ["write it", "test it", "ship it"] {
-        let entry = work::add_item(&root, &id, text, engr::rules::Attempt::FIRST).expect("add");
+        let entry =
+            work::add_item(&root, &obj(&id), text, engr::rules::Attempt::FIRST).expect("add");
         work::set_item_state(
             &root,
-            &id,
+            &obj(&id),
             entry,
             ItemState::Done,
             engr::rules::Attempt::FIRST,
         )
         .expect("done");
-        work::set_item_result(&root, &id, entry, Some("done"), engr::rules::Attempt::FIRST)
-            .expect("result");
+        work::set_item_result(
+            &root,
+            &obj(&id),
+            entry,
+            Some("done"),
+            engr::rules::Attempt::FIRST,
+        )
+        .expect("result");
     }
-    let item = work::load(&root, &id).expect("load");
+    let item = work::load(&root, &obj(&id)).expect("load");
     assert!(item
         .items
         .iter()
@@ -650,15 +692,16 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
     let other = new_object(&root, "target");
     work::start(
         &root,
-        &id,
+        &obj(&id),
         Some("a checkpoint"),
         engr::rules::Attempt::FIRST,
     )
     .expect("start");
-    let entry = work::add_item(&root, &id, "a step", engr::rules::Attempt::FIRST).expect("add");
+    let entry =
+        work::add_item(&root, &obj(&id), "a step", engr::rules::Attempt::FIRST).expect("add");
     work::add_dependency(
         &root,
-        &id,
+        &obj(&id),
         &format!("obj:{}", compact(&other)),
         Some("why"),
         engr::rules::Attempt::FIRST,
@@ -666,7 +709,7 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
     .expect("depend");
     work::add_blocker(
         &root,
-        &id,
+        &obj(&id),
         Some("waiting"),
         None,
         engr::rules::Attempt::FIRST,
@@ -674,7 +717,7 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
     .expect("block");
     work::set_item_result(
         &root,
-        &id,
+        &obj(&id),
         entry,
         Some("an outcome"),
         engr::rules::Attempt::FIRST,
@@ -712,11 +755,11 @@ fn a_hand_edited_sidecar_outside_the_schema_is_refused_rather_than_repaired() {
         }),
     ];
 
-    let sound = store::read_json::<Value>(&work::path(&root, &id)).expect("read");
+    let sound = store::read_json::<Value>(&work::path(&root, &obj(&id))).expect("read");
     for (what, corrupt) in corruptions {
-        write_raw(&work::path(&root, &id), &sound).expect("restore");
-        rewrite(&root, &id, corrupt);
-        let error = work::load(&root, &id).expect_err(what);
+        write_raw(&work::path(&root, &obj(&id)), &sound).expect("restore");
+        rewrite(&root, &obj(&id), corrupt);
+        let error = work::load(&root, &obj(&id)).expect_err(what);
         // Schema, not usage, and not "either". Accepting both would hide the
         // boundary this test exists to hold: nothing about a file on disk is
         // the current caller's mistake.
@@ -736,7 +779,7 @@ fn an_orphan_sidecar_is_refused_rather_than_listed() {
     let id = new_object(&root, "the object");
     work::start(
         &root,
-        &id,
+        &obj(&id),
         Some("a checkpoint"),
         engr::rules::Attempt::FIRST,
     )
@@ -744,16 +787,17 @@ fn an_orphan_sidecar_is_refused_rather_than_listed() {
 
     // Copied to a filename naming an Object that was never created.
     let orphan = engr::model::new_id();
-    let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
-    write_raw(&work::path(&root, &orphan), &sound).expect("write");
+    let sound: Value = store::read_json(&work::path(&root, &obj(&id))).expect("read");
+    write_raw(&work::path(&root, &obj(&orphan)), &sound).expect("write");
 
-    let error = work::load(&root, &orphan).expect_err("a sidecar for nothing");
+    let error = work::load(&root, &obj(&orphan)).expect_err("a sidecar for nothing");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("belongs to no object"), "{error}");
-    assert!(work::find(&root, &orphan).is_err(), "and find agrees");
+    assert!(error.message.contains("belongs to nothing"), "{error}");
+    assert!(error.message.contains("object engr:obj:"), "{error}");
+    assert!(work::find(&root, &obj(&orphan)).is_err(), "and find agrees");
 
     // The real one is untouched by its neighbour being wrong.
-    work::load(&root, &id).expect("the valid sidecar still loads");
+    work::load(&root, &obj(&id)).expect("the valid sidecar still loads");
 }
 
 /// Stored Work is held to exactly what the write path can produce.
@@ -767,56 +811,61 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     let id = new_object(&root, "schema");
     let other = new_object(&root, "target");
     let target = format!("obj:{}", compact(&other));
-    work::start(&root, &id, None, engr::rules::Attempt::FIRST).expect("start");
-    let entry = work::add_item(&root, &id, "a step", engr::rules::Attempt::FIRST).expect("add");
+    work::start(&root, &obj(&id), None, engr::rules::Attempt::FIRST).expect("start");
+    let entry =
+        work::add_item(&root, &obj(&id), "a step", engr::rules::Attempt::FIRST).expect("add");
     work::add_item_commit(
         &root,
-        &id,
+        &obj(&id),
         entry,
         &"a".repeat(40),
         engr::rules::Attempt::FIRST,
     )
     .expect("commit");
-    work::add_dependency(&root, &id, &target, None, engr::rules::Attempt::FIRST).expect("depend");
-    let sound: Value = store::read_json(&work::path(&root, &id)).expect("read");
-    let restore = || write_raw(&work::path(&root, &id), &sound).expect("restore");
+    work::add_dependency(&root, &obj(&id), &target, None, engr::rules::Attempt::FIRST)
+        .expect("depend");
+    let sound: Value = store::read_json(&work::path(&root, &obj(&id))).expect("read");
+    let restore = || write_raw(&work::path(&root, &obj(&id)), &sound).expect("restore");
 
     // `dependencies`, `blockers`, `items` and `items[].commits` are required and
     // may be empty. Omitted is a third spelling the write path never produces.
     for field in ["dependencies", "blockers", "items"] {
         restore();
-        rewrite(&root, &id, |value| {
+        rewrite(&root, &obj(&id), |value| {
             value.as_object_mut().expect("object").remove(field);
         });
-        let error = work::load(&root, &id).expect_err(field);
+        let error = work::load(&root, &obj(&id)).expect_err(field);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{field}");
     }
     restore();
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         value["items"][0]
             .as_object_mut()
             .expect("item")
             .remove("commits");
     });
-    assert!(work::load(&root, &id).is_err(), "commits is required too");
+    assert!(
+        work::load(&root, &obj(&id)).is_err(),
+        "commits is required too"
+    );
 
     // The write path refuses a duplicate dependency and a duplicate commit, so
     // stored ones are shapes it could not have written.
     restore();
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         let held = value["dependencies"][0].clone();
         value["dependencies"] = json!([held.clone(), held]);
     });
-    let error = work::load(&root, &id).expect_err("one prerequisite is one dependency");
+    let error = work::load(&root, &obj(&id)).expect_err("one prerequisite is one dependency");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("twice"), "{error}");
 
     restore();
-    rewrite(&root, &id, |value| {
+    rewrite(&root, &obj(&id), |value| {
         let held = value["items"][0]["commits"][0].clone();
         value["items"][0]["commits"] = json!([held.clone(), held]);
     });
-    let error = work::load(&root, &id).expect_err("a commit recorded twice");
+    let error = work::load(&root, &obj(&id)).expect_err("a commit recorded twice");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 
     // A stored fault is a schema fault. Reporting it as usage would blame
@@ -831,8 +880,8 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     ];
     for (what, corrupt) in stored_faults {
         restore();
-        rewrite(&root, &id, corrupt);
-        let error = work::load(&root, &id).expect_err(what);
+        rewrite(&root, &obj(&id), corrupt);
+        let error = work::load(&root, &obj(&id)).expect_err(what);
         assert_eq!(
             error.code,
             engr::EXIT_SCHEMA,
@@ -844,7 +893,7 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     restore();
     let error = work::set_summary(
         &root,
-        &id,
+        &obj(&id),
         Some(&"x".repeat(engr::work::SUMMARY_MAX + 1)),
         engr::rules::Attempt::FIRST,
     )
@@ -862,19 +911,21 @@ fn updated_at_is_validated_and_compared_as_an_instant() {
     let (_dir, root) = workspace();
     let earlier = new_object(&root, "earlier");
     let later = new_object(&root, "later");
-    work::start(&root, &earlier, None, engr::rules::Attempt::FIRST).expect("start");
-    work::start(&root, &later, None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&earlier), None, engr::rules::Attempt::FIRST).expect("start");
+    work::start(&root, &obj(&later), None, engr::rules::Attempt::FIRST).expect("start");
 
     // The same moment, written two ways: as text the offset one sorts lower,
     // as an instant it is two hours after.
-    rewrite(&root, &earlier, |value| {
+    rewrite(&root, &obj(&earlier), |value| {
         value["updated_at"] = json!("2026-08-19T10:00:00Z");
     });
-    rewrite(&root, &later, |value| {
+    rewrite(&root, &obj(&later), |value| {
         value["updated_at"] = json!("2026-08-19T09:00:00-03:00");
     });
-    let earlier_at = work::load(&root, &earlier).expect("load").updated_at();
-    let later_at = work::load(&root, &later).expect("load").updated_at();
+    let earlier_at = work::load(&root, &obj(&earlier))
+        .expect("load")
+        .updated_at();
+    let later_at = work::load(&root, &obj(&later)).expect("load").updated_at();
     assert!(
         later_at > earlier_at,
         "12:00Z is after 10:00Z however it is spelled"
@@ -886,15 +937,15 @@ fn updated_at_is_validated_and_compared_as_an_instant() {
 
     // The stored spelling is preserved, not rewritten to a canonical one.
     assert_eq!(
-        work::load(&root, &later).expect("load").updated_at,
+        work::load(&root, &obj(&later)).expect("load").updated_at,
         "2026-08-19T09:00:00-03:00"
     );
 
     for invalid in ["", "yesterday", "2026-08-19", "1755610000"] {
-        rewrite(&root, &later, |value| {
+        rewrite(&root, &obj(&later), |value| {
             value["updated_at"] = json!(invalid);
         });
-        let error = work::load(&root, &later).expect_err(invalid);
+        let error = work::load(&root, &obj(&later)).expect_err(invalid);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{invalid:?}");
         assert!(error.message.contains("RFC3339"), "{error}");
     }
@@ -917,7 +968,7 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
     let object = new_object(&root, "the work");
     work::start(
         &root,
-        &object,
+        &obj(&object),
         Some("underway"),
         engr::rules::Attempt::FIRST,
     )
@@ -927,19 +978,25 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
         "obj:{}",
         engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact")
     );
-    let error = work::add_dependency(&root, &object, &absent, None, engr::rules::Attempt::FIRST)
-        .expect_err("the library path is not a way around the rule");
+    let error = work::add_dependency(
+        &root,
+        &obj(&object),
+        &absent,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect_err("the library path is not a way around the rule");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
     let error = work::add_blocker(
         &root,
-        &object,
+        &obj(&object),
         Some("waiting"),
         Some(&absent),
         engr::rules::Attempt::FIRST,
     )
     .expect_err("a blocker target is the same rule");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
-    let stored = work::load(&root, &object).expect("work");
+    let stored = work::load(&root, &obj(&object)).expect("work");
     assert!(stored.dependencies.is_empty());
     assert!(
         stored.blockers.is_empty(),
@@ -955,7 +1012,7 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
     );
     work::add_dependency(
         &root,
-        &object,
+        &obj(&object),
         &present,
         Some("needs it first"),
         engr::rules::Attempt::FIRST,
@@ -963,13 +1020,13 @@ fn a_dependency_or_blocker_target_must_exist_when_it_is_written() {
     .expect("add");
     work::add_blocker(
         &root,
-        &object,
+        &obj(&object),
         Some("waiting on review"),
         None,
         engr::rules::Attempt::FIRST,
     )
     .expect("blocker");
-    let stored = work::load(&root, &object).expect("work");
+    let stored = work::load(&root, &obj(&object)).expect("work");
     assert_eq!(stored.dependencies.len(), 1);
     assert_eq!(stored.blockers.len(), 1);
 }
@@ -988,12 +1045,12 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     let object = new_object(&root, "the owner");
     work::start(
         &root,
-        &object,
+        &obj(&object),
         Some("underway"),
         engr::rules::Attempt::FIRST,
     )
     .expect("start");
-    work::load(&root, &object).expect("a sound owner");
+    work::load(&root, &obj(&object)).expect("a sound owner");
 
     // Present on disk, and not loadable.
     let path = store::object_path(&root, &object);
@@ -1001,7 +1058,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     stored["state"] = serde_json::json!("not-a-state");
     write_raw(&path, &stored).expect("write");
 
-    let error = work::load(&root, &object).expect_err("the owner will not load");
+    let error = work::load(&root, &obj(&object)).expect_err("the owner will not load");
     assert!(
         error.message.contains("cannot be read"),
         "the refusal must name the real fault: {error}"
@@ -1015,7 +1072,7 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
     // kept rather than merely a different message.
     std::fs::remove_file(&path).expect("remove");
     std::fs::remove_file(store::events_path(&root, &object)).expect("remove events");
-    let error = work::load(&root, &object).expect_err("the owner is gone");
+    let error = work::load(&root, &obj(&object)).expect_err("the owner is gone");
     assert!(error.message.contains("does not exist"), "{error}");
 }
 
@@ -1028,4 +1085,315 @@ fn work_says_its_owner_is_unreadable_rather_than_absent() {
 fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Result<()> {
     let text = engr::proof::canonical_bytes(value, "test fixture")?;
     std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
+}
+
+/// A Work owner from a bare Object id, which is what these tests hold.
+fn obj(id: &str) -> work::Owner {
+    work::Owner::Object(id.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Owner = Object | Backlog
+// ---------------------------------------------------------------------------
+//
+// #63 moved ownership without moving anything else: Work is still
+// agent-managed, still non-authoritative, still has no identity of its own. The
+// tests below pin the two halves of that. The first is that a Backlog item's
+// sidecar is the same sidecar — same shape, same rules, a separate file. The
+// rest are the one thing the second owner kind actually costs, which is that a
+// Backlog item, unlike an Object, can be removed.
+
+use engr::backlog::Prepared as BacklogPrepared;
+
+/// A Work owner from a bare Backlog id.
+fn bl(id: &str) -> work::Owner {
+    work::Owner::Backlog(id.to_owned())
+}
+
+fn backlog_item(root: &Path, topic: &str, text: &str) -> String {
+    engr::backlog::create(root, topic, text, Vec::new(), &BacklogPrepared::first())
+        .expect("backlog item")
+        .id
+}
+
+fn on_backlog_add(root: &Path, id: &str) -> BacklogPrepared {
+    BacklogPrepared::first()
+        .against(engr::backlog::Precondition::section_absent(root, id).expect("observe"))
+}
+
+fn on_backlog_section(root: &Path, id: &str, section: u64) -> BacklogPrepared {
+    BacklogPrepared::first()
+        .against(engr::backlog::Precondition::section(root, id, section).expect("observe"))
+}
+
+fn on_backlog_merge(root: &Path, id: &str, destination: u64, source: u64) -> BacklogPrepared {
+    BacklogPrepared::first().against(
+        engr::backlog::Precondition::merge(root, id, destination, source).expect("observe"),
+    )
+}
+
+/// The second owner kind is the same sidecar in a different directory.
+///
+/// Nothing about the shape, the limits or the API changes with the owner — the
+/// only visible difference is where the file lands and what `ids` calls it.
+#[test]
+fn a_backlog_item_keeps_execution_memory_the_same_way_an_object_does() {
+    let (_dir, root) = workspace();
+    let object = new_object(&root, "durable knowledge");
+    let item = backlog_item(&root, "unresolved topic", "the first point");
+
+    work::start(
+        &root,
+        &obj(&object),
+        Some("from the record"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("object sidecar");
+    work::start(
+        &root,
+        &bl(&item),
+        Some("from the staging"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("backlog sidecar");
+
+    let expected = store::engr_dir(&root)
+        .join("work")
+        .join("backlog")
+        .join(format!("{item}.json"));
+    assert!(
+        expected.is_file(),
+        "the owner kind is the directory, and nothing else says it"
+    );
+    assert_eq!(work::path(&root, &bl(&item)), expected);
+
+    // Two owners, two sidecars, no shared state.
+    work::add_item(&root, &obj(&object), "a step", engr::rules::Attempt::FIRST).expect("step");
+    assert!(work::load(&root, &bl(&item))
+        .expect("load")
+        .items
+        .is_empty());
+    assert_eq!(
+        work::load(&root, &obj(&object))
+            .expect("load")
+            .summary
+            .as_deref(),
+        Some("from the record")
+    );
+
+    // Enumeration covers both, deterministically, Objects first.
+    assert_eq!(
+        work::ids(&root).expect("ids"),
+        vec![obj(&object), bl(&item)]
+    );
+
+    // And the sidecar changed nothing about what it belongs to: the point is
+    // still unresolved, which is the whole reason Work is not authority.
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("item")
+            .sections
+            .len(),
+        1
+    );
+}
+
+/// A sidecar belongs to a Backlog item that exists, checked the same way.
+#[test]
+fn work_cannot_be_started_for_a_backlog_item_that_does_not_exist() {
+    let (_dir, root) = workspace();
+    let absent = engr::model::new_id();
+    let error = work::start(&root, &bl(&absent), None, engr::rules::Attempt::FIRST)
+        .expect_err("no such backlog item");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+}
+
+/// The owner invariant holds on read for the second kind too.
+#[test]
+fn an_orphan_backlog_sidecar_is_refused_rather_than_listed() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "topic", "point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("start");
+
+    let orphan = engr::model::new_id();
+    let sound: Value = store::read_json(&work::path(&root, &bl(&item))).expect("read");
+    write_raw(&work::path(&root, &bl(&orphan)), &sound).expect("write");
+
+    let error = work::load(&root, &bl(&orphan)).expect_err("a sidecar for nothing");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("belongs to nothing"), "{error}");
+    assert!(
+        error.message.contains("backlog item engr:backlog:"),
+        "the message names the kind, because a bare id no longer says which: {error}"
+    );
+
+    work::load(&root, &bl(&item)).expect("the valid sidecar still loads");
+}
+
+/// Work does not decide whether an individual point can be resolved.
+///
+/// The guard is on the owner's *removal*, not on Backlog's lifecycle. Consuming
+/// a point that leaves the item standing is untouched by it, which is what keeps
+/// execution memory from becoming a precondition for ordinary progress.
+#[test]
+fn a_point_that_is_not_the_last_is_consumed_while_work_is_kept() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "two points", "the first");
+    let second = engr::backlog::add_section(
+        &root,
+        &item,
+        "the second",
+        Vec::new(),
+        &on_backlog_add(&root, &item),
+    )
+    .expect("second point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("start");
+
+    let removed_item = engr::backlog::consume_section(
+        &root,
+        &item,
+        second,
+        &on_backlog_section(&root, &item, second),
+    )
+    .expect("an ordinary consume is not the guard's business");
+    assert!(!removed_item, "the item still has a point in it");
+
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("item")
+            .sections
+            .len(),
+        1
+    );
+    work::load(&root, &bl(&item)).expect("the sidecar is untouched");
+}
+
+/// Merging points is not a site for the guard at all.
+///
+/// The destination survives a merge, so the owner does, so a sidecar cannot be
+/// orphaned by one. A guard here would refuse something that was never a risk.
+#[test]
+fn merging_backlog_points_is_not_blocked_by_execution_memory() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "consolidating", "the destination");
+    let source = engr::backlog::add_section(
+        &root,
+        &item,
+        "the source",
+        Vec::new(),
+        &on_backlog_add(&root, &item),
+    )
+    .expect("source point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("start");
+
+    engr::backlog::merge_into(
+        &root,
+        &item,
+        1,
+        source,
+        "one point saying both things",
+        Vec::new(),
+        &on_backlog_merge(&root, &item, 1, source),
+    )
+    .expect("a merge keeps its destination, so the owner survives");
+
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("item")
+            .sections
+            .len(),
+        1
+    );
+    work::load(&root, &bl(&item)).expect("the sidecar is untouched");
+}
+
+/// The one place the invariant has to be enforced.
+///
+/// Consuming the last point removes the item, and a sidecar may not outlive
+/// what it belongs to. The refusal is explicit rather than a cascade, so a
+/// `paused` sidecar — a human's stop signal — cannot disappear inside an
+/// operation about something else.
+#[test]
+fn the_last_point_is_not_consumed_while_the_item_still_owns_work() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "one point", "the only point");
+    work::start(
+        &root,
+        &bl(&item),
+        Some("halfway through"),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("start");
+    work::set_state(
+        &root,
+        &bl(&item),
+        State::Paused,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("a human stopped this");
+
+    let before = std::fs::read(work::path(&root, &bl(&item))).expect("sidecar bytes");
+    let error =
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect_err("the item would go, and its execution memory with it");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error
+            .message
+            .contains(&format!("engr work rm engr:backlog:{}", compact(&item))),
+        "the refusal names the way through: {error}"
+    );
+
+    // Nothing moved. Not the item, not its point, not the stop signal.
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("item")
+            .sections
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(work::path(&root, &bl(&item))).expect("after"),
+        before
+    );
+    assert_eq!(
+        work::load(&root, &bl(&item)).expect("load").state,
+        State::Paused
+    );
+
+    // Discarding the sidecar deliberately is what clears the way, and the
+    // deletion still reports that a stop signal went with it.
+    let removed =
+        work::remove(&root, &bl(&item), engr::rules::Attempt::FIRST).expect("explicit removal");
+    assert!(removed.was_paused);
+    assert!(
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect("now the item may go")
+    );
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect_err("resolved")
+            .code,
+        engr::EXIT_NOT_FOUND
+    );
+    assert!(work::ids(&root).expect("ids").is_empty());
+}
+
+/// An unreadable sidecar is still a sidecar.
+///
+/// The guard asks whether the file is there, not whether it loads — otherwise
+/// corrupting a sidecar would be the way past the invariant, and the workspace
+/// would be left holding bytes for an owner that no longer exists.
+#[test]
+fn a_corrupt_sidecar_still_holds_the_owner_in_place() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "one point", "the only point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("start");
+    std::fs::write(work::path(&root, &bl(&item)), "not json at all").expect("corrupt it");
+
+    let error =
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect_err("a broken sidecar is not an absent one");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(engr::backlog::load(&root, &item).is_ok());
 }
