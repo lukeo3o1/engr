@@ -71,6 +71,17 @@ pub fn effective(root: &Path, id: &str) -> Result<Object> {
     Ok(replay(root, id, false)?.0)
 }
 
+/// Identities present in either required materialized projections or admitted
+/// history. Validation remains on the read path; discovery must not erase an
+/// EventStore-established Object merely because its projection is missing.
+pub fn object_ids(root: &Path) -> Result<Vec<String>> {
+    let mut ids = store::object_ids(root)?;
+    ids.extend(store::event_ids(root)?);
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// Read one current target section through the same effective authority used by
 /// every read surface. Reference admission must never pin a stale projection
 /// while an admitted recovery tail already carries newer wording.
@@ -352,6 +363,7 @@ pub struct Report {
     pub standing_on_unreadable: Vec<StandsOnUnreadable>,
     pub broken_replacements: Vec<BrokenReplacement>,
     pub unprojected: usize,
+    pub projection_missing: bool,
     pub uncommitted: Option<bool>,
 }
 
@@ -363,6 +375,7 @@ impl Report {
             && self.standing_on_missing.is_empty()
             && self.standing_on_unreadable.is_empty()
             && self.broken_replacements.is_empty()
+            && !self.projection_missing
             && self.unprojected == 0
     }
 }
@@ -545,6 +558,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             .iter()
             .filter(|event| event.rev > projection_rev)
             .count(),
+        projection_missing: persisted.is_none(),
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })
 }

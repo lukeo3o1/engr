@@ -195,7 +195,7 @@ fn canonical_reference(id: &str) -> String {
 
 /// The abbreviation width to use across one command's output.
 pub fn width(root: &Path) -> usize {
-    store::object_ids(root)
+    ops::object_ids(root)
         .map(|ids| store::abbrev_len(&ids))
         .unwrap_or(8)
 }

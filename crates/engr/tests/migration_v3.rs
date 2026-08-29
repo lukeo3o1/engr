@@ -80,6 +80,45 @@ fn history(root: &Path, object: &Value) {
     .expect("events");
 }
 
+#[test]
+fn missing_migration_manifest_gives_recovery_only_with_proven_phase_evidence() {
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+
+    let predecessor_workspace = tempfile::tempdir().expect("predecessor");
+    predecessor(predecessor_workspace.path(), &[object(id, "predecessor")]);
+    std::fs::create_dir_all(store::engr_dir(predecessor_workspace.path()).join("migration-v3"))
+        .expect("marker");
+    let predecessor_error = store::migrate(predecessor_workspace.path()).expect_err("manifest");
+    assert!(predecessor_error.message.contains("has not advanced"));
+    assert!(predecessor_error
+        .message
+        .contains("discarded and prepared again"));
+
+    let current = tempfile::tempdir().expect("current");
+    store::init(current.path()).expect("init");
+    std::fs::create_dir_all(store::engr_dir(current.path()).join("migration-v3")).expect("marker");
+    let current_error = store::migrate(current.path()).expect_err("manifest");
+    assert!(current_error
+        .message
+        .contains("publication may have completed"));
+    assert!(current_error.message.contains("do not remove the marker"));
+    assert!(!current_error.message.contains("discarded"));
+
+    let malformed = tempfile::tempdir().expect("malformed");
+    store::init(malformed.path()).expect("init");
+    std::fs::write(
+        store::engr_dir(malformed.path()).join("format.json"),
+        "not json",
+    )
+    .expect("corrupt authority");
+    std::fs::create_dir_all(store::engr_dir(malformed.path()).join("migration-v3"))
+        .expect("marker");
+    let malformed_error = store::migrate(malformed.path()).expect_err("fail closed");
+    assert!(malformed_error.message.contains("format.json"));
+    assert!(!malformed_error.message.contains("has not advanced"));
+    assert!(!malformed_error.message.contains("discarded"));
+}
+
 fn event(rev: u64, payload: Payload) -> Event {
     let payload_sha256 = payload.sha256().expect("payload hash");
     Event {

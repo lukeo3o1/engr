@@ -699,6 +699,22 @@ fn verify_reads_referenced_targets_through_effective_authority() {
         ops::effective(&root, &target).is_ok(),
         "the events reconstruct it"
     );
+    assert!(
+        ops::object_ids(&root)
+            .expect("discover Objects")
+            .contains(&target),
+        "enumeration retains an Object established by admitted history"
+    );
+    let target_report = ops::verify(&root, &target).expect("verify reconstructed target");
+    assert!(target_report.projection_missing);
+    assert!(
+        !target_report.passed(),
+        "a required projection is still unhealthy"
+    );
+    assert!(
+        !store::object_path(&root, &target).exists(),
+        "read-only discovery and verification never materialize authority"
+    );
 
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(

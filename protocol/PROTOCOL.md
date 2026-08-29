@@ -2552,6 +2552,8 @@ exactly 26 lowercase Crockford Base32 characters using
 Local standalone forms are `engr:obj:<id>`, `engr:obj:<id>:<section>`,
 `engr:backlog:<id>` and `engr:backlog:<id>:<section>`. A Git snapshot selector
 may follow as `@<commit>`; it selects an as-of snapshot and is not identity.
+CLI arguments documented as standalone engr references consume these canonical
+forms, including references copied from machine-readable command output.
 Backlog `subjects[]` and `produced[]` name current resources, so they refuse it.
 Embedded references omit `engr:` and pair their namespace-relative `ref` with
 `kind: "engr"`. The shared parser owns syntax only: each caller decides which
