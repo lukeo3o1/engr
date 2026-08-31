@@ -592,7 +592,10 @@ is bound to, and the exact payload:
 `section.delete`, `section.merge` — and not the Event type. What is being asked
 for and what enters history are two statements, and the Challenge makes the
 first. `value` is the same payload the resulting Event carries, so there is one
-schema rather than two that have to agree.
+schema rather than two that have to agree — with one member settled later: its
+`admitted.at` says when the value was put up, which is what `created_at` says
+about the envelope around it, and the record replaces it with the instant the act
+was admitted.
 
 `generator.fingerprint` is the opaque identity of the generator that minted the
 Challenge. A pending Challenge is not migrated across incompatible generators:

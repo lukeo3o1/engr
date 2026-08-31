@@ -469,13 +469,53 @@ pub enum CandidateState {
 /// older identical Challenge — restored or copied after a later one was
 /// applied — be reported and cleaned up as though a person had answered for it.
 /// Nobody ever did.
+/// Whether this Event is the admission of exactly this Challenge.
+///
+/// Everything is compared but the instant the Section value was admitted at, and
+/// that exception is the whole of what the stamp costs. A Challenge freezes
+/// *which* act, against *which* Object, at *which* revision, through *which*
+/// door — and the Event must match all of it. It cannot also freeze *when* the
+/// act was admitted, because that had not happened yet when the question was
+/// asked.
+///
+/// Nothing is loosened by leaving it out. `admitted.at` is not a fact a person
+/// assents to; it is a fact the admission creates.
 fn is_admission_of(id: &str, event: &Event, candidate: &Candidate, applied_rev: u64) -> bool {
     event.rev == applied_rev
         && id == candidate.object()
-        && event.action == candidate.payload.action
+        && same_act(&event.action, &candidate.payload.action)
         && event
             .human_confirmation()
             .is_some_and(|confirmation| confirmation.challenge == candidate.challenge.id)
+}
+
+/// Two actions that differ in nothing a person was asked about.
+fn same_act(left: &Action, right: &Action) -> bool {
+    let (mut left, mut right) = (left.clone(), right.clone());
+    for action in [&mut left, &mut right] {
+        if let Some(value) = action.value_mut() {
+            value.admitted.at = String::new();
+        }
+    }
+    left == right
+}
+
+/// Stamp the instant the Section value is being admitted at.
+///
+/// `admitted.by` is frozen with the rest of the question, because which door a
+/// value comes through is part of what a person assents to. `admitted.at` is
+/// not: it is when the admission happened, and at prepare it has not happened.
+///
+/// A Challenge can sit for hours before somebody answers it, so carrying the
+/// preparation instant into the record would persist an admission time that
+/// predates the admission — a false statement in the one place the record exists
+/// to be true. The Challenge keeps its own copy as "when this was put up",
+/// beside `created_at` which says the same thing about the envelope.
+fn admitted_now(mut action: Action) -> Action {
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = now();
+    }
+    action
 }
 
 /// Classify a Challenge from the same effective projection and durable Event
@@ -1314,10 +1354,14 @@ fn admit_agent_locked(
     }
 
     let review_digest = checked.map(|review| review.review_digest);
+    // Stamped here for the same reason the Human path stamps at confirm: the
+    // instant belongs to the admission, and this is it. The Agent path has no
+    // waiting human, so the two are close — but "close" is not a contract, and
+    // one rule is easier to keep than one rule with an exception.
     let event = Event::sealed(
         &payload.object,
         crate::model::new_id(),
-        payload.action.clone(),
+        admitted_now(payload.action.clone()),
         before.rev + 1,
         agent_admission(review_digest),
     )?;
@@ -1666,7 +1710,7 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     let event = Event::sealed(
         &id,
         crate::model::new_id(),
-        candidate.payload.action.clone(),
+        admitted_now(candidate.payload.action.clone()),
         object.rev + 1,
         // The Event keeps the two members durable provenance needs. The rest
         // of what the human was shown lived in the Challenge, and the Challenge is
@@ -1770,4 +1814,14 @@ pub fn content(
 /// separate facts for the reason migration makes obvious.
 pub fn value(content: Content, by: Admission) -> SectionValue {
     SectionValue::new(SectionAdmitted::new(by, now()), content)
+}
+
+/// The Section value as the record will hold it, given the moment it was
+/// admitted.
+///
+/// Public so a caller that builds an Event outside the gate — there is no such
+/// caller today, and the boundary refuses one anyway — cannot be the reason the
+/// two spellings drift apart.
+pub fn admitted_at(action: Action) -> Action {
+    admitted_now(action)
 }

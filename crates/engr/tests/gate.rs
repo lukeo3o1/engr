@@ -2442,3 +2442,81 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
         "nothing was admitted"
     );
 }
+
+/// A Section is admitted when somebody admits it, not when somebody asked.
+///
+/// `admitted.by` is frozen with the rest of the question, because which door a
+/// value comes through is part of what a person assents to. `admitted.at` is
+/// not: it is a fact the admission creates, and at prepare it has not happened
+/// yet. A Challenge can sit for a long time before it is answered, so carrying
+/// the preparation instant into the record would persist an admission time that
+/// predates the admission — a false statement in the one place the record exists
+/// to be true.
+///
+/// The cost is that the Event's action is no longer byte-identical to the frozen
+/// subject, so the already-applied comparison ignores that one member. Nothing
+/// is loosened: everything a person assented to is still compared, and the two
+/// halves of that trade are checked together here.
+#[test]
+fn a_section_is_admitted_when_it_is_admitted_and_not_when_it_was_proposed() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "when it happened");
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "wording")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+
+    let frozen = prepared
+        .candidate
+        .payload
+        .value()
+        .expect("the subject freezes a value")
+        .admitted
+        .clone();
+    // Long enough that a clock cannot make the two look alike by accident.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+    let admitted = common::admitted_code(&root, &code);
+    let stamped = admitted
+        .event
+        .action
+        .value()
+        .expect("the record holds a value")
+        .admitted
+        .clone();
+
+    assert_eq!(
+        stamped.by, frozen.by,
+        "the door is what was asked about, and it is frozen"
+    );
+    assert!(
+        stamped.at > frozen.at,
+        "and the instant is when it was admitted, not when it was put up: {} is not after {}",
+        stamped.at,
+        frozen.at
+    );
+    assert_eq!(
+        admitted.object.sections[0].admitted, stamped,
+        "the Section carries exactly what the Event admitted"
+    );
+
+    // The retry still recognises its own record. This is the half the comparison
+    // change had to keep: a crash between the append and the projection leaves a
+    // durable Event whose action now differs from the frozen subject by that one
+    // member, and reporting it as unapplied would admit the same wording twice.
+    write_raw(
+        &store::challenge_path(&root, &code).expect("path"),
+        &prepared.candidate.challenge,
+    )
+    .expect("restore the challenge a crash would have left");
+    let again = common::admitted_code(&root, &code);
+    assert_eq!(again.object.rev, 2, "the retry is idempotent");
+    assert_eq!(again.object.sections.len(), 1);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert_eq!(
+        again.object.sections[0].admitted, stamped,
+        "and reports the instant the record actually holds"
+    );
+}
