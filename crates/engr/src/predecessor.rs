@@ -815,16 +815,26 @@ pub fn decode_events(path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
             .map_err(|error| Error::new(error.code, format!("{where_}: {error}")))?;
         events.push(event);
     }
-    // Append-only and gapless from 1, which is what makes "the effective state"
-    // a well-defined question rather than a guess about which lines survived.
-    for (index, event) in events.iter().enumerate() {
-        let expected = index as u64 + 1;
+    // **Adjacent, not gapless from 1.** The released build checked exactly this
+    // and nothing more: consecutive records had to be consecutive revisions, and
+    // a retained file was free to begin wherever it began. Its own reducer said
+    // as much — "retained evidence at or below the projection may have a missing
+    // prefix" — so a workspace whose history was pruned is a shape the release
+    // wrote and told people was sound.
+    //
+    // Requiring rev 1 here would be this build strengthening a contract that is
+    // already published, and refusing to migrate records somebody made with the
+    // shipped tool. #66 verifies the predecessor *under the released historical
+    // contract*; the complete-stream rule belongs to the current generation, and
+    // its stream begins at the bootstrap Event this migration writes.
+    for pair in events.windows(2) {
         ensure!(
-            event.rev == expected,
+            pair[0].rev.checked_add(1) == Some(pair[1].rev),
             EXIT_SCHEMA,
-            "{}: predecessor history is a gapless sequence from rev 1, and rev {} is at position {expected}",
+            "{}: predecessor rev {} does not immediately follow rev {}",
             path.display(),
-            event.rev
+            pair[1].rev,
+            pair[0].rev
         );
     }
     Ok(events)
@@ -835,9 +845,40 @@ pub fn decode_events(path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
 /// Effective, not merely stored. The released build wrote the Object file after
 /// appending the Event, so a crash between the two leaves durable history the
 /// projection has not caught up with. #66 requires migration to take that tail
-/// into account, so this replays it — under the predecessor's own reducer — and
-/// then requires the stored projection, where there is one, to be exactly what
-/// that history derives.
+/// into account, so this applies it — under the predecessor's own reducer.
+///
+/// **It verifies as much as the retained history allows, and no less.** Those
+/// are two different amounts, and conflating them breaks the migration in one
+/// direction or the other.
+///
+/// The release accepted a pruned history prefix: `load_events` returned an empty
+/// list for a missing file and checked only that consecutive records held
+/// consecutive revisions, and its own reducer said in as many words that
+/// "retained evidence at or below the projection may have a missing prefix".
+/// Demanding rev 1 here would refuse workspaces the shipped tool wrote and
+/// called sound, which is this build strengthening a published contract
+/// retroactively — exactly what #66 forbids by verifying the predecessor *under
+/// the released historical contract*.
+///
+/// But migration is also where the first aggregate seal is minted, and a
+/// projection nothing can establish must not be granted one. The release had no
+/// Object-level seal at all: `verify` checked each Section's own hash and
+/// reported an unprojected tail, and never replayed history to compare against
+/// the projection. So a hand-edited title was invisible to it, and would be
+/// invisible here too if this simply trusted the file.
+///
+/// Hence three cases, each getting the strongest check its own evidence
+/// supports:
+///
+/// - **no projection** — history is all there is, so it must be able to rebuild
+///   one: it begins at rev 1 with `object_created`, and all of it is replayed.
+/// - **a projection, and history complete from rev 1** — the ordinary workspace.
+///   The whole history is replayed and the projection must be exactly what it
+///   derives, so an edit made outside the gate is refused rather than sealed.
+/// - **a projection, and a pruned prefix** — the comparison is not available to
+///   anyone, including the build that wrote the file. The Section seals are what
+///   that generation did protect, so they are checked, and only a tail starting
+///   at exactly `stored.rev + 1` is applied over it.
 pub fn effective_state(
     object_path: &Path,
     events_path: &Path,
@@ -854,18 +895,80 @@ pub fn effective_state(
         None => None,
     };
     let events = decode_events(events_path, id, history)?;
-    ensure!(
-        !events.is_empty(),
-        EXIT_SCHEMA,
-        "{id}: a predecessor Object has admitted history"
-    );
-    ensure!(
-        events[0].action == Action::ObjectCreated,
-        EXIT_SCHEMA,
-        "{id}: predecessor history begins with object_created"
-    );
+    // A history that starts at the beginning can rebuild the Object; one that
+    // does not is evidence about a tail and nothing more.
+    let complete = events
+        .first()
+        .is_some_and(|first| first.rev == 1 && first.action == Action::ObjectCreated);
+
+    let Some(mut effective) = stored else {
+        ensure!(
+            complete,
+            EXIT_SCHEMA,
+            "{id}: a predecessor Object with no projection is rebuilt from history, so that history begins with object_created at rev 1"
+        );
+        return replay(id, &events);
+    };
+
+    if complete {
+        let reconciled = replay(id, &events)?;
+        // The projection may legitimately lag its history by a tail, and may
+        // never lead it or disagree with it.
+        ensure!(
+            effective.rev <= reconciled.rev,
+            EXIT_INVARIANT,
+            "{id}: the stored predecessor projection is ahead of its own admitted history"
+        );
+        let mut replayed = Object::empty(id);
+        for event in events.iter().filter(|event| event.rev <= effective.rev) {
+            project(&mut replayed, event)?;
+        }
+        ensure!(
+            effective.title == replayed.title
+                && effective.state == replayed.state
+                && effective.rev == replayed.rev
+                && effective.next_section_id == replayed.next_section_id
+                && effective.sections == replayed.sections,
+            EXIT_INVARIANT,
+            "{id}: predecessor Object projection is not exactly derivable from admitted history"
+        );
+        return Ok(reconciled);
+    }
+
+    // A pruned prefix. Records at or below the projection are spent evidence and
+    // are not replayed — with the beginning gone, replaying them derives
+    // something the release never claimed — and a tail that skips a revision is
+    // one nothing could have arrived at.
+    let tail: Vec<&Event> = events
+        .iter()
+        .filter(|event| event.rev > effective.rev)
+        .collect();
+    if let Some(first) = tail.first() {
+        ensure!(
+            first.rev == effective.rev + 1,
+            EXIT_INVARIANT,
+            "{id}: predecessor recovery begins at rev {}, and the projection stands at rev {}",
+            first.rev,
+            effective.rev
+        );
+        for event in &tail {
+            project(&mut effective, event).map_err(|error| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{id}: predecessor history cannot reconcile: {error}"),
+                )
+            })?;
+        }
+    }
+    effective.validate()?;
+    effective.check_seals()?;
+    Ok(effective)
+}
+
+/// Rebuild an Object from a history that starts at its beginning.
+fn replay(id: &str, events: &[Event]) -> Result<Object> {
     let mut reconciled = Object::empty(id);
-    for event in &events {
+    for event in events {
         project(&mut reconciled, event).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
@@ -875,28 +978,6 @@ pub fn effective_state(
     }
     reconciled.validate()?;
     reconciled.check_seals()?;
-    if let Some(stored) = stored {
-        // The projection may legitimately lag its history by a tail, and may
-        // never lead it or disagree with it.
-        ensure!(
-            stored.rev <= reconciled.rev,
-            EXIT_INVARIANT,
-            "{id}: the stored predecessor projection is ahead of its own admitted history"
-        );
-        let mut replayed = Object::empty(id);
-        for event in events.iter().filter(|event| event.rev <= stored.rev) {
-            project(&mut replayed, event)?;
-        }
-        ensure!(
-            stored.title == replayed.title
-                && stored.state == replayed.state
-                && stored.rev == replayed.rev
-                && stored.next_section_id == replayed.next_section_id
-                && stored.sections == replayed.sections,
-            EXIT_INVARIANT,
-            "{id}: predecessor Object projection is not exactly derivable from admitted history"
-        );
-    }
     Ok(reconciled)
 }
 

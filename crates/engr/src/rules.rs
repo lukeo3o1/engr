@@ -816,6 +816,8 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         )
     })?;
 
+    // The profile, before the deserializer resolves the evidence away.
+    check_restricted_yaml(front, &where_)?;
     let front: FrontMatter = serde_norway::from_str(front)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{where_}: {error}")))?;
 
@@ -1049,6 +1051,137 @@ pub struct BoundRule {
     /// semantic input the review is actually bound to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_sha256: Option<String>,
+}
+
+/// The restricted YAML profile a Rule's front matter is read under.
+///
+/// #66 fixes it: YAML 1.2, duplicate keys invalid, custom tags invalid,
+/// anchors and aliases invalid, and only schema-required forms accepted. A
+/// typed deserializer enforces none of that. It resolves an alias into the value
+/// its anchor held, applies a tag, and takes the last of two duplicate keys —
+/// and then hands back a perfectly valid `FrontMatter` that no longer stands in
+/// any recoverable relation to the bytes it came from.
+///
+/// That matters here more than it would elsewhere, because Rule Review identity
+/// is **artifact-exact**: #66 says any byte-level change to a Rule file,
+/// "including semantically equivalent YAML reformatting", changes the
+/// ReviewDigest. Two files whose bytes differ must therefore never be one
+/// policy — and an anchor is exactly a way to write one policy twice. Left
+/// unrestricted, a reviewer reading the file and a build hashing the file are
+/// looking at two different documents.
+///
+/// The check runs on the raw front matter, before deserialization, because
+/// afterwards the evidence is gone: the constructs have already been resolved
+/// away and the typed value cannot say which of them produced it.
+///
+/// Scanning is line-oriented and deliberately conservative about strings: a `&`
+/// or `*` inside a quoted scalar is content, and a `#` begins a comment. What is
+/// rejected is a *node* carrying an anchor, an alias or a tag, which is the only
+/// place those can appear.
+fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
+    let mut keys: Vec<(usize, String)> = Vec::new();
+    for (number, line) in front.lines().enumerate() {
+        let number = number + 1;
+        let content = strip_comment(line);
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        ensure!(
+            trimmed != "---" && trimmed != "...",
+            EXIT_SCHEMA,
+            "{where_}:{number}: a rule's front matter is one document"
+        );
+        // What follows a `key:` or a `-`, which is where a node begins and the
+        // only place an anchor, alias or tag may be written.
+        let node = node_of(trimmed);
+        if let Some(first) = node.chars().next() {
+            ensure!(
+                first != '&',
+                EXIT_SCHEMA,
+                "{where_}:{number}: a rule's front matter uses no YAML anchors; write the value out"
+            );
+            ensure!(
+                first != '*',
+                EXIT_SCHEMA,
+                "{where_}:{number}: a rule's front matter uses no YAML aliases; write the value out"
+            );
+            ensure!(
+                first != '!',
+                EXIT_SCHEMA,
+                "{where_}:{number}: a rule's front matter uses no YAML tags"
+            );
+        }
+        // Duplicate keys, per mapping. Indentation identifies the mapping, which
+        // is enough for the shallow shapes this schema accepts and refuses
+        // rather than guesses at anything deeper.
+        if let Some((key, _)) = split_key(trimmed) {
+            let indent = content.len() - content.trim_start().len();
+            keys.retain(|(depth, _)| *depth < indent);
+            ensure!(
+                !keys.iter().any(|(depth, seen)| *depth == indent && seen == &key),
+                EXIT_SCHEMA,
+                "{where_}:{number}: {key:?} appears twice in one mapping, and a rule has one value for it"
+            );
+            keys.push((indent, key));
+        }
+    }
+    Ok(())
+}
+
+/// A line with any trailing comment removed, respecting quotes.
+fn strip_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        match quote {
+            Some(open) if *byte == open => quote = None,
+            Some(_) => {}
+            None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
+            None if *byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) => {
+                return &line[..index];
+            }
+            None => {}
+        }
+    }
+    line
+}
+
+/// The value part of `key: value`, or of `- value`, or the line itself.
+fn node_of(trimmed: &str) -> &str {
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return node_of(rest.trim());
+    }
+    if trimmed == "-" {
+        return "";
+    }
+    match split_key(trimmed) {
+        Some((_, value)) => value,
+        None => trimmed,
+    }
+}
+
+/// `key: value` split at the first unquoted colon followed by space or end.
+fn split_key(trimmed: &str) -> Option<(String, &str)> {
+    let candidate = trimmed.strip_prefix("- ").map(str::trim).unwrap_or(trimmed);
+    let bytes = candidate.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        match quote {
+            Some(open) if *byte == open => quote = None,
+            Some(_) => continue,
+            None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
+            None if *byte == b':' && (index + 1 == bytes.len() || bytes[index + 1] == b' ') => {
+                let key = candidate[..index].trim().trim_matches(['"', '\'']);
+                if key.is_empty() {
+                    return None;
+                }
+                return Some((key.to_owned(), candidate[index + 1..].trim()));
+            }
+            None => continue,
+        }
+    }
+    None
 }
 
 /// The rule-id grammar, in one place so the loader and the snapshot check

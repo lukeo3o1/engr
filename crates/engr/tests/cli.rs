@@ -5412,3 +5412,143 @@ fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
     );
     assert!(engr::backlog::load(root, &item).is_err());
 }
+
+/// A human asked to overrule a review is shown the review they are overruling,
+/// and shown the same one an hour later.
+///
+/// Everything on this screen that decides the answer comes out of the frozen
+/// subject: which attempt it was, whether the review **failed** or was
+/// **exhausted** — a distinction the Event deliberately loses, since both become
+/// `overridden` in history — the exact Rule set that was reviewed, and the
+/// agent's own account of why it could not pass. None of that is reconstructible
+/// afterwards, and a screen that recomputed the Rule list from live state would
+/// let a Rule edited in the meantime change what a frozen Challenge appears to
+/// say while the Challenge itself did not move.
+#[test]
+fn an_override_screen_shows_the_review_it_is_overruling_and_keeps_showing_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "governed record"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    // The policy arrives after the record, as it does in a real workspace.
+    std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 2\n  on_exhaustion: human_confirmation\nbased_on:\n  - path: AGENTS.md\n---\n\n# Careful\n\nRead this first.\n",
+    )
+    .expect("rule");
+
+    // The digest an agent attests is the one engr surfaces when it refuses the
+    // ungoverned attempt, which is the whole of how an agent obtains one.
+    let add = |extra: &[&str]| -> Vec<String> {
+        let mut args: Vec<String> = [
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "reviewed wording",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        args
+    };
+    fn borrowed(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+
+    let bare = add(&[]);
+    let refused = run_engr(root, &borrowed(&bare));
+    assert!(
+        !refused.status.success(),
+        "a governed mutation needs a review"
+    );
+    let surfaced = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let digest = surfaced
+        .split_whitespace()
+        .find(|word| word.starts_with("1:"))
+        .unwrap_or_else(|| panic!("the refusal surfaces the digest: {surfaced}"))
+        .to_owned();
+
+    let reviewed = add(&[
+        "--review",
+        &digest,
+        "--reviewed-rule",
+        "careful",
+        "--review-attempt",
+        "3",
+        "--review-result",
+        "exhausted",
+        "--review-explanation",
+        "the rule wants a basis this change cannot cite",
+    ]);
+    let candidate = prepare(root, &borrowed(&reviewed));
+    let code = candidate["id"].as_str().expect("challenge").to_owned();
+
+    // Frozen inside the subject, so it is under `Challenge.digest`. A human
+    // asked to overrule something is entitled to have the thing they are
+    // overruling be part of what their answer is bound to.
+    let review = &candidate["subject"]["data"]["review"];
+    assert_eq!(review["result"], "exhausted");
+    assert_eq!(review["attempt"], 3);
+    assert_eq!(review["rules"], serde_json::json!(["careful"]));
+    assert_eq!(
+        review["explanation"],
+        "the rule wants a basis this change cannot cite"
+    );
+
+    let screen =
+        String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        screen.contains("EXHAUSTED at attempt 3"),
+        "the screen distinguishes exhausted from failed, and says which try: {screen}"
+    );
+    assert!(
+        screen.contains("careful"),
+        "and names the Rule set that was reviewed: {screen}"
+    );
+    assert!(
+        screen.contains("the rule wants a basis this change cannot cite"),
+        "and the reason the agent gave, which nothing can reconstruct: {screen}"
+    );
+
+    // Add a second Rule. The frozen question has not moved, so neither does the
+    // screen — and because the review material has moved, the screen says so
+    // rather than quietly presenting a review nobody could now confirm.
+    std::fs::write(
+        engr::rules::dir(root).join("second.md"),
+        "---\nid: second\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Second\n\nAnd another.\n",
+    )
+    .expect("a second rule");
+
+    let after = String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        after.contains("EXHAUSTED at attempt 3")
+            && after.contains("the rule wants a basis this change cannot cite"),
+        "the frozen review is what it was: {after}"
+    );
+    assert!(
+        !after.contains("second"),
+        "a Rule written afterwards was not part of what was reviewed: {after}"
+    );
+    assert!(
+        after.contains("the applicable Rules have moved"),
+        "and the screen says the code is no longer good: {after}"
+    );
+
+    let refused = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        !refused.status.success(),
+        "confirming a challenge whose review material moved admits nothing"
+    );
+}

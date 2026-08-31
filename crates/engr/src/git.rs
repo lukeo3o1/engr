@@ -372,6 +372,22 @@ pub fn repo_root(root: &Path) -> Option<PathBuf> {
     run(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// Where git keeps this repository's own local state.
+///
+/// Asked of git rather than assembled from the root, because a worktree, a
+/// submodule and a bare checkout each put it somewhere a caller would guess
+/// wrong. Absent outside a repository, which is an answer and not a failure.
+pub fn git_dir(root: &Path) -> Option<PathBuf> {
+    let answer = run(root, &["rev-parse", "--absolute-git-dir"])?;
+    Some(PathBuf::from(answer))
+}
+
+/// One directory inside the workspace, as git names it from the repository
+/// root. The public half of [`repo_relative`], for callers writing patterns
+/// git will match rather than paths it will open.
+pub fn repo_relative_dir(root: &Path, path: &Path) -> Option<String> {
+    repo_relative(root, path)
+}
 /// The type of the object this id names, without peeling it.
 ///
 /// [`exists`] asks whether a revision *reaches* a commit, which is the right

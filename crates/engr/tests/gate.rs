@@ -905,9 +905,13 @@ fn rewriting_a_challenge_is_detected_before_admission() {
         "a Challenge member with no case here is a member nothing proves is bound"
     );
     let mut populated = live.candidate.subject.clone();
-    populated.review = Some(engr::model::ReviewProvenance {
+    populated.review = Some(engr::gate::FrozenReview {
         outcome: engr::model::ReviewOutcome::Passed,
         digest: format!("1:{}", "0".repeat(64)),
+        attempt: 1,
+        result: engr::proof::ReviewResult::Passed,
+        rules: vec!["a-rule".to_owned()],
+        explanation: Some("why it could not pass".to_owned()),
     });
     assert_eq!(
         members(serde_json::to_value(&populated).expect("subject")),

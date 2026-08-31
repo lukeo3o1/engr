@@ -48,15 +48,52 @@ pub struct ObjectSubject {
     /// the Event's `data` carries. One schema, not two that have to agree.
     pub value: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<ReviewProvenance>,
+    pub review: Option<FrozenReview>,
+}
+
+/// The Rule Review a human is being asked to stand behind, frozen with the rest
+/// of the question.
+///
+/// The Event keeps two members of this — the outcome and the digest — because
+/// that is all durable provenance needs. What a *person* needs to answer is more
+/// than that, and it is not recoverable afterwards.
+///
+/// `result` is the distinction the Event deliberately loses: a review that
+/// **failed** and one that was **exhausted** both become `overridden` in
+/// history, and they are not the same thing to overrule. `attempt` says which
+/// try this was. `rules` names the exact Rule set that was reviewed, so the
+/// screen renders what was actually considered rather than recomputing the list
+/// from live state — a Rule edited afterwards would otherwise change what a
+/// frozen Challenge appears to say. `explanation` is the agent's own account of
+/// why it could not pass, which nothing can reconstruct.
+///
+/// All of it is inside `subject`, so all of it is under `Challenge.digest`. A
+/// human asked to overrule something is entitled to have the thing they are
+/// overruling be part of what their answer is bound to.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenReview {
+    pub outcome: ReviewOutcome,
+    pub digest: String,
+    pub attempt: u32,
+    pub result: crate::proof::ReviewResult,
+    pub rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+}
+
+impl FrozenReview {
+    /// What the Event records out of it: outcome and digest, and nothing else.
+    pub fn provenance(&self) -> ReviewProvenance {
+        ReviewProvenance {
+            outcome: self.outcome,
+            digest: self.digest.clone(),
+        }
+    }
 }
 
 impl ObjectSubject {
-    pub fn of(
-        payload: &Payload,
-        expected_rev: u64,
-        review: Option<ReviewProvenance>,
-    ) -> Result<Self> {
+    pub fn of(payload: &Payload, expected_rev: u64, review: Option<FrozenReview>) -> Result<Self> {
         let value = serde_json::to_value(&payload.action)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("challenge subject: {error}")))?;
         let value = value
@@ -974,8 +1011,8 @@ fn checked_review(
 ///
 /// A pass ratifies; a failure or an exhausted sequence that a human confirms
 /// anyway is an override, and the record must not lose the difference.
-fn frozen_review(review: Option<&crate::proof::CandidateReview>) -> Option<ReviewProvenance> {
-    review.map(|review| ReviewProvenance {
+fn frozen_review(review: Option<&crate::proof::CandidateReview>) -> Option<FrozenReview> {
+    review.map(|review| FrozenReview {
         outcome: match review.result {
             crate::proof::ReviewResult::Passed => ReviewOutcome::Passed,
             crate::proof::ReviewResult::Failed | crate::proof::ReviewResult::Exhausted => {
@@ -983,6 +1020,10 @@ fn frozen_review(review: Option<&crate::proof::CandidateReview>) -> Option<Revie
             }
         },
         digest: review.review_digest.clone(),
+        attempt: review.attempt,
+        result: review.result,
+        rules: review.rules.iter().map(|rule| rule.id.clone()).collect(),
+        explanation: review.explanation.clone(),
     })
 }
 
@@ -992,7 +1033,7 @@ fn mint(
     root: &Path,
     payload: &Payload,
     expected_rev: u64,
-    review: Option<ReviewProvenance>,
+    review: Option<FrozenReview>,
     report: Option<crate::proof::CandidateReview>,
 ) -> Result<Prepared> {
     let subject = ObjectSubject::of(payload, expected_rev, review)?;
@@ -1627,7 +1668,17 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         crate::model::new_id(),
         candidate.payload.action.clone(),
         object.rev + 1,
-        human_admission(candidate.code(), candidate.subject.review.clone()),
+        // The Event keeps the two members durable provenance needs. The rest
+        // of what the human was shown lived in the Challenge, and the Challenge is
+        // discarded the moment it is answered.
+        human_admission(
+            candidate.code(),
+            candidate
+                .subject
+                .review
+                .as_ref()
+                .map(FrozenReview::provenance),
+        ),
     )?;
 
     let before = object;

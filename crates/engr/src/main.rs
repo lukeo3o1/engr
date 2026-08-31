@@ -2405,22 +2405,46 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             ));
         }
     }
-    // The Rule Review is rebound from live Rules rather than read off the
-    // Challenge, so what the screen says is what confirmation will find.
+    // Rendered from the frozen review, not recomputed from live Rules.
+    //
+    // The two are different claims and only one of them is the question. What a
+    // person is being asked to overrule is what the agent actually hit: this
+    // attempt, this outcome, this Rule set, this explanation. Recomputing the
+    // Rule list from live state means a Rule edited after the code was minted
+    // silently changes what a frozen Challenge appears to say — and confirmation
+    // would still refuse, because it rebinds and compares, so the screen would
+    // have been describing something that could not be confirmed.
+    //
+    // Live Rules still decide staleness; they do not decide what is displayed.
     if let Some(review) = &candidate.subject.review {
-        let outcome = match review.outcome {
-            model::ReviewOutcome::Passed => "passed",
-            model::ReviewOutcome::Overridden => {
-                "failed or exhausted — confirming this overrides it"
+        let outcome = match review.result {
+            engr::proof::ReviewResult::Passed => "passed".to_owned(),
+            engr::proof::ReviewResult::Failed => {
+                "FAILED — confirming this overrides the agent's own review".to_owned()
             }
+            engr::proof::ReviewResult::Exhausted => format!(
+                "EXHAUSTED at attempt {} — confirming this admits work no passing review allowed",
+                review.attempt
+            ),
         };
         out.push_str(&format!(
             "Review     {outcome}\nDigest     {}\n",
             review.digest
         ));
-        if let Ok(rules) = live_rules(root, candidate) {
-            if !rules.is_empty() {
-                out.push_str(&format!("Rules      {}\n", rules.join(", ")));
+        if !review.rules.is_empty() {
+            out.push_str(&format!("Rules      {}\n", review.rules.join(", ")));
+        }
+        // The one part nothing can reconstruct. A human overruling a review has
+        // to read the reason it was offered, or the override means nothing.
+        if let Some(explanation) = &review.explanation {
+            out.push_str(&format!("Reason     {explanation}\n"));
+        }
+        if let Ok(live) = live_rules(root, candidate) {
+            if live != review.rules {
+                out.push_str(
+                    "note       the applicable Rules have moved since this was prepared; \
+                     confirming will be refused, prepare it again\n",
+                );
             }
         }
     }

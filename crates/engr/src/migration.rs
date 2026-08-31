@@ -509,12 +509,21 @@ fn preflight(root: &Path) -> Result<(MigrationSubject, Vec<crate::predecessor::O
         } else {
             None
         };
-        ensure!(
-            events_path.exists(),
-            EXIT_SCHEMA,
-            "{id}: a predecessor Object has admitted history"
-        );
-        let history = capture(&mut source, root, &events_path)?;
+        // A missing history file is a shape the release wrote: its own
+        // `load_events` returned an empty list for one, so an Object whose
+        // history was pruned away entirely is still a workspace it called
+        // sound. What must exist is one of the two, and `effective_state`
+        // decides which of them is authority.
+        let history = if events_path.exists() {
+            capture(&mut source, root, &events_path)?
+        } else {
+            ensure!(
+                stored.is_some(),
+                EXIT_SCHEMA,
+                "{id}: a predecessor Object has neither a projection nor any admitted history"
+            );
+            String::new()
+        };
         let predecessor = crate::predecessor::effective_state(
             &object_path,
             &events_path,
@@ -589,8 +598,10 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
     // Before anything local is written. The stage and the minted Challenge both
     // live under `local/`, and the predecessor's own `.gitignore` names neither —
     // so a person who prepares a migration and then commits would otherwise put a
-    // live challenge code into the repository.
-    ensure_local_ignored(root)?;
+    // live challenge code into the repository. Done through git's local exclude,
+    // so asking the question changes no tracked byte; the tracked line is part of
+    // the publication a human confirms.
+    exclude_local_from_git(root)?;
     let data = serde_json::to_value(&subject)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
     let taken = pending_challenge_codes(root)?;
@@ -706,6 +717,20 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
         "the confirmed migration is not the one that was staged"
     );
 
+    // A destination staged by an earlier run is what finishes the transaction.
+    // Publication overwrites the predecessor Object files in place, so once it
+    // has begun there is no predecessor left to re-derive from — and there does
+    // not need to be, because every staged byte is checked back against the
+    // digest the confirmed subject pins before any of it is published.
+    if let Some(ready) = confirmed_destination(root, &challenge.id, &subject)? {
+        let sections = subject
+            .objects
+            .iter()
+            .map(|one| one.sections as usize)
+            .sum();
+        return finish(root, challenge, ready, sections);
+    }
+
     // Re-derive from the predecessor as it stands now, and require it to be the
     // predecessor the human was shown. A file edited between the question and
     // the answer changes what the answer would mean.
@@ -717,12 +742,14 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
         challenge.id
     );
 
-    // One instant for the whole migration, taken from the Challenge itself: a
-    // clock read per Object would stamp one confirmation with as many admission
-    // times as it happened to take.
+    // One instant for the whole migration, read once here. It is the moment the
+    // migration was admitted, not the moment it was proposed: a Challenge can
+    // sit for days, and #66 has Event metadata record the confirmation. A clock
+    // read per Object would stamp one confirmation with as many admission times
+    // as it happened to take.
     let admitted = EventAdmission {
         by: Admission::Human,
-        at: challenge.created_at.clone(),
+        at: now(),
         confirmation: Some(HumanConfirmation {
             challenge: challenge.id.clone(),
         }),
@@ -752,12 +779,66 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
         sections += one.object.sections.len();
         derived.push(one);
     }
+    stage_destination(root, &challenge.id, &derived)?;
+    let ready = confirmed_destination(root, &challenge.id, &subject)?.ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            "the destination was staged and cannot be read back".to_owned(),
+        )
+    })?;
+    finish(root, challenge, ready, sections)
+}
 
-    publish(root, &derived)?;
-    let ids = derived.iter().map(|one| one.object.id.clone()).collect();
+/// Stage the destination and stop, which is the state a crash between staging
+/// and publication leaves behind.
+///
+/// A test seam, and deliberately a blunt one. There is no legitimate reason for
+/// a caller to want half a migration, so this is hidden from the documented
+/// surface rather than dressed up as an option — but the resumable property it
+/// exists to exercise is the one that decides whether a crash mid-publication
+/// is recoverable, and a property nothing can reach is a property nothing
+/// checks.
+#[doc(hidden)]
+pub fn stage_destination_only(root: &Path, challenge: &str) -> Result<()> {
+    store::with_lock(root, || {
+        let manifest = staged(root)?
+            .ok_or_else(|| Error::new(EXIT_INVARIANT, "no migration is staged".to_owned()))?;
+        ensure!(
+            manifest.challenge == challenge,
+            EXIT_INVARIANT,
+            "the staged migration is waiting on challenge {}, not {challenge}",
+            manifest.challenge
+        );
+        let (_, predecessors) = preflight(root)?;
+        let admitted = EventAdmission {
+            by: Admission::Human,
+            at: now(),
+            confirmation: Some(HumanConfirmation {
+                challenge: challenge.to_owned(),
+            }),
+            review: None,
+        };
+        let mut closure = RefClosure::new(root);
+        let mut derived = Vec::new();
+        for predecessor in &predecessors {
+            derived.push(derive(&mut closure, predecessor, admitted.clone())?);
+        }
+        stage_destination(root, challenge, &derived)
+    })
+}
+/// Everything from the staged destination onward, which is also the whole of
+/// what resuming has to do.
+fn finish(
+    root: &Path,
+    challenge: &crate::confirmation::Challenge,
+    ready: Vec<(String, String, String)>,
+    sections: usize,
+) -> Result<Report> {
+    publish(root, &ready)?;
+    let ids = ready.iter().map(|(id, _, _)| id.clone()).collect();
     // Last, and only after everything else landed. While `VERSION` is absent the
-    // workspace is still the predecessor and the migration is resumable; the
-    // moment it exists, every read surface is looking at the new generation.
+    // transaction is unfinished and the staged destination is what finishes it;
+    // the moment it exists, every read surface is looking at the new generation.
     store::write_generation(root)?;
     // A spent code resolves to nothing, so the file goes with the question it
     // asked — the same disposal an ordinary confirmation performs.
@@ -775,30 +856,205 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
     })
 }
 
-/// Write the destination workspace, then remove what the predecessor owned.
+/// The destination workspace, written where the predecessor cannot be harmed by
+/// it, so a crash mid-publication has something to finish from.
 ///
-/// Objects and their bootstrap streams first, the predecessor's own directories
-/// afterwards: a crash between the two leaves a workspace with both, which
-/// `VERSION`'s absence still marks as the predecessor and which the resume path
-/// rebuilds from scratch.
-fn publish(root: &Path, derived: &[Derived]) -> Result<()> {
-    for one in derived {
-        let path = store::events_path(root, &one.object.id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-        }
-        let line = crate::proof::canonical_bytes(&one.event, "Event")?;
-        store::write_text(&path, &format!("{line}\n"))?;
+/// Every path here is under `local/`, which is neither generation's authority.
+const DESTINATION: &str = "destination";
+const DESTINATION_MANIFEST: &str = "destination.json";
+
+fn destination_dir(root: &Path) -> PathBuf {
+    stage_dir(root).join(DESTINATION)
+}
+
+/// One derived Object and its bootstrap Event, as bytes with their digests.
+///
+/// The digests are what make resuming safe. Re-deriving from the predecessor is
+/// impossible once publication has begun — the predecessor Object files are the
+/// ones being overwritten — so recovery finishes forward from these bytes
+/// instead, and it may only do that if it can still prove they are the bytes the
+/// human confirmed.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+struct DestinationFile {
+    object: String,
+    /// The canonical Object bytes, and the digest the confirmed subject pins.
+    object_digest: String,
+    /// The bootstrap Event's own seal. Not in the confirmed subject — it covers
+    /// a fresh Event id and the admission instant, neither of which existed when
+    /// the question was asked — so the transaction pins it here instead, written
+    /// once and never re-minted.
+    event_digest: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+struct Destination {
+    challenge: String,
+    files: Vec<DestinationFile>,
+}
+
+/// Write the whole destination beside the predecessor, atomically.
+///
+/// Nothing canonical is touched until this returns. A crash before it leaves a
+/// predecessor workspace with a stage that names no destination, which
+/// `prepare` re-derives from scratch; a crash after it leaves one that can be
+/// finished without reading the predecessor at all.
+fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Result<()> {
+    let dir = destination_dir(root);
+    let temp = stage_dir(root).join("destination.tmp");
+    if temp.exists() {
+        fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
     }
+    fs::create_dir_all(temp.join("objects")).map_err(|error| tool_error(temp.display(), error))?;
+    fs::create_dir_all(temp.join("eventstore"))
+        .map_err(|error| tool_error(temp.display(), error))?;
+
+    let mut files = Vec::new();
     for one in derived {
         let value = serde_json::to_value(&one.object)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("object: {error}")))?;
+        let object = crate::proof::canonical_bytes(&value, "object")?;
+        let event = crate::proof::canonical_bytes(&one.event, "Event")?;
         store::write_text(
-            &store::object_path(root, &one.object.id),
-            &crate::proof::canonical_bytes(&value, "object")?,
+            &temp.join("objects").join(format!("{}.json", one.object.id)),
+            &object,
         )?;
+        store::write_text(
+            &temp
+                .join("eventstore")
+                .join(format!("{}.jsonl", one.object.id)),
+            &format!("{event}\n"),
+        )?;
+        files.push(DestinationFile {
+            object: one.object.id.clone(),
+            object_digest: one.object.digest.clone(),
+            event_digest: one.event.digest.clone(),
+        });
     }
-    // Old pending Candidate state is unsupported and is not migrated: a question
+    store::write_json(
+        &temp.join(DESTINATION_MANIFEST),
+        &Destination {
+            challenge: challenge.to_owned(),
+            files,
+        },
+    )?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|error| tool_error(dir.display(), error))?;
+    }
+    fs::rename(&temp, &dir).map_err(|error| tool_error(dir.display(), error))
+}
+
+/// Read back a staged destination, holding it to what the human confirmed.
+///
+/// The bytes are re-decoded rather than trusted: each Object must still be the
+/// digest the confirmed subject named, and each Event must still be the seal the
+/// transaction recorded. That is the same claim re-deriving would establish, so
+/// finishing forward from here is not the commit phase trusting whatever a
+/// staged file happened to contain.
+fn confirmed_destination(
+    root: &Path,
+    challenge: &str,
+    subject: &MigrationSubject,
+) -> Result<Option<Vec<(String, String, String)>>> {
+    let dir = destination_dir(root);
+    let manifest_path = dir.join(DESTINATION_MANIFEST);
+    let text = match fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(tool_error(manifest_path.display(), error)),
+    };
+    let destination: Destination = serde_json::from_str(&text).map_err(|error| {
+        Error::new(EXIT_SCHEMA, format!("{}: {error}", manifest_path.display()))
+    })?;
+    ensure!(
+        destination.challenge == challenge,
+        EXIT_INVARIANT,
+        "the staged destination was written for challenge {}, not {challenge}",
+        destination.challenge
+    );
+    ensure!(
+        destination.files.len() == subject.objects.len(),
+        EXIT_INVARIANT,
+        "the staged destination holds {} objects and the confirmed plan names {}",
+        destination.files.len(),
+        subject.objects.len()
+    );
+    let mut ready = Vec::new();
+    for file in &destination.files {
+        let planned = subject
+            .objects
+            .iter()
+            .find(|planned| planned.object == file.object)
+            .ok_or_else(|| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    format!("{} is not in the confirmed migration plan", file.object),
+                )
+            })?;
+        ensure!(
+            planned.digest == file.object_digest,
+            EXIT_INVARIANT,
+            "{} was staged as a value the confirmed plan does not name",
+            file.object
+        );
+        let object_text = read_staged(&dir.join("objects").join(format!("{}.json", file.object)))?;
+        let event_text = read_staged(
+            &dir.join("eventstore")
+                .join(format!("{}.jsonl", file.object)),
+        )?;
+        let object = store::decode_object(
+            Path::new(&file.object),
+            &file.object,
+            serde_json::from_str(&object_text).map_err(|error| {
+                Error::new(EXIT_SCHEMA, format!("staged {}: {error}", file.object))
+            })?,
+        )?;
+        ensure!(
+            object.digest == file.object_digest
+                && object.recomputed_digest()? == file.object_digest,
+            EXIT_INVARIANT,
+            "the staged Object for {} is not the value it was staged as",
+            file.object
+        );
+        let event: Event = serde_json::from_str(event_text.trim_end())
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("staged {}: {error}", file.object)))?;
+        event.validate(&file.object)?;
+        ensure!(
+            event.digest == file.event_digest,
+            EXIT_INVARIANT,
+            "the staged bootstrap Event for {} is not the record it was staged as",
+            file.object
+        );
+        ready.push((file.object.clone(), object_text, event_text));
+    }
+    Ok(Some(ready))
+}
+
+fn read_staged(path: &Path) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))
+}
+
+/// Copy the staged destination into place, then remove what the predecessor
+/// owned.
+///
+/// Idempotent by construction: every write is the same bytes the stage holds, so
+/// re-running after a crash at any point converges rather than compounding. The
+/// predecessor's own directories go last, because until they are gone the
+/// workspace still reads as the predecessor and `VERSION`'s absence still says
+/// the transaction is unfinished.
+fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
+    for (id, _, event) in ready {
+        let path = store::events_path(root, id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+        }
+        store::write_text(&path, event)?;
+    }
+    for (id, object, _) in ready {
+        store::write_text(&store::object_path(root, id), object)?;
+    }
+    // Old pending Human-Gate state is unsupported and is not migrated: a question
     // asked under the predecessor's contract cannot be answered under this one,
     // and the material it was asked about has moved representation underneath
     // it. Prepare it again.
@@ -824,6 +1080,53 @@ fn publish(root: &Path, derived: &[Derived]) -> Result<()> {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
     ensure_local_ignored(root)
+}
+
+/// Keep the local directory out of git for the duration of the question, using
+/// git's own local exclude file rather than the tracked one.
+///
+/// Preparation is not an act on the record. Writing `/local/` into the tracked
+/// `.engr/.gitignore` at prepare time means merely *asking* to migrate leaves a
+/// modified tracked file behind, and a person who then declines is left holding
+/// a change they never confirmed — which is precisely the boundary the Human
+/// Gate exists to draw.
+///
+/// `.git/info/exclude` is the right place for it: same effect, same instant,
+/// and never part of anything anybody commits. The tracked line is added later,
+/// as part of the publication a human did confirm.
+///
+/// Outside a repository there is nothing to keep the code out of, so this is
+/// satisfied by there being no git.
+fn exclude_local_from_git(root: &Path) -> Result<()> {
+    let Some(git_dir) = crate::git::git_dir(root) else {
+        return Ok(());
+    };
+    let Some(relative) = crate::git::repo_relative_dir(root, &store::local_dir(root)) else {
+        return Ok(());
+    };
+    let entry = format!("/{relative}/");
+    let path = git_dir.join("info").join("exclude");
+    let mut text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    if text.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "# engr: a live challenge code is a filename here, and it is meant for one\n\
+         # person. Added while a migration was prepared; the migrated workspace\n\
+         # carries the same rule in its own tracked .gitignore.\n\
+         {entry}\n"
+    ));
+    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
 }
 
 /// The predecessor's `.gitignore` named `lock` and `candidates/`, which this

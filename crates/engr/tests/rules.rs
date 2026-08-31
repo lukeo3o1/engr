@@ -3016,3 +3016,68 @@ fn a_rule_id_is_bounded_and_starts_with_something() {
         );
     }
 }
+
+/// The restricted YAML profile is enforced, not merely declared.
+///
+/// #66 fixes the profile — no anchors, no aliases, no custom tags, no duplicate
+/// keys — and a typed deserializer enforces none of it: it resolves an alias
+/// into its anchor's value, applies a tag, takes the last duplicate key, and
+/// hands back a `FrontMatter` that looks exactly like one written plainly.
+///
+/// The reason it has to bite is artifact-exact identity. A Rule's ReviewDigest
+/// changes on any byte-level change, "including semantically equivalent YAML
+/// reformatting" — so two files whose bytes differ must never be one policy, and
+/// an anchor is precisely a way of writing one policy twice. Each input below
+/// deserializes to a valid Rule if nothing stops it.
+#[test]
+fn the_restricted_yaml_profile_refuses_what_it_says_it_refuses() {
+    let (_dir, root) = workspace();
+
+    let plain = "---\nid: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 3\n  on_exhaustion: reject\n---\n\n# Policy\n\nSay it.\n";
+    write_rule(&root, "policy", plain);
+    let loaded = rules::load_all(&root).expect("the plain spelling loads");
+    assert_eq!(loaded.len(), 1);
+
+    for (what, front) in [
+        (
+            "an anchor",
+            "id: policy\napplies:\n  domains: &d\n    - object\nreview:\n  max_attempts: 3\n  on_exhaustion: reject\n",
+        ),
+        (
+            "an alias",
+            "id: policy\napplies:\n  domains: &d\n    - object\nreview:\n  max_attempts: 3\n  on_exhaustion: reject\nunused: *d\n",
+        ),
+        (
+            "a custom tag",
+            "id: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: !!int 3\n  on_exhaustion: reject\n",
+        ),
+        (
+            "a duplicate key",
+            "id: policy\nid: other\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a duplicate nested key",
+            "id: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 3\n  max_attempts: 4\n  on_exhaustion: reject\n",
+        ),
+        (
+            "a second document",
+            "id: policy\napplies:\n  domains:\n    - object\n...\n",
+        ),
+    ] {
+        write_rule(&root, "policy", &format!("---\n{front}---\n\n# Policy\n\nSay it.\n"));
+        let error = rules::load_all(&root)
+            .err()
+            .unwrap_or_else(|| panic!("{what} must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+    }
+
+    // And the restriction is about YAML structure, not about characters: an
+    // ampersand, an asterisk, a colon or a hash inside a scalar is content, and
+    // refusing those would make the profile unusable for ordinary prose.
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: policy\napplies:\n  domains:\n    - object\n---\n\n# Policy & more\n\nSay it: *emphatically* # not a comment\n",
+    );
+    rules::load_all(&root).expect("ordinary prose in the body is untouched");
+}

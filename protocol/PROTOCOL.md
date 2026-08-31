@@ -1987,14 +1987,33 @@ nothing already admitted.
 `id` is the stable identity and the filename is only a locator, so renaming a
 file does not create a different rule. **Duplicate ids fail closed**: two files
 claiming one identity means the applicable set is not determinable, and a review
-over an indeterminate set attests to nothing. Ids are `[a-z0-9-]+`.
+over an indeterminate set attests to nothing. Ids are `[a-z0-9][a-z0-9-]{0,31}`
+— bounded, and starting with something, because an id is typed at a command
+line, printed in a refusal, and used as a filename.
 
-Front matter is **standard YAML**, then a strict rule schema. The layers are
-distinct — YAML decides syntax, engr decides whether the parsed document is a
-rule — and a field this version does not understand is **refused rather than
-ignored**, because reading past it would review against a rule only partly
-understood. The normative body is stored exactly as written; emptiness is
-decided by refusing, never by rewriting.
+Front matter is YAML read under a **restricted profile**, then a strict rule
+schema. The profile is YAML 1.2 with duplicate keys, custom tags, anchors and
+aliases all invalid, and only schema-required forms accepted.
+
+The restriction is not fastidiousness, and a typed deserializer does not deliver
+it: that resolves an alias into the value its anchor held, applies a tag, takes
+the last of two duplicate keys, and hands back a document that no longer stands
+in any recoverable relation to the bytes it came from. Rule Review identity is
+**artifact-exact** — any byte-level change to a rule file changes the
+ReviewDigest, including semantically equivalent reformatting — so two files
+whose bytes differ must never be one policy, and an anchor is precisely a way of
+writing one policy twice. Unrestricted, a person reading the file and a build
+hashing it are looking at two different documents.
+
+The profile MUST therefore be enforced **before** typed deserialization, because
+afterwards the evidence is gone: the constructs have been resolved away and the
+parsed value cannot say which of them produced it.
+
+Beyond the profile, the layers stay distinct — YAML decides syntax, engr decides
+whether the parsed document is a rule — and a field this version does not
+understand is **refused rather than ignored**, because reading past it would
+review against a rule only partly understood. The normative body is stored
+exactly as written; emptiness is decided by refusing, never by rewriting.
 
 Applicability is domain-only: `object`, `backlog`, `collection`, `work`. What an
 **empty** applicable set means belongs to the domain that owns the mutation, not
@@ -2202,7 +2221,21 @@ Which rules are past their ceiling is a mechanical fact and the same everywhere.
 
 For an **Object**, an exhausted applicable rule stops the autonomous path. If at
 least one *actually exhausted* rule asks for `human_confirmation` the mutation
-escalates to the Human Gate, and otherwise it is refused. Escalation outranks
+escalates to the Human Gate, and otherwise it is refused.
+
+**What escalates has to arrive with what is being overruled.** A human asked to
+overrule a review is answering a question about that review, so the Challenge
+subject MUST freeze it: which attempt it was, whether the review **failed** or
+was **exhausted**, the exact rule set that was reviewed, and the agent's own
+explanation. None of that is recoverable afterwards — the Event records only the
+outcome and the digest, and `failed` and `exhausted` both become `overridden`
+there — so a screen that recomputed any of it from live state would let a rule
+edited in the meantime change what a frozen Challenge appears to say. Freezing
+it inside `subject` is also what puts it under `Challenge.digest`: the thing
+somebody is overruling is part of what their answer is bound to.
+
+Live rules still decide whether the code is **stale**. They do not decide what
+is displayed. Escalation outranks
 refusal among exhausted rules, because a rule naming a human is asking for a
 decision rather than for the attempt to be discarded — and a human can still
 decide to refuse. A rule that asks for a human but is not exhausted escalates
@@ -2481,7 +2514,16 @@ The order is preflight, then question, then publication:
 
 1. compute and verify the predecessor's **effective current Object state** under
    the released historical contract, including any recoverable durable Event
-   tail newer than the persisted projection;
+   tail newer than the persisted projection. *Under* that contract, which is a
+   constraint in both directions: the migration may not accept less than the
+   release verified, and may not demand more than it wrote. Where the released
+   build accepted a pruned history prefix or a missing history file beside a
+   valid projection, so must this — refusing them would be a published contract
+   strengthened after the fact, and a record somebody made with the shipped tool
+   left with no way forward. Where a complete history *is* retained, the
+   projection must be exactly what it derives, because migration is where the
+   first aggregate seal is minted and an edit nothing can establish must not be
+   granted one;
 2. preserve stable Object and Section identities;
 3. map historical Human-only Sections to `admitted.by = human`;
 4. preserve historical `confirmed_at` as `Section.admitted.at`;
@@ -2533,13 +2575,33 @@ named as validated when nothing ever validated it. Any divergence between what
 was validated and what is on disk MUST fail rather than become the new expected
 predecessor.
 
-After preflight, the complete canonical Object set and a digest manifest are
-staged under `.engr/local/`. Installing that sealed plan is idempotent, so a
-crash after any prefix of the copies resumes from the same bytes. The artifact
-that is validated MUST be the artifact that is published: a second read of a
-staged file, between checking it and writing it, is a window the workspace lock
-does not close. Only after every staged artifact has been published may
-`VERSION` be written; cleanup happens last.
+**The whole destination MUST be written outside the predecessor's own paths
+before any of it is published**, and this is the invariant the transaction rests
+on rather than a tidiness preference. The destination Object lives at the same
+`objects/<id>.json` the predecessor occupies, so the first published Object
+destroys bytes the preflight needs in order to decode a predecessor at all. From
+that instant re-deriving is impossible, and a transaction whose only recovery
+plan was to re-derive has none: a crash there leaves a workspace with no
+`VERSION` and no predecessor to rebuild from, which is neither generation and
+has no way back.
+
+So publication is finishing forward from a staged destination, never starting
+over. Recovery MUST NOT re-derive once publication may have begun, and MUST NOT
+simply trust what it finds staged either — those are the two failure modes and
+the staged material has to answer both. Each staged Object is checked back
+against the digest the **confirmed subject** already pins, which is the same
+claim re-deriving would have established; each staged bootstrap Event is checked
+against the seal the transaction recorded when it wrote it, because that Event
+carries a fresh id and the admission instant and so is pinned nowhere else. A
+staged file that fails either check MUST fail closed rather than be published.
+
+Every write in the publication is therefore the same bytes the stage holds,
+which is what makes re-running it after a crash at any point converge rather
+than compound. The predecessor's own directories go last, and only after every
+staged artifact has been published may `VERSION` be written; cleanup happens
+last. A conforming implementation MUST demonstrate resumption at each
+publication step, because a boundary nothing crosses in a test is a boundary
+nothing has checked.
 
 ### Migration is a maintenance window
 
@@ -2681,8 +2743,13 @@ Backlog is committed: git is its only history. A new optional directory is not
 a schema change, so adding one does not move the workspace generation — a
 workspace holding no backlog is byte-for-byte what it was.
 
-`init` MUST write a `.gitignore` excluding `/local/`, and migration MUST add
-that line to a predecessor workspace before it stages anything. `local/` holds
+`init` MUST write a `.gitignore` excluding `/local/`. A predecessor workspace
+does not have that line, and its migration needs the exclusion in place before it
+mints a code — but **preparing a migration MUST NOT change a tracked byte**.
+Asking what a migration would do is not doing it, and somebody who asks and then
+declines must be left holding no change they never confirmed. The exclusion is
+therefore made where git keeps its own local state, and the tracked line is
+written as part of the publication a human confirmed. `local/` holds
 the writer lock, the pending Challenges and any migration stage: all of it is
 this machine's state and none of it is shared authority. A Challenge's filename
 is a live code, and `git add -A` is how a workspace gets staged — committing one

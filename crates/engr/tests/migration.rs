@@ -290,22 +290,27 @@ fn migration_is_a_human_confirmation_of_one_exact_plan() {
         "the bootstrap, four projections and four histories"
     );
 
-    // Preparing publishes nothing: the predecessor is untouched until somebody
-    // answers. The one exception is the ignore line, which has to land before
-    // the stage and the live code do — a person who prepares and then commits
-    // must not put a challenge code into the repository.
+    // Preparing publishes nothing, and nothing means every tracked byte: a
+    // person who asks what a migration would do and then declines is left
+    // holding no change they did not confirm. The live code still has to be
+    // kept out of git, and that is done through git's own local exclude —
+    // same instant, same effect, nothing anybody commits.
     let after = fingerprint(&root);
     let moved: Vec<&String> = after
         .iter()
         .filter(|(path, digest)| before.get(*path) != Some(*digest))
         .map(|(path, _)| path)
         .collect();
-    assert_eq!(
-        moved,
-        vec![".gitignore"],
-        "preflight published nothing else"
+    assert!(moved.is_empty(), "preflight published {moved:?}");
+    assert!(
+        !read(&store::engr_dir(&root).join(".gitignore")).contains("/local/"),
+        "and the tracked ignore file is not the place it was kept out"
     );
-    assert!(read(&store::engr_dir(&root).join(".gitignore")).contains("/local/"));
+    let exclude = read(&root.join(".git").join("info").join("exclude"));
+    assert!(
+        exclude.contains(".engr/local/"),
+        "the live code is excluded locally instead: {exclude}"
+    );
 
     // The subject is a Challenge like any other, and it seals over itself.
     let challenge: engr::confirmation::Challenge = serde_json::from_str(&read(
@@ -830,4 +835,268 @@ fn the_migrated_workspace_carries_on_as_a_current_one() {
         assert!(path.is_dir(), "{} should exist", path.display());
     }
     assert!(read(&store::engr_dir(&root).join(".gitignore")).contains("/local/"));
+}
+
+// ------------------------------------- what the released contract really said
+
+/// A pruned history prefix is a shape the release wrote, so it migrates.
+///
+/// The released `load_events` checked only that consecutive records held
+/// consecutive revisions — never that a file began at rev 1 — and its own
+/// reducer accepted "retained evidence at or below the projection" with a
+/// missing prefix. Somebody who trimmed an old log therefore has a workspace the
+/// shipped tool called sound, and refusing it here would be this build
+/// strengthening a published contract after the fact.
+///
+/// What comes out is the projection the predecessor already held, because with
+/// the beginning gone that projection is the only thing that can say what the
+/// Object is.
+#[test]
+fn a_pruned_history_prefix_still_migrates() {
+    let (_temp, root) = released();
+    let stored = predecessor_object(&root, AUTHORITY);
+    let title = stored["title"].as_str().expect("title").to_owned();
+    let sections = stored["sections"].as_array().expect("sections").len();
+
+    let path = predecessor_events(&root, AUTHORITY);
+    let history = read(&path);
+    let kept: Vec<&str> = history.lines().skip(1).collect();
+    assert!(!kept.is_empty(), "the fixture needs a prefix to lose");
+    write(&path, &format!("{}\n", kept.join("\n")));
+
+    migrate(&root);
+    let object = store::load_object(&root, AUTHORITY).expect("migrated");
+    assert_eq!(object.title, title, "the projection is what it was");
+    assert_eq!(object.sections.len(), sections);
+    assert_eq!(object.rev, 1, "and it starts this generation at rev 1");
+    assert!(ops::verify(&root, AUTHORITY).expect("verify").passed());
+}
+
+/// The same, for a history file that is gone entirely.
+///
+/// `load_events` returned an empty list rather than an error for a missing file,
+/// so an Object with a projection and no log at all is a released workspace too.
+#[test]
+fn a_missing_history_file_still_migrates_a_projection() {
+    let (_temp, root) = released();
+    let title = predecessor_object(&root, AUTHORITY)["title"]
+        .as_str()
+        .expect("title")
+        .to_owned();
+    std::fs::remove_file(predecessor_events(&root, AUTHORITY)).expect("remove history");
+
+    migrate(&root);
+    let object = store::load_object(&root, AUTHORITY).expect("migrated");
+    assert_eq!(object.title, title);
+    assert_eq!(object.rev, 1);
+    assert!(ops::verify(&root, AUTHORITY).expect("verify").passed());
+}
+
+/// A projection with no history is one thing; a history that says nothing, with
+/// no projection to fall back on, is another — and it establishes no Object.
+///
+/// Removing both files instead would prove nothing: enumeration walks the two
+/// directories, so an Object with neither is one the workspace does not have.
+/// What has to fail closed is the shape that still looks like an Object and
+/// cannot answer for itself.
+#[test]
+fn an_object_whose_history_establishes_nothing_is_refused() {
+    let (_temp, root) = released();
+    std::fs::remove_file(store::object_path(&root, AUTHORITY)).expect("remove projection");
+    write(&predecessor_events(&root, AUTHORITY), "");
+
+    let error = engr::migration::prepare(&root).expect_err("nothing establishes it");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(!store::version_path(&root).exists());
+}
+
+/// A pruned prefix does not buy a free pass on the tail.
+///
+/// What the release checked about a retained file was adjacency, and what it
+/// checked about recovery was that the tail began at exactly the next revision.
+/// Both still hold, so a log with a hole in it is refused rather than replayed
+/// over the gap.
+#[test]
+fn a_pruned_prefix_still_requires_an_adjacent_tail() {
+    let (_temp, root) = released();
+    let path = predecessor_events(&root, PROVENANCE_OBJECT);
+    let history = read(&path);
+    let lines: Vec<&str> = history.lines().collect();
+    assert!(lines.len() > 3, "the fixture needs a history to hole");
+    // Drop the prefix, then drop one more from the middle of what is left.
+    let mut kept: Vec<&str> = lines.iter().skip(1).copied().collect();
+    kept.remove(1);
+    write(&path, &format!("{}\n", kept.join("\n")));
+
+    let error = engr::migration::prepare(&root).expect_err("a gap is a gap");
+    assert_ne!(error.code, 0);
+    assert!(!store::version_path(&root).exists());
+}
+
+/// A projection the retained history contradicts is refused, and being able to
+/// say that is exactly what a complete history buys.
+///
+/// The release had no Object-level seal, so a hand-edited title was invisible to
+/// it. Migration is where the first aggregate seal is minted, and minting one
+/// over an edit nothing can establish would launder it into permanent authority.
+/// So where the history *can* answer the question, it is asked — which is why
+/// accepting a pruned prefix above is a narrowing of the claim rather than an
+/// abandonment of it.
+#[test]
+fn a_complete_history_still_refuses_a_projection_it_does_not_derive() {
+    let (_temp, root) = released();
+    edit_predecessor(&root, AUTHORITY, |value| {
+        value["title"] = Value::String("a title nobody confirmed".to_owned());
+    });
+
+    let error = engr::migration::prepare(&root).expect_err("the projection disagrees");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(!store::version_path(&root).exists());
+}
+
+/// What a crash at one publication step leaves behind, named so the list below
+/// reads as a sequence of moments rather than a sequence of function pointers.
+type Damage = fn(&Path);
+
+/// Just the Object projections out of a workspace fingerprint.
+///
+/// The bootstrap Events are deliberately excluded: each run mints a fresh Event
+/// id and stamps the instant it was admitted, so two independent migrations of
+/// one fixture differ there by design. What must be identical between runs is
+/// what the migration *derives*, and what must be identical across a resume is
+/// the record that was staged — two different claims, checked separately.
+fn objects_only(
+    fingerprint: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    fingerprint
+        .iter()
+        .filter(|(path, _)| path.starts_with("objects/") || path.as_str() == "VERSION")
+        .map(|(path, digest)| (path.clone(), digest.clone()))
+        .collect()
+}
+
+// --------------------------------------------- crash, at every publication step
+
+/// Publication is resumable wherever it stops, because the whole destination is
+/// written where the predecessor cannot be harmed by it before anything
+/// canonical moves.
+///
+/// The failure this closes is specific. Publication overwrites
+/// `.engr/objects/<id>.json` — the predecessor's own path — so once the first of
+/// those lands, re-deriving from the predecessor is no longer possible: the
+/// bytes it would read are the new generation's. Without a staged destination a
+/// crash anywhere in that window leaves a workspace with no `VERSION` and no
+/// predecessor to rebuild from, which is neither generation and has no way back.
+///
+/// Each case below stops the transaction after staging, damages the workspace
+/// the way a crash at that step would, and requires the retry not merely to
+/// succeed but to arrive at the very same bytes a clean run produces.
+#[test]
+fn a_crash_at_any_publication_step_is_resumable() {
+    // The Objects a migration derives are deterministic, so a clean run says
+    // what any run must arrive at. The bootstrap Events are not — each carries a
+    // fresh id and the instant it was admitted — so those are held to a stricter
+    // and more useful standard below: the resumed workspace must publish the
+    // record that was *staged*, rather than mint a second one.
+    let clean = {
+        let (_temp, root) = released();
+        migrate(&root);
+        objects_only(&fingerprint(&root))
+    };
+
+    let objects = [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION];
+    let steps: Vec<(&str, Damage)> = vec![
+        ("nothing published", |_root| {}),
+        ("the first stream landed", |root| {
+            let path = store::events_path(root, AUTHORITY);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            write(&path, "a partial write\n");
+        }),
+        ("the first Object was overwritten", |root| {
+            write(
+                &store::object_path(root, AUTHORITY),
+                "no longer a predecessor\n",
+            );
+        }),
+        ("every Object was overwritten", |root| {
+            for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+                write(&store::object_path(root, id), "no longer a predecessor\n");
+            }
+        }),
+        ("the predecessor's own directories are gone", |root| {
+            for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+                write(&store::object_path(root, id), "no longer a predecessor\n");
+            }
+            std::fs::remove_dir_all(store::engr_dir(root).join("events")).expect("events");
+            std::fs::remove_file(store::engr_dir(root).join("format.json")).expect("format");
+        }),
+    ];
+
+    for (what, damage) in steps {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        engr::migration::stage_destination_only(&root, &proposed.challenge).expect("stage");
+        let staged: Vec<String> = objects
+            .iter()
+            .map(|id| {
+                read(
+                    &store::local_dir(&root)
+                        .join("migration")
+                        .join("destination")
+                        .join("eventstore")
+                        .join(format!("{id}.jsonl")),
+                )
+            })
+            .collect();
+        damage(&root);
+
+        let report = match engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge)) {
+            Ok(engr::Confirmed::Migration(report)) => report,
+            Ok(_) => panic!("{what}: expected a migration confirmation"),
+            Err(error) => panic!("{what}: the retry must complete: {error}"),
+        };
+        assert_eq!(report.objects.len(), objects.len(), "{what}");
+        assert_eq!(
+            objects_only(&fingerprint(&root)),
+            clean,
+            "{what}: the resumed Objects are not the ones a clean run derives"
+        );
+        for (id, staged) in objects.iter().zip(&staged) {
+            assert_eq!(
+                &read(&store::events_path(&root, id)),
+                staged,
+                "{what}: {id} published a record other than the one it staged"
+            );
+        }
+        assert!(store::version_path(&root).exists(), "{what}");
+        for id in objects {
+            assert!(
+                ops::verify(&root, id).expect("verify").passed(),
+                "{what}: {id}"
+            );
+        }
+    }
+}
+
+/// A staged destination is not a blank cheque: it is published only where it
+/// still matches the digests the confirmed plan names.
+#[test]
+fn a_rewritten_staged_destination_is_refused_rather_than_published() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    engr::migration::stage_destination_only(&root, &proposed.challenge).expect("stage");
+
+    let staged = store::local_dir(&root)
+        .join("migration")
+        .join("destination")
+        .join("objects")
+        .join(format!("{AUTHORITY}.json"));
+    let mut object: Value = serde_json::from_str(&read(&staged)).expect("staged object");
+    object["title"] = Value::String("a title nobody confirmed".to_owned());
+    write(&staged, &serde_json::to_string(&object).expect("json"));
+
+    let error = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect_err("a rewritten stage publishes nothing");
+    assert_ne!(error.code, 0);
+    assert!(!store::version_path(&root).exists());
 }
