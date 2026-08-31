@@ -138,9 +138,18 @@ fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
     let admission = &admitted.event.metadata.admitted;
     assert_eq!(admission.by, Admission::Agent);
     assert!(admission.confirmation.is_none());
-    assert_eq!(
-        admission.review.as_ref().expect("durable review").digest,
-        expected
+    // The digest is deliberately not here: it binds artifacts at review time
+    // and explains nothing once they have moved. What history keeps is what a
+    // reader can still interpret.
+    let durable = admission.review.as_ref().expect("durable review");
+    assert_eq!(durable.outcome, engr::model::ReviewOutcome::Passed);
+    assert_eq!(durable.result, engr::proof::ReviewResult::Passed);
+    assert_eq!(durable.attempts, 1);
+    assert!(
+        !serde_json::to_string(&admitted.event)
+            .expect("event json")
+            .contains(&expected),
+        "the ReviewDigest is admission-time material and does not become history"
     );
     integrity::check_stored_object_integrity(&admitted.object).expect("integrity");
 }
@@ -216,9 +225,20 @@ fn agent_cli_surfaces_the_review_then_admits_the_same_bound_mutation() {
     assert_eq!(output["event"]["type"], "section.created.v1");
     assert_eq!(output["event"]["metadata"]["admitted"]["by"], "agent");
     assert_eq!(output["object"]["sections"][0]["admitted"]["by"], "agent");
-    assert_eq!(
-        output["event"]["metadata"]["admitted"]["review"]["digest"],
-        review.review_digest
+    // Interpretable facts, not a binding token: what the review concluded and
+    // which attempt it was of. The digest bound the mutation while the review
+    // was being made and does not become history.
+    let durable = &output["event"]["metadata"]["admitted"]["review"];
+    assert_eq!(durable["outcome"], "passed");
+    assert_eq!(durable["result"], "passed");
+    assert_eq!(durable["attempts"], 1);
+    assert!(
+        durable["digest"].is_null(),
+        "the ReviewDigest is admission-time material: {durable}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&admitted.stdout).contains(&review.review_digest),
+        "and it appears nowhere else in what was written either"
     );
 }
 
@@ -306,14 +326,23 @@ fn human_override_binds_the_review_explanation_and_persists_minimal_provenance()
         .review
         .as_ref()
         .expect("the review being overridden");
-    assert_eq!(frozen.outcome, engr::model::ReviewOutcome::Overridden);
+    assert_eq!(frozen.result, engr::proof::ReviewResult::Failed);
     assert_eq!(frozen.digest, expected);
 
     let admitted = common::admitted_code(temp.path(), prepared.candidate.code());
     let admission = &admitted.event.metadata.admitted;
     let durable = admission.review.as_ref().expect("durable review");
     assert_eq!(durable.outcome, engr::model::ReviewOutcome::Overridden);
-    assert_eq!(durable.digest, expected);
+    // The record says what was overruled, which `overridden` alone cannot: a
+    // human overruling a failure and one overruling an exhausted ceiling are not
+    // the same act.
+    assert_eq!(durable.result, engr::proof::ReviewResult::Failed);
+    assert!(
+        !serde_json::to_string(&admitted.event)
+            .expect("event json")
+            .contains(&expected),
+        "the ReviewDigest lived in the Challenge, and the Challenge is gone"
+    );
     assert_eq!(admitted.object.sections[0].admitted.by, Admission::Human);
 }
 
@@ -537,7 +566,8 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
             // actually about.
             review: Some(engr::model::ReviewProvenance {
                 outcome: engr::model::ReviewOutcome::Passed,
-                digest: format!("1:{}", "0".repeat(64)),
+                result: engr::proof::ReviewResult::Passed,
+                attempts: 1,
             }),
         },
     )

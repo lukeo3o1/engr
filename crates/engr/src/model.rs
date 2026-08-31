@@ -1185,14 +1185,35 @@ pub struct HumanConfirmation {
 
 /// What Rule Review concluded, as durable provenance.
 ///
-/// Minimal on purpose: an outcome and an identity. The EventStore does not keep
-/// a ReviewSeries, per-Rule counters, or the Agent's natural-language
-/// reasoning — those belong to the moment, not to the record.
+/// Three structured facts, chosen so a reader years later can interpret them
+/// without anything that has since been thrown away. `outcome` says how the
+/// mutation got in, `result` says what the review itself concluded, and
+/// `attempts` says which try it was.
+///
+/// **The ReviewDigest is deliberately absent.** It binds an exact mutation
+/// against exact Rule artifacts *at review time*, which is what makes it useful
+/// to a Challenge and useless to history: once the Challenge is gone and the
+/// Rule files have moved, sixty-four hex characters explain nothing to anybody
+/// and cannot be recomputed to mean what they meant. A durable field that can
+/// only ever be compared against material that no longer exists is not
+/// provenance, it is residue.
+///
+/// **The Agent's explanation is absent for a different reason.** It is
+/// decision-time material, written by an agent to persuade a human in a
+/// particular moment, and it was frozen in the Challenge where that moment
+/// lived. Keeping it here would quietly turn an agent's argument into the
+/// human's recorded rationale, which is not a thing anybody wrote. If durable
+/// human rationale is wanted, it is its own design.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewProvenance {
     pub outcome: ReviewOutcome,
-    pub digest: String,
+    /// What the review concluded, which `outcome` alone cannot say: an
+    /// `overridden` admission looks the same whether a human overruled a failure
+    /// or an exhausted ceiling, and those are not the same act.
+    pub result: crate::proof::ReviewResult,
+    /// The Agent-attested attempt the review was of.
+    pub attempts: u32,
 }
 
 /// How a reviewed mutation ended up admitted.
@@ -1300,7 +1321,33 @@ impl EventAdmission {
             );
         }
         if let Some(review) = &self.review {
-            crate::digest::REVIEW.verify(&review.digest)?;
+            // `overridden` is the record of a human overruling a review, so it
+            // cannot describe one that passed, and `passed` cannot describe one
+            // that did not. The two members say different things, and a record
+            // where they contradict each other is not a record of anything.
+            let overruled = review.result != crate::proof::ReviewResult::Passed;
+            ensure!(
+                (review.outcome == ReviewOutcome::Overridden) == overruled,
+                EXIT_SCHEMA,
+                "a review that {} cannot be recorded as {}",
+                if overruled { "did not pass" } else { "passed" },
+                match review.outcome {
+                    ReviewOutcome::Passed => "passed",
+                    ReviewOutcome::Overridden => "overridden",
+                }
+            );
+            ensure!(
+                review.attempts > 0,
+                EXIT_SCHEMA,
+                "a Rule Review is of an attempt, and attempts are counted from 1"
+            );
+            if self.by == Admission::Agent {
+                ensure!(
+                    review.result == crate::proof::ReviewResult::Passed,
+                    EXIT_SCHEMA,
+                    "an Agent admission carries the review that let it in, and only a passing one does"
+                );
+            }
         }
         Ok(())
     }
@@ -1902,7 +1949,8 @@ mod tests {
                 confirmation: None,
                 review: Some(ReviewProvenance {
                     outcome: ReviewOutcome::Passed,
-                    digest: format!("1:{}", "a".repeat(64)),
+                    result: crate::proof::ReviewResult::Passed,
+                    attempts: 1,
                 }),
             },
         }
@@ -2270,7 +2318,11 @@ mod admission_tests {
     fn review(outcome: ReviewOutcome) -> ReviewProvenance {
         ReviewProvenance {
             outcome,
-            digest: format!("1:{}", "b".repeat(64)),
+            result: match outcome {
+                ReviewOutcome::Passed => crate::proof::ReviewResult::Passed,
+                ReviewOutcome::Overridden => crate::proof::ReviewResult::Failed,
+            },
+            attempts: 1,
         }
     }
 
@@ -2316,19 +2368,104 @@ mod admission_tests {
         );
     }
 
-    /// The review digest is read for its contract, so an invented scalar is
-    /// refused rather than stored as provenance.
+    /// Durable review provenance is three facts that have to agree with each
+    /// other, and a record where they do not is not a record of anything.
+    ///
+    /// `outcome` says how the mutation got in and `result` says what the review
+    /// concluded, so `overridden` can only describe a review that did not pass
+    /// and `passed` can only describe one that did. `attempts` counts from 1,
+    /// because a review is of an attempt and there is no attempt zero.
     #[test]
-    fn review_provenance_is_checked_against_its_contract() {
-        let mut admitted = human();
-        admitted.review = Some(ReviewProvenance {
-            outcome: ReviewOutcome::Passed,
-            digest: "not-a-digest".to_owned(),
+    fn review_provenance_members_must_agree() {
+        let mut passed_but_overridden = human();
+        passed_but_overridden.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Overridden,
+            result: crate::proof::ReviewResult::Passed,
+            attempts: 1,
         });
-        let error = admitted
+        assert_eq!(
+            passed_but_overridden
+                .validate()
+                .expect_err("nothing was overruled")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut failed_but_passed = human();
+        failed_but_passed.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            result: crate::proof::ReviewResult::Exhausted,
+            attempts: 4,
+        });
+        assert_eq!(
+            failed_but_passed
+                .validate()
+                .expect_err("an exhausted review did not pass")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut attempt_zero = human();
+        attempt_zero.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            result: crate::proof::ReviewResult::Passed,
+            attempts: 0,
+        });
+        assert_eq!(
+            attempt_zero
+                .validate()
+                .expect_err("there is no attempt zero")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut agent_override = EventAdmission {
+            by: Admission::Agent,
+            at: AT.to_owned(),
+            confirmation: None,
+            review: None,
+        };
+        agent_override.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            result: crate::proof::ReviewResult::Failed,
+            attempts: 2,
+        });
+        assert_eq!(
+            agent_override
+                .validate()
+                .expect_err("only a passing review admits an Agent mutation")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut sound = human();
+        sound.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Overridden,
+            result: crate::proof::ReviewResult::Exhausted,
+            attempts: 6,
+        });
+        sound
             .validate()
-            .expect_err("a review names its contract");
-        assert_eq!(error.code, EXIT_SCHEMA);
+            .expect("a human overruling an exhausted review is exactly what this records");
+    }
+
+    /// The ReviewDigest is admission-time material and never becomes history.
+    ///
+    /// It binds an exact mutation against exact Rule artifacts while the
+    /// Challenge is pending, which is where it is checkable. Afterwards the
+    /// Challenge is gone and the Rule files have moved, so a stored copy could
+    /// only ever be compared against material that no longer exists.
+    #[test]
+    fn durable_review_provenance_carries_no_digest() {
+        let mut admitted = human();
+        admitted.review = Some(review(ReviewOutcome::Overridden));
+        let value = serde_json::to_value(&admitted).expect("json");
+        let members: Vec<&String> = value["review"]
+            .as_object()
+            .expect("a review object")
+            .keys()
+            .collect();
+        assert_eq!(members, vec!["attempts", "outcome", "result"]);
     }
 
     /// A human confirmation records the spent code and nothing else — the

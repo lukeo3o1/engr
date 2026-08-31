@@ -2424,7 +2424,7 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             }
             engr::proof::ReviewResult::Exhausted => format!(
                 "EXHAUSTED at attempt {} — confirming this admits work no passing review allowed",
-                review.attempt
+                review.attempts
             ),
         };
         out.push_str(&format!(

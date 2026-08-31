@@ -906,10 +906,9 @@ fn rewriting_a_challenge_is_detected_before_admission() {
     );
     let mut populated = live.candidate.subject.clone();
     populated.review = Some(engr::gate::FrozenReview {
-        outcome: engr::model::ReviewOutcome::Passed,
         digest: format!("1:{}", "0".repeat(64)),
-        attempt: 1,
         result: engr::proof::ReviewResult::Passed,
+        attempts: 1,
         rules: vec!["a-rule".to_owned()],
         explanation: Some("why it could not pass".to_owned()),
     });
@@ -1910,12 +1909,17 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
     );
 }
 
-/// The same, for the Agent door.
+/// The same, for the Agent door — and what it can and cannot prove is stated
+/// here rather than implied.
 ///
-/// The envelope reads a ReviewDigest for spelling. It cannot tell an attestation
-/// made against a Rule set somebody read from sixty-four invented hex
-/// characters, so the digest is recomputed here against the live applicable
-/// Rules for exactly this mutation.
+/// Durable review provenance is interpretable facts, not a binding token: the
+/// ReviewDigest is admission-time material and does not enter history. So the
+/// boundary establishes that a Rule Review is a thing this mutation *could* have
+/// had — a record claiming one where no Rule governs it describes a review that
+/// could not have happened — and that a record claiming none is refused where
+/// one is required. It no longer establishes which review, and that is
+/// deliberate; the barrier against a caller writing one is that there is no
+/// public append at all.
 #[test]
 fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
     let (_dir, root) = workspace();
@@ -1935,18 +1939,43 @@ fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
             confirmation: None,
             review: Some(engr::model::ReviewProvenance {
                 outcome: engr::model::ReviewOutcome::Passed,
-                digest: format!("1:{}", "c".repeat(64)),
+                result: engr::proof::ReviewResult::Passed,
+                attempts: 1,
             }),
         },
     )
     .expect("a well-formed record");
     let error = store::check_appendable(&root, &forged)
-        .expect_err("an invented review digest admits nothing");
+        .expect_err("a review of a mutation no Rule governs admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
-        error.message.contains("Rule Review that is not the one"),
+        error.message.contains("no Rule governs the mutation"),
         "{error}"
     );
+
+    // And the two members must agree with each other. Only a human can overrule
+    // a review, so a record saying an Agent admitted one that did not pass is
+    // not a record whose authority is wrong — it is one that contradicts itself.
+    let incoherent = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        action.clone(),
+        2,
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: engr::proof::ReviewResult::Failed,
+                attempts: 1,
+            }),
+        },
+    )
+    .expect("a well-formed record");
+    let error = store::check_appendable(&root, &incoherent)
+        .expect_err("passed and failed are not the same review");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
 
     // And with no review at all: semantic Agent admission needs an applicable
     // usable Object Rule, and a title is the sole exception.

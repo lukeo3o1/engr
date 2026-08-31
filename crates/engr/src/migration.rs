@@ -1098,14 +1098,13 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
 /// Outside a repository there is nothing to keep the code out of, so this is
 /// satisfied by there being no git.
 fn exclude_local_from_git(root: &Path) -> Result<()> {
-    let Some(git_dir) = crate::git::git_dir(root) else {
+    let Some(path) = crate::git::git_path(root, "info/exclude") else {
         return Ok(());
     };
     let Some(relative) = crate::git::repo_relative_dir(root, &store::local_dir(root)) else {
         return Ok(());
     };
     let entry = format!("/{relative}/");
-    let path = git_dir.join("info").join("exclude");
     let mut text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),

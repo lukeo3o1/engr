@@ -1100,3 +1100,87 @@ fn a_rewritten_staged_destination_is_refused_rather_than_published() {
     assert_ne!(error.code, 0);
     assert!(!store::version_path(&root).exists());
 }
+
+/// The local exclude lands where git actually reads it, including from a linked
+/// worktree.
+///
+/// `--absolute-git-dir` answers with the *per-worktree* administrative
+/// directory, while `info/` is resolved through the common directory a linked
+/// worktree shares with its parent. Joining `info/exclude` onto the git dir
+/// therefore writes, in a linked worktree, a file git never reads — and the
+/// failure is silent in the worst possible way: preparing appears to succeed,
+/// and `.engr/local/` stays visible to `git add -A` with a live challenge code
+/// sitting in it, which is the whole thing the exclude exists to prevent.
+///
+/// So the path is asked for by name, and this checks the answer from the place
+/// that gets it wrong.
+#[test]
+fn the_local_exclude_lands_where_git_reads_it_from_a_linked_worktree() {
+    let (temp, main) = released();
+    // A branch to check out, since a linked worktree cannot share the one the
+    // parent has.
+    git(&main, &["branch", "migration-worktree"]);
+    let linked = temp.path().join("linked");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            linked.to_str().expect("path"),
+            "migration-worktree",
+        ],
+    );
+    assert!(
+        store::engr_dir(&linked).exists(),
+        "the linked worktree has the predecessor workspace"
+    );
+
+    let proposed = engr::migration::prepare(&linked).expect("prepare from the linked worktree");
+    let code = proposed.challenge;
+
+    // Git's own answer, not ours: whatever it says `info/exclude` is, that is
+    // the file it reads.
+    let exclude = PathBuf::from(git(
+        &linked,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+    ));
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    assert!(
+        text.contains(".engr/local/"),
+        "the exclude git reads must name the local directory: {} holds {text:?}",
+        exclude.display()
+    );
+
+    // And the thing that matters, asked of git rather than inferred: the live
+    // code is not something `git add -A` would stage.
+    let live = store::challenges_dir(&linked).join(format!("{code}.json"));
+    assert!(live.exists(), "the challenge is on disk");
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&linked)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .expect("git status");
+    let listing = String::from_utf8_lossy(&status.stdout).to_string();
+    assert!(
+        !listing.contains(&code),
+        "a live challenge code must not be stageable: {listing}"
+    );
+    assert!(
+        !listing.contains("local/"),
+        "and nor must anything else under local/: {listing}"
+    );
+
+    // Preparation still changed no tracked byte, in the worktree or the parent.
+    for root in [&linked, &main] {
+        assert!(
+            !read(&store::engr_dir(root).join(".gitignore")).contains("/local/"),
+            "the tracked ignore file is not where this was done"
+        );
+    }
+}

@@ -141,6 +141,28 @@ a title and nothing else — there is no member a hidden basis or reference coul
 arrive in. `change_state`, `classify`, `section.delete` and `repair` carry no
 wording at all.
 
+The two halves of `admitted` are settled at different moments, and they have to
+be. `by` is frozen with the rest of the question: which door a value comes
+through is part of what a person assents to, and a value that changed doors
+between the question and the answer is not the value they read. `at` is **the
+instant of admission**, stamped when the act is admitted rather than when it was
+proposed — a pending question can sit for a long time, so writing the
+preparation instant into the record would state an admission time that predates
+the admission, which is a false statement in the one place the record exists to
+be true.
+
+For an ordinary admission the Section's `admitted.at` and the Event's
+`metadata.admitted.at` are **one instant, read once**. Two clock reads
+microseconds apart would have the record say a Section was admitted at a
+different moment from the Event that admitted it, and that is a distinction the
+record does not have and could not defend. Migration is the one place the two
+legitimately differ, and it says so where it does it.
+
+An implementation MUST therefore compare a durable record against the question it
+answers on everything except that instant. Nothing is loosened by the exception:
+`admitted.at` is not a fact anybody assents to, it is a fact the admission
+creates.
+
 Migration adds one more, `object.migrated.v1`, which no command can ask for; see
 [The migration](#the-migration).
 
@@ -2228,14 +2250,66 @@ escalates to the Human Gate, and otherwise it is refused.
 
 **What escalates has to arrive with what is being overruled.** A human asked to
 overrule a review is answering a question about that review, so the Challenge
-subject MUST freeze it: which attempt it was, whether the review **failed** or
-was **exhausted**, the exact rule set that was reviewed, and the agent's own
-explanation. None of that is recoverable afterwards — the Event records only the
-outcome and the digest, and `failed` and `exhausted` both become `overridden`
-there — so a screen that recomputed any of it from live state would let a rule
-edited in the meantime change what a frozen Challenge appears to say. Freezing
-it inside `subject` is also what puts it under `Challenge.digest`: the thing
-somebody is overruling is part of what their answer is bound to.
+subject MUST freeze it:
+
+```json
+{
+  "review": {
+    "digest": "1:<review-digest>",
+    "result": "passed | failed | exhausted",
+    "attempts": 6,
+    "rules": ["<rule-id>"],
+    "explanation": "<agent-generated explanation>"
+  }
+}
+```
+
+`explanation` is absent where there is none. `rules` is the applicable Rule-ID
+set, for a person to read. The ReviewDigest lives **here** rather than in
+history, because here is where it is still checkable: while the Challenge is
+pending it binds the exact mutation against the exact Rule artifacts, and
+confirmation rebinds and compares it.
+
+The whole object is inside `subject.data`, so all of it is under
+`Challenge.digest` — the thing somebody is overruling is part of what their
+answer is bound to. Rendering a pending Challenge MUST use this frozen context;
+a screen that recomputed any of it from live state would let a rule edited in
+the meantime change what a frozen Challenge appears to say. Live Rule
+recomputation is for staleness and failing closed, not for replacing what the
+human was actually asked to consider.
+
+**What history keeps is a different three facts**, and the difference is the
+point. Where a Rule Review participated in an admission, the Event records:
+
+```json
+{
+  "review": {
+    "outcome": "passed | overridden",
+    "result": "passed | failed | exhausted",
+    "attempts": 6
+  }
+}
+```
+
+`outcome` says how the mutation got in — `overridden` is Human-only, because
+only a human can admit something despite the review. `result` says what the
+review concluded, which `outcome` alone cannot: overruling a failure and
+overruling an exhausted ceiling are not the same act. `attempts` says which
+attempt it was of. No Rule Review applied means the member is absent.
+
+**The ReviewDigest MUST NOT be persisted here.** It binds an exact mutation
+against exact Rule artifacts *at review time*, which is what makes it useful to
+a Challenge and useless to history: once the Challenge is gone and the Rule
+files have moved there is nothing left for it to be compared against, and a
+field that can only be checked against material that no longer exists is not
+provenance.
+
+**The agent's explanation MUST NOT be persisted here either**, for a different
+reason. It is decision-time material, written to persuade a person in a
+particular moment, and the Challenge is where that moment lived. Keeping it in
+history would quietly turn an agent's argument into the human's recorded
+rationale, which is not a thing anybody wrote. Durable human rationale, if it is
+ever wanted, is its own design rather than a reinterpretation of this one.
 
 Live rules still decide whether the code is **stale**. They do not decide what
 is displayed. Escalation outranks

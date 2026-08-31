@@ -5500,7 +5500,7 @@ fn an_override_screen_shows_the_review_it_is_overruling_and_keeps_showing_it() {
     // overruling be part of what their answer is bound to.
     let review = &candidate["subject"]["data"]["review"];
     assert_eq!(review["result"], "exhausted");
-    assert_eq!(review["attempt"], 3);
+    assert_eq!(review["attempts"], 3);
     assert_eq!(review["rules"], serde_json::json!(["careful"]));
     assert_eq!(
         review["explanation"],

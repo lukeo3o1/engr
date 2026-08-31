@@ -73,21 +73,38 @@ pub struct ObjectSubject {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenReview {
-    pub outcome: ReviewOutcome,
+    /// The identity the review was of. It lives here rather than in history
+    /// because this is where it still means something: while the Challenge is
+    /// pending it binds the exact mutation against the exact Rule artifacts, and
+    /// confirmation rebinds and compares it. Afterwards there is nothing left
+    /// for it to be compared against.
     pub digest: String,
-    pub attempt: u32,
     pub result: crate::proof::ReviewResult,
+    pub attempts: u32,
     pub rules: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
 }
 
 impl FrozenReview {
-    /// What the Event records out of it: outcome and digest, and nothing else.
-    pub fn provenance(&self) -> ReviewProvenance {
+    /// What history keeps: how it got in, what the review said, and which try.
+    ///
+    /// The digest and the explanation stop here. Both are decision-time
+    /// material — one binds artifacts that will have moved, the other is an
+    /// argument made to a person in a moment — and the Challenge is where that
+    /// moment lived.
+    pub fn admitted(&self) -> ReviewProvenance {
         ReviewProvenance {
-            outcome: self.outcome,
-            digest: self.digest.clone(),
+            // Only a human can overrule a review, so reaching history with
+            // anything but `passed` means one did.
+            outcome: match self.result {
+                crate::proof::ReviewResult::Passed => ReviewOutcome::Passed,
+                crate::proof::ReviewResult::Failed | crate::proof::ReviewResult::Exhausted => {
+                    ReviewOutcome::Overridden
+                }
+            },
+            result: self.result,
+            attempts: self.attempts,
         }
     }
 }
@@ -372,15 +389,33 @@ pub(crate) fn check_admission(root: &Path, id: &str, event: &Event) -> Result<()
                 EXIT_INVARIANT,
                 "an Agent mutation is admitted only by a passing Rule Review"
             );
-            // Recomputed against the live applicable Rule set for exactly this
-            // mutation. A digest that names anything else names a review of
-            // something other than what is being written.
+            // What this boundary can still establish, now that durable
+            // provenance keeps interpretable facts rather than a binding token:
+            // that a Rule Review is a thing this mutation could have had. A
+            // record claiming one where no Rule governs the mutation describes a
+            // review that could not have happened, and is refused.
+            //
+            // It no longer establishes *which* review, and that is a real
+            // narrowing rather than a rewording. The ReviewDigest used to sit in
+            // the Event and be recomputed here against the live applicable set,
+            // which caught a record naming a review of some other mutation. It
+            // is not durable provenance — once the Challenge is gone and the
+            // Rule files have moved there is nothing left to compare it against
+            // — so it now lives where it is checkable, which is the Challenge
+            // and the admission that answers one.
+            //
+            // The narrowing is smaller than it first looks. That digest is
+            // derived from workspace state anybody holding the workspace can
+            // read, so it was never a secret and never an obstacle to somebody
+            // who wanted to write one; it caught mismatch, not forgery. What
+            // stands in the way of forgery is that there is no public append at
+            // all, and that `admit_agent` verifies the attestation against the
+            // live binding before it builds anything.
             let mutation = crate::proof::object_review_mutation(&before, &after, &payload)?;
-            let live = crate::rules::bind_object(root, &mutation, before.rev)?;
             ensure!(
-                live.digest()?.to_string() == review.digest,
+                crate::rules::bind_object(root, &mutation, before.rev)?.has_rules(),
                 EXIT_INVARIANT,
-                "this Event names a Rule Review that is not the one its mutation would get"
+                "this Event records a Rule Review, and no Rule governs the mutation it carries"
             );
             Ok(())
         }
@@ -388,10 +423,10 @@ pub(crate) fn check_admission(root: &Path, id: &str, event: &Event) -> Result<()
 }
 
 /// The admission provenance a Human confirmation records.
-fn human_admission(challenge: &str, review: Option<ReviewProvenance>) -> EventAdmission {
+fn human_admission(challenge: &str, at: &str, review: Option<ReviewProvenance>) -> EventAdmission {
     EventAdmission {
         by: Admission::Human,
-        at: now(),
+        at: at.to_owned(),
         confirmation: Some(HumanConfirmation {
             challenge: challenge.to_owned(),
         }),
@@ -399,15 +434,12 @@ fn human_admission(challenge: &str, review: Option<ReviewProvenance>) -> EventAd
     }
 }
 
-fn agent_admission(review: Option<String>) -> EventAdmission {
+fn agent_admission(at: &str, review: Option<ReviewProvenance>) -> EventAdmission {
     EventAdmission {
         by: Admission::Agent,
-        at: now(),
+        at: at.to_owned(),
         confirmation: None,
-        review: review.map(|digest| ReviewProvenance {
-            outcome: ReviewOutcome::Passed,
-            digest,
-        }),
+        review,
     }
 }
 
@@ -511,9 +543,16 @@ fn same_act(left: &Action, right: &Action) -> bool {
 /// predates the admission — a false statement in the one place the record exists
 /// to be true. The Challenge keeps its own copy as "when this was put up",
 /// beside `created_at` which says the same thing about the envelope.
-fn admitted_now(mut action: Action) -> Action {
+/// The instant is passed in rather than read here, because a Section's
+/// `admitted.at` and the Event's `metadata.admitted.at` are **the same
+/// admission instant** for an ordinary admission. Two clock reads microseconds
+/// apart would have the record say the Section was admitted at a different
+/// moment from the Event that admitted it — a distinction the record does not
+/// have and could not defend. Migration is the one place the two legitimately
+/// differ, and it says so where it does it.
+fn admitted_at(mut action: Action, at: &str) -> Action {
     if let Some(value) = action.value_mut() {
-        value.admitted.at = now();
+        value.admitted.at = at.to_owned();
     }
     action
 }
@@ -1053,15 +1092,9 @@ fn checked_review(
 /// anyway is an override, and the record must not lose the difference.
 fn frozen_review(review: Option<&crate::proof::CandidateReview>) -> Option<FrozenReview> {
     review.map(|review| FrozenReview {
-        outcome: match review.result {
-            crate::proof::ReviewResult::Passed => ReviewOutcome::Passed,
-            crate::proof::ReviewResult::Failed | crate::proof::ReviewResult::Exhausted => {
-                ReviewOutcome::Overridden
-            }
-        },
         digest: review.review_digest.clone(),
-        attempt: review.attempt,
         result: review.result,
+        attempts: review.attempt,
         rules: review.rules.iter().map(|rule| rule.id.clone()).collect(),
         explanation: review.explanation.clone(),
     })
@@ -1353,17 +1386,24 @@ fn admit_agent_locked(
         );
     }
 
-    let review_digest = checked.map(|review| review.review_digest);
-    // Stamped here for the same reason the Human path stamps at confirm: the
-    // instant belongs to the admission, and this is it. The Agent path has no
-    // waiting human, so the two are close — but "close" is not a contract, and
-    // one rule is easier to keep than one rule with an exception.
+    // An Agent cannot overrule a review, so anything that reached here passed
+    // one; the attempt it passed on is the fact worth keeping.
+    let reviewed = checked.map(|review| ReviewProvenance {
+        outcome: ReviewOutcome::Passed,
+        result: review.result,
+        attempts: review.attempt,
+    });
+    // One clock read, for both facts, exactly as the Human path does it. The
+    // Agent path has no waiting human, so the two moments are close — but
+    // "close" is not a contract, and a record stating them as one fact is the
+    // record that cannot be wrong about it.
+    let at = now();
     let event = Event::sealed(
         &payload.object,
         crate::model::new_id(),
-        admitted_now(payload.action.clone()),
+        admitted_at(payload.action.clone(), &at),
         before.rev + 1,
-        agent_admission(review_digest),
+        agent_admission(&at, reviewed),
     )?;
     let object = crate::integrity::mutate(&before, |next| project(next, &event))?.object;
     validate_relations(root, &payload, &object)?;
@@ -1707,21 +1747,26 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     // target may have been revised while the human was reading.
     validate_refs(root, &candidate.payload, Admission::Human)?;
 
+    // One clock read, for both facts. This is the moment the mutation was
+    // admitted; the Section and the Event are two statements about that one
+    // moment rather than two moments that happen to be close.
+    let at = now();
     let event = Event::sealed(
         &id,
         crate::model::new_id(),
-        admitted_now(candidate.payload.action.clone()),
+        admitted_at(candidate.payload.action.clone(), &at),
         object.rev + 1,
-        // The Event keeps the two members durable provenance needs. The rest
-        // of what the human was shown lived in the Challenge, and the Challenge is
+        // History keeps the structured facts and nothing else. The digest and
+        // the agent's explanation lived in the Challenge, and the Challenge is
         // discarded the moment it is answered.
         human_admission(
             candidate.code(),
+            &at,
             candidate
                 .subject
                 .review
                 .as_ref()
-                .map(FrozenReview::provenance),
+                .map(FrozenReview::admitted),
         ),
     )?;
 
@@ -1814,14 +1859,4 @@ pub fn content(
 /// separate facts for the reason migration makes obvious.
 pub fn value(content: Content, by: Admission) -> SectionValue {
     SectionValue::new(SectionAdmitted::new(by, now()), content)
-}
-
-/// The Section value as the record will hold it, given the moment it was
-/// admitted.
-///
-/// Public so a caller that builds an Event outside the gate — there is no such
-/// caller today, and the boundary refuses one anyway — cannot be the reason the
-/// two spellings drift apart.
-pub fn admitted_at(action: Action) -> Action {
-    admitted_now(action)
 }

@@ -1055,29 +1055,45 @@ pub struct BoundRule {
 
 /// The restricted YAML profile a Rule's front matter is read under.
 ///
-/// #66 fixes it: YAML 1.2, duplicate keys invalid, custom tags invalid,
-/// anchors and aliases invalid, and only schema-required forms accepted. A
-/// typed deserializer enforces none of that. It resolves an alias into the value
-/// its anchor held, applies a tag, and takes the last of two duplicate keys —
-/// and then hands back a perfectly valid `FrontMatter` that no longer stands in
-/// any recoverable relation to the bytes it came from.
+/// #66 fixes it: YAML 1.2, duplicate keys invalid, custom tags invalid, anchors
+/// and aliases invalid, and only schema-required forms accepted. A typed
+/// deserializer enforces almost none of that. It resolves an alias into the
+/// value its anchor held and applies a tag, then hands back a perfectly valid
+/// `FrontMatter` that no longer stands in any recoverable relation to the bytes
+/// it came from.
 ///
-/// That matters here more than it would elsewhere, because Rule Review identity
+/// That matters more here than it would elsewhere, because Rule Review identity
 /// is **artifact-exact**: #66 says any byte-level change to a Rule file,
 /// "including semantically equivalent YAML reformatting", changes the
-/// ReviewDigest. Two files whose bytes differ must therefore never be one
-/// policy — and an anchor is exactly a way to write one policy twice. Left
-/// unrestricted, a reviewer reading the file and a build hashing the file are
-/// looking at two different documents.
+/// ReviewDigest. Two files whose bytes differ must never be one policy — and an
+/// anchor is exactly a way to write one policy twice. Left unrestricted, a
+/// person reading the file and a build hashing it are looking at two different
+/// documents.
 ///
 /// The check runs on the raw front matter, before deserialization, because
-/// afterwards the evidence is gone: the constructs have already been resolved
-/// away and the typed value cannot say which of them produced it.
+/// afterwards the evidence is gone: the constructs have been resolved away and
+/// the typed value cannot say which of them produced it.
 ///
-/// Scanning is line-oriented and deliberately conservative about strings: a `&`
-/// or `*` inside a quoted scalar is content, and a `#` begins a comment. What is
-/// rejected is a *node* carrying an anchor, an alias or a tag, which is the only
-/// place those can appear.
+/// **It scans token positions, not line beginnings, and that distinction is the
+/// whole of what makes it sound.** An earlier version asked only what a node
+/// *started* with, which flow style walks straight past:
+/// `applies: { domains: [&x object] }` has a node beginning with `{`, so the
+/// anchor inside it was never looked at. Refusing flow style outright would
+/// close that and cost more than it is worth — `domains: [object]` is ordinary
+/// YAML that this schema has every reason to accept. So instead every position
+/// where a node may begin is examined, in either presentation: the start of a
+/// value, and anything following `[`, `{`, `,` or `:`. An indicator can only
+/// introduce a node, so that is everywhere one can be.
+///
+/// Quoted spans are masked out first, because inside them these are content:
+/// `id: "a*b"` is a string, not an alias.
+///
+/// Duplicate keys are caught in two places and both fail closed. Block-style
+/// keys are lines, so the scanner below tracks them by indentation; flow-style
+/// mappings put their keys on one line, where the deserializer refuses a
+/// repeated field against this fixed schema. Two mechanisms for one rule is
+/// worth noting rather than hiding — what would not be acceptable is a case
+/// neither covers.
 fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
     let mut keys: Vec<(usize, String)> = Vec::new();
     for (number, line) in front.lines().enumerate() {
@@ -1092,34 +1108,25 @@ fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
             EXIT_SCHEMA,
             "{where_}:{number}: a rule's front matter is one document"
         );
-        // What follows a `key:` or a `-`, which is where a node begins and the
-        // only place an anchor, alias or tag may be written.
-        let node = node_of(trimmed);
-        if let Some(first) = node.chars().next() {
+        check_indicators(trimmed, where_, number)?;
+        // A block scalar makes the lines under it content rather than nodes,
+        // which this scanner would then read as structure. No field in this
+        // schema needs one, so the shape is refused rather than mis-scanned.
+        if let Some(node) = value_of(trimmed) {
+            let first = node.chars().next();
             ensure!(
-                first != '&',
+                first != Some('|') && first != Some('>'),
                 EXIT_SCHEMA,
-                "{where_}:{number}: a rule's front matter uses no YAML anchors; write the value out"
-            );
-            ensure!(
-                first != '*',
-                EXIT_SCHEMA,
-                "{where_}:{number}: a rule's front matter uses no YAML aliases; write the value out"
-            );
-            ensure!(
-                first != '!',
-                EXIT_SCHEMA,
-                "{where_}:{number}: a rule's front matter uses no YAML tags"
+                "{where_}:{number}: a rule's front matter uses no block scalars"
             );
         }
-        // Duplicate keys, per mapping. Indentation identifies the mapping, which
-        // is enough for the shallow shapes this schema accepts and refuses
-        // rather than guesses at anything deeper.
         if let Some((key, _)) = split_key(trimmed) {
             let indent = content.len() - content.trim_start().len();
             keys.retain(|(depth, _)| *depth < indent);
             ensure!(
-                !keys.iter().any(|(depth, seen)| *depth == indent && seen == &key),
+                !keys
+                    .iter()
+                    .any(|(depth, seen)| *depth == indent && seen == &key),
                 EXIT_SCHEMA,
                 "{where_}:{number}: {key:?} appears twice in one mapping, and a rule has one value for it"
             );
@@ -1127,6 +1134,61 @@ fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuse an anchor, an alias or a tag wherever a node may begin.
+fn check_indicators(line: &str, where_: &str, number: usize) -> Result<()> {
+    let masked = mask_quoted(line);
+    let bytes = masked.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        let what = match byte {
+            b'&' => "anchors; write the value out",
+            b'*' => "aliases; write the value out",
+            b'!' => "tags",
+            _ => continue,
+        };
+        // A node begins at the start of the line, or after one of the
+        // indicators that opens or separates one. Anything else is content.
+        let opens = bytes[..index]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        let node_position = match opens {
+            None => true,
+            Some(b'[') | Some(b'{') | Some(b',') | Some(b':') | Some(b'-') => true,
+            Some(_) => false,
+        };
+        ensure!(
+            !node_position,
+            EXIT_SCHEMA,
+            "{where_}:{number}: a rule's front matter uses no YAML {what}"
+        );
+    }
+    Ok(())
+}
+
+/// The line with the contents of quoted spans replaced by spaces.
+///
+/// Length-preserving, so positions still line up, and content-erasing, so an
+/// indicator character inside a string is not read as structure.
+fn mask_quoted(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    for character in line.chars() {
+        match quote {
+            Some(open) if character == open => {
+                quote = None;
+                out.push(character);
+            }
+            Some(_) => out.push(' '),
+            None if character == '"' || character == '\'' => {
+                quote = Some(character);
+                out.push(character);
+            }
+            None => out.push(character),
+        }
+    }
+    out
 }
 
 /// A line with any trailing comment removed, respecting quotes.
@@ -1147,17 +1209,17 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// The value part of `key: value`, or of `- value`, or the line itself.
-fn node_of(trimmed: &str) -> &str {
-    if let Some(rest) = trimmed.strip_prefix("- ") {
-        return node_of(rest.trim());
-    }
-    if trimmed == "-" {
-        return "";
-    }
-    match split_key(trimmed) {
-        Some((_, value)) => value,
+/// What this line offers as a value, if it offers one.
+fn value_of(trimmed: &str) -> Option<&str> {
+    let rest = match trimmed.strip_prefix("- ") {
+        Some(rest) => rest.trim(),
+        None if trimmed == "-" => return None,
         None => trimmed,
+    };
+    match split_key(rest) {
+        Some((_, value)) if !value.is_empty() => Some(value),
+        Some(_) => None,
+        None => Some(rest),
     }
 }
 

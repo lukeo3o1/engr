@@ -372,14 +372,32 @@ pub fn repo_root(root: &Path) -> Option<PathBuf> {
     run(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// Where git keeps this repository's own local state.
+/// Where git keeps one of its own internal files.
 ///
-/// Asked of git rather than assembled from the root, because a worktree, a
-/// submodule and a bare checkout each put it somewhere a caller would guess
-/// wrong. Absent outside a repository, which is an answer and not a failure.
-pub fn git_dir(root: &Path) -> Option<PathBuf> {
-    let answer = run(root, &["rev-parse", "--absolute-git-dir"])?;
-    Some(PathBuf::from(answer))
+/// Asked of git **by name** rather than assembled from a directory, and that is
+/// the whole point. `--absolute-git-dir` answers with the per-worktree
+/// administrative directory, while `info/` is resolved through the common
+/// directory a linked worktree shares with its parent — so joining
+/// `info/exclude` onto the git dir writes, in a linked worktree, a file git
+/// never reads. Git's own documentation says not to assume which of the two an
+/// internal path belongs to, and to ask with `--git-path`.
+///
+/// Getting that wrong is silent, which is why it is worth a function: the
+/// exclude appears to have been written, and `.engr/local/` stays visible to
+/// `git add -A` with a live challenge code sitting in it.
+///
+/// Absent outside a repository, which is an answer and not a failure.
+pub fn git_path(root: &Path, internal: &str) -> Option<PathBuf> {
+    let answer = run(root, &["rev-parse", "--git-path", internal])?;
+    if answer.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&answer);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
 }
 
 /// One directory inside the workspace, as git names it from the repository
