@@ -153,21 +153,12 @@ impl SectionStatus {
 ///
 /// A hash that cannot be recomputed counts as a mismatch: the alternative is
 /// reporting content we could not check as sound.
-fn section_tampered(object: &Object, section: &crate::model::Section) -> bool {
-    if object.sha256.is_some() {
-        return crate::integrity::check_section_seal(section, &section.sha256).is_err();
-    }
-    section
-        .recomputed_sha256()
-        .map(|now| now != section.sha256)
-        .unwrap_or(true)
+fn section_tampered(_object: &Object, section: &crate::model::Section) -> bool {
+    crate::integrity::check_section_seal(section).is_err()
 }
 
 fn object_tampered(object: &Object) -> bool {
-    object
-        .sha256
-        .as_deref()
-        .is_some_and(|seal| crate::integrity::check_object_integrity(object, seal).is_err())
+    crate::integrity::check_object_integrity(object).is_err()
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -201,7 +192,7 @@ pub fn width(root: &Path) -> usize {
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let (object, section) = match reference.target_identity() {
+    let (object, section) = match crate::dependency::parse_target(reference.target()) {
         Ok(identity) => identity,
         Err(_) => {
             return RefDrift {
@@ -232,106 +223,62 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         .and_then(|target| target.section(section).ok().cloned());
     let target_missing = target.is_none() && !target_unreadable;
 
-    if let Ref::Selective(selective) = reference {
-        let current_integrity_failed = target_object.as_ref().is_some_and(|target| {
-            target.sha256.as_deref().map_or(true, |seal| {
-                crate::integrity::check_object_integrity(target, seal).is_err()
-            })
-        });
-        let evaluated = target_object
-            .as_ref()
-            .and_then(|target| target.sha256.as_deref().map(|seal| (target, seal)))
-            .map(|(target, seal)| crate::dependency::evaluate(root, target, seal, selective));
-        if evaluated.as_ref().is_some_and(Result::is_err) {
-            target_unreadable = true;
-        }
-        let state = evaluated.and_then(Result::ok);
-        let moved_fields = match &state {
-            Some(crate::dependency::Dependency::Drifted { fields }) => fields
-                .iter()
-                .map(|field| field.as_str().to_owned())
-                .collect(),
-            _ => Vec::new(),
-        };
-        let target_tampered = matches!(
-            state,
-            Some(crate::dependency::Dependency::TargetIntegrityFailure)
-        );
-        let target_missing =
-            matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
-        let target_unreadable = target_unreadable
-            || matches!(
-                state,
-                Some(
-                    crate::dependency::Dependency::ProvenanceUnavailable
-                        | crate::dependency::Dependency::SchemaMismatch
-                        | crate::dependency::Dependency::DigestInvalid
-                )
-            );
-        let lookback =
-            (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
-                format!(
-                    "git show {}:{}/objects/{}.json",
-                    short(selective.commit()),
-                    store::DIR,
-                    object
-                )
-            });
-        return RefDrift {
-            object,
-            section,
-            confirmed_sha256: selective.digest().to_owned(),
-            current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
-                .then(|| selective.digest().to_owned()),
-            lookback,
-            target_tampered,
-            target_unreadable,
-            target_missing,
-            moved_fields,
-            integrity_side: target_tampered.then_some(if current_integrity_failed {
-                "current"
-            } else {
-                "historical"
-            }),
-        };
-    }
-    let legacy = reference
-        .as_legacy()
-        .expect("the selective case returned above");
-    let target_tampered = target_object
+    let current_integrity_failed = target_object
         .as_ref()
-        .zip(target.as_ref())
-        .is_some_and(|(object, section)| section_tampered(object, section));
-    // Recomputed from the target's actual content, not read off its stored
-    // seal. The seal is a claim about what was admitted; it is not the
-    // content, and a file rewritten outside admission keeps the old seal while
-    // saying something else. Reporting the seal here made the two verdicts
-    // agree by accident — "was X, now X" for a section whose wording had
-    // changed — because the value being compared was the very value that had
-    // not moved. Content identity decides drift; the seal decides tampering.
-    let current = target.and_then(|section| section.recomputed_sha256().ok());
-    let moved = current.as_deref() != Some(legacy.sha256.as_str());
-    // Worth offering whenever the target is not what was pinned, whether it was
-    // revised through admission or rewritten behind it.
-    let lookback = (current.is_some() && (moved || target_tampered)).then(|| {
+        .is_some_and(|target| crate::integrity::check_object_integrity(target).is_err());
+    let evaluated = target_object
+        .as_ref()
+        .map(|target| crate::dependency::evaluate(root, target, reference));
+    if evaluated.as_ref().is_some_and(Result::is_err) {
+        target_unreadable = true;
+    }
+    let state = evaluated.and_then(Result::ok);
+    let moved_fields = match &state {
+        Some(crate::dependency::Dependency::Drifted { fields }) => fields
+            .iter()
+            .map(|field| field.as_str().to_owned())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let target_tampered = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetIntegrityFailure)
+    );
+    let target_missing =
+        matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
+    let target_unreadable = target_unreadable
+        || matches!(
+            state,
+            Some(
+                crate::dependency::Dependency::ProvenanceUnavailable
+                    | crate::dependency::Dependency::SchemaMismatch
+                    | crate::dependency::Dependency::DigestInvalid
+            )
+        );
+    let lookback = (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
         format!(
             "git show {}:{}/objects/{}.json",
-            short(&legacy.commit),
+            short(reference.commit()),
             store::DIR,
-            legacy.object
+            object
         )
     });
     RefDrift {
-        object: legacy.object.clone(),
-        section: legacy.section,
-        confirmed_sha256: legacy.sha256.clone(),
-        current_sha256: current,
+        object,
+        section,
+        confirmed_sha256: reference.digest().to_owned(),
+        current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
+            .then(|| reference.digest().to_owned()),
         lookback,
         target_tampered,
         target_unreadable,
         target_missing,
-        moved_fields: Vec::new(),
-        integrity_side: None,
+        moved_fields,
+        integrity_side: target_tampered.then_some(if current_integrity_failed {
+            "current"
+        } else {
+            "historical"
+        }),
     }
 }
 
@@ -344,8 +291,8 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
         .map(|section| {
             let basis = section
                 .based_on
-                .as_deref()
-                .and_then(|commit| git::distance(root, commit))
+                .as_ref()
+                .and_then(|basis| git::distance(root, &basis.commit))
                 .filter(git::Distance::moved);
             let drifted = section
                 .refs
@@ -493,18 +440,22 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push('\n');
         render_content(&mut out, &section.content);
         render_relations(&mut out, &section.relations);
-        if let Some(commit) = &section.based_on {
+        if let Some(basis) = &section.based_on {
             out.push_str(&format!(
-                "    based_on {}   admitted {}\n",
-                short(commit),
-                section.admitted_at
+                "    based_on {}   admitted {} by {}\n",
+                short(&basis.commit),
+                section.admitted.at,
+                section.admitted.by.as_str()
             ));
         } else {
-            out.push_str(&format!("    admitted {}\n", section.admitted_at));
+            out.push_str(&format!(
+                "    admitted {} by {}\n",
+                section.admitted.at,
+                section.admitted.by.as_str()
+            ));
         }
         for reference in &section.refs {
-            let (target, target_section) = reference
-                .target_identity()
+            let (target, target_section) = crate::dependency::parse_target(reference.target())
                 .unwrap_or_else(|_| ("invalid".to_owned(), 0));
             out.push_str(&format!(
                 "    refs     {} §{}\n",
@@ -519,7 +470,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         if status.tampered {
             out.push_str(&format!(
                 "    !!       persisted Section does not match the seal admitted at {}\n",
-                section.admitted_at
+                section.admitted.at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
                 Some(commit) => out.push_str(&format!(
@@ -558,7 +509,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 "    advice   {} commits and {} files have changed since {}; check this still holds\n",
                 distance.commits,
                 distance.files.len(),
-                short(section.based_on.as_deref().unwrap_or("")),
+                section.based_on.as_ref().map(|basis| short(&basis.commit)).unwrap_or(""),
             ));
         }
         for drift in &status.drifted {
@@ -630,12 +581,12 @@ struct JsonSection<'a> {
     #[serde(skip_serializing_if = "<[Supplement]>::is_empty")]
     content: &'a [Supplement],
     status: &'static str,
-    based_on: Option<&'a str>,
+    based_on: Option<&'a crate::semantics::BasedOn>,
     refs: &'a [Ref],
     #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
     relations: &'a [Relation],
-    sha256: &'a str,
-    admitted_at: &'a str,
+    digest: &'a str,
+    admitted: &'a crate::semantics::Admitted,
     #[serde(skip_serializing_if = "Option::is_none")]
     basis_commits_behind: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -671,7 +622,7 @@ struct JsonObject<'a> {
     attention: bool,
     rev: u64,
     integrity: &'static str,
-    sha256: Option<&'a str>,
+    digest: &'a str,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
 }
@@ -696,11 +647,11 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 text: &section.text,
                 content: &section.content,
                 status: status.key(),
-                based_on: section.based_on.as_deref(),
+                based_on: section.based_on.as_ref(),
                 refs: &section.refs,
                 relations: &section.relations,
-                sha256: &section.sha256,
-                admitted_at: &section.admitted_at,
+                digest: &section.digest,
+                admitted: &section.admitted,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),
@@ -720,7 +671,7 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         } else {
             "ok"
         },
-        sha256: object.sha256.as_deref(),
+        digest: &object.digest,
         summary: JsonSummary {
             sections: tally.total,
             ok: tally.ok,
@@ -957,7 +908,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
     for item in items {
         if let Some(needle) = keyword {
             let needle = needle.to_lowercase();
-            let hit = item.topic.to_lowercase().contains(&needle)
+            let hit = item.title.to_lowercase().contains(&needle)
                 || item
                     .sections
                     .iter()
@@ -982,7 +933,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
             item.sections.len(),
             note,
             to_the_second(item.updated_at()),
-            item.topic
+            item.title
         ));
     }
     out
@@ -996,7 +947,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
 pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     let w = backlog_width(root);
     let mut out = String::from(STAGING_BANNER);
-    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.topic));
+    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.title));
     out.push_str(&format!(
         "{} unresolved   updated {}\n",
         item.sections.len(),
@@ -1089,7 +1040,7 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
     serde_json::to_string_pretty(&JsonBacklogItem {
         id: &item.id,
         reference: backlog_reference(&item.id),
-        topic: &item.topic,
+        topic: &item.title,
         // Structured output travels furthest from the banner, so the boundary
         // has to be a field rather than a line somebody printed once.
         authority: "unconfirmed_staging",
@@ -1242,7 +1193,7 @@ fn subject_title(root: &Path, subject: &work::Subject) -> String {
             .map(|object| object.title)
             .unwrap_or_default(),
         work::Subject::Backlog(id) => backlog::load(root, id)
-            .map(|item| item.topic)
+            .map(|item| item.title)
             .unwrap_or_default(),
     }
 }
@@ -1390,7 +1341,7 @@ fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
     let id = uuid.to_string();
     match parsed.kind() {
         crate::reference::ResourceKind::Backlog => match backlog::load(root, &id) {
-            Ok(item) => format!("unresolved  {}", item.topic),
+            Ok(item) => format!("unresolved  {}", item.title),
             Err(error) if error.code == crate::EXIT_NOT_FOUND => {
                 "gone (consumed or removed)".to_owned()
             }
@@ -1434,7 +1385,7 @@ pub fn render_collection_ls(root: &Path, collections: &[collection::Collection])
             item.state.as_str(),
             item.members.len(),
             attention,
-            item.name
+            item.title
         ));
     }
     out
@@ -1466,7 +1417,7 @@ pub fn render_collection_show(root: &Path, item: &collection::Collection) -> Str
         item.id,
         item.id,
         item.state.as_str(),
-        item.name
+        item.title
     ));
     if let Some(schedule) = &item.schedule {
         let mut parts = Vec::new();
@@ -1522,7 +1473,7 @@ pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
         // The same field Backlog and Work carry, for the same reason: structured
         // output leaves the screen that would otherwise have said so.
         "authority": "planning",
-        "name": item.name,
+        "title": item.title,
         "description": item.description,
         "state": item.state.as_str(),
         "schedule": item.schedule,
@@ -1577,13 +1528,13 @@ fn comparable_projection(object: &Object) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(object)
         .map_err(|error| Error::new(crate::EXIT_SCHEMA, format!("comparing: {error}")))?;
     if let Some(map) = value.as_object_mut() {
-        map.remove("sha256");
+        map.remove("digest");
         if let Some(sections) = map.get_mut("sections").and_then(|s| s.as_array_mut()) {
             let mut keyed = serde_json::Map::new();
             for mut section in sections.drain(..) {
                 let id = section.get("id").and_then(serde_json::Value::as_u64);
                 if let Some(entry) = section.as_object_mut() {
-                    entry.remove("sha256");
+                    entry.remove("digest");
                     entry.remove("id");
                 }
                 let at = id

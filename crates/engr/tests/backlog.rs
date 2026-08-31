@@ -5,18 +5,12 @@
 //! authority, and a candidate written against one unresolved point mutating a
 //! different one.
 
-use engr::backlog::{self, Prepared, Produced, Subject};
-use engr::model::{Action, Content, Payload, Ref};
-use engr::{gate, ops, reference, store};
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
+mod common;
 
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
+use common::workspace;
+use engr::backlog::{self, Prepared, Produced, Subject};
+use engr::{gate, ops, reference, store};
+use std::path::Path;
 
 /// Put an Object on disk without going through any write path.
 ///
@@ -53,38 +47,14 @@ fn commit_all(root: &Path, message: &str) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
-fn payload(action: Action, object: &str, text: &str) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content: Content {
-            text: text.to_owned(),
-            based_on: None,
-            refs: Vec::new(),
-            ..Content::default()
-        },
-    }
-}
-
-fn admit(root: &Path, payload: Payload) -> engr::model::Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(root, payload(Action::ObjectCreated, &id, title));
-    id
-}
+use common::{add, admit, new_object, wording};
 
 fn compact(id: &str) -> String {
     reference::encode_uuid(uuid::Uuid::parse_str(id).expect("uuid"))
 }
 
-fn item(root: &Path, topic: &str, text: &str) -> String {
-    backlog::create(root, topic, text, Vec::new(), &Prepared::first())
+fn item(root: &Path, title: &str, text: &str) -> String {
+    backlog::create(root, title, text, Vec::new(), &Prepared::first())
         .expect("create backlog item")
         .id
 }
@@ -96,8 +66,8 @@ fn on_add(root: &Path, id: &str) -> Prepared {
     Prepared::first().against(backlog::Precondition::section_absent(root, id).expect("observe"))
 }
 
-fn on_topic(root: &Path, id: &str) -> Prepared {
-    Prepared::first().against(backlog::Precondition::topic(root, id).expect("observe"))
+fn on_title(root: &Path, id: &str) -> Prepared {
+    Prepared::first().against(backlog::Precondition::title(root, id).expect("observe"))
 }
 
 fn on_section(root: &Path, id: &str, section: u64) -> Prepared {
@@ -194,7 +164,7 @@ fn a_declared_current_workspace_is_not_downgraded_by_a_malformed_object() {
     let fresh = backlog::create(&root, "topic", "unresolved", Vec::new(), &Prepared::first())
         .expect("an unrelated domain is not held hostage by it");
     assert_eq!(
-        backlog::load(&root, &fresh.id).expect("load").topic,
+        backlog::load(&root, &fresh.id).expect("load").title,
         "topic"
     );
 }
@@ -501,19 +471,19 @@ fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
     for (name, corrupt) in [
         (
             "a blank topic",
-            Box::new(|value: &mut serde_json::Value| value["topic"] = serde_json::json!("   "))
+            Box::new(|value: &mut serde_json::Value| value["title"] = serde_json::json!("   "))
                 as Box<dyn Fn(&mut serde_json::Value)>,
         ),
         (
             "a topic spanning lines",
             Box::new(|value: &mut serde_json::Value| {
-                value["topic"] = serde_json::json!("a topic\nwith a body under it")
+                value["title"] = serde_json::json!("a topic\nwith a body under it")
             }),
         ),
         (
             "a topic that is really a body",
             Box::new(|value: &mut serde_json::Value| {
-                value["topic"] = serde_json::json!("x".repeat(121))
+                value["title"] = serde_json::json!("x".repeat(121))
             }),
         ),
         (
@@ -544,7 +514,7 @@ fn stored_backlog_data_is_held_to_what_the_write_path_enforces() {
 
     // A topic exactly at the limit is fine; the boundary is not off by one.
     let mut value = pristine;
-    value["topic"] = serde_json::json!("x".repeat(120));
+    value["title"] = serde_json::json!("x".repeat(120));
     write_raw(&path, &value).expect("write");
     backlog::load(&root, &id).expect("120 characters is a topic, not a body");
 }
@@ -769,10 +739,7 @@ fn ordinary_backlog_mutations_serialize_through_the_workspace_lock() {
 fn a_subject_may_name_an_object_a_section_or_another_unresolved_point() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "authentication");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "refresh tokens rotate"),
-    );
+    admit(&root, add(&object, wording("refresh tokens rotate")));
     let other = item(&root, "another topic", "also unresolved");
 
     let subjects = vec![
@@ -936,16 +903,15 @@ fn the_record_still_cannot_depend_on_unconfirmed_staging() {
     // `refs[]` names an Object and a section of it. A Backlog id put there
     // resolves to no Object, which is the only answer that keeps a confirmed
     // section from standing on wording nobody read.
-    let mut proposal = payload(Action::SectionAdded, &object, "stands on something");
-    proposal.content.refs = vec![Ref::selective(
-        engr::dependency::SelectiveRef::stored(
-            engr::proof::section_target(&staging, 1),
-            vec![engr::dependency::SemanticField::Text],
-            engr::git::head(&root).expect("HEAD"),
-            format!("1:{}", "0".repeat(64)),
-        )
-        .expect("a well formed reference at a staging id"),
-    )];
+    let mut content = wording("stands on something");
+    content.refs = vec![engr::dependency::SelectiveRef::stored(
+        engr::proof::section_target(&staging, 1),
+        vec![engr::dependency::SemanticField::Text],
+        engr::git::head(&root).expect("HEAD"),
+        format!("1:{}", "0".repeat(64)),
+    )
+    .expect("a well formed reference at a staging id")];
+    let proposal = add(&object, content);
     let error = gate::prepare(&root, proposal).expect_err("a record ref cannot target backlog");
     assert_eq!(error.code, engr::EXIT_NOT_FOUND);
     assert!(error.message.contains("does not exist"));
@@ -957,10 +923,10 @@ fn the_record_still_cannot_depend_on_unconfirmed_staging() {
 
 /// Write an item with exact timestamps, which `create` cannot: it uses the
 /// clock, and these tests are about values the clock never produces.
-fn staged(root: &Path, id: &str, topic: &str, sections: serde_json::Value) {
+fn staged(root: &Path, id: &str, title: &str, sections: serde_json::Value) {
     let item = serde_json::json!({
         "id": id,
-        "topic": topic,
+        "title": title,
         "next_section_id": sections.as_array().expect("sections").len() + 1,
         "sections": sections,
     });
@@ -980,8 +946,8 @@ fn activity_is_compared_as_an_instant_not_as_text() {
         "offsets",
         serde_json::json!([
             // 17:00Z — earlier, but sorts later as a string.
-            {"id": 1, "text": "first", "updated_at": "2026-08-17T01:00:00+08:00", "subjects": []},
-            {"id": 2, "text": "second", "updated_at": "2026-08-16T20:00:00Z", "subjects": []},
+            {"id": 1, "text": "first", "updated_at": "2026-08-17T01:00:00+08:00"},
+            {"id": 2, "text": "second", "updated_at": "2026-08-16T20:00:00Z"},
         ]),
     );
 
@@ -1009,7 +975,7 @@ fn rendering_activity_to_the_second_never_moves_the_instant() {
         &id,
         "rendered",
         serde_json::json!([
-            {"id": 1, "text": "point", "updated_at": "2026-08-17T10:00:00.123456+08:00", "subjects": []},
+            {"id": 1, "text": "point", "updated_at": "2026-08-17T10:00:00.123456+08:00"},
         ]),
     );
     let item = backlog::load(&root, &id).expect("load");
@@ -1128,9 +1094,9 @@ fn a_topic_rename_does_not_refresh_section_activity() {
         .updated_at
         .clone();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    backlog::rename(&root, &id, "after", &on_topic(&root, &id)).expect("rename");
+    backlog::rename(&root, &id, "after", &on_title(&root, &id)).expect("rename");
     let after = backlog::load(&root, &id).expect("load");
-    assert_eq!(after.topic, "after");
+    assert_eq!(after.title, "after");
     assert_eq!(
         after.sections[0].updated_at, before,
         "renaming a topic is not activity on any unresolved point"
@@ -1232,10 +1198,7 @@ fn merging_unresolved_points_keeps_what_they_already_produced() {
 fn effective_authority_is_unchanged_by_anything_in_staging() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "record");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "confirmed wording"),
-    );
+    admit(&root, add(&object, wording("confirmed wording")));
     let before = ops::effective(&root, &object).expect("effective");
 
     backlog::create(
@@ -1572,15 +1535,15 @@ fn every_field_of_the_bound_section_stales_it_not_only_the_wording() {
     }
 }
 
-/// The topic is context every Section is read in, so it is bound with them.
+/// The title is context every Section is read in, so it is bound with them.
 #[test]
-fn a_topic_change_stales_a_section_mutation_prepared_under_it() {
+fn a_title_change_stales_a_section_mutation_prepared_under_it() {
     let (_dir, root) = workspace();
     let id = item(&root, "original topic", "unresolved");
     let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
-    backlog::rename(&root, &id, "a different topic", &on_topic(&root, &id)).expect("rename");
+    backlog::rename(&root, &id, "a different topic", &on_title(&root, &id)).expect("rename");
     let error = bound.still_holds(&root).expect_err("the context moved");
-    assert!(error.message.contains("topic"), "{}", error.message);
+    assert!(error.message.contains("title"), "{}", error.message);
 }
 
 /// Adding binds the topic and the id it is about to take, not its siblings.
@@ -1625,7 +1588,7 @@ fn adding_a_point_binds_the_id_it_will_take_and_not_the_siblings() {
 fn a_topic_mutation_binds_the_whole_item() {
     let (_dir, root) = workspace();
     let id = item(&root, "topic", "first");
-    let bound = backlog::Precondition::topic(&root, &id).expect("observe");
+    let bound = backlog::Precondition::title(&root, &id).expect("observe");
     bound.still_holds(&root).expect("unchanged");
 
     backlog::add_section(
@@ -1687,9 +1650,9 @@ fn a_merge_binds_the_topic_and_both_ends_but_not_an_unnamed_sibling() {
 
     // The topic scopes every point under it, so it is bound too.
     let bound = backlog::Precondition::merge(&root, &id, 1, 2).expect("observe");
-    backlog::rename(&root, &id, "a different topic", &on_topic(&root, &id)).expect("rename");
+    backlog::rename(&root, &id, "a different topic", &on_title(&root, &id)).expect("rename");
     let error = bound.still_holds(&root).expect_err("the context moved");
-    assert!(error.message.contains("topic"), "{}", error.message);
+    assert!(error.message.contains("title"), "{}", error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,7 +1674,7 @@ fn marker(root: &Path, id: &str, section: u64) -> Option<engr::rules::RuleReview
         .expect("load")
         .section(section)
         .expect("section")
-        .rule_review
+        .review_exhaustion
 }
 
 fn attempt(value: u32) -> Prepared {
@@ -2016,7 +1979,7 @@ fn the_marker_is_a_section_field_that_is_absent_unless_it_is_needed() {
     let stored: serde_json::Value =
         store::read_json(&backlog::item_path(&root, &id)).expect("item");
     assert!(
-        stored["sections"][0].get("rule_review").is_none(),
+        stored["sections"][0].get("review_exhaustion").is_none(),
         "an ordinary point carries no diagnostic: {}",
         stored["sections"][0]
     );
@@ -2026,7 +1989,7 @@ fn the_marker_is_a_section_field_that_is_absent_unless_it_is_needed() {
     let stored: serde_json::Value =
         store::read_json(&backlog::item_path(&root, &id)).expect("item");
     assert_eq!(
-        stored["sections"][0]["rule_review"],
+        stored["sections"][0]["review_exhaustion"],
         serde_json::json!({"attempts": 2, "limit": 1}),
         "two numbers, and deliberately not a review history"
     );
@@ -2194,7 +2157,7 @@ fn a_precondition_for_something_else_does_not_authorize_this_mutation() {
 
     // The right item and point, the wrong kind of binding: a whole-item
     // predecessor is what a rename rests on, not a reword.
-    let whole = backlog::Precondition::topic(&root, &mine).expect("observe");
+    let whole = backlog::Precondition::title(&root, &mine).expect("observe");
     let error = backlog::revise_section(
         &root,
         &mine,
@@ -2286,7 +2249,7 @@ fn a_merge_precondition_must_cover_exactly_the_destination_and_its_source() {
 fn creating_an_item_refuses_a_precondition_it_could_not_honour() {
     let (_dir, root) = workspace();
     let elsewhere = item(&root, "unrelated", "unresolved");
-    let bound = backlog::Precondition::topic(&root, &elsewhere).expect("observe");
+    let bound = backlog::Precondition::title(&root, &elsewhere).expect("observe");
     bound
         .still_holds(&root)
         .expect("it holds, and it authorizes nothing here");
@@ -2321,7 +2284,7 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
     let id = item(&root, "original topic", "unresolved");
 
     let renaming = |value: u32| {
-        attempt(value).against(backlog::Precondition::topic(&root, &id).expect("observe"))
+        attempt(value).against(backlog::Precondition::title(&root, &id).expect("observe"))
     };
     let error = backlog::rename(&root, &id, "a different topic", &renaming(3))
         .expect_err("nowhere to record it");
@@ -2332,7 +2295,7 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
         error.message
     );
     assert_eq!(
-        backlog::load(&root, &id).expect("load").topic,
+        backlog::load(&root, &id).expect("load").title,
         "original topic"
     );
     assert_eq!(
@@ -2425,7 +2388,7 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
         ),
     ] {
         let mut corrupt = pristine.clone();
-        corrupt["sections"][0]["rule_review"] = marker;
+        corrupt["sections"][0]["review_exhaustion"] = marker;
         write_raw(&path, &corrupt).expect("hand edit");
         let error = backlog::load(&root, &id).unwrap_err();
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
@@ -2433,7 +2396,7 @@ fn a_stored_marker_that_no_exhausted_review_could_have_written_is_refused() {
 
     // The shape an exhausted review does produce still loads.
     let mut fine = pristine;
-    fine["sections"][0]["rule_review"] = serde_json::json!({"attempts": 6, "limit": 5});
+    fine["sections"][0]["review_exhaustion"] = serde_json::json!({"attempts": 6, "limit": 5});
     write_raw(&path, &fine).expect("hand edit");
     backlog::load(&root, &id).expect("a real diagnostic");
 }
@@ -2497,7 +2460,7 @@ fn a_library_mutation_cannot_skip_the_predecessor_by_going_direct() {
             );
         }
         let stored = backlog::load(&root, &id).expect("load");
-        assert_eq!(stored.topic, "topic", "no rename landed");
+        assert_eq!(stored.title, "topic", "no rename landed");
         assert_eq!(
             stored.section(1).expect("§1").text,
             "unresolved",
@@ -2530,7 +2493,7 @@ fn creating_a_point_is_still_possible_where_a_rule_governs_backlog() {
     let exhausted = backlog::create(&root, "another", "unresolved", Vec::new(), &attempt(9))
         .expect("soft-admit");
     assert_eq!(
-        exhausted.sections[0].rule_review,
+        exhausted.sections[0].review_exhaustion,
         Some(engr::rules::RuleReview {
             attempts: 9,
             limit: 5
@@ -2609,15 +2572,9 @@ fn an_explicit_revision_is_inexact_when_the_file_read_is_not_what_it_holds() {
 fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() {
     let (_dir, root) = workspace();
     let sound = new_object(&root, "a sound record");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &sound, "confirmed wording"),
-    );
+    admit(&root, add(&sound, wording("confirmed wording")));
     let moved = new_object(&root, "a record that will move");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &moved, "also confirmed"),
-    );
+    admit(&root, add(&moved, wording("also confirmed")));
     let id = item(&root, "topic", "unresolved");
 
     // The wording moves without the gate. It still loads, and it is still
@@ -2682,10 +2639,7 @@ fn a_produced_outcome_cannot_claim_authority_that_was_edited_outside_the_gate() 
 fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "a record");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "confirmed wording"),
-    );
+    admit(&root, add(&object, wording("confirmed wording")));
     let id = item(&root, "topic", "unresolved");
     let compact = compact(&object);
 
@@ -2694,8 +2648,7 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
     tampered.state = engr::semantics::State::Closed;
     overwrite_object(&root, &tampered);
     for section in &tampered.sections {
-        engr::integrity::check_section_seal(section, &section.sha256)
-            .expect("the Section seals still pass");
+        engr::integrity::check_section_seal(section).expect("the Section seals still pass");
     }
 
     let before = backlog::load(&root, &id).expect("load");
@@ -2744,14 +2697,8 @@ fn an_object_level_outcome_refuses_authority_changed_outside_the_gate() {
 fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "a record");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "first confirmed wording"),
-    );
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "second confirmed wording"),
-    );
+    admit(&root, add(&object, wording("first confirmed wording")));
+    admit(&root, add(&object, wording("second confirmed wording")));
     let id = item(&root, "topic", "unresolved");
     let compact = compact(&object);
 
@@ -2762,7 +2709,7 @@ fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate(
     assert_eq!((tampered.rev, tampered.next_section_id), (rev, next));
     overwrite_object(&root, &tampered);
     for section in &tampered.sections {
-        engr::integrity::check_section_seal(section, &section.sha256)
+        engr::integrity::check_section_seal(section)
             .expect("every remaining Section seal still passes");
     }
 
@@ -2792,7 +2739,7 @@ fn an_object_level_outcome_refuses_an_admitted_section_removed_outside_the_gate(
 fn a_produced_target_that_cannot_be_read_is_not_reported_as_missing() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "a record");
-    admit(&root, payload(Action::SectionAdded, &object, "first"));
+    admit(&root, add(&object, wording("first")));
     let id = item(&root, "topic", "unresolved");
 
     // Two confirmed mutations claiming the same revision.
@@ -2891,10 +2838,7 @@ fn a_stored_number_outside_the_shared_domain_is_a_schema_fault() {
 fn recording_a_produced_outcome_is_activity_and_the_protocol_agrees() {
     let (_dir, root) = workspace();
     let object = new_object(&root, "a record");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &object, "confirmed wording"),
-    );
+    admit(&root, add(&object, wording("confirmed wording")));
     let id = item(&root, "topic", "unresolved");
     let before = backlog::load(&root, &id).expect("load").sections[0]
         .updated_at

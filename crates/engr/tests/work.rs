@@ -7,43 +7,15 @@
 //! Work owns no authority, changes no Object state, is not addressable, and
 //! cannot be mistaken for the record on any screen that prints it.
 
-use engr::model::{Action, Content, Object, Payload};
+mod common;
+
 use engr::semantics::{ObjectType, State as ObjectState};
 use engr::work::{self, ItemState, State};
-use engr::{gate, ops, store};
+use engr::{ops, store};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
+use std::path::Path;
 
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
-
-fn admit(root: &Path, payload: Payload) -> Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(
-        root,
-        Payload {
-            action: Action::ObjectCreated,
-            object: id.clone(),
-            becomes: None,
-            content: Content {
-                text: title.to_owned(),
-                ..Content::default()
-            },
-        },
-    );
-    id
-}
+use common::{admit, new_object, workspace};
 
 fn compact(id: &str) -> String {
     engr::reference::encode_uuid_str(id).expect("compact")
@@ -624,15 +596,7 @@ fn completing_every_item_changes_nothing_about_the_object() {
     let id = new_object(&root, "the design");
     admit(
         &root,
-        Payload {
-            action: Action::ObjectClassified {
-                object_type: Some(ObjectType::Design),
-                state: ObjectState::Draft,
-            },
-            object: id.clone(),
-            becomes: None,
-            content: Content::default(),
-        },
+        common::classify(&id, Some(ObjectType::Design), ObjectState::Draft),
     );
     let before = ops::effective(&root, &id).expect("object");
 
@@ -827,26 +791,24 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     let sound: Value = store::read_json(&work::path(&root, &obj(&id))).expect("read");
     let restore = || write_raw(&work::path(&root, &obj(&id)), &sound).expect("restore");
 
-    // `dependencies`, `blockers`, `items` and `items[].commits` are required and
-    // may be empty. Omitted is a third spelling the write path never produces.
+    // `dependencies`, `blockers`, `items` and `items[].commits` are omitted when
+    // empty, per the canonical omission rule. An explicit `[]` is the second
+    // spelling the write path never produces.
     for field in ["dependencies", "blockers", "items"] {
         restore();
         rewrite(&root, &obj(&id), |value| {
-            value.as_object_mut().expect("object").remove(field);
+            value[field] = json!([]);
         });
         let error = work::load(&root, &obj(&id)).expect_err(field);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{field}");
     }
     restore();
     rewrite(&root, &obj(&id), |value| {
-        value["items"][0]
-            .as_object_mut()
-            .expect("item")
-            .remove("commits");
+        value["items"][0]["commits"] = json!([]);
     });
     assert!(
         work::load(&root, &obj(&id)).is_err(),
-        "commits is required too"
+        "an empty commit list is omitted too"
     );
 
     // The write path refuses a duplicate dependency and a duplicate commit, so

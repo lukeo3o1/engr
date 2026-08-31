@@ -2,18 +2,13 @@
 //! wording that was confirmed, that confirmed history remains, and that drift
 //! is noticed.
 
-use engr::model::{Action, Content, Payload, Ref};
+mod common;
+
+use common::{admit, new_object, text_ref, workspace, Act};
+use engr::model::{Content, Payload};
 use engr::{gate, integrity, ops, store, view};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
-
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
+use std::path::Path;
 
 fn commit_all(root: &Path, message: &str) -> String {
     for args in [
@@ -40,45 +35,18 @@ fn commit_all(root: &Path, message: &str) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
-fn payload(action: Action, object: &str, text: &str) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content: Content {
-            text: text.to_owned(),
-            based_on: None,
-            refs: Vec::new(),
-            ..Content::default()
-        },
-    }
+fn payload(action: Act, object: &str, text: &str) -> Payload {
+    common::payload(action, object, common::wording(text))
 }
 
-fn admit(root: &Path, payload: Payload) -> engr::model::Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(root, payload(Action::ObjectCreated, &id, title));
-    id
-}
-
-fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
-    let target = ops::effective(root, object).expect("reference target");
-    Ref::selective(
-        engr::dependency::admit(
-            root,
-            &target,
-            target.sha256.as_deref().expect("aggregate seal"),
-            section,
-            &[engr::dependency::SemanticField::Text],
-            commit,
-        )
-        .expect("admit selective reference"),
-    )
+/// Replace the references a proposal carries, resealing the value it sits in.
+fn set_refs(payload: &mut Payload, refs: Vec<engr::model::Ref>) {
+    payload
+        .action
+        .value_mut()
+        .expect("this action carries a section value")
+        .content
+        .refs = refs;
 }
 
 /// Edit the stored object the way a text editor would — content changed, hash
@@ -94,10 +62,7 @@ fn tamper(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
 fn editing_a_sections_text_is_detected() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "integrity");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &id, "the confirmed wording"),
-    );
+    admit(&root, payload(Act::Add, &id, "the confirmed wording"));
 
     assert!(ops::verify(&root, &id).expect("verify").passed());
 
@@ -114,29 +79,35 @@ fn editing_a_sections_text_is_detected() {
 fn every_confirmed_revision_remains_in_append_only_history() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "durable history");
-    admit(&root, payload(Action::SectionAdded, &id, "first wording"));
-    admit(
-        &root,
-        payload(Action::SectionRevised { section: 1 }, &id, "second wording"),
-    );
+    admit(&root, payload(Act::Add, &id, "first wording"));
+    admit(&root, payload(Act::Revise(1), &id, "second wording"));
 
     let events = store::load_events(&root, &id).expect("history");
     assert_eq!(events.len(), 3);
-    assert_eq!(events[1].payload.content.text, "first wording");
-    assert_eq!(events[2].payload.content.text, "second wording");
+    let wording = |event: &engr::model::Event| {
+        event
+            .action
+            .value()
+            .expect("a section event carries its value")
+            .content
+            .text
+            .clone()
+    };
+    assert_eq!(wording(&events[1]), "first wording");
+    assert_eq!(wording(&events[2]), "second wording");
 }
 
 #[test]
 fn repointing_a_reference_is_detected() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "the target");
-    admit(&root, payload(Action::SectionAdded, &target, "first"));
-    admit(&root, payload(Action::SectionAdded, &target, "second"));
+    admit(&root, payload(Act::Add, &target, "first"));
+    admit(&root, payload(Act::Add, &target, "second"));
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
-    let mut with_ref = payload(Action::SectionAdded, &source, "depends on the first");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "depends on the first");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -158,29 +129,16 @@ fn repointing_a_reference_is_detected() {
 fn reconcile_applies_an_event_the_projection_missed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "reconciliation");
-    let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "one"))
-        .expect("prepare crash tail");
-    append_admitted_raw(
-        &root,
-        &engr::model::Event {
-            format: engr::model::EVENT_FORMAT.to_owned(),
-            version: engr::EVENT_ENVELOPE_VERSION,
-            event_id: engr::model::new_id(),
-            rev: 2,
-            time: "2026-08-25T00:00:00Z".to_owned(),
-            payload: prepared.candidate.payload.clone(),
-            provenance: engr::model::Provenance::Tagged {
-                admission: engr::model::TaggedAdmission {
-                    kind: engr::semantics::Admission::Human,
-                    confirmation: Some(engr::model::HumanConfirmation {
-                        challenge: prepared.candidate.challenge.clone(),
-                        candidate_digest: prepared.candidate.candidate_digest.clone(),
-                    }),
-                    rule_review: None,
-                },
-            },
-        },
-    );
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "one")).expect("prepare crash tail");
+    let crashed = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        prepared.candidate.payload.action.clone(),
+        2,
+        engr::model::EventAdmission::human("2026-08-25T00:00:00Z", prepared.candidate.code()),
+    )
+    .expect("a durable Event whose projection never landed");
+    append_admitted_raw(&root, &id, &crashed);
 
     let object_path = store::object_path(&root, &id);
     let events_path = store::events_path(&root, &id);
@@ -211,15 +169,12 @@ fn reconcile_applies_an_event_the_projection_missed() {
 fn a_reference_is_drift_once_its_target_is_revised() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "the target");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, "the original basis"),
-    );
+    admit(&root, payload(Act::Add, &target, "the original basis"));
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "the source");
-    let mut with_ref = payload(Action::SectionAdded, &source, "rests on the basis");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "rests on the basis");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
 
     let object = store::load_object(&root, &source).expect("source");
@@ -231,11 +186,7 @@ fn a_reference_is_drift_once_its_target_is_revised() {
 
     admit(
         &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &target,
-            "the basis, restated differently",
-        ),
+        payload(Act::Revise(1), &target, "the basis, restated differently"),
     );
 
     let assessment = view::assess(&root, &object);
@@ -256,7 +207,7 @@ fn show_marks_a_section_whose_content_does_not_match_its_hash() {
     admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             "Ruling: expose the reason code on the audit detail view.",
         ),
@@ -300,24 +251,20 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(
-            Action::SectionAdded,
-            &target,
-            "Ruling: reason codes are numeric.",
-        ),
+        payload(Act::Add, &target, "Ruling: reason codes are numeric."),
     );
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
+        .digest
         .clone();
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
     let mut with_ref = payload(
-        Action::SectionAdded,
+        Act::Add,
         &source,
         "Therefore the UI renders them as integers.",
     );
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
 
     let object = store::load_object(&root, &source).expect("source");
@@ -348,7 +295,7 @@ fn a_section_standing_on_tampered_wording_is_not_ok() {
         "content identity has to follow the content"
     );
     assert_eq!(
-        store::load_object(&root, &target).expect("target").sections[0].sha256,
+        store::load_object(&root, &target).expect("target").sections[0].digest,
         pinned,
         "the seal still claims the wording nobody changed it back to"
     );
@@ -373,13 +320,16 @@ fn a_historical_integrity_failure_names_the_historical_side() {
     let target = new_object(&root, "historical target");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "the committed dependency"),
+        payload(Act::Add, &target, "the committed dependency"),
     );
     let good_commit = commit_all(&root, "good target");
 
     let source = new_object(&root, "source");
-    let mut with_ref = payload(Action::SectionAdded, &source, "depends on target text");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &good_commit)];
+    let mut with_ref = payload(Act::Add, &source, "depends on target text");
+    set_refs(
+        &mut with_ref,
+        vec![text_ref(&root, &target, 1, &good_commit)],
+    );
     let source_object = admit(&root, with_ref);
 
     tamper(&root, &target, |value| {
@@ -398,20 +348,15 @@ fn a_historical_integrity_failure_names_the_historical_side() {
     assert!(restored.status.success());
     std::fs::write(store::object_path(&root, &target), restored.stdout).expect("restore target");
 
-    let original = source_object.sections[0].refs[0]
-        .as_selective()
-        .expect("selective ref");
-    let historical_ref = Ref::selective(
-        engr::dependency::SelectiveRef::stored(
-            original.target(),
-            original.fields().to_vec(),
-            bad_commit,
-            original.digest(),
-        )
-        .expect("historical ref"),
-    );
-    let source_seal = source_object.sha256.clone().expect("source seal");
-    let diagnostic_source = integrity::mutate(&source_object, &source_seal, |object| {
+    let original = &source_object.sections[0].refs[0];
+    let historical_ref = engr::dependency::SelectiveRef::stored(
+        original.target(),
+        original.fields().to_vec(),
+        bad_commit,
+        original.digest(),
+    )
+    .expect("historical ref");
+    let diagnostic_source = integrity::mutate(&source_object, |object| {
         object.sections[0].refs[0] = historical_ref;
         Ok(())
     })
@@ -437,32 +382,18 @@ fn the_confirmation_hash_covers_the_action_and_the_section_hash_does_not() {
         refs: Vec::new(),
         ..Content::default()
     };
-    let added = Payload {
-        action: Action::SectionAdded,
-        object: object.clone(),
-        becomes: None,
-        content: content.clone(),
-    };
-    let deleted = Payload {
-        action: Action::SectionDeleted { section: 1 },
-        object,
-        becomes: None,
-        content: content.clone(),
-    };
+    let added = common::payload(Act::Add, &object, content.clone());
+    let deleted = common::payload(Act::Delete(1), &object, content.clone());
 
-    // What the human assents to includes which action it is, so a displayed
-    // candidate cannot be swapped for a different one carrying the same words.
-    assert_ne!(
-        added.sha256().expect("hash"),
-        deleted.sha256().expect("hash")
-    );
-
-    // The section's own hash covers only content, so `verify` can recompute it
-    // from what is stored without needing to know how it got there.
-    assert_eq!(
-        content.sha256().expect("hash"),
-        content.sha256().expect("hash")
-    );
+    // What the human assents to includes which action it is, so a frozen subject
+    // cannot be swapped for a different one carrying the same words.
+    let subject = |payload: &Payload| {
+        serde_json::to_value(engr::gate::ObjectSubject::of(payload, 0, None).expect("subject"))
+            .expect("json")
+    };
+    assert_ne!(subject(&added), subject(&deleted));
+    assert_eq!(subject(&added)["action"], "section.create");
+    assert_eq!(subject(&deleted)["action"], "section.delete");
 }
 
 /// A dependency that will not load is a failure, not drift.
@@ -477,13 +408,13 @@ fn a_reference_to_unreadable_authority_reports_a_failure_rather_than_drift() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+        payload(Act::Add, &target, "Reason codes are numeric."),
     );
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
-    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "So the UI renders integers.");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
 
     // Sound to begin with.
@@ -566,13 +497,13 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+        payload(Act::Add, &target, "Reason codes are numeric."),
     );
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
-    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "So the UI renders integers.");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -614,8 +545,17 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     // all is its own finding, and it would mask this one.
     std::fs::write(&history, &history_bytes).expect("restore history");
     write_raw(&path, &sound).expect("restore");
-    let mut without: Value = store::read_json(&path).expect("read");
-    without["sections"] = serde_json::json!([]);
+    // Removed and resealed, not blanked: an Object with no Sections omits the
+    // member, and one that carries an empty list is refused as schema before
+    // anything asks which Sections it has. What is being pinned here is absence,
+    // so the target has to stay a valid Object that simply no longer holds it.
+    let held = store::load_object(&root, &target).expect("target");
+    let without = integrity::mutate(&held, |object| {
+        object.sections.clear();
+        Ok(())
+    })
+    .expect("reseal")
+    .object;
     write_raw(&path, &without).expect("write");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
@@ -646,13 +586,13 @@ fn verify_reads_referenced_targets_through_effective_authority() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+        payload(Act::Add, &target, "Reason codes are numeric."),
     );
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
-    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "So the UI renders integers.");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -737,24 +677,23 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+        payload(Act::Add, &target, "Reason codes are numeric."),
     );
     let target_before = std::fs::read(store::object_path(&root, &target)).expect("target bytes");
     let commit = commit_all(&root, "record target");
     let reference = text_ref(&root, &target, 1, &commit);
-    let selective = reference.as_selective().expect("selective reference");
     let section_seal = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
+        .digest
         .clone();
     assert_ne!(
-        selective.digest(),
+        reference.digest(),
         section_seal,
         "dependency identity and resource integrity are separate contracts"
     );
 
     let source = new_object(&root, "downstream decision");
-    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![reference.clone()];
+    let mut with_ref = payload(Act::Add, &source, "So the UI renders integers.");
+    set_refs(&mut with_ref, vec![reference.clone()]);
     admit(&root, with_ref);
     assert!(ops::verify(&root, &source).expect("verify").passed());
 
@@ -767,12 +706,8 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
     tamper(&root, &target, |value| {
         value["sections"][0]["text"] = Value::String("Reason codes are free text.".into());
     });
-    let mut to_forged = payload(
-        Action::SectionAdded,
-        &source,
-        "depends on rewritten wording",
-    );
-    to_forged.content.refs = vec![reference];
+    let mut to_forged = payload(Act::Add, &source, "depends on rewritten wording");
+    set_refs(&mut to_forged, vec![reference]);
     let error = gate::prepare(&root, to_forged).expect_err("that target cannot be referenced");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("TargetIntegrityFailure"), "{error}");
@@ -789,7 +724,7 @@ fn a_reference_pins_content_identity_rather_than_the_targets_seal() {
     admit(
         &root,
         payload(
-            Action::SectionRevised { section: 1 },
+            Act::Revise(1),
             &target,
             "Reason codes are numeric, and stable across releases.",
         ),
@@ -819,13 +754,13 @@ fn a_reference_to_a_target_that_is_gone_is_a_failure_on_every_surface() {
     let target = new_object(&root, "upstream decision");
     admit(
         &root,
-        payload(Action::SectionAdded, &target, "Reason codes are numeric."),
+        payload(Act::Add, &target, "Reason codes are numeric."),
     );
     let commit = commit_all(&root, "record target");
 
     let source = new_object(&root, "downstream decision");
-    let mut with_ref = payload(Action::SectionAdded, &source, "So the UI renders integers.");
-    with_ref.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut with_ref = payload(Act::Add, &source, "So the UI renders integers.");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
     admit(&root, with_ref);
 
     let object = ops::effective(&root, &source).expect("source");
@@ -880,7 +815,7 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
 fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "one meaning");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    admit(&root, payload(Act::Add, &id, "wording"));
 
     let path = store::object_path(&root, &id);
     let original = std::fs::read_to_string(&path).expect("object bytes");
@@ -919,9 +854,9 @@ fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
 /// reproduces is the state a crash leaves: the record is durable and the
 /// projection is not, which is exactly what recovery has to cope with. Written
 /// as the canonical JCS bytes, because that is what the read boundary requires.
-fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
-    let path = store::events_path(root, &event.payload.object);
-    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+fn append_admitted_raw(root: &Path, object: &str, event: &engr::model::Event) {
+    let path = store::events_path(root, object);
+    let line = engr::proof::canonical_bytes(event, "Event").expect("canonical");
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
     existing.push_str(&line);
     existing.push('\n');

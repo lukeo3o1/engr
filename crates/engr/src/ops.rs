@@ -5,15 +5,15 @@ use crate::{ensure, git, store, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, E
 use std::path::Path;
 
 /// Replay the recoverable tail without choosing whether it may be persisted.
-/// Reads need the same effective Object as a repaired current workspace, while
-/// a legacy workspace must remain byte-for-byte read-only until migration.
+///
+/// Reads need the same effective Object a reconciled workspace would hold, and
+/// getting there must not require a write.
 fn replay(root: &Path, id: &str, require_integrity: bool) -> Result<(Object, bool)> {
     let events = store::load_events(root, id)?;
-    let current = store::validate_format(root)? == store::WorkspaceFormat::Current;
     let mut created_from_history = false;
     let object = match store::load_object(root, id) {
         Ok(object) => {
-            if current && crate::integrity::check_stored_object_integrity(&object).is_err() {
+            if crate::integrity::check_stored_object_integrity(&object).is_err() {
                 if require_integrity {
                     crate::integrity::check_stored_object_integrity(&object)?;
                 }
@@ -27,13 +27,18 @@ fn replay(root: &Path, id: &str, require_integrity: bool) -> Result<(Object, boo
         Err(error) if error.code == EXIT_NOT_FOUND => {
             let created = events.iter().find(|event| event.rev == 1).ok_or(error)?;
             ensure!(
-                created.payload.object == id
-                    && matches!(&created.payload.action, Action::ObjectCreated),
+                matches!(
+                    &created.action,
+                    Action::ObjectCreated { .. } | Action::ObjectMigrated { .. }
+                ),
                 EXIT_INVARIANT,
                 "{id}: event rev 1 cannot reconstruct a missing object"
             );
             created_from_history = true;
-            Object::new(id.to_owned(), String::new())?
+            let mut empty = Object::new(id.to_owned(), String::new())?;
+            empty.rev = 0;
+            empty.reseal()?;
+            empty
         }
         Err(error) => return Err(error),
     };
@@ -44,19 +49,13 @@ fn replay(root: &Path, id: &str, require_integrity: bool) -> Result<(Object, boo
             format!("{id}: event tail cannot reconcile: {}", error.message),
         )
     })?;
-    if !current || !applied {
+    if !applied {
         return Ok((projected, applied));
     }
     let sealed = if created_from_history {
         crate::integrity::seal_migrated(projected)?.object
     } else {
-        let seal = predecessor.sha256.as_deref().ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("object {id} has no aggregate integrity seal"),
-            )
-        })?;
-        crate::integrity::mutate(&predecessor, seal, |next| {
+        crate::integrity::mutate(&predecessor, |next| {
             *next = replay_recoverable_tail(next.clone(), &events)?.0;
             Ok(())
         })?
@@ -98,28 +97,13 @@ pub fn effective_section(root: &Path, id: &str, section: u64) -> Result<Section>
 ///
 /// Recomputed, never compared seal-to-seal: the stored value is a claim about
 /// what was admitted, and only recomputing establishes what the target says
-/// now. `section` narrows it to one; without it the whole Object is judged,
-/// because an Object-level claim is a claim about all of it.
+/// now. `section` narrows the *object-level* half to one Section; integrity is
+/// always judged over the whole aggregate.
 pub fn sound(root: &Path, object: &Object, section: Option<u64>) -> Result<()> {
-    if let Some(seal) = object.sha256.as_deref() {
-        // Aggregate integrity is never narrowed to one Section: the parent
-        // Object is the authority that says this Section belongs here.
-        crate::integrity::check_object_integrity(object, seal)?;
-        return Ok(());
-    }
-    let sections = match section {
-        Some(id) => vec![object.section(id)?],
-        None => object.sections.iter().collect(),
-    };
-    for section in sections {
-        ensure!(
-            section.recomputed_sha256()? == section.sha256,
-            EXIT_INVARIANT,
-            "{} §{} does not match its admitted integrity seal; it was changed outside an admission path",
-            object.id,
-            section.id
-        );
-    }
+    // Aggregate integrity is never narrowed to one Section: the parent Object is
+    // the authority that says this Section belongs here, and the aggregate seal
+    // covers every nested Section's own seal.
+    crate::integrity::check_object_integrity(object)?;
     if section.is_none() {
         object_level_authority(root, object)?;
     }
@@ -128,7 +112,7 @@ pub fn sound(root: &Path, object: &Object, section: Option<u64>) -> Result<()> {
 
 /// Reconcile the current aggregate with its admitted history.
 ///
-/// The v3 Object seal covers title, type, state, revision, id counter and nested
+/// The Object seal covers title, type, state, revision, id counter and nested
 /// Sections. Event replay answers the separate crash-recovery question: rebuilt
 /// from rev 0, the log yields what admission produced and exposes a projection
 /// that missed or invented an Event.
@@ -181,9 +165,7 @@ fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
 
 /// Close the window between appending an event and saving the projection.
 ///
-/// Current workspaces persist crash repair. Legacy workspaces expose the same
-/// effective Object in memory, because requiring a write here would make a
-/// valid old workspace unreadable before its explicit migration.
+/// The projection is written back, so the next reader does not have to redo it.
 pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
     store::with_lock(root, || reconcile_locked(root, id))
 }
@@ -196,7 +178,7 @@ pub fn reconcile(root: &Path, id: &str) -> Result<Object> {
 /// nothing to, or it would be restoring authority partly from the material that
 /// lost its authority.
 ///
-/// #35's ruling makes the exactness the whole contract: repair may restore only
+/// Exactness is the whole contract: repair may restore only
 /// what admitted history derives, so if history cannot derive it this fails
 /// closed rather than guessing. A log that does not begin with a creation
 /// cannot reconstruct an Object, and that is a different failure from a damaged
@@ -205,25 +187,17 @@ pub fn provable(root: &Path, id: &str) -> Result<Object> {
     let events = store::load_events(root, id)?;
     ensure!(
         events.first().is_some_and(|event| event.rev == 1
-            && matches!(event.payload.action, Action::ObjectCreated)),
+            && matches!(
+                event.action,
+                Action::ObjectCreated { .. } | Action::ObjectMigrated { .. }
+            )),
         EXIT_INVARIANT,
         "{id}: admitted history does not begin with a creation, so no provable projection can be rebuilt from it"
     );
     let mut object = Object::new(id.to_owned(), String::new())?;
-    let mut migrated = false;
+    object.rev = 0;
+    object.reseal()?;
     for event in &events {
-        // The same generation boundary the durable recheck crosses: retained
-        // Event-v1 records are read under their own contract, so replaying them
-        // reproduces the predecessor in its legacy spelling. Repair publishes
-        // current authority, so it has to convert before it goes on.
-        if event.version == crate::EVENT_ENVELOPE_VERSION && !migrated {
-            object = crate::migration::migrated_replay(
-                root,
-                object,
-                &crate::migration::Migrated::Whole,
-            )?;
-            migrated = true;
-        }
         project(&mut object, event).map_err(|error| {
             Error::new(
                 EXIT_INVARIANT,
@@ -234,16 +208,12 @@ pub fn provable(root: &Path, id: &str) -> Result<Object> {
             )
         })?;
     }
-    if !migrated {
-        object =
-            crate::migration::migrated_replay(root, object, &crate::migration::Migrated::Whole)?;
-    }
     Ok(object)
 }
 
 pub(crate) fn reconcile_locked(root: &Path, id: &str) -> Result<Object> {
     let (object, applied) = replay(root, id, true)?;
-    if applied && store::validate_format(root)? == store::WorkspaceFormat::Current {
+    if applied {
         store::save_object(root, &object)?;
     }
     Ok(object)
@@ -409,11 +379,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     // defence in depth for a value arriving another way — but answering `false`
     // is precisely how an unsealed Object with no Sections reported as healthy,
     // because every other field of the report was empty too.
-    let current = store::validate_format(root)? == store::WorkspaceFormat::Current;
-    let object_tampered = match object.sha256.as_deref() {
-        Some(seal) => crate::integrity::check_object_integrity(object, seal).is_err(),
-        None => current,
-    };
+    let object_tampered = crate::integrity::check_object_integrity(object).is_err();
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     let mut standing_on_missing = Vec::new();
@@ -428,16 +394,12 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         // following the chain to find current knowledge could arrive nowhere
         // while `verify` said PASS.
         broken_replacements.extend(broken_replacements_in(root, section));
-        let section_failed = if object.sha256.is_some() {
-            crate::integrity::check_section_seal(section, &section.sha256).is_err()
-        } else {
-            section.recomputed_sha256()? != section.sha256
-        };
-        if section_failed {
+        if crate::integrity::check_section_seal(section).is_err() {
             tampered.push(section.id);
         }
         for reference in &section.refs {
-            let (target_id, target_section_id) = reference.target_identity()?;
+            let (target_id, target_section_id) =
+                crate::dependency::parse_target(reference.target())?;
             // Neither `continue` that used to be here was safe. Skipping an
             // unreadable target let a source object PASS while standing on
             // authority nobody could read, and skipping a missing one reported
@@ -478,7 +440,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                     continue;
                 }
             };
-            let Ok(target_section) = target.section(target_section_id) else {
+            let Ok(_) = target.section(target_section_id) else {
                 standing_on_missing.push(StandsOnMissing {
                     section: section.id,
                     target: target_id.clone(),
@@ -486,61 +448,39 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                 });
                 continue;
             };
-            if let crate::model::Ref::Selective(selective) = reference {
-                let current_failed = target.sha256.as_deref().map_or(true, |seal| {
-                    crate::integrity::check_object_integrity(&target, seal).is_err()
-                });
-                let Some(seal) = target.sha256.as_deref() else {
+            let current_failed = crate::integrity::check_object_integrity(&target).is_err();
+            match crate::dependency::evaluate(root, &target, reference)? {
+                crate::dependency::Dependency::TargetIntegrityFailure => {
+                    standing_on_tampered.push(StandsOnTampered {
+                        section: section.id,
+                        target: target_id.clone(),
+                        target_section: target_section_id,
+                        side: Some(if current_failed {
+                            "current"
+                        } else {
+                            "historical"
+                        }),
+                    });
+                }
+                crate::dependency::Dependency::TargetMissing => {
+                    standing_on_missing.push(StandsOnMissing {
+                        section: section.id,
+                        target: target_id.clone(),
+                        target_section: target_section_id,
+                    });
+                }
+                state @ (crate::dependency::Dependency::ProvenanceUnavailable
+                | crate::dependency::Dependency::SchemaMismatch
+                | crate::dependency::Dependency::DigestInvalid) => {
                     standing_on_unreadable.push(StandsOnUnreadable {
                         section: section.id,
                         target: target_id.clone(),
                         target_section: target_section_id,
-                        reason: "target has no aggregate integrity seal".to_owned(),
+                        reason: format!("selective reference cannot be verified: {state:?}"),
                     });
-                    continue;
-                };
-                match crate::dependency::evaluate(root, &target, seal, selective)? {
-                    crate::dependency::Dependency::TargetIntegrityFailure => {
-                        standing_on_tampered.push(StandsOnTampered {
-                            section: section.id,
-                            target: target_id.clone(),
-                            target_section: target_section_id,
-                            side: Some(if current_failed {
-                                "current"
-                            } else {
-                                "historical"
-                            }),
-                        });
-                    }
-                    crate::dependency::Dependency::TargetMissing => {
-                        standing_on_missing.push(StandsOnMissing {
-                            section: section.id,
-                            target: target_id.clone(),
-                            target_section: target_section_id,
-                        });
-                    }
-                    state @ (crate::dependency::Dependency::ProvenanceUnavailable
-                    | crate::dependency::Dependency::SchemaMismatch
-                    | crate::dependency::Dependency::DigestInvalid) => {
-                        standing_on_unreadable.push(StandsOnUnreadable {
-                            section: section.id,
-                            target: target_id.clone(),
-                            target_section: target_section_id,
-                            reason: format!("selective reference cannot be verified: {state:?}"),
-                        });
-                    }
-                    crate::dependency::Dependency::Unchanged
-                    | crate::dependency::Dependency::Drifted { .. } => {}
                 }
-                continue;
-            }
-            if target_section.recomputed_sha256()? != target_section.sha256 {
-                standing_on_tampered.push(StandsOnTampered {
-                    section: section.id,
-                    target: target_id,
-                    target_section: target_section_id,
-                    side: None,
-                });
+                crate::dependency::Dependency::Unchanged
+                | crate::dependency::Dependency::Drifted { .. } => {}
             }
         }
     }

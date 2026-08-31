@@ -582,12 +582,12 @@ pub struct Rule {
     ///
     /// [`Review`] is what the Rule *means*, and it is deliberately the same
     /// value whether the policy was written out or left to the defaults. This
-    /// is the other question, and exactly one caller asks it: the workspace
-    /// version 1 Rule schema had no `review` member, so a predecessor v1 Rule
-    /// carrying one is bytes that generation refused to load. Migration has to
-    /// refuse them too rather than admitting a file into v3 under defaults the
-    /// generation it came from never offered. Not part of identity and not
-    /// hashed — nothing about what the Rule requires depends on it.
+    /// is the other question, and exactly one caller asks it: the released
+    /// predecessor had no Rules at all, so a Rule file in a workspace being
+    /// migrated is a later domain and is refused by name rather than admitted
+    /// under defaults the generation it came from never offered. Not part of
+    /// identity and not hashed — nothing about what the Rule requires depends
+    /// on it.
     #[serde(skip)]
     pub written_review: bool,
     /// The normative text, exactly as written.
@@ -627,11 +627,11 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     // rather than in the command that happens to have asked.
     //
     // Leaving it to the CLI made persisted meaning depend on which public door a
-    // caller came through: `engr rules ls` refused a version 1 workspace while
-    // `rules::load_all` accepted the same file and assigned it the version 2
-    // defaults, which is precisely the silent reinterpretation the version
-    // exists to prevent. Same shape as the raw single-file loader that was made
-    // private for the same reason: one door.
+    // caller came through: `engr rules ls` refused a workspace this build does
+    // not write while `rules::load_all` accepted the same file and assigned it
+    // this generation's defaults, which is precisely the silent reinterpretation
+    // the generation marker exists to prevent. Same shape as the raw
+    // single-file loader that was made private for the same reason: one door.
     //
     // `bind` and `check` reach rules only through `applicable`, which reaches
     // them only through here, so this one check covers every semantic entry
@@ -1051,24 +1051,36 @@ pub struct BoundRule {
     pub content_sha256: Option<String>,
 }
 
-/// The v1 rule-id grammar, in one place so the loader and the snapshot check
+/// The rule-id grammar, in one place so the loader and the snapshot check
 /// cannot drift.
+///
+/// `[a-z0-9][a-z0-9-]{0,31}`: bounded, and it must start with something. A
+/// leading `-` reads as a flag wherever an id is typed, and an unbounded id is
+/// a filename this build would write and some other filesystem would refuse.
+pub(crate) const RULE_ID_MAX: usize = 32;
+
 fn check_rule_id(id: &str, what: &str) -> Result<()> {
+    let canonical = id.len() <= RULE_ID_MAX
+        && id
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
     ensure!(
-        !id.is_empty()
-            && id.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            }),
+        canonical,
         EXIT_SCHEMA,
-        "{what}: rule id {id:?} is not canonical; v1 ids are [a-z0-9-]+"
+        "{what}: rule id {id:?} is not canonical; ids are [a-z0-9][a-z0-9-]{{0,{}}}",
+        RULE_ID_MAX - 1
     );
     Ok(())
 }
 impl BoundRule {
     /// Hold one snapshot to the frozen Rule contract before it can be hashed.
     ///
-    /// Validation rather than privacy, unlike [`crate::proof::CandidateSubject`]
-    /// and [`crate::proof::ReviewMutation`]. Those are always computed, so they
+    /// Validation rather than privacy, unlike [`crate::proof::ReviewMutation`]
+    /// and [`crate::gate::ObjectSubject`]. Those are always computed, so they
     /// can be made unconstructible; a Rule snapshot arrives **as data**, read
     /// back from a candidate that stored it, so there is no construction path
     /// to route it through. What can be required is that it satisfies the same
@@ -1762,8 +1774,8 @@ pub fn check(
     // different answers, and neither is "the subject moved" — reporting either
     // as a mismatch would tell an agent to re-review something that was never
     // the problem, and recomputing an old proof with today's calculation would
-    // do exactly that to every historical attestation the moment a version 2
-    // exists.
+    // do exactly that to every historical attestation the moment a second
+    // contract version exists.
     let checked =
         crate::digest::REVIEW.recheck(attested, |version| binding.digest_under(version))?;
     let ids = binding.rule_ids();

@@ -1,12 +1,31 @@
-//! Coordinated workspace-generation migration.
+//! Migrating the one supported predecessor workspace.
 //!
-//! The predecessor is validated as a whole before one authoritative Object is
-//! replaced. A durable staging marker then makes the commit phase resumable:
-//! Objects may be copied from the already-validated plan more than once, and
-//! `format.json` advances only after every copy succeeds.
+//! The predecessor is the officially released `latest` workspace and nothing
+//! else. It is validated as a whole, converted deterministically, frozen into a
+//! plan, and published only after a human confirms that exact plan through the
+//! ordinary Challenge primitive — `subject.type = migration`.
+//!
+//! Three properties are the whole design:
+//!
+//! - **Effective state, not stored state.** The released build appended its
+//!   Event before saving its Object, so a crash between the two leaves durable
+//!   history the projection has not caught up with. The migration reads the
+//!   predecessor's own reducer over its own history and requires the stored
+//!   projection, where there is one, to be exactly what that history derives.
+//! - **History is discarded, not translated.** The predecessor's Events are read
+//!   to establish what each Object *is*, and are then dropped. Translating them
+//!   into the new vocabulary would mint records nobody admitted, in a vocabulary
+//!   that did not exist when they were admitted. Each migrated Object gets one
+//!   `object.migrated.v1` bootstrap at revision 1, and the Object itself is at
+//!   revision 1.
+//! - **Atomic or nothing.** A durable staging marker makes the commit phase
+//!   resumable, and `.engr/VERSION` is written last. A workspace half way
+//!   between generations is never a steady state anyone can act on.
 
-use crate::dependency::{self, SemanticField};
-use crate::model::{LegacyRef, Object, Provenance, Ref, Section};
+use crate::model::{
+    Action, Event, EventAdmission, HumanConfirmation, Object, Payload, Section, SectionValue,
+    Snapshot, SnapshotSection,
+};
 use crate::proof::{sha256_of, stored_within_safe_integers};
 use crate::semantics::Admission;
 use crate::store::{self, WorkspaceFormat};
@@ -17,48 +36,37 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-const STAGE: &str = "migration-v3";
-const STAGE_TEMP: &str = "migration-v3.tmp";
+const STAGE: &str = "migration";
+const STAGE_TEMP: &str = "migration.tmp";
 const MANIFEST: &str = "manifest.json";
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    source_version: u32,
-    target_version: u32,
-    objects: BTreeMap<String, String>,
-    /// Retained resources whose bytes this migration rewrites, by their
-    /// `.engr`-relative path.
-    resources: BTreeMap<String, String>,
-    source: BTreeMap<String, String>,
+/// The staging directory, under `local/` with every other resumable local file.
+///
+/// Public because `store::validate_format` names it in the one error a person
+/// has to act on, and a path a diagnostic prints is a path a caller may need to
+/// look at.
+pub fn stage_dir(root: &Path) -> PathBuf {
+    store::local_dir(root).join(STAGE)
 }
 
-impl Manifest {
-    /// The subject-lifetime invariant, asked of the plan rather than the workspace.
-    ///
-    /// The two kinds are established by different parts of the plan, and neither
-    /// substitutes for the other. An Object is in the migrated projection this
-    /// manifest carries. A Backlog item is not projected at all — what proves it
-    /// was there is the predecessor capture, since preflight reads every item it
-    /// retains, so a sidecar whose subject was never captured has no subject.
-    ///
-    /// Asked on the staged path as well as at preflight, because a stage is
-    /// resumable local state that an editor can reach between the two.
-    fn require_work_subject(&self, subject: &crate::work::Subject) -> Result<()> {
-        let present = match subject {
-            crate::work::Subject::Object(id) => self.objects.contains_key(id),
-            crate::work::Subject::Backlog(id) => self
-                .source
-                .contains_key(&format!("{}/{id}.json", crate::backlog::DIR)),
-        };
-        ensure!(
-            present,
-            EXIT_SCHEMA,
-            "staged work sidecar {subject} belongs to no {} in the migration plan",
-            subject.noun()
-        );
-        Ok(())
-    }
+fn stage_temp(root: &Path) -> PathBuf {
+    store::local_dir(root).join(STAGE_TEMP)
+}
+
+/// One predecessor Section, in both spellings that matter.
+///
+/// A predecessor Ref pins the seal the *predecessor* took over the
+/// *predecessor's* content, and the redesigned digest has to be taken over the
+/// migrated content. Those are two different hashes of the same Section whenever
+/// it carries references of its own, so the conversion needs both and must not
+/// derive one from the other.
+#[derive(Clone)]
+struct HistoricalSection {
+    /// The seal the predecessor recorded, proven against the predecessor content
+    /// before anything was converted.
+    legacy_seal: String,
+    /// The same Section in the redesigned spelling.
+    migrated: Section,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,27 +76,26 @@ struct HistoricalKey {
     section: u64,
 }
 
-/// One historical Section, in both spellings that matter.
-///
-/// A legacy Ref pins the seal the *predecessor* took over the *predecessor's*
-/// content, and the v3 digest has to be taken over the migrated content. Those
-/// are two different hashes of the same Section whenever it carries references
-/// of its own, so the conversion needs both and must not derive one from the
-/// other.
-#[derive(Clone)]
-struct HistoricalSection {
-    /// The seal the predecessor generation recorded, proven against the
-    /// predecessor content before anything was converted.
-    legacy_seal: String,
-    /// The same Section with its references in the current spelling.
-    migrated: Section,
-}
-
 struct RefClosure<'a> {
     root: &'a Path,
     cache: BTreeMap<HistoricalKey, HistoricalSection>,
     visiting: BTreeSet<HistoricalKey>,
 }
+
+/// The six semantic fields the predecessor's whole-content seal covered.
+///
+/// `admission` and `header` are deliberately absent: the original Ref never
+/// attested either, and adding them would make the migrated Ref claim a
+/// dependency nobody declared — which would then drift the first time a Section
+/// was promoted or given a header.
+const PREDECESSOR_REF_FIELDS: [crate::dependency::SemanticField; 6] = [
+    crate::dependency::SemanticField::BasedOn,
+    crate::dependency::SemanticField::Content,
+    crate::dependency::SemanticField::Refs,
+    crate::dependency::SemanticField::Relations,
+    crate::dependency::SemanticField::Role,
+    crate::dependency::SemanticField::Text,
+];
 
 impl<'a> RefClosure<'a> {
     fn new(root: &'a Path) -> Self {
@@ -99,84 +106,67 @@ impl<'a> RefClosure<'a> {
         }
     }
 
-    fn convert_section(&mut self, mut section: Section) -> Result<Section> {
-        ensure!(
-            section.admission == Admission::Human,
-            EXIT_SCHEMA,
-            "a predecessor Section can only reconstruct as human admission"
-        );
-        let mut converted = Vec::with_capacity(section.refs.len());
-        for reference in std::mem::take(&mut section.refs) {
-            let Ref::Legacy(reference) = reference else {
-                return Err(Error::new(
-                    EXIT_SCHEMA,
-                    "a predecessor workspace cannot already carry a selective reference".to_owned(),
-                ));
-            };
-            converted.push(Ref::selective(self.convert_ref(reference)?));
+    /// Convert one predecessor Section into the redesigned shape.
+    ///
+    /// Every predecessor Section is Human-admitted, because while that
+    /// generation was current the Human Gate was the only door there was, and
+    /// the instant it recorded as `confirmed_at` becomes `admitted.at`. Nothing
+    /// is invented: no `header`, no `role`, no `content`, no `relations`,
+    /// because the predecessor had none of them.
+    fn convert_section(&mut self, section: &crate::predecessor::Section) -> Result<Section> {
+        let mut refs = Vec::with_capacity(section.refs.len());
+        for reference in &section.refs {
+            refs.push(self.convert_ref(reference)?);
         }
-        section.refs = converted;
-        section.content().validate_for_migration()?;
-        Ok(section)
+        crate::proof::canonical_set(&mut refs, "reference")?;
+        let content = crate::model::Content {
+            header: None,
+            role: None,
+            text: section.text.clone(),
+            content: Vec::new(),
+            based_on: crate::predecessor::based_on(section),
+            refs,
+            relations: Vec::new(),
+        };
+        let value = SectionValue::new(crate::predecessor::admitted(section), content);
+        value.validate()?;
+        Section::from_value(section.id, value)
     }
 
-    fn convert_ref(&mut self, reference: LegacyRef) -> Result<dependency::SelectiveRef> {
-        ensure!(
-            reference.section > 0,
-            EXIT_SCHEMA,
-            "a legacy reference cannot name section 0"
-        );
-        ensure!(
-            reference.section <= crate::proof::MAX_SAFE_INTEGER,
-            EXIT_SCHEMA,
-            "legacy reference section {} is outside the shared safe-integer range",
-            reference.section
-        );
-        ensure_lower_sha256(&reference.sha256, "legacy reference seal")?;
+    /// Convert one predecessor Ref, attesting exactly what it attested.
+    fn convert_ref(&mut self, reference: &crate::predecessor::Ref) -> Result<crate::model::Ref> {
         let key = HistoricalKey {
             commit: reference.commit.clone(),
             object: reference.object.clone(),
             section: reference.section,
         };
-        let historical = self.historical_section(key.clone())?;
+        let historical = self.historical_section(key)?;
         // Against the seal the predecessor took, not against a hash of the
         // migrated Section. They are the same number only when the target
         // carries no references of its own, because converting one rewrites
-        // exactly the member both hashes cover — so comparing the pin against
-        // the migrated hash accused every chained reference of being forged
-        // and made the workspace holding it unmigratable. What the pin claims
-        // is a statement in the predecessor's own terms, and it is checked in
-        // those terms; `check_legacy_section` has already proved that seal
-        // against the predecessor content it came with.
+        // exactly the member both hashes cover.
         ensure!(
             historical.legacy_seal == reference.sha256,
             EXIT_INVARIANT,
-            "{} §{} at {} seals as {}, not the legacy reference seal {}",
+            "{} §{} at {} seals as {}, not the predecessor reference seal {}",
             reference.object,
             reference.section,
             reference.commit,
             historical.legacy_seal,
             reference.sha256
         );
-        let fields = dependency::canonical_fields(&[
-            SemanticField::Role,
-            SemanticField::Text,
-            SemanticField::Content,
-            SemanticField::BasedOn,
-            SemanticField::Refs,
-            SemanticField::Relations,
-        ])?;
+        let fields = crate::dependency::canonical_fields(&PREDECESSOR_REF_FIELDS)?;
         let target = crate::proof::section_target(&reference.object, reference.section);
-        let snapshot = dependency::ref_snapshot(
+        let snapshot = crate::dependency::ref_snapshot(
             target.clone(),
             &fields,
             &historical.migrated,
             reference.commit.clone(),
         )?;
-        dependency::SelectiveRef::stored(
+        crate::dependency::SelectiveRef::stored(
             target,
             fields,
-            reference.commit,
+            reference.commit.clone(),
             snapshot.digest()?.to_string(),
         )
     }
@@ -188,32 +178,43 @@ impl<'a> RefClosure<'a> {
         ensure!(
             self.visiting.insert(key.clone()),
             EXIT_SCHEMA,
-            "legacy reference closure cycles through {} §{} at {}",
+            "predecessor reference closure cycles through {} §{} at {}",
             key.object,
             key.section,
             key.commit
         );
         let result = (|| {
-            let object =
-                crate::git::object_at(self.root, &key.commit, &key.object)?.ok_or_else(|| {
-                    Error::new(
-                        crate::EXIT_NOT_FOUND,
+            let object = match crate::git::object_at(self.root, &key.commit, &key.object)? {
+                Some(crate::git::HistoricalObject::Predecessor(object)) => object,
+                Some(crate::git::HistoricalObject::Current(_)) => {
+                    return Err(Error::new(
+                        EXIT_SCHEMA,
                         format!(
-                            "legacy reference target {} is absent at {}",
+                            "{} at {} is already a migrated Object, so a predecessor reference cannot be converted against it",
+                            key.object, key.commit
+                        ),
+                    ))
+                }
+                None => {
+                    return Err(Error::new(
+                        EXIT_NOT_FOUND,
+                        format!(
+                            "predecessor reference target {} is absent at {}",
                             crate::proof::section_target(&key.object, key.section),
                             key.commit
                         ),
-                    )
-                })?;
+                    ))
+                }
+            };
             let section = object.section(key.section)?.clone();
-            // Proves the predecessor seal against the predecessor content,
-            // which is the only moment both are in hand. Read it after this
-            // and it is a checked fact rather than a stored claim.
-            check_legacy_section(&section)?;
+            // Proves the predecessor seal against the predecessor content, which
+            // is the only moment both are in hand. Read after this and it is a
+            // checked fact rather than a stored claim.
+            section.check_seal()?;
             let legacy_seal = section.sha256.clone();
             Ok(HistoricalSection {
                 legacy_seal,
-                migrated: self.convert_section(section)?,
+                migrated: self.convert_section(&section)?,
             })
         })();
         self.visiting.remove(&key);
@@ -223,6 +224,13 @@ impl<'a> RefClosure<'a> {
     }
 }
 
+/// One predecessor Section from a commit, in the migrated spelling.
+///
+/// The read path needs this: a Ref written before the migration pins a
+/// predecessor commit, and verifying it means projecting the target as this
+/// build's projection understands it. Using the same conversion the migration
+/// used is what makes a Ref recomputed after the migration agree with the one
+/// recorded during it.
 pub(crate) fn migrated_historical_section(
     root: &Path,
     commit: &str,
@@ -238,165 +246,52 @@ pub(crate) fn migrated_historical_section(
         .map(|historical| historical.migrated)
 }
 
-/// The migrated-v3 reading of an Object reconstructed from retained Event-v1
-/// history.
-///
-/// Retained history is deliberately not rewritten: it is read under its own
-/// generation. So replaying it produces the predecessor in its legacy spelling,
-/// while everything current — the stored Object, and any digest taken against
-/// it — is in the migrated one. Anything that reconstructs a predecessor and
-/// then compares it with current material has to convert first, or it is
-/// comparing two spellings of the same thing and calling them different.
-///
-/// A Section already carrying selective refs is left alone; the closure refuses
-/// those by design, and after a partial history there can be both.
-///
-/// `wanted` decides how much of the Object has to make that trip. Converting a
-/// Section reopens the historical Git target of every legacy Ref on it, so
-/// converting the whole Object makes every legacy Ref in it a precondition for
-/// whatever the caller was actually trying to do. See [`Migrated`].
-pub(crate) fn migrated_replay(
-    root: &Path,
-    mut object: Object,
-    wanted: &Migrated,
-) -> Result<Object> {
-    let convert = |section: &Section| {
-        wanted.includes(section.id)
-            && section
-                .refs
-                .iter()
-                .any(|reference| matches!(reference, Ref::Legacy(_)))
-    };
-    if !object.sections.iter().any(convert) {
-        return Ok(object);
-    }
-    let mut closure = RefClosure::new(root);
-    let mut sections = Vec::with_capacity(object.sections.len());
-    for section in std::mem::take(&mut object.sections) {
-        if convert(&section) {
-            sections.push(closure.convert_section(section)?);
-        } else {
-            sections.push(section);
-        }
-    }
-    object.sections = sections;
-    Ok(object)
+/// What the destination will hold for one Object, and what it was derived from.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedObject {
+    pub object: String,
+    pub title: String,
+    /// How many Sections survive into the migrated Object. Presentation: a
+    /// person confirming a migration is being told the size of what moves.
+    pub sections: u64,
+    /// The revision the predecessor stood at. Not the destination's, which is
+    /// always 1 — this is the history being left behind.
+    pub predecessor_rev: u64,
+    /// The digest the migrated Object will carry.
+    pub digest: String,
 }
 
-/// How much of an Object a caller needs in the migrated spelling.
+/// The frozen `subject.data` of a released-predecessor migration.
 ///
-/// Converting a Section is not free and not local: it reopens the historical Git
-/// commit each of its legacy Refs pins. So a caller that converts the whole
-/// Object has made every legacy Ref anywhere in it a precondition — and if one
-/// of those commits is later lost, the conversion fails with `EXIT_NOT_FOUND`
-/// and takes the caller down with it, however little of the Object the caller
-/// was reading.
-///
-/// That matters most on the read path, where the failure would arrive as "this
-/// Object does not exist". Retained Event history is not current-state
-/// authority, and a Ref whose pinned commit is gone is `provenance unavailable`
-/// where it is actually depended on — never grounds for making a sound current
-/// Object unreadable because something unrelated to it moved.
-pub(crate) enum Migrated {
-    /// Every Section carrying a legacy Ref. For projections that read them all.
-    Whole,
-    /// Only these Sections, by id.
-    Sections(std::collections::BTreeSet<u64>),
-}
-
-impl Migrated {
-    /// Nothing yet. Widen it with the operations that will actually be proved.
-    pub(crate) fn nothing() -> Self {
-        Migrated::Sections(std::collections::BTreeSet::new())
-    }
-
-    /// Add whatever one operation's CandidateDigest projection reads.
+/// This predecessor/destination pair owns its own subject shape, because there
+/// is no generic migration-effects schema and inventing one would freeze a
+/// vocabulary for migrations nobody has designed. What it has to do is make the
+/// question exact: which predecessor bytes, becoming which destination Objects.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationSubject {
+    /// The predecessor bootstrap, in the spelling that release wrote.
+    pub from: crate::predecessor::Format,
+    /// The destination generation.
+    pub to: u32,
+    pub objects: Vec<PlannedObject>,
+    /// Every predecessor file the plan was derived from, by its `.engr`-relative
+    /// path, with the digest of the exact bytes that were read.
     ///
-    /// The arms are the arms of [`crate::proof::candidate_subject`], and they
-    /// have to stay that way: this decides what gets reconstructed, and that
-    /// function decides what gets hashed. `object.renamed` and the lifecycle
-    /// operations project title and state and name no Section. A Section
-    /// operation names its own participants. Only `section_merged` and
-    /// `object.superseded` need everything, because `ObjectInvariant` carries
-    /// every Section's semantics.
-    ///
-    /// `section.added` needs nothing: its before-state names no Section, and the
-    /// Section it produces is created after the boundary, so it cannot be
-    /// carrying a legacy Ref.
-    pub(crate) fn widen(&mut self, action: &crate::model::Action) {
-        use crate::model::Action;
-        let Migrated::Sections(ids) = self else {
-            return;
-        };
-        match action {
-            // Repair joins these: its projection is `ObjectInvariant` too, so
-            // every Section's semantics are one of its digest inputs.
-            Action::SectionMerged { .. } | Action::ObjectSuperseded | Action::ObjectRepaired => {
-                *self = Migrated::Whole
-            }
-            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
-                ids.insert(*section);
-            }
-            Action::SectionAdded
-            | Action::ObjectCreated
-            | Action::ObjectRenamed
-            | Action::ObjectClosed
-            | Action::ObjectReopened
-            | Action::ObjectClassified { .. } => {}
-        }
-    }
-
-    fn includes(&self, section: u64) -> bool {
-        match self {
-            Migrated::Whole => true,
-            Migrated::Sections(ids) => ids.contains(&section),
-        }
-    }
+    /// This is what makes the confirmation about *these* bytes. A predecessor
+    /// file edited between the question and the answer no longer matches, and
+    /// the migration refuses rather than publishing a derivation of something
+    /// nobody was shown.
+    pub source: BTreeMap<String, String>,
 }
 
-/// Migrate or resume a migration while the caller holds the workspace lock.
-pub(crate) fn run(root: &Path) -> Result<()> {
-    let stage = stage_dir(root);
-    if stage.exists() {
-        // `ensure_migration_ignored` used to run here, before anything about
-        // the stage had been read. It now runs inside `commit_stage`, after the
-        // plan has been validated and after the released-generation floor has
-        // been applied to it — so a resume that is going to be refused writes
-        // nothing at all, rather than amending `.gitignore` on its way to the
-        // refusal.
-        return commit_stage(root, &stage);
-    }
-    let before = store::validate_format(root)?;
-    ensure!(
-        before != WorkspaceFormat::Current,
-        EXIT_SCHEMA,
-        "workspace does not require migration"
-    );
-    let source_version = match before {
-        WorkspaceFormat::LegacyV0 => 0,
-        WorkspaceFormat::OlderVersion(version) => version,
-        WorkspaceFormat::Current => unreachable!("checked above"),
-    };
-    let plan = preflight(root, source_version)?;
-    store::ensure_migration_ignored(root)?;
-    stage_plan(root, source_version, &plan)?;
-    commit_stage(root, &stage_dir(root))
-}
-
-/// Everything the commit phase will publish, and the exact predecessor bytes it
-/// was derived from.
-///
-/// `source` is not a second read of the workspace taken afterwards. Every entry
-/// is the digest of the text preflight itself decoded, so the manifest names
-/// what was actually validated rather than whatever happens to be on disk when
-/// the manifest is written. A source file that moves in between then fails the
-/// closing comparison instead of quietly becoming the new expected predecessor.
-struct Plan {
-    objects: BTreeMap<String, Object>,
-    /// Retained resources whose persisted bytes change under v3, by their
-    /// `.engr`-relative path.
-    resources: BTreeMap<String, String>,
-    source: BTreeMap<String, String>,
+/// The staged plan: which question was asked, and which code answers it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    subject: MigrationSubject,
+    challenge: String,
 }
 
 /// One read of a predecessor file, with its digest kept.
@@ -406,1327 +301,547 @@ struct Plan {
 /// it returned.
 fn capture(source: &mut BTreeMap<String, String>, root: &Path, path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?;
-    source.insert(relative_to_engr(root, path)?, sha256_of(&text));
+    source.insert(
+        relative_to_engr(root, path)?,
+        crate::digest::OBJECT.emit(sha256_of(&text))?.to_string(),
+    );
     Ok(text)
 }
 
 fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
-    let base = store::engr_dir(root);
-    path.strip_prefix(&base)
-        .map(|relative| {
-            relative
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/")
-        })
-        .map_err(|_| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{} is outside the workspace", path.display()),
-            )
-        })
-}
-
-/// The predecessor projection for one Object, from the exact bytes it is built
-/// out of.
-///
-/// Preflight passes the bytes it captures; resume passes the bytes the manifest
-/// says preflight captured. Both get the same rules from here, because a second
-/// copy of them kept in step by hand is how the resume path and the plan start
-/// disagreeing about what the predecessor was.
-fn predecessor_projection(
-    root: &Path,
-    id: &str,
-    source_version: u32,
-    stored: Option<&str>,
-    history: &str,
-) -> Result<Object> {
-    let path = store::object_path(root, id);
-    let stored = match stored {
-        Some(text) => {
-            let value: serde_json::Value = serde_json::from_str(text)
-                .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-            stored_within_safe_integers(&value, &path.display().to_string())?;
-            let object = store::decode_object_for_version(&path, id, value, source_version)?;
-            check_legacy_object(&object)?;
-            Some(object)
-        }
-        None => None,
-    };
-
-    let events_path = store::events_path(root, id);
-    // Ahead of decoding, for the same reason the Object envelope is: the
-    // current Event model reads a predecessor line with its later members
-    // defaulted, so a v2-only action or member in a v1 history would decode
-    // cleanly and then reconstruct a projection the predecessor generation
-    // could not have produced.
-    for (index, line) in history.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}:{}: {error}", events_path.display(), index + 1),
-            )
-        })?;
-        store::check_predecessor_event_shape(&events_path, index + 1, source_version, &value)?;
-    }
-    let events = store::decode_events(root, &events_path, id, history)?;
-    for event in &events {
-        ensure!(
-            event.version == crate::EVENT_ENVELOPE_VERSION_V0
-                && matches!(event.provenance, Provenance::Confirmed { .. }),
+    let engr = store::engr_dir(root);
+    let relative = path.strip_prefix(&engr).map_err(|_| {
+        Error::new(
             EXIT_SCHEMA,
-            "a predecessor workspace carries only Event generation 1"
-        );
-        ensure_legacy_refs(&event.payload.content.refs)?;
-    }
-    if stored.is_none() {
-        ensure!(
-            events.first().is_some_and(|event| event.rev == 1
-                && matches!(event.payload.action, crate::model::Action::ObjectCreated)),
-            EXIT_SCHEMA,
-            "{id}: event rev 1 cannot reconstruct a missing object"
-        );
-    }
-    let (reconciled, _) =
-        crate::model::replay_recoverable_tail(Object::new(id.to_owned(), String::new())?, &events)
-            .map_err(|error| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!(
-                        "{id}: predecessor event tail cannot reconcile: {}",
-                        error.message
-                    ),
-                )
-            })?;
-    if let Some(stored) = stored {
-        ensure!(
-            stored.title == reconciled.title
-                && stored.object_type == reconciled.object_type
-                && stored.state == reconciled.state
-                && stored.rev == reconciled.rev
-                && stored.next_section_id == reconciled.next_section_id
-                && stored.sections == reconciled.sections,
-            EXIT_INVARIANT,
-            "{id}: predecessor Object projection is not exactly derivable from admitted history"
-        );
-    }
-    check_legacy_object(&reconciled)?;
-    Ok(reconciled)
+            format!("{} is not inside {}", path.display(), engr.display()),
+        )
+    })?;
+    Ok(relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/"))
 }
 
-/// The deterministic v3 conversion of one predecessor projection.
+/// The domains that arrived after the released generation.
 ///
-/// This is the migration's actual target for an Object. Preflight derives the
-/// plan with it and resume re-derives the same answer with it, so what the
-/// stage claims is never the only thing saying what should be published.
-fn migrate_object(closure: &mut RefClosure, id: &str, mut object: Object) -> Result<Object> {
-    object.legacy_format = None;
-    object.legacy_version = None;
-    object.sections.sort_by_key(|section| section.id);
-    let mut sections = Vec::with_capacity(object.sections.len());
-    for section in object.sections {
-        let mut section = closure.convert_section(section)?;
-        // The current generation persists one order for a set, so the
-        // migrated bytes have to be in it. Sealing canonicalizes a clone
-        // either way; what changes here is the representation on disk.
-        crate::proof::canonical_set(&mut section.refs, "reference")?;
-        crate::proof::canonical_set(&mut section.relations, "relation")?;
-        sections.push(section);
-    }
-    object.sections = sections;
-    object.sha256 = None;
-    object.validate()?;
-    // Before the seal, not after it. Sealing runs this same walk on its way
-    // through `canonical_bytes`, but that one reports a *usage* fault — and
-    // a number reaching here came out of a predecessor file, not off
-    // somebody's command line. Checking first keeps the fault class honest
-    // about where the value was found, and refuses it before a seal is
-    // computed over bytes JCS would have silently rounded.
-    let value = serde_json::to_value(&object)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {id}: {error}")))?;
-    stored_within_safe_integers(&value, &format!("object {id}"))?;
-    let resealed = crate::integrity::seal_migrated(object)?;
-    resealed.object.validate()?;
-    crate::integrity::check_stored_object_integrity(&resealed.object)?;
-    Ok(resealed.object)
-}
-
-/// The `.engr` domains that arrived after the released version 1 generation.
+/// That release wrote `format.json`, `objects/`, `events/` and `candidates/`,
+/// and had no Rule, Backlog, Work or Collection subsystem at all — those landed
+/// in later builds that were never published. So a declared predecessor
+/// workspace holding one of them is not the workspace this migration is defined
+/// over, and it is refused before anything is written.
 ///
-/// One list, named once, so the preflight floor and the resume floor cannot
-/// drift apart — a floor that two call sites each spell out separately is a
-/// floor with a hole in it the moment a fifth domain is added.
-type DomainDir = fn(&Path) -> PathBuf;
-
-const LATER_THAN_RELEASED_V1: &[(&str, DomainDir)] = &[
-    ("rules", crate::rules::dir),
-    ("backlog", crate::backlog::dir),
-    // The whole domain, not one subject kind's subdirectory: a floor that checked
-    // `work/objects` alone would wave through a predecessor holding
-    // `work/backlog`, while its own message claimed the generation had no Work
-    // subsystem at all.
-    ("work", crate::work::root_dir),
-    ("collections", crate::collection::dir),
-];
-
-/// What the released version 1 generation's `.engr` actually held.
+/// `local/` is deliberately absent from the list. It is *this* generation's
+/// directory, and taking the workspace lock creates it — so a predecessor
+/// workspace acquires one the moment anything looks at it, including this
+/// check. Refusing it would make the migration refuse every workspace it is
+/// defined over.
 ///
-/// #32's ruling `5460403574` fixes what "workspace version 1" means for
-/// compatibility: the generation the published `latest` release shipped at
-/// `e7d9f99`, not the whole unreleased development window during which
-/// `format.json` still happened to say 1. That release wrote `format.json`,
-/// `objects/`, `events/` and `candidates/`, and had no Rule, Backlog, Work or
-/// Collection subsystem at all — those landed later, in builds that were never
-/// published.
-///
-/// So a declared v1 workspace holding one of them is refused, and refused
-/// *here*: before the `.gitignore` is touched, before a plan is staged, before
-/// anything at all is written. Carrying them forward would migrate bytes the
-/// generation did not recognize as engr state into current resources.
-///
-/// `rules/` is the one that changes what the record can do. A rule file is
+/// `rules/` is the one that changes what the record can *do*: a rule file is
 /// authored by a human and never by engr, so its presence says nothing about
 /// which build made the workspace — and migrating it would make policy the
-/// released build never recognized start governing agent admission, because
+/// released build never recognized start governing agent admission because
 /// somebody ran `engr migrate`. That is authority arriving through a
-/// representation change, which is the thing the whole generation boundary
-/// exists to prevent.
-///
-/// A workspace really written by a later version-1 build is out of scope by the
-/// same ruling: preserving those is a separate compatibility decision, and the
-/// ruling says explicitly it must not be inferred from the shared version
-/// number. The diagnostic says so rather than implying the data is worthless.
-///
-/// The format-less v0 path is deliberately not covered, and that is a decision
-/// rather than an oversight. The ruling says "for source version 1", and the
-/// subject was asked directly and chose to leave v0 as it is. The same gap is
-/// open there in principle — v0 predates all four domains too — but a v0
-/// workspace comes from a build that shipped before the release and carries no
-/// `format.json` at all, so it is close to unreachable in practice. Widening
-/// this to v0 needs a ruling, not a judgement call here.
-fn check_released_v1_domains(root: &Path, source_version: u32) -> Result<()> {
-    if source_version != 1 {
-        return Ok(());
-    }
-    for (domain, locate) in LATER_THAN_RELEASED_V1 {
-        let path = locate(root);
-        // `symlink_metadata`, so a dangling link counts as present. Absence is
-        // the only answer that lets the migration continue.
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(tool_error(path.display(), error)),
-            Ok(_) => {}
-        }
-        let authority = if *domain == "rules" {
-            " Activating it would make a rule the released build never recognized govern agent admission."
-        } else {
-            ""
-        };
-        return Err(Error::new(
+/// representation change.
+const LATER_DOMAINS: &[&str] = &["rules", "backlog", "work", "collections", "eventstore"];
+
+fn check_released_domains(root: &Path) -> Result<()> {
+    for domain in LATER_DOMAINS {
+        let path = store::engr_dir(root).join(domain);
+        ensure!(
+            !path.exists(),
             EXIT_SCHEMA,
-            format!(
-                "{}: workspace version 1 is the generation the published release wrote, which had objects/, events/ and candidates/ and no {domain} subsystem at all, so this migration does not carry {domain}/ forward as version 1 state.{authority} If it came from a later build that still declared version 1, that is a separate compatibility path and not this one.",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn preflight(root: &Path, source_version: u32) -> Result<Plan> {
-    ensure!(
-        migratable_source_version(source_version),
-        EXIT_SCHEMA,
-        "workspace version {source_version} has no defined migration to version {}",
-        crate::WORKSPACE_VERSION
-    );
-    check_released_v1_domains(root, source_version)?;
-    let mut source = BTreeMap::new();
-    let mut stored = BTreeMap::new();
-    for id in store::object_ids(root)? {
-        let path = store::object_path(root, &id);
-        let text = capture(&mut source, root, &path)?;
-        stored.insert(id, text);
-    }
-
-    // An Object with no Event file was never compared against admitted history
-    // at all: the loop below only reaches ids the EventStore knows. Its legacy
-    // Section seals say nothing about the Object level — title, type, state,
-    // revision, counter, Section membership — so granting it the first v3
-    // aggregate seal would launder an unverifiable projection into current
-    // authority. Under the retained EventStore contract every stored Object has
-    // an admitted creation, so absence here is a broken predecessor rather than
-    // a shape this generation has to accommodate.
-    let event_ids = store::event_ids(root)?;
-    for id in stored.keys() {
-        ensure!(
-            event_ids.contains(id),
-            EXIT_INVARIANT,
-            "{id}: no admitted history, so its projection cannot be proven before it is sealed"
-        );
-    }
-
-    // Validate every Event record and apply only a recoverable tail before
-    // converting representation. No v1 Event is ever replayed into a v3
-    // projection after the generation has advanced.
-    let mut predecessor = BTreeMap::new();
-    for id in &event_ids {
-        // Retained Event-v1 history stays under the contract that wrote it.
-        // #35 scopes the Phase-3 numeric domain to values participating in
-        // *current* state — §11 fails migration on "a required current-state
-        // JSON integer", and acceptance criterion 21 says the same — so the
-        // bound is applied to the predecessor Object above and to the migrated
-        // projection below, and never to immutable history for its own sake.
-        //
-        // Nothing escapes through the gap. An Event's only numbers are its
-        // `rev` and the Section ids an action names, and neither can be out of
-        // domain here while the migration still succeeds: `rev` is replayed
-        // contiguously from 1, and a Section id is only ever handed out from
-        // `next_section_id`, which the migrated Object carries into the walk
-        // below. An out-of-domain number in either position fails replay or
-        // fails that walk — it does not need a third check that would also
-        // refuse history for numbers current state never reads.
-        let history = capture(&mut source, root, &store::events_path(root, id))?;
-        let projection = predecessor_projection(
-            root,
-            id,
-            source_version,
-            stored.get(id).map(String::as_str),
-            &history,
-        )?;
-        predecessor.insert(id.clone(), projection);
-    }
-
-    let resources = validate_retained_resources(root, source_version, &predecessor, &mut source)?;
-
-    let mut closure = RefClosure::new(root);
-    let mut migrated = BTreeMap::new();
-    for (id, object) in predecessor {
-        let object = migrate_object(&mut closure, &id, object)?;
-        migrated.insert(id, object);
-    }
-    // Everything preflight read is confirmed unchanged, and nothing else may be
-    // in the set. The closing walk used to *become* `Plan.source`, so a file
-    // that appeared after its own domain was enumerated — a new Backlog item, a
-    // new Event log, a new Rule — was promoted into the manifest as an expected
-    // predecessor without ever being schema, JCS, replay or Rule validated. The
-    // commit phase would then find the workspace exactly as the manifest
-    // described it and advance the generation over an unvalidated resource.
-    //
-    // So the manifest is the captured set, and the live walk is only ever asked
-    // whether it still agrees.
-    let live = source_fingerprint(root)?;
-    for path in live.keys() {
-        ensure!(
-            source.contains_key(path),
-            EXIT_INVARIANT,
-            "{path} appeared while migration was validating the workspace"
-        );
-    }
-    for (path, digest) in &source {
-        ensure!(
-            live.get(path) == Some(digest),
-            EXIT_INVARIANT,
-            "{path} changed while migration was validating it"
-        );
-    }
-    Ok(Plan {
-        objects: migrated,
-        resources,
-        source,
-    })
-}
-
-/// Validate every retained resource, and say which of them need new bytes.
-///
-/// Adopting JCS is itself a representation migration: the predecessor build
-/// wrote these files with a pretty serializer, so an ordinary v2 Backlog,
-/// Collection or Work file is not the bytes v3 says a current resource has.
-/// Advancing `format.json` over them unchanged would leave a workspace full of
-/// resources its own reader refuses. One already byte-identical to its v3 form
-/// needs no rewrite and gets none.
-fn validate_retained_resources(
-    root: &Path,
-    source_version: u32,
-    objects: &BTreeMap<String, Object>,
-    source: &mut BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>> {
-    let mut rewrites = BTreeMap::new();
-    // Kept, because a Work sidecar may now be owned by one of these and the
-    // subject-lifetime invariant has to hold across the migration too.
-    let mut backlog = BTreeSet::new();
-    for id in crate::backlog::ids(root)? {
-        let path = crate::backlog::item_path(root, &id);
-        let text = capture(source, root, &path)?;
-        let mut item = crate::backlog::decode_for_migration(&path, &id, &text)?;
-        crate::backlog::canonicalize_sets(&mut item)?;
-        let canonical = crate::proof::canonical_bytes(&item, "backlog item")?;
-        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
-        backlog.insert(id);
-    }
-    for id in crate::collection::ids(root)? {
-        let path = crate::collection::path(root, &id);
-        let text = capture(source, root, &path)?;
-        let mut collection = crate::collection::decode_for_migration(&path, &id, &text)?;
-        crate::collection::canonicalize_members(&mut collection)?;
-        let canonical = crate::proof::canonical_bytes(&collection, "collection")?;
-        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
-    }
-    for subject in crate::work::ids(root)? {
-        let path = crate::work::path(root, &subject);
-        let text = capture(source, root, &path)?;
-        let mut work = crate::work::decode_for_migration(&path, &subject, &text)?;
-        // Each subject kind is checked against the thing that establishes it in
-        // the migrated workspace: an Object against the rebuilt projection, a
-        // Backlog item against the items this same pass just validated.
-        let owned = match &subject {
-            crate::work::Subject::Object(id) => objects.contains_key(id),
-            crate::work::Subject::Backlog(id) => backlog.contains(id),
-        };
-        ensure!(
-            owned,
-            EXIT_SCHEMA,
-            "work sidecar {subject} belongs to no {} in the migrated workspace",
-            subject.noun()
-        );
-        crate::work::canonicalize_work(&mut work)?;
-        let canonical = crate::proof::canonical_bytes(&work, "work")?;
-        plan_rewrite(root, &path, canonical, source, &mut rewrites)?;
-    }
-    // Rules are captured from the same read that validated them, exactly as
-    // artifact-exact identity requires everywhere else: reopening the path to
-    // fingerprint it is a second read of a file that is editable outside the
-    // workspace lock, so the manifest could name bytes the loader never
-    // accepted. `Rule::raw` is the text that was parsed.
-    let rules = crate::rules::load_all_for_migration(root)?;
-    check_predecessor_rules(source_version, &rules)?;
-    for rule in rules {
-        source.insert(relative_to_engr(root, &rule.source)?, sha256_of(&rule.raw));
-    }
-    // Anything else living under `rules/` is captured too, and only so the
-    // closing set comparison can be exact. It is not a Rule — the loader reads
-    // `.md` and nothing else — so nothing here claims it was validated as one;
-    // what is claimed is that it was present, and that it did not change.
-    let rules_dir = crate::rules::dir(root);
-    if rules_dir.is_dir() {
-        for entry in
-            fs::read_dir(&rules_dir).map_err(|error| tool_error(rules_dir.display(), error))?
-        {
-            let entry = entry.map_err(|error| tool_error(rules_dir.display(), error))?;
-            let path = entry.path();
-            if entry
-                .file_type()
-                .map_err(|error| tool_error(path.display(), error))?
-                .is_file()
-            {
-                let relative = relative_to_engr(root, &path)?;
-                if !source.contains_key(&relative) {
-                    capture(source, root, &path)?;
-                }
-            }
-        }
-    }
-    Ok(rewrites)
-}
-
-/// A Rule whose `review:` block the source generation had no schema for.
-///
-/// Version 2 is the first to define `review.max_attempts` and
-/// `review.on_exhaustion`, so an explicit block was an *unknown field* to
-/// anything older, which refused the file outright. Accepting one now would let
-/// migration admit a file its own predecessor rejected.
-///
-/// Only the format-less v0 path reaches this. Under #32's released-generation
-/// ruling `5460403574`, a version 1 workspace holding `rules/` at all is
-/// refused by [`check_released_v1_domains`] long before any rule is parsed —
-/// the released v1 build had no Rule subsystem, so the question of how it would
-/// have read a `review:` block does not arise. The ruling did not speak to the
-/// format-less generation, which predates the release and equally had none, so
-/// this stays as the narrower guard on the path it left alone.
-fn check_predecessor_rules(source_version: u32, rules: &[crate::rules::Rule]) -> Result<()> {
-    if source_version >= 2 {
-        return Ok(());
-    }
-    for rule in rules {
-        ensure!(
-            !rule.written_review,
-            EXIT_SCHEMA,
-            "{}: rule {} writes a review block, and workspace version {source_version} has no review member, so this is not a rule that generation could load",
-            rule.source.display(),
-            rule.id
+            "{} holds {domain}/, which the released version {} workspace never had; this is a later unreleased build's workspace and engr {} defines no route from it",
+            store::engr_dir(root).display(),
+            crate::PREDECESSOR_WORKSPACE_VERSION,
+            crate::IMPLEMENTATION_VERSION
         );
     }
     Ok(())
 }
 
-/// What a version 1 plan captured, judged as a fact about the plan.
+/// Every predecessor Object identity, from projections and history alike.
 ///
-/// A version 1 plan that captured `rules/agent-policy.md` as an expected
-/// predecessor was prepared by a binary reading an older compatibility floor.
-/// That is true of the plan whichever phase a crash left it in, so it is asked
-/// on both — and it is the one check that can *name* the situation, which is
-/// more use to whoever is holding it than reporting whichever downstream
-/// fingerprint comparison happened to fail first.
-///
-/// The already-published phase is the dangerous one, and it is not obvious.
-/// There the Objects are on disk and `format.json` already says 3, so the only
-/// thing left is removing the marker — and removing the marker is precisely
-/// what makes the workspace readable again. An earlier version of this check
-/// sat *after* that path's early return, reasoning that a v3 workspace may hold
-/// rules legitimately because they were admitted after it advanced. That
-/// reasoning does not hold: while the marker exists ordinary reads and writes
-/// fail closed, so nothing can have been admitted inside the crash window. For
-/// a version 1 plan a later domain in `source` is evidence of the obsolete
-/// interpretation, not of legitimate post-migration state.
-///
-/// The two phases get different recoveries, because they are in genuinely
-/// different positions and the wrong advice is worse than none. Before
-/// publication nothing has advanced and the plan is disposable. After it the
-/// migration is done and the marker is held on purpose: clearing it is the act
-/// that decides what that domain becomes, and that is a human's call rather
-/// than a resume's.
-fn check_staged_v1_manifest(
-    stage: &Path,
-    manifest: &Manifest,
-    workspace_version: u32,
-) -> Result<()> {
-    if manifest.source_version != 1 {
-        return Ok(());
-    }
-    for path in manifest.source.keys() {
-        let domain = path.split('/').next().unwrap_or_default();
-        if !LATER_THAN_RELEASED_V1
-            .iter()
-            .any(|(later, _)| *later == domain)
-        {
+/// History as well as projections, because the released build wrote the Event
+/// first: an Object whose file never landed is still an Object its own admitted
+/// history establishes, and dropping it would silently lose a record.
+fn predecessor_ids(root: &Path) -> Result<Vec<String>> {
+    let mut ids = BTreeSet::new();
+    for (dir, suffix) in [
+        (store::objects_dir(root), ".json"),
+        (predecessor_events_dir(root), ".jsonl"),
+    ] {
+        if !dir.is_dir() {
             continue;
         }
-        let situation = format!(
-            "this staged migration captured {path:?} as a workspace version 1 predecessor, and {domain}/ was not part of the released version 1 generation, so the plan was prepared under a reading of the compatibility floor that no longer holds."
-        );
-        let recovery = if workspace_version == manifest.target_version {
-            format!(
-                " Its publication already completed — `format.json` names version {} — so all that is left is the marker at {}, and it is held on purpose: removing it is what would make {domain}/ current. Decide what {domain}/ should be in this workspace, then clear the marker yourself.",
-                manifest.target_version,
-                stage.display()
-            )
-        } else {
-            format!(
-                " `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
-                stage.display()
-            )
-        };
-        return Err(Error::new(EXIT_SCHEMA, format!("{situation}{recovery}")));
+        for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
+            let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(id) = name.strip_suffix(suffix) {
+                ids.insert(id.to_owned());
+            }
+        }
     }
-    Ok(())
+    Ok(ids.into_iter().collect())
 }
 
-/// The released-generation floor, applied to the workspace a plan is about to
-/// publish onto.
-///
-/// The invariant, as distinct from what the plan happens to say: a plan whose
-/// manifest is clean can still be sitting on a workspace that has since grown a
-/// `rules/`, and publishing would activate it just the same.
-///
-/// Only reached before publication, so the recovery is the simple one. Saying
-/// it matters, because refusing here leaves a workspace that can neither resume
-/// nor be read — the marker sees to the second — and without a way out somebody
-/// is stuck between two closed doors.
-fn check_staged_v1_workspace(root: &Path, stage: &Path, manifest: &Manifest) -> Result<()> {
-    check_released_v1_domains(root, manifest.source_version).map_err(|error| {
-        Error::new(
-            error.code,
-            format!(
-                "{} `format.json` still names version 1, so the workspace has not advanced and the plan at {} can be discarded and prepared again.",
-                error.message,
-                stage.display()
-            ),
-        )
+fn predecessor_events_dir(root: &Path) -> PathBuf {
+    store::engr_dir(root).join("events")
+}
+
+/// The migrated snapshot of one validated predecessor Object.
+fn snapshot_of(
+    predecessor: &crate::predecessor::Object,
+    closure: &mut RefClosure,
+) -> Result<Snapshot> {
+    let mut sections = Vec::with_capacity(predecessor.sections.len());
+    for section in &predecessor.sections {
+        let converted = closure.convert_section(section)?;
+        sections.push(SnapshotSection {
+            id: converted.id,
+            value: converted.value(),
+        });
+    }
+    sections.sort_by_key(|section| section.id);
+    Ok(Snapshot {
+        // The released generation had no Object `type`, so a migrated Object is
+        // untyped. Inventing one would be engr classifying a record nobody
+        // classified.
+        title: predecessor.title.clone(),
+        object_type: None,
+        state: predecessor.state,
+        next_section_id: predecessor.next_section_id,
+        sections,
     })
 }
 
-fn plan_rewrite(
-    root: &Path,
-    path: &Path,
-    canonical: String,
-    source: &BTreeMap<String, String>,
-    rewrites: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let relative = relative_to_engr(root, path)?;
-    if source.get(&relative) != Some(&sha256_of(&canonical)) {
-        rewrites.insert(relative, canonical);
-    }
-    Ok(())
+/// What one migrated Object becomes.
+struct Derived {
+    object: Object,
+    event: Event,
 }
 
-fn migratable_source_version(version: u32) -> bool {
-    // Format-less legacy workspaces carry a representation explicitly handled
-    // by this converter. Everything with a declared version is decided by the
-    // one list, so what this build claims it can migrate and what it will
-    // actually attempt cannot drift apart.
-    version == 0 || crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version)
-}
-
-fn check_legacy_object(object: &Object) -> Result<()> {
-    ensure!(
-        object.sha256.is_none(),
-        EXIT_SCHEMA,
-        "a predecessor Object cannot already carry a v3 aggregate seal"
-    );
-    for section in &object.sections {
-        check_legacy_section(section)?;
-    }
-    Ok(())
-}
-
-fn check_legacy_section(section: &Section) -> Result<()> {
-    ensure!(
-        section.admission == Admission::Human,
-        EXIT_SCHEMA,
-        "a predecessor Section can only reconstruct as human admission"
-    );
-    ensure_lower_sha256(&section.sha256, "legacy Section seal")?;
-    let recomputed = section.recomputed_sha256()?;
-    ensure!(
-        recomputed == section.sha256,
-        EXIT_INVARIANT,
-        "section {} was sealed as {} and its predecessor contents seal as {}",
-        section.id,
-        section.sha256,
-        recomputed
-    );
-    ensure_legacy_refs(&section.refs)
-}
-
-fn ensure_legacy_refs(refs: &[Ref]) -> Result<()> {
-    for reference in refs {
-        ensure!(
-            matches!(reference, Ref::Legacy(_)),
-            EXIT_SCHEMA,
-            "a predecessor resource cannot already carry a selective reference"
-        );
-    }
-    Ok(())
-}
-
-fn ensure_lower_sha256(value: &str, what: &str) -> Result<()> {
-    ensure!(
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        EXIT_SCHEMA,
-        "{what} is not 64 lowercase hexadecimal characters"
-    );
-    Ok(())
-}
-
-/// The Object id a `.engr`-relative source path names, if it names one.
-fn staged_object_id(path: &str) -> Option<&str> {
-    path.strip_prefix("objects/")
-        .and_then(|rest| rest.strip_suffix(".json"))
-}
-
-/// The only retained resources a v3 stage may publish. A manifest is durable
-/// operational input, so its map keys are never paths by convention: they are
-/// parsed capabilities before either staging or workspace paths are built.
-enum RetainedResource {
-    Backlog(String),
-    Collection(String),
-    Work(crate::work::Subject),
-}
-
-fn retained_resource(relative: &str) -> Result<RetainedResource> {
-    ensure!(
-        !relative.contains('\\'),
-        EXIT_SCHEMA,
-        "staged retained resource {relative:?} is not an .engr-relative path"
-    );
-    let pieces: Vec<_> = relative.split('/').collect();
-    let file_id = |name: &str| -> Result<String> {
-        let id = name.strip_suffix(".json").ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("staged retained resource {relative:?} is not a JSON resource"),
-            )
-        })?;
-        ensure!(
-            !id.is_empty() && id != "." && id != "..",
-            EXIT_SCHEMA,
-            "staged retained resource {relative:?} has no valid resource identity"
-        );
-        Ok(id.to_owned())
+/// Derive the destination Object by *replaying* its own bootstrap Event.
+///
+/// Not by assembling it beside one. The Object a migration publishes has to be
+/// exactly what its history derives, and deriving it is the only way to be sure
+/// — a second construction path would be a second answer that could differ.
+///
+/// `admitted` is the migration's own Human confirmation and instant, while the
+/// Sections inside the snapshot keep the provenance the predecessor recorded.
+/// That is the case #66 keeps `Section.admitted` and `Event.metadata.admitted`
+/// apart for: here they legitimately name different people at different times.
+fn derive(
+    closure: &mut RefClosure,
+    predecessor: &crate::predecessor::Object,
+    admitted: EventAdmission,
+) -> Result<Derived> {
+    let action = Action::ObjectMigrated {
+        snapshot: Box::new(snapshot_of(predecessor, closure)?),
     };
-    match pieces.as_slice() {
-        ["backlog", name] => Ok(RetainedResource::Backlog(file_id(name)?)),
-        ["collections", name] => Ok(RetainedResource::Collection(file_id(name)?)),
-        // The subject kind is in the path and nowhere else, so parsing it here is
-        // what gives the rest of this file a subject to check against. An
-        // unrecognized third subdirectory falls through to the refusal below.
-        ["work", "objects", name] => Ok(RetainedResource::Work(crate::work::Subject::Object(
-            file_id(name)?,
-        ))),
-        ["work", "backlog", name] => Ok(RetainedResource::Work(crate::work::Subject::Backlog(
-            file_id(name)?,
-        ))),
-        _ => Err(Error::new(
-            EXIT_SCHEMA,
-            format!("staged retained resource {relative:?} is not a known .engr resource path"),
-        )),
+    Payload::new(predecessor.id.clone(), action.clone()).validate()?;
+    let event = Event::sealed(&predecessor.id, crate::model::new_id(), action, 1, admitted)?;
+    let mut object = empty(&predecessor.id)?;
+    crate::model::project(&mut object, &event)?;
+    object.validate()?;
+    let value = serde_json::to_value(&object)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {}: {error}", predecessor.id)))?;
+    stored_within_safe_integers(&value, &format!("object {}", predecessor.id))?;
+    crate::integrity::check_stored_object_integrity(&object)?;
+    Ok(Derived { object, event })
+}
+
+fn empty(id: &str) -> Result<Object> {
+    let mut object = Object::new(id.to_owned(), String::new())?;
+    object.rev = 0;
+    object.reseal()?;
+    Ok(object)
+}
+
+/// The admission provenance a plan uses while it is only a plan.
+///
+/// A fixed instant and a fixed code, so the Object digest a plan promises is a
+/// function of the predecessor alone. The Object digest does not cover the Event
+/// at all, which is what makes this safe: the real confirmation supplies the
+/// real values and the Object still derives identically.
+fn planning_admission() -> EventAdmission {
+    EventAdmission {
+        by: Admission::Human,
+        at: "1970-01-01T00:00:00Z".to_owned(),
+        confirmation: Some(HumanConfirmation {
+            challenge: "AAAAAA".to_owned(),
+        }),
+        review: None,
     }
 }
 
-impl RetainedResource {
-    fn staged_path(&self, stage: &Path) -> PathBuf {
-        match self {
-            Self::Backlog(id) => stage
-                .join("resources")
-                .join("backlog")
-                .join(format!("{id}.json")),
-            Self::Collection(id) => stage
-                .join("resources")
-                .join("collections")
-                .join(format!("{id}.json")),
-            Self::Work(subject) => stage
-                .join("resources")
-                .join(crate::work::DIR)
-                .join(subject.folder())
-                .join(format!("{}.json", subject.id())),
-        }
-    }
-
-    fn destination(&self, root: &Path) -> PathBuf {
-        match self {
-            Self::Backlog(id) => crate::backlog::item_path(root, id),
-            Self::Collection(id) => crate::collection::path(root, id),
-            Self::Work(subject) => crate::work::path(root, subject),
-        }
-    }
-
-    fn validate_staged(&self, staged: &Path, text: &str, manifest: &Manifest) -> Result<()> {
-        match self {
-            Self::Backlog(id) => {
-                crate::backlog::decode_current_staged(staged, id, text)?;
-            }
-            Self::Collection(id) => {
-                crate::collection::decode_current_staged(staged, id, text)?;
-            }
-            Self::Work(subject) => {
-                manifest.require_work_subject(subject)?;
-                crate::work::decode_current_staged(staged, subject, text)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// A resource digest alone proves only that staged bytes and the manifest
-    /// agree. Rebuild the deterministic v3 spelling from the captured
-    /// predecessor too, so editing both staged bytes and their digest cannot
-    /// replace the migration plan with a different valid resource.
-    fn verify_derivation(
-        &self,
-        root: &Path,
-        relative: &str,
-        staged: &str,
-        manifest: &Manifest,
-    ) -> Result<()> {
-        let source_path = self.destination(root);
-        let source = fs::read_to_string(&source_path)
-            .map_err(|error| tool_error(source_path.display(), error))?;
-        let expected_source = manifest.source.get(relative).ok_or_else(|| {
+/// The preflight: read, validate and convert the whole predecessor.
+///
+/// Nothing is written by this. It answers what the destination would be, and the
+/// plan derived from it is what a human is then asked about.
+fn preflight(root: &Path) -> Result<(MigrationSubject, Vec<crate::predecessor::Object>)> {
+    check_released_domains(root)?;
+    let mut source = BTreeMap::new();
+    let bootstrap_path = store::engr_dir(root).join("format.json");
+    let bootstrap_text = capture(&mut source, root, &bootstrap_path)?;
+    let format: crate::predecessor::Format =
+        serde_json::from_str(&bootstrap_text).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,
-                format!("staged retained resource {relative:?} was not captured at preflight"),
+                format!("{}: {error}", bootstrap_path.display()),
             )
         })?;
-        let staged_digest = manifest.resources.get(relative).ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("staged retained resource {relative:?} has no staged digest"),
-            )
-        })?;
-        let source_digest = sha256_of(&source);
-        if source_digest == *staged_digest {
-            return Ok(());
-        }
-        ensure!(
-            source_digest == *expected_source,
-            EXIT_INVARIANT,
-            "{relative} changed after migration preflight"
-        );
-        let canonical = match self {
-            Self::Backlog(id) => {
-                let mut item = crate::backlog::decode_for_migration(&source_path, id, &source)?;
-                crate::backlog::canonicalize_sets(&mut item)?;
-                crate::proof::canonical_bytes(&item, "backlog item")?
-            }
-            Self::Collection(id) => {
-                let mut collection =
-                    crate::collection::decode_for_migration(&source_path, id, &source)?;
-                crate::collection::canonicalize_members(&mut collection)?;
-                crate::proof::canonical_bytes(&collection, "collection")?
-            }
-            Self::Work(subject) => {
-                manifest.require_work_subject(subject)?;
-                let mut work = crate::work::decode_for_migration(&source_path, subject, &source)?;
-                crate::work::canonicalize_work(&mut work)?;
-                crate::proof::canonical_bytes(&work, "work")?
-            }
+    ensure!(
+        format.format == crate::predecessor::WORKSPACE_FORMAT
+            && format.version == crate::PREDECESSOR_WORKSPACE_VERSION,
+        EXIT_SCHEMA,
+        "{} is not the released predecessor bootstrap",
+        bootstrap_path.display()
+    );
+
+    let mut predecessors = Vec::new();
+    let mut planned = Vec::new();
+    let mut closure = RefClosure::new(root);
+    for id in predecessor_ids(root)? {
+        crate::model::validate_object_id(&id)?;
+        let object_path = store::object_path(root, &id);
+        let events_path = predecessor_events_dir(root).join(format!("{id}.jsonl"));
+        let stored = if object_path.exists() {
+            Some(capture(&mut source, root, &object_path)?)
+        } else {
+            None
         };
         ensure!(
-            canonical == staged,
-            EXIT_INVARIANT,
-            "{relative} staged bytes are not the canonical migration of the captured predecessor"
+            events_path.exists(),
+            EXIT_SCHEMA,
+            "{id}: a predecessor Object has admitted history"
         );
-        Ok(())
+        let history = capture(&mut source, root, &events_path)?;
+        let predecessor = crate::predecessor::effective_state(
+            &object_path,
+            &events_path,
+            &id,
+            stored.as_deref(),
+            &history,
+        )?;
+        let derived = derive(&mut closure, &predecessor, planning_admission())?;
+        planned.push(PlannedObject {
+            object: id.clone(),
+            title: derived.object.title.clone(),
+            sections: derived.object.sections.len() as u64,
+            predecessor_rev: predecessor.rev,
+            digest: derived.object.digest.clone(),
+        });
+        predecessors.push(predecessor);
+    }
+    Ok((
+        MigrationSubject {
+            from: format,
+            to: crate::WORKSPACE_GENERATION,
+            objects: planned,
+            source,
+        },
+        predecessors,
+    ))
+}
+
+/// What `engr migrate` produced.
+#[derive(Debug)]
+pub struct Proposed {
+    pub challenge: String,
+    pub subject: MigrationSubject,
+    /// Whether this run re-rendered an existing staged plan rather than deriving
+    /// a new one.
+    pub resumed: bool,
+}
+
+/// Prepare the migration and mint the Challenge that admits it.
+pub fn prepare(root: &Path) -> Result<Proposed> {
+    store::with_lock(root, || prepare_locked(root))
+}
+
+fn prepare_locked(root: &Path) -> Result<Proposed> {
+    if let Some(manifest) = staged(root)? {
+        // A staged plan is the question a human is already holding. Re-deriving
+        // it would mint a second code for the same migration and void the one
+        // they have.
+        let path = store::challenge_path(root, &manifest.challenge)?;
+        ensure!(
+            path.exists(),
+            EXIT_INVARIANT,
+            "the staged migration names challenge {}, which is gone; remove {} to start again",
+            manifest.challenge,
+            stage_dir(root).display()
+        );
+        return Ok(Proposed {
+            challenge: manifest.challenge,
+            subject: manifest.subject,
+            resumed: true,
+        });
+    }
+    ensure!(
+        matches!(
+            store::validate_format(root),
+            Ok(WorkspaceFormat::Predecessor)
+        ),
+        EXIT_SCHEMA,
+        "this workspace is not the released predecessor, so there is nothing to migrate"
+    );
+    let (subject, _) = preflight(root)?;
+    // Before anything local is written. The stage and the minted Challenge both
+    // live under `local/`, and the predecessor's own `.gitignore` names neither —
+    // so a person who prepares a migration and then commits would otherwise put a
+    // live challenge code into the repository.
+    ensure_local_ignored(root)?;
+    let data = serde_json::to_value(&subject)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
+    let taken = pending_challenge_codes(root)?;
+    let challenge = crate::confirmation::Challenge::mint(
+        crate::confirmation::Subject {
+            kind: crate::confirmation::SubjectType::Migration,
+            data,
+        },
+        &taken,
+        now(),
+    )?;
+    stage(
+        root,
+        &Manifest {
+            subject: subject.clone(),
+            challenge: challenge.id.clone(),
+        },
+    )?;
+    store::write_json(&store::challenge_path(root, &challenge.id)?, &challenge)?;
+    Ok(Proposed {
+        challenge: challenge.id,
+        subject,
+        resumed: false,
+    })
+}
+
+fn now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("formatting a timestamp cannot fail")
+}
+
+/// Challenge codes already on disk, read without holding any of them to this
+/// build's rules — minting must avoid a code even where the file is unreadable.
+fn pending_challenge_codes(root: &Path) -> Result<Vec<String>> {
+    let dir = store::challenges_dir(root);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut codes = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
+        let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(code) = name.strip_suffix(".json") {
+            if crate::confirmation::valid_challenge(code) {
+                codes.push(code.to_owned());
+            }
+        }
+    }
+    codes.sort();
+    Ok(codes)
+}
+
+fn staged(root: &Path) -> Result<Option<Manifest>> {
+    let path = stage_dir(root).join(MANIFEST);
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display()))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(tool_error(path.display(), error)),
     }
 }
 
-/// A staged Object digest proves only that the stage agrees with itself.
+/// Install the plan atomically, so a crash leaves either no stage or a complete
+/// one — never a half-written question.
+fn stage(root: &Path, manifest: &Manifest) -> Result<()> {
+    let temp = stage_temp(root);
+    let final_dir = stage_dir(root);
+    if temp.exists() {
+        fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
+    }
+    fs::create_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
+    store::write_json(&temp.join(MANIFEST), manifest)?;
+    fs::rename(&temp, &final_dir).map_err(|error| tool_error(final_dir.display(), error))
+}
+
+/// What a confirmed migration did.
+#[derive(Debug)]
+pub struct Report {
+    pub objects: Vec<String>,
+    pub sections: usize,
+}
+
+/// Apply the migration a human has just confirmed.
 ///
-/// Retained resources are re-derived from the captured predecessor on resume,
-/// so editing staged bytes *and* their manifest digest cannot quietly swap in a
-/// different resource. Objects carry more authority than any of them and had no
-/// equivalent: a crash leaves a stage whose Object can be rewritten, resealed —
-/// Section and aggregate seals are unkeyed, so whoever can edit the file can
-/// compute valid ones — and re-digested into a plan that agrees with itself
-/// everywhere resume looked, while the predecessor bytes it supposedly came
-/// from sit unchanged on disk. That makes operational staging a way to write
-/// authority. #31 requires each required conversion to be deterministic and says
-/// migration must not legitimize state merely by resealing it, so the target has
-/// to be the derivation rather than whatever the manifest currently claims.
-fn verify_object_derivation(
-    root: &Path,
-    closure: &mut RefClosure,
-    id: &str,
-    staged: &str,
-    manifest: &Manifest,
-) -> Result<()> {
-    let path = store::object_path(root, id);
-    let relative = relative_to_engr(root, &path)?;
-    let staged_digest = manifest.objects.get(id).ok_or_else(|| {
+/// Every derivation is redone here rather than read out of the stage. The stage
+/// says which question was asked; it is not evidence about the answer, and a
+/// commit phase that trusted it would publish whatever a staged file happened to
+/// contain.
+pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {
+    let manifest = staged(root)?.ok_or_else(|| {
         Error::new(
-            EXIT_SCHEMA,
-            format!("staged object {id} has no staged digest"),
+            EXIT_INVARIANT,
+            format!(
+                "challenge {} names a migration, and no migration is staged; run `engr migrate`",
+                challenge.id
+            ),
         )
     })?;
-    let live = match fs::read_to_string(&path) {
-        Ok(text) => Some(text),
-        Err(error) if error.kind() == ErrorKind::NotFound => None,
-        Err(error) => return Err(tool_error(path.display(), error)),
+    ensure!(
+        manifest.challenge == challenge.id,
+        EXIT_INVARIANT,
+        "the staged migration is waiting on challenge {}, not {}",
+        manifest.challenge,
+        challenge.id
+    );
+    let subject: MigrationSubject = serde_json::from_value(challenge.subject.data.clone())
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
+    ensure!(
+        subject == manifest.subject,
+        EXIT_INVARIANT,
+        "the confirmed migration is not the one that was staged"
+    );
+
+    // Re-derive from the predecessor as it stands now, and require it to be the
+    // predecessor the human was shown. A file edited between the question and
+    // the answer changes what the answer would mean.
+    let (current, predecessors) = preflight(root)?;
+    ensure!(
+        current == subject,
+        EXIT_INVARIANT,
+        "the predecessor workspace moved after challenge {} was prepared; prepare it again",
+        challenge.id
+    );
+
+    // One instant for the whole migration, taken from the Challenge itself: a
+    // clock read per Object would stamp one confirmation with as many admission
+    // times as it happened to take.
+    let admitted = EventAdmission {
+        by: Admission::Human,
+        at: challenge.created_at.clone(),
+        confirmation: Some(HumanConfirmation {
+            challenge: challenge.id.clone(),
+        }),
+        review: None,
     };
-    // An interrupted commit already published this one. The live bytes are the
-    // target, and the predecessor they were derived from is no longer on disk
-    // to derive from again.
-    if live
-        .as_deref()
-        .is_some_and(|text| sha256_of(text) == *staged_digest)
-    {
-        return Ok(());
-    }
-    let stored = match manifest.source.get(&relative) {
-        Some(expected) => {
-            let text = live.ok_or_else(|| {
+    let mut closure = RefClosure::new(root);
+    let mut derived = Vec::new();
+    let mut sections = 0usize;
+    for predecessor in &predecessors {
+        let one = derive(&mut closure, predecessor, admitted.clone())?;
+        let planned = subject
+            .objects
+            .iter()
+            .find(|planned| planned.object == one.object.id)
+            .ok_or_else(|| {
                 Error::new(
                     EXIT_INVARIANT,
-                    format!("{relative} disappeared after migration preflight"),
+                    format!("{} is not in the confirmed migration plan", one.object.id),
                 )
             })?;
-            ensure!(
-                sha256_of(&text) == *expected,
-                EXIT_INVARIANT,
-                "{relative} changed after migration preflight"
-            );
-            Some(text)
-        }
-        // Preflight captured no projection for it, so it is the recovery case:
-        // an Object whose admitted history reconstructs it. Anything on disk
-        // here is neither the predecessor nor the published target.
-        None => {
-            ensure!(
-                live.is_none(),
-                EXIT_INVARIANT,
-                "{relative} appeared after migration preflight"
-            );
-            None
-        }
-    };
-
-    let events_path = store::events_path(root, id);
-    let events_relative = relative_to_engr(root, &events_path)?;
-    let expected = manifest.source.get(&events_relative).ok_or_else(|| {
-        Error::new(
-            EXIT_INVARIANT,
-            format!("{id}: no admitted history was captured to derive its migration from"),
-        )
-    })?;
-    let history = fs::read_to_string(&events_path)
-        .map_err(|error| tool_error(events_path.display(), error))?;
-    ensure!(
-        sha256_of(&history) == *expected,
-        EXIT_INVARIANT,
-        "{events_relative} changed after migration preflight"
-    );
-
-    let projection = predecessor_projection(
-        root,
-        id,
-        manifest.source_version,
-        stored.as_deref(),
-        &history,
-    )?;
-    let canonical = crate::proof::canonical_bytes(
-        &migrate_object(closure, id, projection)?,
-        &format!("object {id}"),
-    )?;
-    ensure!(
-        canonical == staged,
-        EXIT_INVARIANT,
-        "{relative} staged bytes are not the canonical migration of the captured predecessor"
-    );
-    Ok(())
-}
-
-fn validate_manifest(manifest: &Manifest) -> Result<()> {
-    ensure!(
-        migratable_source_version(manifest.source_version),
-        EXIT_SCHEMA,
-        "staged migration source version {} has no defined migration to version {}",
-        manifest.source_version,
-        crate::WORKSPACE_VERSION
-    );
-    for id in manifest.objects.keys() {
-        crate::model::validate_object_id(id).map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "staged migration object id {id:?} is invalid: {}",
-                    error.message
-                ),
-            )
-        })?;
-    }
-    for (relative, digest) in &manifest.resources {
-        retained_resource(relative)?;
-        let source = manifest.source.get(relative).ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("staged retained resource {relative:?} was not captured at preflight"),
-            )
-        })?;
         ensure!(
-            source != digest,
-            EXIT_SCHEMA,
-            "staged retained resource {relative:?} does not rewrite its captured predecessor"
+            planned.digest == one.object.digest,
+            EXIT_INVARIANT,
+            "{} does not migrate to the value that was confirmed",
+            one.object.id
         );
+        sections += one.object.sections.len();
+        derived.push(one);
     }
-    Ok(())
-}
-fn stage_dir(root: &Path) -> PathBuf {
-    store::engr_dir(root).join(STAGE)
+
+    publish(root, &derived)?;
+    let ids = derived.iter().map(|one| one.object.id.clone()).collect();
+    // Last, and only after everything else landed. While `VERSION` is absent the
+    // workspace is still the predecessor and the migration is resumable; the
+    // moment it exists, every read surface is looking at the new generation.
+    store::write_generation(root)?;
+    // A spent code resolves to nothing, so the file goes with the question it
+    // asked — the same disposal an ordinary confirmation performs.
+    let spent = store::challenge_path(root, &challenge.id)?;
+    if spent.exists() {
+        fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
+    }
+    let stage = stage_dir(root);
+    if stage.exists() {
+        fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
+    }
+    Ok(Report {
+        objects: ids,
+        sections,
+    })
 }
 
-fn stage_plan(root: &Path, source_version: u32, plan: &Plan) -> Result<()> {
-    let temporary = store::engr_dir(root).join(STAGE_TEMP);
-    match fs::symlink_metadata(&temporary) {
-        Ok(metadata) => {
-            ensure!(
-                metadata.file_type().is_dir(),
-                EXIT_SCHEMA,
-                "{} is not a migration staging directory",
-                temporary.display()
-            );
-            fs::remove_dir_all(&temporary)
-                .map_err(|error| tool_error(temporary.display(), error))?;
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(tool_error(temporary.display(), error)),
-    }
-    let object_dir = temporary.join("objects");
-    fs::create_dir_all(&object_dir).map_err(|error| tool_error(object_dir.display(), error))?;
-    let mut digests = BTreeMap::new();
-    for (id, object) in &plan.objects {
-        let path = object_dir.join(format!("{id}.json"));
-        store::write_json(&path, object)?;
-        let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
-        digests.insert(id.clone(), sha256_of(&bytes));
-    }
-    let mut resources = BTreeMap::new();
-    for (relative, canonical) in &plan.resources {
-        let path = temporary.join("resources").join(relative);
+/// Write the destination workspace, then remove what the predecessor owned.
+///
+/// Objects and their bootstrap streams first, the predecessor's own directories
+/// afterwards: a crash between the two leaves a workspace with both, which
+/// `VERSION`'s absence still marks as the predecessor and which the resume path
+/// rebuilds from scratch.
+fn publish(root: &Path, derived: &[Derived]) -> Result<()> {
+    for one in derived {
+        let path = store::events_path(root, &one.object.id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
         }
-        store::write_text(&path, canonical)?;
-        resources.insert(relative.clone(), sha256_of(canonical));
+        let line = crate::proof::canonical_bytes(&one.event, "Event")?;
+        store::write_text(&path, &format!("{line}\n"))?;
     }
-    store::write_json(
-        &temporary.join(MANIFEST),
-        &Manifest {
-            source_version,
-            target_version: crate::WORKSPACE_VERSION,
-            objects: digests,
-            resources,
-            source: plan.source.clone(),
-        },
-    )?;
-    let stage = stage_dir(root);
-    match fs::symlink_metadata(&stage) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Ok(_) => {
-            return Err(Error::new(
-                EXIT_SCHEMA,
-                format!("{} already exists", stage.display()),
-            ));
+    for one in derived {
+        let value = serde_json::to_value(&one.object)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("object: {error}")))?;
+        store::write_text(
+            &store::object_path(root, &one.object.id),
+            &crate::proof::canonical_bytes(&value, "object")?,
+        )?;
+    }
+    // Old pending Candidate state is unsupported and is not migrated: a question
+    // asked under the predecessor's contract cannot be answered under this one,
+    // and the material it was asked about has moved representation underneath
+    // it. Prepare it again.
+    for domain in ["events", "candidates"] {
+        let path = store::engr_dir(root).join(domain);
+        if path.exists() {
+            fs::remove_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
         }
-        Err(error) => return Err(tool_error(stage.display(), error)),
     }
-    fs::rename(&temporary, &stage).map_err(|error| tool_error(stage.display(), error))
+    let bootstrap = store::engr_dir(root).join("format.json");
+    if bootstrap.exists() {
+        fs::remove_file(&bootstrap).map_err(|error| tool_error(bootstrap.display(), error))?;
+    }
+    for path in [
+        store::challenges_dir(root),
+        crate::backlog::dir(root),
+        crate::collection::dir(root),
+        crate::rules::dir(root),
+    ] {
+        fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+    }
+    for path in crate::work::dirs(root) {
+        fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+    }
+    ensure_local_ignored(root)
 }
 
-/// A target-version workspace may retain its stage only in the narrow crash
-/// window after every staged artifact was published. The version scalar alone
-/// cannot establish that ordering: it can also have been edited or merged.
-fn verify_published_stage(root: &Path, manifest: &Manifest) -> Result<()> {
-    let current = source_fingerprint(root)?;
-    for path in current.keys() {
-        let reconstructed = staged_object_id(path).is_some_and(|id| {
-            manifest.objects.contains_key(id) && !manifest.source.contains_key(path)
-        });
-        ensure!(
-            manifest.source.contains_key(path) || reconstructed,
-            EXIT_INVARIANT,
-            "{path} appeared after migration preflight"
-        );
-    }
-    for (path, source_digest) in &manifest.source {
-        let actual = current.get(path).ok_or_else(|| {
-            Error::new(
-                EXIT_INVARIANT,
-                format!("{path} disappeared after migration preflight"),
-            )
-        })?;
-        let published_object = staged_object_id(path).and_then(|id| manifest.objects.get(id));
-        let published_resource = manifest.resources.get(path);
-        ensure!(
-            actual == source_digest
-                || published_object == Some(actual)
-                || published_resource == Some(actual),
-            EXIT_INVARIANT,
-            "{path} does not match either its predecessor or staged target"
-        );
-    }
-
-    let current_ids = store::object_ids(root)?;
-    ensure!(
-        current_ids.len() == manifest.objects.len()
-            && current_ids
-                .iter()
-                .all(|id| manifest.objects.contains_key(id)),
-        EXIT_INVARIANT,
-        "the target workspace does not contain exactly the staged Object set"
-    );
-    for (id, expected) in &manifest.objects {
-        let path = store::object_path(root, id);
-        let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
-        ensure!(
-            sha256_of(&bytes) == *expected,
-            EXIT_INVARIANT,
-            "{} is not the staged target Object",
-            path.display()
-        );
-        let value: serde_json::Value = serde_json::from_str(&bytes)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-        let object = store::decode_object(&path, id, value)?;
-        crate::integrity::check_stored_object_integrity(&object)?;
-    }
-    for (relative, expected) in &manifest.resources {
-        let resource = retained_resource(relative)?;
-        let path = resource.destination(root);
-        let bytes = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
-        ensure!(
-            sha256_of(&bytes) == *expected,
-            EXIT_INVARIANT,
-            "{} is not the staged target resource",
-            path.display()
-        );
-        resource.validate_staged(&path, &bytes, manifest)?;
-    }
-    Ok(())
-}
-
-fn commit_stage(root: &Path, stage: &Path) -> Result<()> {
-    let metadata =
-        fs::symlink_metadata(stage).map_err(|error| tool_error(stage.display(), error))?;
-    ensure!(
-        metadata.file_type().is_dir(),
-        EXIT_SCHEMA,
-        "{} is not a migration staging directory",
-        stage.display()
-    );
-    let manifest_path = stage.join(MANIFEST);
-    let manifest: Manifest = match store::read_current_json(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(error) if error.code == EXIT_NOT_FOUND => {
-            let version = store::declared_workspace_version(root)?;
-            let recovery = if version == Some(crate::WORKSPACE_VERSION) {
-                format!(
-                    " `format.json` already names version {}; publication may have completed, so do not remove the marker. Restore its manifest from the migration plan before resuming.",
-                    crate::WORKSPACE_VERSION
-                )
-            } else if matches!(version, Some(1 | 2)) {
-                format!(
-                    " `format.json` still names version {}, so the workspace has not advanced and the incomplete plan at {} can be discarded and prepared again.",
-                    version.expect("recognized predecessor checked"),
-                    stage.display()
-                )
-            } else {
-                " The workspace generation cannot establish a pre-publication phase, so the marker must remain until its migration plan is recovered.".to_owned()
-            };
-            return Err(Error::new(
-                error.code,
-                format!("{};{recovery}", error.message),
-            ));
-        }
-        Err(error) => return Err(error),
+/// The predecessor's `.gitignore` named `lock` and `candidates/`, which this
+/// generation does not have. One line replaces both, and it is added rather than
+/// the file being rewritten: an ignore file is a person's, not engr's.
+fn ensure_local_ignored(root: &Path) -> Result<()> {
+    let path = store::engr_dir(root).join(".gitignore");
+    let mut text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(tool_error(path.display(), error)),
     };
-    ensure!(
-        manifest.target_version == crate::WORKSPACE_VERSION,
-        EXIT_SCHEMA,
-        "staged migration targets workspace version {}, not {}",
-        manifest.target_version,
-        crate::WORKSPACE_VERSION
-    );
-    validate_manifest(&manifest)?;
-    let workspace_version = store::declared_workspace_version(root)?.unwrap_or(0);
-    ensure!(
-        workspace_version == manifest.source_version
-            || workspace_version == manifest.target_version,
-        EXIT_INVARIANT,
-        "staged migration was prepared from workspace version {}, but the workspace is version {}",
-        manifest.source_version,
-        workspace_version
-    );
-    // Before the target-version return, not after it. What the plan captured is
-    // a fact about the plan, and it is equally disqualifying whichever phase the
-    // crash landed in: removing the marker is the act that makes the workspace
-    // readable again, so on the already-published path it is the act that would
-    // put a Rule the released generation never owned into force.
-    check_staged_v1_manifest(stage, &manifest, workspace_version)?;
-    if workspace_version == manifest.target_version {
-        verify_published_stage(root, &manifest)?;
-        fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
+    if text.lines().any(|line| line.trim() == "/local/") {
         return Ok(());
     }
-    // Past that return the workspace is still at the source version, so this
-    // resume is about to publish. The live workspace gets the floor too: a plan
-    // whose own manifest is clean can still be sitting on a workspace that has
-    // since grown one of the later domains, and publishing would activate it
-    // just the same.
-    //
-    // This half is deliberately *not* applied on the already-published path.
-    // There the workspace is v3, so a later domain that appeared during the
-    // crash window is a v3 workspace holding something a v3 workspace may hold
-    // — and it is caught by `verify_published_stage` anyway, as a path that
-    // appeared after preflight.
-    check_staged_v1_workspace(root, stage, &manifest)?;
-    store::ensure_migration_ignored(root)?;
-    // The Object set the plan was built from is the set of *predecessor
-    // projections*, which the manifest names in `source`. It is not the set the
-    // plan publishes: an Object whose projection was missing and whose admitted
-    // history reconstructs it is legitimately in `objects` and legitimately not
-    // on disk yet. Comparing against `objects` made the recovery case preflight
-    // explicitly admits impossible to commit.
-    //
-    // An id may therefore be present now for exactly two reasons: it had a
-    // predecessor projection, or an interrupted commit already published it.
-    let current_ids = store::object_ids(root)?;
-    for id in &current_ids {
-        ensure!(
-            manifest.objects.contains_key(id),
-            EXIT_INVARIANT,
-            "{id} appeared after migration preflight"
-        );
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
     }
-    for id in manifest
-        .source
-        .keys()
-        .filter_map(|path| staged_object_id(path))
-    {
-        crate::model::validate_object_id(id).map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "staged migration source object id {id:?} is invalid: {}",
-                    error.message
-                ),
-            )
-        })?;
-        ensure!(
-            current_ids.iter().any(|current| current == id),
-            EXIT_INVARIANT,
-            "{id} disappeared after migration preflight"
-        );
-    }
-    if workspace_version == manifest.source_version {
-        let current = source_fingerprint(root)?;
-        for path in current.keys() {
-            // A file that is in the workspace but not in the plan is either a
-            // reconstructed Object an interrupted commit already published, or
-            // something that arrived after preflight validated the workspace.
-            let published = staged_object_id(path).is_some_and(|id| {
-                manifest.objects.contains_key(id) && !manifest.source.contains_key(path)
-            });
-            ensure!(
-                manifest.source.contains_key(path) || published,
-                EXIT_INVARIANT,
-                "{path} appeared after migration preflight"
-            );
-        }
-        for (path, expected) in &manifest.source {
-            let Some(actual) = current.get(path) else {
-                return Err(Error::new(
-                    EXIT_INVARIANT,
-                    format!("{path} disappeared after migration preflight"),
-                ));
-            };
-            let staged_ok =
-                staged_object_id(path).and_then(|id| manifest.objects.get(id)) == Some(actual);
-            let rewritten = manifest
-                .resources
-                .get(path)
-                .is_some_and(|digest| digest == actual);
-            ensure!(
-                actual == expected || staged_ok || rewritten,
-                EXIT_INVARIANT,
-                "{path} changed after migration preflight"
-            );
-        }
-    }
-    // One pass, and it keeps what it validated. Reading the staged file a second
-    // time to publish it would mean the bytes that were checked and the bytes
-    // that get written are two different reads of a file the workspace lock does
-    // not make immutable — so the validated artifact and the published artifact
-    // are the same value here, held in memory between the two.
-    let mut publish: Vec<(PathBuf, String)> = Vec::new();
-    let mut closure = RefClosure::new(root);
-    for (id, expected) in &manifest.objects {
-        let staged = stage.join("objects").join(format!("{id}.json"));
-        ensure_regular_file(&staged)?;
-        let bytes =
-            fs::read_to_string(&staged).map_err(|error| tool_error(staged.display(), error))?;
-        ensure!(
-            sha256_of(&bytes) == *expected,
-            EXIT_INVARIANT,
-            "{} changed after migration preflight",
-            staged.display()
-        );
-        let value: serde_json::Value = serde_json::from_str(&bytes)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", staged.display())))?;
-        let object = store::decode_object(&staged, id, value)?;
-        crate::integrity::check_stored_object_integrity(&object)?;
-        if workspace_version == manifest.source_version {
-            verify_object_derivation(root, &mut closure, id, &bytes, &manifest)?;
-        }
-        publish.push((store::object_path(root, id), bytes));
-    }
-    for (relative, expected) in &manifest.resources {
-        let resource = retained_resource(relative)?;
-        let staged = resource.staged_path(stage);
-        ensure_regular_file(&staged)?;
-        let bytes =
-            fs::read_to_string(&staged).map_err(|error| tool_error(staged.display(), error))?;
-        ensure!(
-            sha256_of(&bytes) == *expected,
-            EXIT_INVARIANT,
-            "{} changed after migration preflight",
-            staged.display()
-        );
-        resource.validate_staged(&staged, &bytes, &manifest)?;
-        if workspace_version == manifest.source_version {
-            resource.verify_derivation(root, relative, &bytes, &manifest)?;
-        }
-        publish.push((resource.destination(root), bytes));
-    }
-    for (path, bytes) in publish {
-        store::write_text(&path, &bytes)?;
-    }
-    store::write_workspace_format(root, crate::WORKSPACE_VERSION)?;
-    fs::remove_dir_all(stage).map_err(|error| tool_error(stage.display(), error))?;
-    ensure!(
-        store::validate_format(root)? == WorkspaceFormat::Current,
-        EXIT_SCHEMA,
-        "workspace migration did not produce the current format"
-    );
-    Ok(())
-}
-
-/// A staged entry has to be a real file, not a link to one.
-///
-/// The staging directory is inside the repository like everything else, so a
-/// symlink placed there would make the digest check read one path and the
-/// publication read another.
-fn ensure_regular_file(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| tool_error(path.display(), error))?;
-    ensure!(
-        metadata.file_type().is_file(),
-        EXIT_SCHEMA,
-        "{} is not a staged file",
-        path.display()
-    );
-    Ok(())
-}
-
-fn source_fingerprint(root: &Path) -> Result<BTreeMap<String, String>> {
-    let base = store::engr_dir(root);
-    let mut result = BTreeMap::new();
-    for directory in [
-        "objects",
-        "events",
-        "backlog",
-        "collections",
-        "work",
-        "rules",
-    ] {
-        let start = base.join(directory);
-        if !start.exists() {
-            continue;
-        }
-        let mut pending = vec![start];
-        while let Some(path) = pending.pop() {
-            for entry in fs::read_dir(&path).map_err(|error| tool_error(path.display(), error))? {
-                let entry = entry.map_err(|error| tool_error(path.display(), error))?;
-                let file = entry.path();
-                if entry
-                    .file_type()
-                    .map_err(|error| tool_error(file.display(), error))?
-                    .is_dir()
-                {
-                    pending.push(file);
-                } else {
-                    let relative = relative_to_engr(root, &file)?;
-                    let bytes = fs::read_to_string(&file)
-                        .map_err(|error| tool_error(file.display(), error))?;
-                    result.insert(relative, sha256_of(&bytes));
-                }
-            }
-        }
-    }
-    Ok(result)
-}
-
-// Keep migration-only validation out of the public Content API while still
-// applying the same schema rules after replacing legacy refs.
-trait MigrationContentValidation {
-    fn validate_for_migration(&self) -> Result<()>;
-}
-
-impl MigrationContentValidation for crate::model::Content {
-    fn validate_for_migration(&self) -> Result<()> {
-        let value = serde_json::to_value(self)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("section content: {error}")))?;
-        stored_within_safe_integers(&value, "section content")
-    }
+    text.push_str("/local/\n");
+    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
 }

@@ -332,14 +332,72 @@ pub const REVIEW: Family = Family {
     )],
 };
 
-/// The Human confirmation candidate proof.
+/// The Human Gate Challenge seal.
 ///
-/// Infrastructure only in this slice: the family exists so the contract has one
-/// place to live, and nothing persists under it yet. What a candidate digest
-/// covers is still being settled, and the gate's existing hashes stay exactly as
-/// they are until that lands.
-pub const CANDIDATE: Family = Family {
-    name: "CandidateDigestContract",
+/// Covers `id + generator + created_at + subject` — the complete Challenge
+/// except the value itself. Local-only: a Challenge lives under `.engr/local/`,
+/// is spent at confirmation, and its digest is never copied into durable Event
+/// provenance. What travels into history is the spent code, because what the
+/// record needs to say is *which* question a human answered, not a hash of a
+/// file that no longer exists.
+pub const CHALLENGE: Family = Family {
+    name: "ChallengeDigestContract",
+    current: 1,
+    versions: &[(
+        1,
+        Support {
+            emit: true,
+            verify: true,
+        },
+        SHA256_HEX,
+    )],
+};
+
+/// The Object aggregate seal.
+///
+/// Over the complete canonical persisted Object except its own `digest`. Field
+/// local like the rest: sharing the number 1 with SectionDigestContract says
+/// nothing about sharing a calculation.
+pub const OBJECT: Family = Family {
+    name: "ObjectDigestContract",
+    current: 1,
+    versions: &[(
+        1,
+        Support {
+            emit: true,
+            verify: true,
+        },
+        SHA256_HEX,
+    )],
+};
+
+/// The Section seal.
+///
+/// Over the complete canonical persisted Section except its own `digest`, so it
+/// covers identity and admission provenance as well as semantics. A seal over
+/// wording alone would let a Section be repointed at another id, or its
+/// admission rewritten from agent to human, with the seal still verifying.
+pub const SECTION: Family = Family {
+    name: "SectionDigestContract",
+    current: 1,
+    versions: &[(
+        1,
+        Support {
+            emit: true,
+            verify: true,
+        },
+        SHA256_HEX,
+    )],
+};
+
+/// The durable Event seal.
+///
+/// Version 1 binds the owning Object UUID *beside* the Event rather than
+/// hashing the Event alone, so a well-formed Event cannot be moved into another
+/// Object's stream and keep verifying. Filesystem layout is a locator; the
+/// digest is what says which stream an Event belongs to.
+pub const EVENT: Family = Family {
+    name: "EventDigestContract",
     current: 1,
     versions: &[(
         1,
@@ -354,7 +412,7 @@ pub const CANDIDATE: Family = Family {
 /// The selective semantic dependency snapshot a Section Ref pins.
 ///
 /// Field-local, like the others: this version namespace is `refs[].digest`'s
-/// alone and shares nothing with CandidateDigestContract or
+/// alone and shares nothing with ChallengeDigestContract or
 /// ReviewDigestContract. Version 1 is **undomained** — it hashes its canonical
 /// snapshot bytes with no kind or version prefix mixed in — so a later contract
 /// may add domain separation without redefining how a v1 value verifies.

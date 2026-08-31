@@ -15,6 +15,7 @@ pub mod integrity;
 pub mod migration;
 pub mod model;
 pub mod ops;
+pub mod predecessor;
 pub mod proof;
 pub mod reference;
 pub mod rules;
@@ -23,92 +24,47 @@ pub mod store;
 pub mod view;
 pub mod work;
 
-/// Schema version of `.engr/format.json`, the workspace-level authority.
+/// The compatibility generation of the redesigned workspace, held in
+/// `.engr/VERSION`.
 ///
-/// Version 2 is the first to define `review.max_attempts` and
-/// `review.on_exhaustion` on a project Rule, including their effective
-/// defaults. That is a *semantic* change over unchanged bytes: a rule file with
-/// no `review:` block means one thing here and another to a version 1 build, and
-/// an explicit block is an unknown field there. The workspace version is what
-/// stops the two from silently disagreeing — a build that does not know a
-/// version refuses the workspace rather than reading it under its own rules.
+/// One, and deliberately unrelated to the number the predecessor
+/// `.engr/format.json` carried. That sequence counted schema revisions of a
+/// design this one replaces, so reusing it would make "version 1" name two
+/// unrelated layouts — and a generation marker exists precisely so a build
+/// refuses what it cannot read instead of reading it under its own rules.
+pub const WORKSPACE_GENERATION: u32 = 1;
+
+/// The exact bytes `.engr/VERSION` carries.
 ///
-/// Version 3 activates the coordinated mixed-authority contract: explicit
-/// Section admission and timestamps, resource seals, selective references,
-/// and Event generation 2.
-pub const WORKSPACE_VERSION: u32 = 3;
-/// Compatibility name used by the Phase-3 contract tests.
-pub const PHASE_3_WORKSPACE_VERSION: u32 = WORKSPACE_VERSION;
-/// Older workspace versions this build can migrate directly into v3.
+/// One spelling, terminated the way every other text file in this repository
+/// is. A marker with two accepted encodings is a marker two implementations can
+/// disagree about while each believes it agrees.
+pub const WORKSPACE_VERSION_FILE: &str = "1\n";
+
+/// The one predecessor generation this build migrates from.
 ///
-/// Version 1 is in this set because it is the *released* generation: the
-/// published `latest` release is commit `e7d9f99`, and that build writes
-/// `.engr/format.json` version 1. So a version 1 workspace is not a curiosity
-/// of development history — it is what every workspace the released tool
-/// created says it is, and leaving it out made the record a person built with
-/// the shipped binary unreachable from the shipped binary's own successor.
+/// Not a set and not a chain. The supported source is the officially released
+/// `latest` workspace, which bootstraps
+/// `{"format":"engr-workspace","version":1}`. Every other shape that ever said
+/// version 1, 2 or 3 did so inside an unreleased development window, so nobody
+/// holds one who did not build it themselves — and defining a route for those
+/// would freeze a serializer that was never shipped into the permanent
+/// contract.
+pub const PREDECESSOR_WORKSPACE_VERSION: u32 = 1;
+
+/// The release whose workspace this build migrates.
 ///
-/// "Released generation" is also the *limit* of what version 1 means here. It
-/// owns `format.json`, `objects/`, `events/` and `candidates/` and nothing
-/// else; `rules/`, `backlog/`, `work/` and `collections/` arrived in later
-/// builds that were never published, and a declared v1 workspace holding one is
-/// refused by `migration::check_released_v1_domains` before anything is
-/// written.
-///
-/// Both entries are *direct* migrations rather than a chain. There is
-/// deliberately no v1 -> v2 step in this process: the migrator decodes the
-/// generation the workspace declares, validates it under that generation's own
-/// rules, and derives v3 from that one validated predecessor. Nothing is ever
-/// written in an intermediate generation's spelling, which is what stops a
-/// historical serializer from becoming part of the permanent contract.
-///
-/// What makes one pipeline able to serve both is that the v2 persisted shape is
-/// a strict *superset* of the v1 one: everything v2 added — `type` on an
-/// Object, `role`, `content` and `relations` on a Section, `becomes` on a
-/// payload, and the `object_classified` and `object_superseded` actions — is
-/// optional and absent from a v1 file. So each generation decodes under its own
-/// enumerated schema and arrives at the same internal representation.
-///
-/// Superset is not "the same", and the difference is the whole safety
-/// argument. Those members reached the v2 window part-way through, they carry
-/// real v3 semantics, and the in-memory model defaults every one of them — so a
-/// v1 file carrying `object_classified` decoded cleanly, reconstructed a
-/// classified Object, and published a classification no human ever made. What
-/// stops that is `store::check_predecessor_object_shape` and
-/// `store::check_predecessor_event_shape` enumerating each generation's exact
-/// members ahead of any decoding. The v1 -> v2 semantic step — how a Rule's
-/// `review:` block is read — is separate again, in
-/// `migration::check_predecessor_rules`.
-pub const MIGRATABLE_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
-/// Older versions whose historical Object representation this build can read.
-///
-/// A snapshot is governed by the authority that wrote it, and is decoded under
-/// that version's own persisted schema — which is also why one migration
-/// pipeline can take either of them forward.
-pub const HISTORICALLY_RECOGNIZED_WORKSPACE_VERSIONS: &[u32] = &[1, 2];
-/// Version carried by the supported Phase 0 Object envelope.
-pub const LEGACY_OBJECT_VERSION_V0: u32 = 1;
-/// Version carried by confirmed Event envelopes this build writes and reads.
-pub const EVENT_ENVELOPE_VERSION_V0: u32 = 1;
-/// Event envelope generation this build emits.
-///
-/// Version 2 is the mixed-authority generation: a merge names the Section that
-/// survives it rather than listing everything it consumed, and admission
-/// provenance becomes one tagged structure. Both are different statements about
-/// what a record means, so it is a generation rather than an addition.
-///
-pub const EVENT_ENVELOPE_VERSION: u32 = 2;
-pub const PHASE_3_EVENT_ENVELOPE_VERSION: u32 = EVENT_ENVELOPE_VERSION;
-/// The candidate envelope this build mints and admits.
-///
-/// Version 1 stored its binding and its revision-presentation metadata outside
-/// any fingerprint. A live candidate is local, uncommitted and short-lived, so
-/// the upgrade refuses the old envelope outright rather than reading missing
-/// integrity data as if it were protected — the whole point is that what a
-/// human was shown is the thing that gets admitted.
-pub const CANDIDATE_ENVELOPE_VERSION: u32 = 3;
-/// Version carried by candidate envelopes minted before candidate integrity.
-pub const CANDIDATE_ENVELOPE_VERSION_V0: u32 = 1;
+/// Recorded because "version 1" alone is ambiguous: `format.json` still said 1
+/// through a long unreleased window whose later builds also wrote `rules/`,
+/// `backlog/`, `work/` and `collections/`. The published release is the one
+/// thing that says which version 1 is meant, and
+/// `migration::check_released_domains` refuses a declared v1 workspace holding
+/// a domain that release never had.
+pub const PREDECESSOR_RELEASE_COMMIT: &str = "e7d9f99733407a8c31cec33af18a92480f4f4c6f";
+
+/// The predecessor bootstrap value, in the spelling that release wrote.
+pub const PREDECESSOR_WORKSPACE_FORMAT: &str = "engr-workspace";
+
 /// There is no version number. One moving release tag, `latest`, and the commit
 /// the binary was built from — see `build.rs` for where that comes from and what
 /// `-dirty` means.
@@ -127,6 +83,44 @@ pub const IMPLEMENTATION_VERSION: &str = concat!("latest (", env!("ENGR_COMMIT")
 /// the compile fails, which is a harder guarantee than any check that has to be
 /// remembered.
 pub const PROTOCOL: &str = include_str!("../../../protocol/PROTOCOL.md");
+
+/// What one confirmation admitted.
+///
+/// A human types `CONFIRM <code>` and nothing else, so the response cannot say
+/// which family of question it answers. The Challenge does — `subject.type` — so
+/// the dispatch reads the file rather than asking the person to remember.
+#[derive(Debug)]
+pub enum Confirmed {
+    Object(Box<gate::Admitted>),
+    Migration(migration::Report),
+}
+
+/// Admit whatever `response` answers.
+///
+/// Deliberately not behind `store::require_current`: a migration is confirmed
+/// while the workspace is still the predecessor, which is the one confirmation
+/// that could not exist if this boundary refused it.
+pub fn confirm(root: &std::path::Path, response: &str) -> Result<Confirmed> {
+    store::with_lock(root, || {
+        let code = confirmation::authorize(
+            response,
+            |code| {
+                store::challenge_path(root, code)
+                    .map(|path| path.exists())
+                    .unwrap_or(false)
+            },
+            |code| gate::discard_locked(root, code),
+        )?;
+        let challenge = store::load_challenge(root, code)?;
+        match challenge.subject.kind {
+            confirmation::SubjectType::Object => gate::confirm_locked(root, response)
+                .map(|admitted| Confirmed::Object(Box::new(admitted))),
+            confirmation::SubjectType::Migration => {
+                migration::apply(root, &challenge).map(Confirmed::Migration)
+            }
+        }
+    })
+}
 
 /// Invalid command line, or a confirmation response that did not match.
 pub const EXIT_USAGE: i32 = 2;

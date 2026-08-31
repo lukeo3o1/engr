@@ -8,45 +8,16 @@
 //! Nothing here invents persisted design. A finding that would need a frozen
 //! contract to change belongs on its owning issue under #32's stop rule.
 
-use engr::model::{Action, Content, Payload};
+mod common;
+
+use common::{add, admit, new_object, wording, workspace};
 use engr::rules::Attempt;
 use engr::{backlog, collection, gate, integrity, ops, store, work};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Barrier};
-use tempfile::TempDir;
-
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
 
 fn attempt() -> Attempt {
     Attempt::new(1).expect("the first attempt")
-}
-
-fn payload(action: Action, object: &str, text: &str) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content: Content {
-            text: text.to_owned(),
-            ..Content::default()
-        },
-    }
-}
-
-fn admit(root: &Path, payload: Payload) {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.challenge)).expect("confirm");
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(root, payload(Action::ObjectCreated, &id, title));
-    id
 }
 
 /// Every admitted Object still verifies, and its history still reads.
@@ -85,10 +56,7 @@ fn parallel_admissions_on_distinct_objects_all_land() {
             let id = id.clone();
             scope.spawn(move || {
                 barrier.wait();
-                admit(
-                    &root,
-                    payload(Action::SectionAdded, &id, &format!("wording {n}")),
-                );
+                admit(&root, add(&id, wording(&format!("wording {n}"))));
             });
         }
     });
@@ -125,7 +93,8 @@ fn staging_and_admission_can_run_at_the_same_time() {
         &backlog::Prepared::attempt(attempt()),
     )
     .expect("backlog item");
-    let plan = collection::create(&root, "plan", None, None, attempt()).expect("collection");
+    let plan =
+        collection::create(&root, "plan", "plan", None, None, attempt()).expect("collection");
     work::start(&root, &obj(&id), None, attempt()).expect("work sidecar");
 
     let barrier = Arc::new(Barrier::new(4));
@@ -139,10 +108,9 @@ fn staging_and_admission_can_run_at_the_same_time() {
             scope.spawn(move || {
                 barrier.wait();
                 match task {
-                    0 => admit(
-                        &root,
-                        payload(Action::SectionAdded, &id, "admitted under contention"),
-                    ),
+                    0 => {
+                        admit(&root, add(&id, wording("admitted under contention")));
+                    }
                     1 => {
                         let prepared = backlog::Prepared::attempt(attempt()).against(
                             backlog::Precondition::section_absent(&root, &item)
@@ -221,13 +189,11 @@ fn contention_on_one_object_leaves_a_contiguous_history() {
                 let id = id.clone();
                 scope.spawn(move || {
                     barrier.wait();
-                    let Ok(prepared) =
-                        gate::prepare(&root, payload(Action::SectionAdded, &id, &format!("w{n}")))
+                    let Ok(prepared) = gate::prepare(&root, add(&id, wording(&format!("w{n}"))))
                     else {
                         return false;
                     };
-                    gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
-                        .is_ok()
+                    gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code())).is_ok()
                 })
             })
             .collect();
@@ -271,8 +237,7 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
     let id = new_object(&root, "candidate states");
 
     // Pending: freshly prepared, nothing has moved under it.
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
+    let prepared = gate::prepare(&root, add(&id, wording("pending"))).expect("prepare");
     assert!(matches!(
         gate::candidate_state(&root, &prepared.candidate).expect("classify"),
         gate::CandidateState::Pending
@@ -280,11 +245,11 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
 
     // AlreadyApplied: the Event landed and the envelope outlived it, which is
     // what a crash between the append and the envelope's removal leaves behind.
-    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
+    let path = store::challenge_path(&root, prepared.candidate.code()).expect("path");
     let envelope = std::fs::read(&path).expect("candidate bytes");
-    gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge)).expect("confirm");
+    gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code())).expect("confirm");
     std::fs::write(&path, &envelope).expect("restore what a crash would have left");
-    let restored = gate::find(&root, &prepared.candidate.challenge).expect("it still reads");
+    let restored = gate::find(&root, prepared.candidate.code()).expect("it still reads");
     assert!(matches!(
         gate::candidate_state(&root, &restored).expect("classify"),
         gate::CandidateState::AlreadyApplied(_)
@@ -293,7 +258,7 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
     // And confirming it again is an idempotent retry, not a second admission —
     // the property that makes crash recovery safe to attempt blindly.
     let before = store::load_events(&root, &id).expect("history").len();
-    gate::confirm(&root, &format!("CONFIRM {}", restored.challenge)).expect("idempotent retry");
+    gate::confirm(&root, &format!("CONFIRM {}", restored.code())).expect("idempotent retry");
     assert_eq!(
         store::load_events(&root, &id).expect("history").len(),
         before,
@@ -303,25 +268,21 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
     // Stale: prepared against a predecessor something else then moved past. An
     // Agent rename advances the revision without superseding the envelope, so
     // the candidate is left describing a state that no longer exists.
-    let stale = gate::prepare(&root, payload(Action::SectionAdded, &id, "stale")).expect("prepare");
-    gate::admit_agent(
-        &root,
-        payload(Action::ObjectRenamed, &id, "an agent got there first"),
-        None,
-    )
-    .expect("agent rename");
+    let stale = gate::prepare(&root, add(&id, wording("stale"))).expect("prepare");
+    gate::admit_agent(&root, common::rename(&id, "an agent got there first"), None)
+        .expect("agent rename");
     match gate::candidate_state(&root, &stale.candidate).expect("classify") {
         gate::CandidateState::Stale { current_rev } => assert!(
-            current_rev > stale.candidate.binding.expected_rev,
+            current_rev > stale.candidate.expected_rev(),
             "stale means the object moved past what this candidate bound"
         ),
         other => panic!("expected a stale candidate, got {other:?}"),
     }
-    gate::confirm(&root, &format!("CONFIRM {}", stale.candidate.challenge))
+    gate::confirm(&root, &format!("CONFIRM {}", stale.candidate.code()))
         .expect_err("a stale candidate cannot be admitted");
 
     // It stays readable, though: a dead candidate must still explain itself.
-    gate::find(&root, &stale.candidate.challenge).expect("and it still reads");
+    gate::find(&root, stale.candidate.code()).expect("and it still reads");
     assert_workspace_sound(&root);
     drop(dir);
 }
@@ -338,10 +299,7 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
 fn the_survey_warns_on_stderr_and_leaves_its_columns_alone() {
     let (dir, root) = workspace();
     let id = new_object(&root, "surveyed object");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &id, "wording that was admitted"),
-    );
+    admit(&root, add(&id, wording("wording that was admitted")));
 
     let clean = std::process::Command::new(env!("CARGO_BIN_EXE_engr"))
         .arg("--root")

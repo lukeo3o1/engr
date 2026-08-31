@@ -13,14 +13,12 @@ git-tracked, freely agent-editable, and admitted by nobody. That is what lets
 the record stay strict: exploratory material has somewhere to live that does not
 cost a confirmation or dilute what a recorded section means.
 
-Current workspaces use `.engr/format.json` as their sole schema authority.
-Legacy v0 and version 1 and 2 workspaces remain read-only; run `engr migrate`
-explicitly to perform the whole-workspace v3 transition before changing them.
-Versions 1 and 2 are both direct predecessors of version 3, taken forward by the
-same migration rather than through one another — so a workspace written by the
-published `latest` release, which is version 1, migrates under this build with
-no intermediate binary to find. engr refuses to mutate unknown or newer
-versions.
+Current workspaces use `.engr/VERSION` as their sole generation authority.
+The released `latest` workspace is the one supported predecessor: it stays
+read-only until `engr migrate` proposes the whole-workspace transition and a
+human confirms it, so a record built with the published binary moves forward
+under this build with no intermediate binary to find. engr refuses to mutate
+unknown or newer generations.
 
 Canonical Object references are `engr:obj:<compact-id>`. The compact ID is the
 UUID's exact 128 bits encoded as 26 lowercase Crockford Base32 characters;
@@ -199,8 +197,8 @@ signal that belongs to the human rather than the agent — and engr cannot tell
 them apart, so it enforces none of it. What it does instead is say what happened:
 deleting paused work reports that a human's stop signal went with it.
 
-**Commit `.engr/objects`, `.engr/events`, `.engr/rules`, `.engr/backlog`, `.engr/work` and
-`.engr/collections`.** Admitted events are append-only
+**Commit `.engr/objects`, `.engr/eventstore`, `.engr/rules`, `.engr/backlog`,
+`.engr/work` and `.engr/collections`.** Admitted events are append-only
 history and audit evidence; Sections remain the authority for current wording.
 This is also a safety rule. A section's hash sits in the
 same file as the section, so it catches a careless edit and not a careful one —

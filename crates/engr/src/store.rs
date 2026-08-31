@@ -2,16 +2,22 @@
 //!
 //! ```text
 //! .engr/
-//!   format.json              what version wrote this workspace
-//!   lock                     one writer at a time
-//!   objects/<uuid>.json      the authority
-//!   events/<uuid>.jsonl      append-only admitted history
-//!   candidates/<CODE>.json   awaiting a human
-//!   rules/*.md               project review policy
-//!   backlog/<uuid>.json      unresolved staging, admitted by nobody
-//!   work/objects/<uuid>.json execution memory, owned by an object, admitted by nobody
-//!   collections/<id>.json    planning metadata, admitted by nobody
+//!   VERSION                          the workspace generation, "1"
+//!   .gitignore                       at least /local/
+//!   objects/<uuid>.json              the authority
+//!   eventstore/objects/<uuid>.jsonl  append-only admitted history
+//!   backlog/<uuid>.json              unresolved staging, admitted by nobody
+//!   work/objects/<uuid>.json         execution memory, owned by a subject
+//!   work/backlog/<uuid>.json         the same, for a backlog subject
+//!   collections/<id>.json            planning metadata, admitted by nobody
+//!   rules/*.md                       project review policy
+//!   local/lock                       one writer at a time
+//!   local/challenges/<CODE>.json     awaiting a human
 //! ```
+//!
+//! `local/` is the one non-Git-tracked directory, and everything that must not
+//! travel with a `git add -A` lives inside it — so the workspace has one ignore
+//! line instead of a list that grows every time something local is added.
 //!
 //! There is no public writer here, and that is a contract rather than an
 //! oversight. A raw serializer or an Object save that validates shape is not an
@@ -54,14 +60,8 @@
 //! }
 //! ```
 
-use crate::model::{
-    project, replay_recoverable_tail, Action, Event, Merge, Object, Provenance, ReviewOutcome,
-    EVENT_FORMAT,
-};
-use crate::{
-    ensure, tool_error, Error, Result, EVENT_ENVELOPE_VERSION, EVENT_ENVELOPE_VERSION_V0,
-    EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE, LEGACY_OBJECT_VERSION_V0, WORKSPACE_VERSION,
-};
+use crate::model::{replay_recoverable_tail, Action, Event, Object};
+use crate::{ensure, tool_error, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -69,7 +69,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DIR: &str = ".engr";
-pub const WORKSPACE_FORMAT: &str = "engr-workspace";
 
 pub fn engr_dir(root: &Path) -> PathBuf {
     root.join(DIR)
@@ -77,39 +76,46 @@ pub fn engr_dir(root: &Path) -> PathBuf {
 pub fn objects_dir(root: &Path) -> PathBuf {
     engr_dir(root).join("objects")
 }
-pub fn events_dir(root: &Path) -> PathBuf {
-    engr_dir(root).join("events")
+pub fn eventstore_dir(root: &Path) -> PathBuf {
+    engr_dir(root).join("eventstore").join("objects")
 }
-pub fn candidates_dir(root: &Path) -> PathBuf {
-    engr_dir(root).join("candidates")
+/// Non-Git-tracked, non-authoritative state. One directory, one ignore line.
+pub fn local_dir(root: &Path) -> PathBuf {
+    engr_dir(root).join("local")
+}
+pub fn challenges_dir(root: &Path) -> PathBuf {
+    local_dir(root).join("challenges")
+}
+pub fn lock_path(root: &Path) -> PathBuf {
+    local_dir(root).join("lock")
+}
+pub fn version_path(root: &Path) -> PathBuf {
+    engr_dir(root).join("VERSION")
 }
 pub fn object_path(root: &Path, id: &str) -> PathBuf {
     objects_dir(root).join(format!("{id}.json"))
 }
 pub fn events_path(root: &Path, id: &str) -> PathBuf {
-    events_dir(root).join(format!("{id}.jsonl"))
+    eventstore_dir(root).join(format!("{id}.jsonl"))
 }
-pub fn candidate_path(root: &Path, challenge: &str) -> Result<PathBuf> {
+pub fn challenge_path(root: &Path, challenge: &str) -> Result<PathBuf> {
     ensure!(
         crate::confirmation::valid_challenge(challenge),
         EXIT_USAGE,
-        "candidate code {challenge:?} must be six characters from 23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        "challenge code {challenge:?} must be six characters from 23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     );
-    Ok(candidates_dir(root).join(format!("{challenge}.json")))
+    Ok(challenges_dir(root).join(format!("{challenge}.json")))
 }
 
 /// Where the last size refusal is written down.
 ///
-/// Inside `candidates/` deliberately, and not beside `format.json`. That
-/// directory is already ignored by every `.gitignore` `init` has ever written,
-/// so this file cannot travel out of the machine that made it — whereas a new
-/// path at the top of `.engr` would need a line existing workspaces do not have,
-/// and quietly rewriting somebody's `.gitignore` is a worse answer than picking
-/// a directory that already says "local only". [`crate::gate::pending_codes`]
-/// reads this directory by filename and keeps only valid challenge codes, so a
-/// name that is not one is invisible to it.
+/// Under `local/`, which is the whole of what a workspace does not commit — so
+/// this cannot travel out of the machine that made it, and it needs no ignore
+/// line of its own. [`crate::gate::pending_codes`] reads `challenges/` by
+/// filename and keeps only valid challenge codes, so this name is invisible to
+/// it.
 pub fn refusal_path(root: &Path) -> PathBuf {
-    candidates_dir(root).join("refused-oversize.json")
+    local_dir(root).join("refused-oversize.json")
 }
 
 /// Walk up from `start` looking for a workspace, so the tool works from any
@@ -145,45 +151,37 @@ pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Format {
-    format: String,
-    version: u32,
-}
-
+/// Which generation wrote this workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceFormat {
-    LegacyV0,
-    /// A recognized workspace at an older version of the authority.
+    /// The one supported predecessor: the officially released `latest`
+    /// workspace, which bootstraps `{"format":"engr-workspace","version":1}`.
     ///
-    /// Distinct from [`Self::LegacyV0`], which has no workspace authority at
-    /// all. This one is well formed and says exactly what it is; what it is is
-    /// not what this build writes. Both are read-only until `engr migrate`, and
-    /// they say different things to whoever is reading the error.
-    OlderVersion(u32),
+    /// Well formed and read-only until `engr migrate`, which is a different fact
+    /// from a workspace this build cannot read at all — and the reader's next
+    /// question has a different answer in each case.
+    Predecessor,
     Current,
 }
 
 /// Written by [`init`], because `git add -A` is the normal way people stage a
-/// workspace and two of these files must never travel with it. A candidate's
-/// filename *is* its challenge code, so committing a live one hands the code to
-/// everyone with repository access — the gate assumes it goes to one human and
-/// comes back. Telling people not to do that in a README does not stop `-A`.
+/// workspace and one directory in it must never travel.
+///
+/// A Challenge's filename *is* its code, so committing a live one hands the code
+/// to everyone with repository access — the gate assumes it goes to one human
+/// and comes back. Telling people not to do that in a README does not stop `-A`.
+///
+/// One line, because there is one local directory. Every earlier layout grew
+/// this list each time something local was added, and every workspace created
+/// before that addition kept the shorter list.
 const GITIGNORE: &str = "\
 # The record lives in objects/ — commit that; it is where earlier wording is
-# recovered from. events/ is safe to commit too: any challenge codes in it have
-# already been spent, and a spent code resolves to nothing.
+# recovered from. eventstore/ is safe to commit too: any challenge codes in it
+# have already been spent, and a spent code resolves to nothing.
 #
-# These four are local only:
-#   lock         a mutex for this machine, nothing to share
-#   candidates/  each file is named after a *live* challenge code
-#   migration-v3/     resumable migration plan for this machine
-#   migration-v3.tmp/ plan before its atomic installation
-/lock
-/candidates/
-/migration-v3/
-/migration-v3.tmp/
+# local/ is this machine's alone: the writer lock, live challenges whose
+# filenames are their codes, and a resumable migration plan.
+/local/
 ";
 
 pub fn init(root: &Path) -> Result<PathBuf> {
@@ -196,10 +194,11 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     );
     let mut layout = vec![
         objects_dir(root),
-        events_dir(root),
-        candidates_dir(root),
+        eventstore_dir(root),
+        challenges_dir(root),
         crate::backlog::dir(root),
         crate::collection::dir(root),
+        crate::rules::dir(root),
     ];
     // Work has one directory per subject kind, and asks for them by list so a
     // third kind could not be created here and forgotten everywhere else.
@@ -207,208 +206,139 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     for path in layout {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
-    write_json(
-        &dir.join("format.json"),
-        &Format {
-            format: WORKSPACE_FORMAT.to_owned(),
-            version: WORKSPACE_VERSION,
-        },
-    )?;
+    write_text(&version_path(root), crate::WORKSPACE_VERSION_FILE)?;
     let ignore = dir.join(".gitignore");
     fs::write(&ignore, GITIGNORE).map_err(|error| tool_error(ignore.display(), error))?;
     Ok(dir)
 }
 
-/// A v3 migration plan is resumable local state, like the lock and live
-/// candidates. Existing predecessor workspaces did not know its name, so
-/// migration adds the two ignores without replacing any local ignore policy.
-pub(crate) fn ensure_migration_ignored(root: &Path) -> Result<()> {
-    let path = engr_dir(root).join(".gitignore");
-    let mut text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(tool_error(path.display(), error)),
-    };
-    let missing: Vec<_> = ["/migration-v3/", "/migration-v3.tmp/"]
-        .into_iter()
-        .filter(|entry| !text.lines().any(|line| line.trim() == *entry))
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    for entry in missing {
-        text.push_str(entry);
-        text.push('\n');
-    }
-    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
-}
-
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
-    let migration = engr_dir(root).join("migration-v3");
+    let migration = crate::migration::stage_dir(root);
     ensure!(
         !migration.exists(),
         EXIT_SCHEMA,
         "{} marks an incomplete coordinated migration; run `engr migrate` to resume it",
         migration.display()
     );
-    let declared = declared_workspace_version(root)?;
-    if declared.is_none() {
-        ensure!(
-            detect_legacy(root)?,
-            EXIT_SCHEMA,
-            "{} has no format.json and is not a recognized legacy v0 workspace",
-            engr_dir(root).display()
-        );
-        return Ok(WorkspaceFormat::LegacyV0);
+    if version_path(root).exists() {
+        read_generation(root)?;
+        return Ok(WorkspaceFormat::Current);
     }
-    let version = declared.expect("checked above");
-    if version != WORKSPACE_VERSION {
-        // Recognized-but-older is reported, not refused, because the workspace
-        // is intact and one explicit command moves it forward. Anything else —
-        // a version this build has never heard of, including a newer one — is
-        // refused outright: reading it under this build's rules is precisely
-        // the silent reinterpretation the version exists to prevent.
-        ensure!(
-            crate::MIGRATABLE_WORKSPACE_VERSIONS.contains(&version),
-            EXIT_SCHEMA,
-            "{}",
-            unsupported_version(version)
-        );
-        return Ok(WorkspaceFormat::OlderVersion(version));
-    }
-    Ok(WorkspaceFormat::Current)
+    ensure!(
+        predecessor_bootstrap(root)?.is_some(),
+        EXIT_SCHEMA,
+        "{} has no VERSION and is not the released predecessor workspace this engr migrates",
+        engr_dir(root).display()
+    );
+    Ok(WorkspaceFormat::Predecessor)
 }
 
-/// Why an unrecognized workspace version is refused, and which refusal it is.
+/// Read `.engr/VERSION`, held to its one spelling.
 ///
-/// Two different situations reached one sentence, and the sentence said nothing
-/// about what to do next. A version *above* this build's is a workspace from a
-/// newer engr: nothing here will ever read it, and the answer is a newer
-/// binary. A version below it that this build cannot migrate is a generation
-/// with no defined route forward, which is a different fact and a different
-/// conversation. Neither is the same as "run `engr migrate`", so neither is
+/// Bytes rather than a parsed integer. The marker exists so a build refuses what
+/// it cannot read, and a parser that accepts `" 1 "`, `"01"` and `"1"` alike has
+/// already conceded that a workspace may say the same thing several ways —
+/// which is what makes two implementations able to disagree while each believes
+/// it agrees.
+pub(crate) fn read_generation(root: &Path) -> Result<u32> {
+    let path = version_path(root);
+    let text = read_text(&path)?;
+    ensure!(
+        text == crate::WORKSPACE_VERSION_FILE,
+        EXIT_SCHEMA,
+        "{}",
+        unsupported_generation(&path, &text)
+    );
+    Ok(crate::WORKSPACE_GENERATION)
+}
+
+/// Why a `VERSION` this build does not write is refused, and which refusal it is.
+///
+/// A generation *above* this build's is a workspace from a newer engr: nothing
+/// here will ever read it, and the answer is a newer binary. Anything else is a
+/// marker this build has no route from, which is a different fact and a
+/// different conversation. Neither is "run `engr migrate`", so neither is
 /// allowed to sound like it.
-fn unsupported_version(version: u32) -> String {
-    let mut versions = crate::MIGRATABLE_WORKSPACE_VERSIONS.to_vec();
-    versions.sort_unstable();
-    let migratable = versions
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    if version > WORKSPACE_VERSION {
-        return format!(
-            "workspace version {version} was written by a newer engr; this build ({}) writes version {WORKSPACE_VERSION} and cannot read it",
-            crate::IMPLEMENTATION_VERSION
-        );
+fn unsupported_generation(path: &Path, text: &str) -> String {
+    let declared = text.trim_end_matches('\n');
+    if let Ok(generation) = declared.parse::<u32>() {
+        if generation > crate::WORKSPACE_GENERATION {
+            return format!(
+                "{}: workspace generation {generation} was written by a newer engr; this build ({}) writes generation {} and cannot read it",
+                path.display(),
+                crate::IMPLEMENTATION_VERSION,
+                crate::WORKSPACE_GENERATION
+            );
+        }
     }
     format!(
-        "workspace version {version} is not supported by engr {}; it migrates versions {migratable} into version {WORKSPACE_VERSION}",
-        crate::IMPLEMENTATION_VERSION
+        "{}: {declared:?} is not a workspace generation engr {} recognizes; this build writes generation {}",
+        path.display(),
+        crate::IMPLEMENTATION_VERSION,
+        crate::WORKSPACE_GENERATION
     )
 }
 
-/// Read only the declared authority while a coordinated migration stage may
-/// exist. Missing means the legacy generation; callers that are not already
-/// holding a validated migration plan must use [`validate_format`] instead.
-pub(crate) fn declared_workspace_version(root: &Path) -> Result<Option<u32>> {
+/// The predecessor bootstrap, when this workspace is one.
+///
+/// Returns `None` for a directory that is not the released predecessor rather
+/// than failing, so [`validate_format`] can say the one useful thing about a
+/// `.engr` that is neither generation.
+pub(crate) fn predecessor_bootstrap(root: &Path) -> Result<Option<u32>> {
     let path = engr_dir(root).join("format.json");
     if !path.exists() {
         return Ok(None);
     }
-    // The schema authority is a current resource too, and it is the one every
-    // other decoder consults to choose its generation — so it cannot be the one
-    // file exempt from the generation's own persisted representation. Checked
-    // after parsing rather than before, because the version it declares is what
-    // says whether the rule applies at all, and a predecessor `format.json` is
-    // read under its own contract. `check_canonical_bytes` does not consult the
-    // workspace version, so there is no recursion.
     let text = read_text(&path)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
+    let format: crate::predecessor::Format = serde_json::from_str(&text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    let format: Format = serde_json::from_value(value.clone())
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    // Said before the representation is judged, because this build has no
-    // standing to judge it. A newer generation decides its own persisted form,
-    // so holding one to *this* generation's canonical bytes reports a workspace
-    // from the future as a corrupt workspace — the wrong fact, and the one that
-    // sends the reader looking for damage instead of for a newer engr.
     ensure!(
-        format.version <= WORKSPACE_VERSION,
-        EXIT_SCHEMA,
-        "{}",
-        unsupported_version(format.version)
-    );
-    if format.version == WORKSPACE_VERSION {
-        check_canonical_bytes(&path, &text, &value)?;
-    }
-    ensure!(
-        format.format == WORKSPACE_FORMAT,
+        format.format == crate::predecessor::WORKSPACE_FORMAT,
         EXIT_SCHEMA,
         "{}: not an engr workspace",
         path.display()
     );
+    // Named exactly, and refused by name. `format.json` said version 1, 2 and 3
+    // across a long unreleased development window whose builds wrote domains
+    // and shapes the release never had, and the *published* version 1 is the
+    // only one #66 defines a route from. Reading any other under its rules would
+    // be the silent reinterpretation the generation marker exists to prevent.
+    ensure!(
+        format.version == crate::PREDECESSOR_WORKSPACE_VERSION,
+        EXIT_SCHEMA,
+        "{}: workspace version {} is not a generation engr {} migrates; the supported predecessor is the released version {} workspace ({})",
+        path.display(),
+        format.version,
+        crate::IMPLEMENTATION_VERSION,
+        crate::PREDECESSOR_WORKSPACE_VERSION,
+        crate::PREDECESSOR_RELEASE_COMMIT
+    );
     Ok(Some(format.version))
 }
 
-fn detect_legacy(root: &Path) -> Result<bool> {
-    let ids = crate::ops::object_ids(root)?;
-    if ids.is_empty() {
-        return Ok(false);
-    }
-    for id in ids {
-        let value: serde_json::Value = read_json(&object_path(root, &id))?;
-        if value.get("format").and_then(|value| value.as_str()) != Some("engr-object")
-            || value.get("version").and_then(|value| value.as_u64())
-                != Some(LEGACY_OBJECT_VERSION_V0.into())
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 pub fn require_current(root: &Path) -> Result<()> {
-    // Named rather than lumped together: "legacy v0" is wrong and confusing for
-    // a workspace that states a version perfectly clearly, and the reader's next
-    // question — what is stale about mine — has a different answer in each case.
     match validate_format(root)? {
         WorkspaceFormat::Current => Ok(()),
-        WorkspaceFormat::LegacyV0 => Err(Error::new(
-            EXIT_SCHEMA,
-            "legacy v0 workspace is read-only; run `engr migrate` before mutation".to_owned(),
-        )),
-        WorkspaceFormat::OlderVersion(version) => Err(Error::new(
+        WorkspaceFormat::Predecessor => Err(Error::new(
             EXIT_SCHEMA,
             format!(
-                "workspace version {version} is read-only here; this engr writes version {WORKSPACE_VERSION}. Run `engr migrate` before mutation"
+                "the released predecessor workspace is read-only here; this engr writes generation {}. Run `engr migrate` before mutation",
+                crate::WORKSPACE_GENERATION
             ),
         )),
     }
 }
 
+/// Decode a current Object, held to the generation's exact persisted shape.
+///
+/// The members are enumerated ahead of decoding rather than left to serde. Every
+/// optional member of the model has a default, so a file carrying a member this
+/// generation never defined would deserialize cleanly with the unknown one
+/// ignored, and everything downstream would treat the default as something the
+/// file said.
 pub(crate) fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> Result<Object> {
-    // The two spellings of one lifecycle field are checked here rather than in
-    // the workspace scan, because this is where the answer matters: a file
-    // claiming both cannot say which it means, and `status` is read as an alias
-    // for `state`, so serde would silently take one and call it authority.
-    if let Some(object) = value.as_object() {
-        ensure!(
-            !(object.contains_key("status") && object.contains_key("state")),
-            EXIT_SCHEMA,
-            "{}: contains both legacy status and canonical state",
-            path.display()
-        );
-        ensure!(
-            object.contains_key("status") || object.contains_key("state"),
-            EXIT_SCHEMA,
-            "{}: object has neither status nor state",
-            path.display()
-        );
-    }
+    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
+    check_current_object_shape(path, &value)?;
     let object: Object = serde_json::from_value(value)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
     object.validate()?;
@@ -422,397 +352,14 @@ pub(crate) fn decode_object(path: &Path, id: &str, value: serde_json::Value) -> 
     Ok(object)
 }
 
-/// Decode an Object under the workspace generation that owns its bytes.
-/// Compatibility fields in the in-memory model must never make a current
-/// resource's missing member look like a valid legacy default.
-pub(crate) fn decode_object_for_version(
-    path: &Path,
-    id: &str,
-    value: serde_json::Value,
-    version: u32,
-) -> Result<Object> {
-    if version >= 3 {
-        crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
-        check_current_object_shape(path, &value)?;
-    } else {
-        check_predecessor_object_shape(path, version, &value)?;
-    }
-    let object = decode_object(path, id, value)?;
-    if version >= 3 {
-        ensure!(
-            object.legacy_format.is_none() && object.legacy_version.is_none(),
-            EXIT_SCHEMA,
-            "{}: a current Object carries no per-resource format markers",
-            path.display()
-        );
-        for section in &object.sections {
-            ensure!(
-                section
-                    .refs
-                    .iter()
-                    .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
-                EXIT_SCHEMA,
-                "{}: a current Object cannot carry a legacy reference",
-                path.display()
-            );
-        }
-    }
-    Ok(object)
-}
-
-/// A current aggregate seal is a digest, not merely a member that is there.
-fn check_current_seal(path: &Path, value: Option<&serde_json::Value>) -> Result<()> {
-    let seal = value.and_then(serde_json::Value::as_str).ok_or_else(|| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!(
-                "{}: a current Object carries an aggregate seal, not a null one",
-                path.display()
-            ),
-        )
-    })?;
-    ensure!(
-        seal.len() == 64
-            && seal
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        EXIT_SCHEMA,
-        "{}: aggregate seal {seal:?} is not 64 lowercase hex characters",
-        path.display()
-    );
-    Ok(())
-}
-
-fn exact_members(
-    path: &Path,
-    what: &str,
-    value: &serde_json::Map<String, serde_json::Value>,
-    expected: &[&str],
-) -> Result<()> {
-    let found: std::collections::BTreeSet<&str> = value.keys().map(String::as_str).collect();
-    let expected: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
-    ensure!(
-        found == expected,
-        EXIT_SCHEMA,
-        "{}: {what} members are {:?}, expected {:?}",
-        path.display(),
-        found,
-        expected
-    );
-    Ok(())
-}
-
-fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<()> {
-    let object = value.as_object().ok_or_else(|| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("{}: object must be a JSON object", path.display()),
-        )
-    })?;
-    exact_members(
-        path,
-        "Object",
-        object,
-        &[
-            "id",
-            "title",
-            "type",
-            "state",
-            "rev",
-            "next_section_id",
-            "sections",
-            "sha256",
-        ],
-    )?;
-    // Present is not the same as sealed. `Object.sha256` is an `Option` only so
-    // historical v1/v2 material still decodes, and `exact_members` above is
-    // satisfied by the member existing — so `"sha256": null` decoded to `None`
-    // and passed this boundary, producing a current Object in a shape
-    // [`save_object`] refuses to write. That is a second current schema no
-    // writer can produce, and the read side is where it did damage: every trust
-    // diagnostic asks `sha256.as_deref().is_some_and(...)`, and `None` answers
-    // false — so an Object with no Sections and its aggregate replaced by null
-    // verified as healthy.
-    check_current_seal(path, object.get("sha256"))?;
-    let sections = object
-        .get("sections")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}: sections must be an array", path.display()),
-            )
-        })?;
-    let mut previous = None;
-    for section in sections {
-        let section = section.as_object().ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{}: a section must be a JSON object", path.display()),
-            )
-        })?;
-        exact_members(
-            path,
-            "Section",
-            section,
-            &[
-                "id",
-                "admission",
-                "role",
-                "text",
-                "content",
-                "based_on",
-                "refs",
-                "relations",
-                "sha256",
-                "admitted_at",
-            ],
-        )?;
-        let id = section
-            .get("id")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{}: section id must be an integer", path.display()),
-                )
-            })?;
-        ensure!(
-            previous.map_or(true, |previous| previous < id),
-            EXIT_SCHEMA,
-            "{}: current Sections are stored in increasing id order",
-            path.display()
-        );
-        // Set-valued arrays have one persisted order too, and it is the shared
-        // one: JCS each element, then order by those bytes. The canonical-bytes
-        // check cannot see this — JCS fixes member order inside an object and
-        // leaves arrays exactly as written — so without it a stored set can be
-        // reordered, keep valid seals, and load: two accepted encodings for one
-        // v3 value, which is the thing this generation says it does not have.
-        for field in ["refs", "relations"] {
-            let items = section
-                .get(field)
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    Error::new(
-                        EXIT_SCHEMA,
-                        format!("{}: §{id} {field} must be an array", path.display()),
-                    )
-                })?;
-            let mut canonical = items.clone();
-            crate::proof::canonical_set(&mut canonical, field)?;
-            ensure!(
-                canonical == *items,
-                EXIT_SCHEMA,
-                "{}: §{id} {field} must be in canonical set order",
-                path.display()
-            );
-        }
-        previous = Some(id);
-    }
-    Ok(())
-}
-
-/// What one predecessor generation actually persisted.
+/// Required members, then the ones that may be omitted.
 ///
-/// The member lists are transcribed from the builds themselves, not inferred
-/// from the current model, and the difference matters: the in-memory model is
-/// deliberately permissive across generations. `status` is an alias for
-/// `state`; `admission`, `sha256`, `role`, `content`, `relations` and `type`
-/// all have serde defaults. So a file of one generation deserializes cleanly as
-/// a file of another, with the members it never had quietly filled in — and
-/// then everything downstream treats those defaults as things the predecessor
-/// said. Enumerating the members ahead of decoding is what stops that, and it
-/// is why the lists are exhaustive rather than a set of prohibitions.
-///
-/// Which build each list comes from:
-///
-/// ```text
-/// v0  1d95dbe  per-resource markers, `status`, no workspace authority
-/// v1  e7d9f99  the published `latest` release
-/// v2  a645020^ the last build before the v3 generation
-/// ```
-///
-/// v2 is a strict superset of v1: everything it added — `type` on an Object,
-/// and `role`, `content` and `relations` on a Section — is optional, absent
-/// from a v1 file, and absent from an early v2 file too, because those members
-/// arrived partway through the v2 window. That is what lets one pipeline take
-/// either generation forward. It is *not* the same as the two persisting an
-/// Object identically, and treating it that way is what let a v1 workspace
-/// carry v2 semantics.
-struct Generation {
-    object_required: &'static [&'static str],
-    object_optional: &'static [&'static str],
-    section_required: &'static [&'static str],
-    section_optional: &'static [&'static str],
-    /// The reducer's action vocabulary, each with the parameters it flattens
-    /// into the payload alongside its own name.
-    actions: &'static [ActionShape],
-    /// Payload members every action carries, outside its own parameters.
-    payload_required: &'static [&'static str],
-    payload_optional: &'static [&'static str],
-}
-
-struct ActionShape {
-    label: &'static str,
-    required: &'static [&'static str],
-    optional: &'static [&'static str],
-}
-
-const NOTHING: &[&str] = &[];
-
-/// The eight actions every predecessor generation had. v2 adds two more.
-const SHARED_ACTIONS: &[ActionShape] = &[
-    ActionShape {
-        label: "object_created",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_renamed",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_added",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_revised",
-        required: &["section"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_merged",
-        required: &["absorbs"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_deleted",
-        required: &["section"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_closed",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_reopened",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-];
-
-const V2_ACTIONS: &[ActionShape] = &[
-    ActionShape {
-        label: "object_created",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_renamed",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_added",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_revised",
-        required: &["section"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_merged",
-        required: &["absorbs"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "section_deleted",
-        required: &["section"],
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_closed",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_reopened",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-    ActionShape {
-        label: "object_classified",
-        required: &["state"],
-        optional: &["type"],
-    },
-    ActionShape {
-        label: "object_superseded",
-        required: NOTHING,
-        optional: NOTHING,
-    },
-];
-
-const GENERATION_V0: Generation = Generation {
-    object_required: &[
-        "format",
-        "version",
-        "id",
-        "title",
-        "status",
-        "rev",
-        "next_section_id",
-        "sections",
-    ],
-    object_optional: NOTHING,
-    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
-    section_optional: &["based_on"],
-    actions: SHARED_ACTIONS,
-    payload_required: &["object", "text", "refs"],
-    payload_optional: &["based_on"],
-};
-
-const GENERATION_V1: Generation = Generation {
-    object_required: &["id", "title", "state", "rev", "next_section_id", "sections"],
-    // Retained when a v0 workspace was converted in place by the released
-    // build, which renamed the lifecycle key and left these where they were.
-    object_optional: &["format", "version"],
-    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
-    section_optional: &["based_on"],
-    actions: SHARED_ACTIONS,
-    payload_required: &["object", "text", "refs"],
-    payload_optional: &["based_on"],
-};
-
-const GENERATION_V2: Generation = Generation {
-    object_required: &["id", "title", "state", "rev", "next_section_id", "sections"],
-    object_optional: &["format", "version", "type"],
-    section_required: &["id", "text", "refs", "sha256", "confirmed_at"],
-    section_optional: &["based_on", "role", "content", "relations"],
-    actions: V2_ACTIONS,
-    payload_required: &["object", "text", "refs"],
-    payload_optional: &["based_on", "becomes", "role", "content", "relations"],
-};
-
-fn generation(source_version: u32) -> Result<&'static Generation> {
-    match source_version {
-        0 => Ok(&GENERATION_V0),
-        1 => Ok(&GENERATION_V1),
-        2 => Ok(&GENERATION_V2),
-        other => Err(Error::new(
-            EXIT_SCHEMA,
-            format!("workspace version {other} has no persisted predecessor schema"),
-        )),
-    }
-}
-
-/// Every required member is there, and nothing outside the generation's set is.
-fn check_generation_members(
+/// Not exact equality. The canonical omission rule means an absent optional, an
+/// empty array and an empty object are all simply not written — so "these exact
+/// keys" would refuse every Object that legitimately carries none of them. What
+/// is still exact is the *vocabulary*: a member outside both lists is not a
+/// member of this generation, whatever else about the file reads correctly.
+fn shape_members(
     path: &Path,
     what: &str,
     value: &serde_json::Map<String, serde_json::Value>,
@@ -823,7 +370,7 @@ fn check_generation_members(
         ensure!(
             value.contains_key(*member),
             EXIT_SCHEMA,
-            "{}: {what} is missing {member:?}, which its generation always wrote",
+            "{}: a {what} carries {member}",
             path.display()
         );
     }
@@ -831,183 +378,132 @@ fn check_generation_members(
         ensure!(
             required.contains(&member.as_str()) || optional.contains(&member.as_str()),
             EXIT_SCHEMA,
-            "{}: {what} carries {member:?}, which its generation never had",
+            "{}: {member:?} is not a member of a {what}",
+            path.display()
+        );
+    }
+    // An omissible member written out as `null` is the other spelling the rule
+    // forbids: two files saying the same thing, sealing differently. Refused
+    // here rather than by the decoder, which would read it as absent.
+    for member in optional.iter().copied() {
+        ensure!(
+            !value.get(member).is_some_and(serde_json::Value::is_null),
+            EXIT_SCHEMA,
+            "{}: {what} {member} is absent by omission, never by null",
             path.display()
         );
     }
     Ok(())
 }
 
-/// Validate one stored Object against the exact envelope its own generation
-/// wrote, before anything decodes it.
-pub(crate) fn check_predecessor_object_shape(
-    path: &Path,
-    source_version: u32,
-    value: &serde_json::Value,
-) -> Result<()> {
-    let schema = generation(source_version)?;
+const OBJECT_REQUIRED: &[&str] = &["id", "title", "state", "rev", "next_section_id", "digest"];
+const OBJECT_OPTIONAL: &[&str] = &["type", "sections"];
+const SECTION_REQUIRED: &[&str] = &["id", "admitted", "text", "digest"];
+const SECTION_OPTIONAL: &[&str] = &["header", "role", "content", "based_on", "refs", "relations"];
+
+fn check_current_object_shape(path: &Path, value: &serde_json::Value) -> Result<()> {
     let object = value.as_object().ok_or_else(|| {
         Error::new(
             EXIT_SCHEMA,
             format!("{}: object must be a JSON object", path.display()),
         )
     })?;
-    ensure!(
-        !object.contains_key("sha256"),
-        EXIT_SCHEMA,
-        "{}: predecessor Object cannot already carry a v3 aggregate seal",
-        path.display()
-    );
-    if source_version > 0 {
-        // Said before the member check, because it is the one wrong shape that
-        // has a next action. A workspace that declares a version while its
-        // Objects still carry the per-resource markers and spell the lifecycle
-        // `status` is a v0 conversion the predecessor build began and did not
-        // finish — its own migration renamed the key file by file with no
-        // staging — and the reader needs to be told that rather than reading
-        // "carries `status`, which its generation never had".
-        let markers = object.get("format").and_then(serde_json::Value::as_str)
-            == Some(crate::model::OBJECT_FORMAT)
-            && object.get("version").and_then(serde_json::Value::as_u64)
-                == Some(crate::LEGACY_OBJECT_VERSION_V0.into());
-        ensure!(
-            !(markers && object.contains_key("status")),
-            EXIT_SCHEMA,
-            "{}: workspace-v{source_version} declares its generation, but this Object still carries the legacy v0 per-resource envelope, so the v0 conversion never finished",
-            path.display()
-        );
-    }
-    check_generation_members(
-        path,
-        &format!("workspace-v{source_version} Object"),
-        object,
-        schema.object_required,
-        schema.object_optional,
-    )?;
-    if source_version == 0 {
-        ensure!(
-            object.get("format").and_then(serde_json::Value::as_str)
-                == Some(crate::model::OBJECT_FORMAT)
-                && object.get("version").and_then(serde_json::Value::as_u64)
-                    == Some(crate::LEGACY_OBJECT_VERSION_V0.into()),
-            EXIT_SCHEMA,
-            "{}: not a recognized legacy v0 Object",
-            path.display()
-        );
-    }
-    let sections = object
-        .get("sections")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
+    shape_members(path, "Object", object, OBJECT_REQUIRED, OBJECT_OPTIONAL)?;
+    // An empty array is the same value as an absent one, and this generation
+    // writes it one way. Checked here because the decoder cannot tell them
+    // apart afterwards, and the two seal differently.
+    if let Some(sections) = object.get("sections") {
+        let sections = sections.as_array().ok_or_else(|| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("{}: sections must be an array", path.display()),
             )
         })?;
-    for section in sections {
-        let section = section.as_object().ok_or_else(|| {
-            Error::new(
+        ensure!(
+            !sections.is_empty(),
+            EXIT_SCHEMA,
+            "{}: an Object with no Sections omits the member rather than writing an empty list",
+            path.display()
+        );
+        let mut previous = None;
+        for section in sections {
+            let section = section.as_object().ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{}: a section must be a JSON object", path.display()),
+                )
+            })?;
+            shape_members(path, "Section", section, SECTION_REQUIRED, SECTION_OPTIONAL)?;
+            let id = section
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!("{}: section id must be an integer", path.display()),
+                    )
+                })?;
+            ensure!(
+                previous.is_none() || previous.is_some_and(|previous| previous < id),
                 EXIT_SCHEMA,
-                format!("{}: a section must be a JSON object", path.display()),
-            )
-        })?;
-        check_generation_members(
-            path,
-            &format!("workspace-v{source_version} Section"),
-            section,
-            schema.section_required,
-            schema.section_optional,
-        )?;
+                "{}: current Sections are stored in increasing id order",
+                path.display()
+            );
+            for field in ["content", "refs", "relations"] {
+                let Some(items) = section.get(field) else {
+                    continue;
+                };
+                let items = items.as_array().ok_or_else(|| {
+                    Error::new(
+                        EXIT_SCHEMA,
+                        format!("{}: §{id} {field} must be an array", path.display()),
+                    )
+                })?;
+                ensure!(
+                    !items.is_empty(),
+                    EXIT_SCHEMA,
+                    "{}: §{id} omits {field} rather than writing an empty list",
+                    path.display()
+                );
+                // Set-valued arrays have one persisted order too, and it is the
+                // shared one: JCS each element, then order by those bytes. The
+                // canonical-bytes check cannot see this — JCS fixes member order
+                // inside an object and leaves arrays exactly as written — so
+                // without it a stored set can be reordered, keep a valid seal,
+                // and load: two accepted encodings for one value. `content` is
+                // ordered rather than a set, so only its emptiness is checked.
+                if field != "content" {
+                    let mut canonical = items.clone();
+                    crate::proof::canonical_set(&mut canonical, field)?;
+                    ensure!(
+                        canonical == *items,
+                        EXIT_SCHEMA,
+                        "{}: §{id} {field} must be in canonical set order",
+                        path.display()
+                    );
+                }
+            }
+            previous = Some(id);
+        }
     }
     Ok(())
 }
-
-/// Validate one retained Event line against the exact envelope its generation
-/// wrote, before anything decodes it.
+/// Publish the workspace generation marker.
 ///
-/// Retained history is read to prove a projection is derivable, so an Event
-/// carrying a later generation's action or member is not a curiosity: it is the
-/// route by which a projection nobody admitted becomes derivable. An
-/// `object_classified` line in a version 1 history reconstructs a classified
-/// Object, and the migration then publishes a classification no human ever made
-/// — from a generation whose reducer had no such action at all.
-pub(crate) fn check_predecessor_event_shape(
-    path: &Path,
-    line: usize,
-    source_version: u32,
-    value: &serde_json::Value,
-) -> Result<()> {
-    let schema = generation(source_version)?;
-    let where_ = format!("{}:{line}", path.display());
-    let event = value
-        .as_object()
-        .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{where_}: an event is a JSON object")))?;
-    let label = event
-        .get("action")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| Error::new(EXIT_SCHEMA, format!("{where_}: an event names its action")))?;
-    let action = schema
-        .actions
-        .iter()
-        .find(|shape| shape.label == label)
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "{where_}: {label:?} is not an action workspace version {source_version} had"
-                ),
-            )
-        })?;
-
-    let mut required: Vec<&str> = vec!["format", "version", "event_id", "rev", "time", "action"];
-    required.extend_from_slice(schema.payload_required);
-    required.extend_from_slice(action.required);
-    required.push("confirmation");
-    let mut optional: Vec<&str> = schema.payload_optional.to_vec();
-    optional.extend_from_slice(action.optional);
-    check_generation_members(
-        Path::new(&where_),
-        &format!("workspace-v{source_version} Event"),
-        event,
-        &required,
-        &optional,
-    )?;
-
-    let confirmation = event
-        .get("confirmation")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!("{where_}: confirmation is a JSON object"),
-            )
-        })?;
-    check_generation_members(
-        Path::new(&where_),
-        &format!("workspace-v{source_version} confirmation"),
-        confirmation,
-        &["challenge", "payload_sha256"],
-        NOTHING,
-    )
-}
-
-pub fn migrate(root: &Path) -> Result<()> {
-    with_lock(root, || crate::migration::run(root))
-}
-
-pub(crate) fn write_workspace_format(root: &Path, version: u32) -> Result<()> {
-    write_json(
-        &engr_dir(root).join("format.json"),
-        &Format {
-            format: WORKSPACE_FORMAT.to_owned(),
-            version,
-        },
-    )
+/// The last write of a migration, deliberately: while it is absent the
+/// workspace is still the predecessor, and a crash before it leaves something
+/// `validate_format` can name rather than a workspace that claims a generation
+/// it has not finished becoming.
+pub(crate) fn write_generation(root: &Path) -> Result<()> {
+    write_text(&version_path(root), crate::WORKSPACE_VERSION_FILE)
 }
 
 /// Hold the workspace write lock for the duration of `body`.
 pub fn with_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
-    let path = engr_dir(root).join("lock");
+    let path = lock_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+    }
     let file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1034,34 +530,6 @@ fn read_text(path: &Path) -> Result<String> {
             tool_error(path.display(), error)
         }
     })
-}
-
-/// [`read_json`] for a resource of the **current** generation, whose persisted
-/// bytes are one exact representation rather than a family of equivalent ones.
-///
-/// Three properties, and they are one check. The bytes have to be the RFC 8785
-/// serialization of the value they parse to — which fixes member order, number
-/// formatting and insignificant whitespace, and also settles duplicate member
-/// names for free: a repeated key collapses during parsing, so the value
-/// re-serializes with one occurrence and no longer matches the bytes that had
-/// two. That matters beyond tidiness, because a duplicate is where two
-/// conforming JSON stacks are allowed to disagree about what the file says.
-///
-/// On the read path rather than only in the writer, because a current resource
-/// arrives through a git merge, a hand edit, a copy or another implementation
-/// as readily as through this build's own `write_json`. A writer that emits one
-/// representation and a reader that accepts many is not one representation.
-///
-/// Set-valued arrays are the part this cannot answer: JCS fixes member order
-/// inside an object and leaves array order alone. Each resource requires its own
-/// sets to be in the shared canonical order where it validates its shape.
-pub(crate) fn read_current_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = read_text(path)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    check_canonical_bytes(path, &text, &value)?;
-    serde_json::from_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
 }
 
 /// Current resources have the one spelling their writer emits. JCS alone fixes
@@ -1149,58 +617,80 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
-    let temporary = path.with_extension("json.tmp");
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
     fs::write(&temporary, text.as_bytes())
         .map_err(|error| tool_error(temporary.display(), error))?;
     fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
     Ok(())
 }
 
+/// Load a current Object.
+///
+/// A predecessor workspace has no current Object to load, and this says so
+/// rather than reading its bytes under this generation's rules. Migration is the
+/// one caller that reads a predecessor, and it goes through
+/// [`crate::predecessor`].
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
+    require_readable(root)?;
     let path = object_path(root, id);
     let text = read_text(&path)?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    let version = match validate_format(root)? {
-        WorkspaceFormat::LegacyV0 => 0,
-        WorkspaceFormat::OlderVersion(version) => version,
-        WorkspaceFormat::Current => WORKSPACE_VERSION,
-    };
-    // The canonical-bytes rule belongs to the current generation and only to it.
-    // A predecessor Object is read under the contract it was written under, and
-    // that contract did not require one persisted spelling — refusing it here
-    // would make a valid old workspace unreadable instead of migratable.
-    if version >= WORKSPACE_VERSION {
-        check_canonical_bytes(&path, &text, &value)?;
+    check_canonical_bytes(&path, &text, &value)?;
+    decode_object(&path, id, value)
+}
+
+/// Read one pending Challenge, checked as an envelope and nothing more.
+///
+/// The family is deliberately not interpreted here: the dispatcher needs to know
+/// which domain owns the subject *before* that domain reads it, and a loader
+/// that understood the Object family would be one the migration family had to
+/// route around.
+pub(crate) fn load_challenge(root: &Path, code: &str) -> Result<crate::confirmation::Challenge> {
+    let path = challenge_path(root, code)?;
+    ensure!(
+        path.exists(),
+        EXIT_NOT_FOUND,
+        "no challenge awaiting {code}"
+    );
+    let text = read_text(&path)?;
+    let stored: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    check_canonical_bytes(&path, &text, &stored)?;
+    let challenge: crate::confirmation::Challenge = serde_json::from_value(stored)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    ensure!(
+        challenge.id == code,
+        EXIT_SCHEMA,
+        "challenge file {code} names {}; it would show one change and admit another",
+        challenge.id
+    );
+    challenge.validate()?;
+    Ok(challenge)
+}
+
+/// Every read surface asks this first, so a predecessor workspace produces one
+/// answer — migrate it — rather than a schema complaint about whichever file the
+/// caller happened to open.
+fn require_readable(root: &Path) -> Result<()> {
+    match validate_format(root)? {
+        WorkspaceFormat::Current => Ok(()),
+        WorkspaceFormat::Predecessor => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "this is the released predecessor workspace; engr {} reads generation {}. Run `engr migrate`",
+                crate::IMPLEMENTATION_VERSION,
+                crate::WORKSPACE_GENERATION
+            ),
+        )),
     }
-    decode_object_for_version(&path, id, value, version)
 }
 
 pub(crate) fn save_object(root: &Path, object: &Object) -> Result<()> {
     require_current(root)?;
     object.validate()?;
-    ensure!(
-        object.legacy_format.is_none() && object.legacy_version.is_none(),
-        EXIT_SCHEMA,
-        "a current Object carries no per-resource format markers"
-    );
-    ensure!(
-        object.sha256.is_some(),
-        EXIT_SCHEMA,
-        "object {} has no aggregate integrity seal",
-        object.id
-    );
-    for section in &object.sections {
-        ensure!(
-            section
-                .refs
-                .iter()
-                .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
-            EXIT_SCHEMA,
-            "§{}: a current Object cannot carry a legacy reference",
-            section.id
-        );
-    }
     crate::integrity::check_stored_object_integrity(object)?;
     let value = serde_json::to_value(object)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("object {}: {error}", object.id)))?;
@@ -1227,7 +717,7 @@ pub fn object_ids(root: &Path) -> Result<Vec<String>> {
 }
 
 pub(crate) fn event_ids(root: &Path) -> Result<Vec<String>> {
-    let dir = events_dir(root);
+    let dir = eventstore_dir(root);
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1257,11 +747,17 @@ fn validate_recoverable_tail(id: &str, object: Option<Object>, events: &[Event])
                 )
             })?;
             ensure!(
-                matches!(&created.payload.action, Action::ObjectCreated),
+                matches!(
+                    &created.action,
+                    Action::ObjectCreated { .. } | Action::ObjectMigrated { .. }
+                ),
                 EXIT_SCHEMA,
                 "{id}: event rev 1 cannot reconstruct a missing object"
             );
-            Object::new(id.to_owned(), String::new())?
+            let mut empty = Object::new(id.to_owned(), String::new())?;
+            empty.rev = 0;
+            empty.reseal()?;
+            empty
         }
     };
     let (projected, _) = replay_recoverable_tail(object, events).map_err(|error| {
@@ -1352,76 +848,6 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     }
 }
 
-/// A record may carry only the shapes its own generation defined.
-///
-/// One rule, asked on the way in *and* on the way out, because those two are the
-/// same question and answering it in only one place is how they drift. Asked
-/// only at read, a write path appends history its own next read refuses. Asked
-/// only at write, a file that arrived some other way is replayed under rules it
-/// was never written against.
-///
-/// Event generation 1 excludes the merge that names the Section surviving it;
-/// generation 2 defines and writes that shape. Accepting it under generation 1
-/// would silently redefine retained history and replay a different Object from
-/// the one that was admitted.
-/// Members this generation's writers have legitimately omitted, at one time or
-/// another, without the record meaning anything different.
-///
-/// `based_on` is the one with history behind it: an absent basis was spelled
-/// `null` before it became an absent field, and every event emitted then still
-/// says so. The rest are optional semantic members this build omits when they
-/// carry nothing, so a record that spells one out explicitly is saying the same
-/// thing the longer way.
-///
-/// A list of what may be *absent from the model's own output*, never a list of
-/// what is forbidden. Forgetting to extend this one refuses a spelling; a list
-/// of forbidden keys, forgotten, accepts a field from a generation this build
-/// does not implement — and only one of those two mistakes is safe.
-const OMISSIBLE_EVENT_MEMBERS: &[&str] = &["becomes", "role", "content", "based_on", "relations"];
-
-/// Nothing in the stored bytes went missing on the way into the typed model.
-///
-/// `Event` cannot use `deny_unknown_fields`: its payload is flattened, and serde
-/// forbids the two together. So the check is done against what the decode
-/// produced — every member the record carries must be one the model has a place
-/// for, and must survive with its value intact.
-///
-/// It has to happen *before* anything reads the decoded value, because the
-/// dropped member is exactly the one that would have said the record is not of
-/// this generation. A record carrying admission provenance is not a record of
-/// the generation that had only one door; dropping that member leaves the stored
-/// `payload_sha256` verifying, since it was never inside the payload, and replay
-/// then reports `human` for bytes that said `agent`. Reconciliation can make
-/// that reading authoritative after a crash.
-///
-/// What it must **not** do is treat the current serializer's single spelling as
-/// the whole historical read contract. History is read under its own contract
-/// and is never rewritten, so a member this build omits today but wrote
-/// yesterday is a valid record, not an unknown field.
-fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Result<()> {
-    let decoded = serde_json::to_value(event)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
-    let (stored, decoded) = match (stored.as_object(), decoded.as_object()) {
-        (Some(stored), Some(decoded)) => (stored, decoded),
-        _ => return Err(Error::new(EXIT_SCHEMA, "event must be a JSON object")),
-    };
-    for (member, value) in stored {
-        match decoded.get(member) {
-            Some(kept) => ensure!(
-                kept == value,
-                EXIT_SCHEMA,
-                "{member} did not survive being read, so this record does not mean what it says"
-            ),
-            None => ensure!(
-                OMISSIBLE_EVENT_MEMBERS.contains(&member.as_str()),
-                EXIT_SCHEMA,
-                "{member} is not a member this generation defines, so this record is not one of its records"
-            ),
-        }
-    }
-    Ok(())
-}
-
 /// Everything a record must satisfy to belong in this store, asked on the way in
 /// and on the way out.
 ///
@@ -1432,203 +858,86 @@ fn check_nothing_was_dropped(stored: &serde_json::Value, event: &Event) -> Resul
 /// happened to be noticed.
 ///
 /// `stored` is the record as the file actually holds it: the exact record text
-/// alongside the value it parses to. Appending has no stored form yet, and
-/// needs none — a value that came from this build's own model cannot be
-/// carrying a member the model has no place for.
+/// alongside the value it parses to. Appending has no stored form yet, and needs
+/// none — a value that came from this build's own model cannot be carrying a
+/// member the model has no place for.
 fn check_event_record(
     event: &Event,
     id: &str,
     stored: Option<(&str, &serde_json::Value)>,
 ) -> Result<()> {
-    ensure!(
-        event.format == EVENT_FORMAT,
-        EXIT_SCHEMA,
-        "not an engr event"
-    );
     if let Some((raw, stored)) = stored {
-        check_nothing_was_dropped(stored, event)?;
-        if event.version == EVENT_ENVELOPE_VERSION {
-            let canonical = serde_json::to_value(event)
-                .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
-            ensure!(
-                *stored == canonical,
-                EXIT_SCHEMA,
-                "Event v2 is not in its exact canonical shape"
-            );
-            crate::proof::stored_within_safe_integers(stored, "Event v2")?;
-            // The contract is not "parses to the same value". It is that the
-            // persisted record *is* the RFC 8785 bytes. Comparing parsed values
-            // would already have erased member order, insignificant whitespace
-            // and any duplicate member name the parser collapsed, and an
-            // EventStore arrives through git merge, hand edit and copy as
-            // readily as through this build's own append.
-            ensure!(
-                raw == crate::proof::canonical_bytes(event, "Event v2")?,
-                EXIT_SCHEMA,
-                "Event v2 is not persisted as its canonical JCS bytes"
-            );
-        }
-    }
-    check_event_generation(event)?;
-    if event.version == EVENT_ENVELOPE_VERSION {
-        let value = serde_json::to_value(event)
+        let canonical = serde_json::to_value(event)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
-        crate::proof::stored_within_safe_integers(&value, "Event v2")?;
-        // Revision zero is the Object before any Event: the first admitted one
-        // advances it to 1. No writer emits it, and adjacency alone cannot
-        // refuse it, because a `0, 1, ...` log is perfectly contiguous.
-        ensure!(event.rev >= 1, EXIT_SCHEMA, "Event v2 revisions start at 1");
+        // Nothing went missing on the way into the typed model. `Event` cannot
+        // use `deny_unknown_fields` — its action is flattened, and serde forbids
+        // the two together — so the check is against what the decode produced.
+        // The dropped member is exactly the one that would have said the record
+        // is not of this generation: a member carrying admission provenance,
+        // silently discarded, leaves a record that replays as something nobody
+        // admitted.
         ensure!(
-            time::OffsetDateTime::parse(
-                &event.time,
-                &time::format_description::well_known::Rfc3339
-            )
-            .is_ok(),
+            *stored == canonical,
             EXIT_SCHEMA,
-            "Event v2 time is not RFC3339"
+            "an Event is stored in its exact canonical shape, and this one is not"
+        );
+        crate::proof::stored_within_safe_integers(stored, "Event")?;
+        // The contract is not "parses to the same value". It is that the
+        // persisted record *is* the RFC 8785 bytes. Comparing parsed values
+        // would already have erased member order, insignificant whitespace and
+        // any duplicate member name the parser collapsed, and an EventStore
+        // arrives through git merge, hand edit and copy as readily as through
+        // this build's own append.
+        ensure!(
+            raw == crate::proof::canonical_bytes(event, "Event")?,
+            EXIT_SCHEMA,
+            "an Event is persisted as its canonical JCS bytes, and this one is not"
         );
     }
-    ensure!(
-        event.payload.object == id,
-        EXIT_SCHEMA,
-        "event belongs to object {:?}, not {:?}",
-        event.payload.object,
-        id
-    );
-    event.payload.validate().map_err(|error| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("invalid event payload: {}", error.message),
-        )
-    })?;
-    let payload_sha256 = event.payload.sha256().map_err(|error| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!("invalid event payload: {}", error.message),
-        )
-    })?;
-    // The retained generation identifies its mutation by hashing it. The
-    // mixed-authority generation names the semantic transition instead, so this
-    // is asked of the shape that has it rather than of every record.
-    if let Some(confirmation) = event.confirmation() {
-        ensure!(
-            confirmation.payload_sha256 == payload_sha256,
-            EXIT_SCHEMA,
-            "confirmation does not match the event payload"
-        );
+    let value = serde_json::to_value(event)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("event: {error}")))?;
+    crate::proof::stored_within_safe_integers(&value, "Event")?;
+    // Revision zero is the Object before any Event: the first admitted one
+    // advances it to 1. No writer emits it, and adjacency alone cannot refuse
+    // it, because a `0, 1, ...` log is perfectly contiguous.
+    event.validate(id)?;
+    if let Some(value) = event.action.value() {
+        value.content.require_canonical_order()?;
     }
-    event.provenance.validate()?;
-    if let Provenance::Tagged { admission } = &event.provenance {
-        if admission.kind == crate::semantics::Admission::Agent
-            && !matches!(
-                event.payload.action,
-                Action::ObjectCreated | Action::ObjectRenamed
-            )
-        {
+    let admitted = &event.metadata.admitted;
+    if admitted.by == crate::semantics::Admission::Agent {
+        ensure!(
+            event.action.becomes().is_none(),
+            EXIT_SCHEMA,
+            "an Agent Event cannot carry a destination"
+        );
+        ensure!(
+            !matches!(
+                event.action,
+                Action::ObjectStateChanged { .. }
+                    | Action::ObjectClassified { .. }
+                    | Action::ObjectSuperseded { .. }
+                    | Action::ObjectRepaired {}
+                    | Action::ObjectMigrated { .. }
+            ),
+            EXIT_SCHEMA,
+            "this action requires Human admission"
+        );
+        // Title work is non-authoritative navigation metadata, so an Agent may
+        // create and rename without a governing Rule. Everything else it admits
+        // has to name the review that let it in.
+        if !matches!(
+            event.action,
+            Action::ObjectCreated { .. } | Action::ObjectRenamed { .. }
+        ) {
             ensure!(
-                admission.rule_review.is_some(),
+                admitted.review.is_some(),
                 EXIT_SCHEMA,
                 "an Agent semantic Object event records the passing Rule Review that admitted it"
             );
         }
     }
     Ok(())
-}
-
-fn check_event_generation(event: &Event) -> Result<()> {
-    // The generation itself, before anything about its contents. Leaving this to
-    // the read side alone was the same asymmetry one level up: a record naming a
-    // generation this build does not support could be written and then refused
-    // by the very next read of the log it was written to.
-    match event.version {
-        EVENT_ENVELOPE_VERSION_V0 => {
-            ensure!(
-                !matches!(
-                    &event.payload.action,
-                    Action::SectionMerged {
-                        merge: Merge::Into { .. }
-                    }
-                ),
-                EXIT_SCHEMA,
-                "event version {} does not define a merge that names the section surviving it",
-                event.version
-            );
-            ensure!(
-                matches!(event.provenance, Provenance::Confirmed { .. }),
-                EXIT_SCHEMA,
-                "event version {} carries retained confirmation provenance",
-                event.version
-            );
-            ensure!(
-                event
-                    .payload
-                    .content
-                    .refs
-                    .iter()
-                    .all(|reference| matches!(reference, crate::model::Ref::Legacy(_))),
-                EXIT_SCHEMA,
-                "event version {} cannot carry selective references",
-                event.version
-            );
-            Ok(())
-        }
-        EVENT_ENVELOPE_VERSION => {
-            ensure!(
-                !matches!(
-                    &event.payload.action,
-                    Action::SectionMerged {
-                        merge: Merge::Absorbing { .. }
-                    }
-                ),
-                EXIT_SCHEMA,
-                "event version {} does not define the retained allocating merge",
-                event.version
-            );
-            ensure!(
-                matches!(event.provenance, Provenance::Tagged { .. }),
-                EXIT_SCHEMA,
-                "event version {} carries tagged admission provenance",
-                event.version
-            );
-            ensure!(
-                event
-                    .payload
-                    .content
-                    .refs
-                    .iter()
-                    .all(|reference| matches!(reference, crate::model::Ref::Selective(_))),
-                EXIT_SCHEMA,
-                "event version {} cannot carry legacy references",
-                event.version
-            );
-            event.payload.content.require_canonical_order()?;
-            if let Provenance::Tagged { admission } = &event.provenance {
-                if admission.kind == crate::semantics::Admission::Agent {
-                    ensure!(
-                        event.payload.becomes.is_none(),
-                        EXIT_SCHEMA,
-                        "an Agent Event cannot carry becomes"
-                    );
-                    ensure!(
-                        !matches!(
-                            event.payload.action,
-                            Action::ObjectClosed
-                                | Action::ObjectReopened
-                                | Action::ObjectClassified { .. }
-                                | Action::ObjectSuperseded
-                        ),
-                        EXIT_SCHEMA,
-                        "this lifecycle action requires Human admission"
-                    );
-                }
-            }
-            Ok(())
-        }
-        _ => Err(Error::new(
-            EXIT_SCHEMA,
-            format!("unsupported event version {}", event.version),
-        )),
-    }
 }
 
 /// Whether this Event would be accepted by the durable boundary, without
@@ -1650,18 +959,19 @@ fn check_event_generation(event: &Event) -> Result<()> {
 /// inputs live. The lock is taken because the checks read the durable tail, and
 /// an answer about a tail that is moving is not an answer.
 pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
-    with_lock(root, || check_appendable_locked(root, event))
+    with_lock(root, || check_appendable_locked(root, event, None))
 }
 
 /// The durable append, for a caller already inside [`with_lock`] — which is
-/// every caller, because the only routes here are `confirm` and `admit_agent`.
-pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
-    check_appendable_locked(root, event)?;
-    let path = events_path(root, &event.payload.object);
+/// every caller, because the only routes here are `confirm`, `admit_agent` and
+/// the migration bootstrap.
+pub(crate) fn append_event_locked(root: &Path, object: &str, event: &Event) -> Result<()> {
+    check_appendable_locked(root, event, Some(object))?;
+    let path = events_path(root, object);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
-    let line = crate::proof::canonical_bytes(event, "Event v2")?;
+    let line = crate::proof::canonical_bytes(event, "Event")?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1672,28 +982,30 @@ pub(crate) fn append_event_locked(root: &Path, event: &Event) -> Result<()> {
 }
 
 /// Every check the append performs, and none of the writing.
-fn check_appendable_locked(root: &Path, event: &Event) -> Result<()> {
+///
+/// The owning Object is passed in rather than read off the Event, because the
+/// Event does not carry it: the stream binds it, and the seal binds it again. A
+/// caller with no Object in hand recovers it from the seal — there is at most
+/// one Object the digest can have been taken for.
+fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> Result<()> {
     // The durable Event path is part of the workspace-generation boundary, and a
     // direct library caller reaches it without passing the gate. Asked here as
     // well as there, because "this build may write this workspace" is a property
     // of the workspace rather than of the route taken to it.
     require_current(root)?;
-    ensure!(
-        event.version == EVENT_ENVELOPE_VERSION,
-        EXIT_SCHEMA,
-        "current workspaces append Event generation {EVENT_ENVELOPE_VERSION}, not {}",
-        event.version
-    );
+    let id = match object {
+        Some(id) => id.to_owned(),
+        None => owning_object(root, event)?,
+    };
     // Before anything is written, and before the Object is saved — `confirm`
     // appends here first, so refusing at this point leaves the workspace exactly
     // as it was rather than advanced past history it could not record.
-    check_event_record(event, &event.payload.object, None)?;
-    let id = &event.payload.object;
+    check_event_record(event, &id, None)?;
     // Continuity against what is already there, which is the one part of the
     // read contract that is about the file rather than the record. Reading the
     // tail is the cost of not being able to append a revision the next load
     // would refuse.
-    let mut tail = load_events(root, id)?;
+    let mut tail = load_events(root, &id)?;
     if let Some(last) = tail.last() {
         ensure!(
             last.rev.checked_add(1) == Some(event.rev),
@@ -1705,26 +1017,47 @@ fn check_appendable_locked(root: &Path, event: &Event) -> Result<()> {
     }
     // And that the history this produces is one the record can actually be
     // arrived at through. A record can be well formed, contiguous and still
-    // impossible: revising a Section that does not exist, or beginning a history
-    // with something no Object comes from. `.engr/events` is append-only and is
+    // impossible: updating a Section that does not exist, or beginning a history
+    // with something no Object comes from. The EventStore is append-only and is
     // never purged, so such a record is not a mistake anybody can take back — it
     // durably breaks every read that reconstructs the Object, and it breaks
     // crash recovery, which is the one thing this file is for.
-    //
-    // The same check the store already applies to a retained tail, asked before
-    // the tail exists rather than after, and inside the same lock so what is
-    // validated is what gets written.
     tail.push(event.clone());
-    let object = match load_object(root, id) {
+    let stored = match load_object(root, &id) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
     };
-    validate_recoverable_tail(id, object, &tail)?;
+    validate_recoverable_tail(&id, stored, &tail)?;
     // Last, and only for a record that is otherwise sound: a malformed Event
     // should be refused for being malformed, not for failing a proof about a
     // shape nothing could admit anyway.
-    crate::gate::check_admission(root, event)
+    crate::gate::check_admission(root, &id, event)
+}
+
+/// Which Object an Event belongs to, recovered from its own seal.
+///
+/// The public read-only boundary takes an Event and nothing else, and the Event
+/// deliberately does not name its Object. Rather than reintroduce a member that
+/// could disagree with the stream, this asks the seal: the digest binds exactly
+/// one Object id, so at most one workspace Object can answer for it.
+fn owning_object(root: &Path, event: &Event) -> Result<String> {
+    for id in object_ids(root)? {
+        let agrees = crate::digest::EVENT
+            .recheck(&event.digest, |version| event.digest_under(&id, version))
+            .map(|attested| attested.agrees())
+            .unwrap_or(false);
+        if agrees {
+            return Ok(id);
+        }
+    }
+    Err(Error::new(
+        EXIT_NOT_FOUND,
+        format!(
+            "event {} seals against no Object in this workspace, so there is no stream it belongs to",
+            event.id
+        ),
+    ))
 }
 
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
@@ -1739,15 +1072,11 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
         return Ok(Vec::new());
     }
     let text = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
-    decode_events(root, &path, id, &text)
+    decode_events(&path, id, &text)
 }
 
 /// Decode the one EventStore text a caller already captured.
-///
-/// Migration needs this form because fingerprinting one read and replaying a
-/// second one can derive a plan from bytes the manifest does not name. Ordinary
-/// reads take the same route after obtaining their text from disk.
-pub(crate) fn decode_events(root: &Path, path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
+pub(crate) fn decode_events(path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -1788,111 +1117,62 @@ pub(crate) fn decode_events(root: &Path, path: &Path, id: &str, text: &str) -> R
         }
         events.push(event);
     }
-    check_event_history(root, path, id, &events)?;
+    check_event_history(path, id, &events)?;
     Ok(events)
 }
 
-/// History is append-only evidence, not a replaceable recovery cache. Its
-/// first admitted transition is therefore always revision 1, and a generation
-/// that introduced mixed authority cannot be followed by the older semantic
-/// generation again.
-fn check_event_history(root: &Path, path: &Path, id: &str, events: &[Event]) -> Result<()> {
+/// Every Object has a complete stream beginning at revision 1.
+///
+/// History is append-only evidence, not a replaceable recovery cache, and #66
+/// says every Object's current-generation stream starts at 1 — there is no
+/// history-prefix pruning that could make an incomplete stream legitimate. A
+/// migrated Object's revision 1 is its `object.migrated.v1` bootstrap; a newly
+/// created one's is `object.created.v1`.
+fn check_event_history(path: &Path, id: &str, events: &[Event]) -> Result<()> {
+    let Some(first) = events.first() else {
+        return Ok(());
+    };
     ensure!(
-        !events.is_empty(),
+        first.rev == 1,
         EXIT_SCHEMA,
-        "{} is an empty Event history file",
-        path.display()
-    );
-    ensure!(
-        events[0].rev == 1,
-        EXIT_SCHEMA,
-        "{}: non-empty Event history starts at revision {}, not 1",
+        "{}: non-empty Event history starts at revision 1, not {}",
         path.display(),
-        events[0].rev
+        first.rev
     );
-    let mut seen_v2 = false;
-    for event in events {
-        if event.version == EVENT_ENVELOPE_VERSION {
-            seen_v2 = true;
-        } else {
-            ensure!(
-                !seen_v2,
-                EXIT_SCHEMA,
-                "{}: retained Event generation 1 cannot follow generation 2",
-                path.display()
-            );
-        }
-    }
-    check_human_candidate_digests(root, id, events)
-}
-
-/// Exactly the Sections the Human rechecks below will read.
-///
-/// A CandidateDigest is operation-specific. `object.renamed` hashes the title
-/// and lifecycle either side and names no Section at all; a Section operation
-/// names its own participants. Only `section_merged` and `object.superseded`
-/// project the whole Object, because `ObjectInvariant` carries every Section's
-/// semantics.
-///
-/// Converting more than that is not a wasted cycle, it is a wider precondition:
-/// every legacy Ref on a converted Section has its pinned commit reopened, so
-/// converting the whole Object makes an unrelated Ref's availability decide
-/// whether the Object can be read at all. Asking for the operation's own inputs
-/// keeps a lost commit a fact about the operations that actually depend on it.
-///
-/// A Section this generation *adds* cannot carry a legacy Ref — it did not exist
-/// before the boundary — and the before-state of an add names no Section, so
-/// `section.added` needs nothing converted.
-fn sections_the_rechecks_read(events: &[Event]) -> crate::migration::Migrated {
-    let mut wanted = crate::migration::Migrated::nothing();
-    for event in events {
-        if event.version != EVENT_ENVELOPE_VERSION || event.human_confirmation().is_none() {
-            continue;
-        }
-        wanted.widen(&event.payload.action);
-    }
-    wanted
-}
-
-/// Event-v2 keeps a Human candidate digest after its short-lived envelope is
-/// deleted. The transition it seals remains reconstructable from immutable
-/// history, so accepting only the digest's scalar syntax would turn durable
-/// admission evidence into an unauthenticated label after confirmation.
-fn check_human_candidate_digests(root: &Path, id: &str, events: &[Event]) -> Result<()> {
-    let wanted = sections_the_rechecks_read(events);
-    let mut projection = Object::new(id.to_owned(), String::new())?;
-    let mut migrated = false;
-    for event in events {
-        if event.version == EVENT_ENVELOPE_VERSION && !migrated {
-            projection = crate::migration::migrated_replay(root, projection, &wanted)?;
-            migrated = true;
-        }
-        let before = projection.clone();
-        project(&mut projection, event).map_err(|error| {
-            Error::new(
-                EXIT_SCHEMA,
-                format!(
-                    "{id}: Event history cannot reconstruct its transition: {}",
-                    error.message
-                ),
-            )
-        })?;
-        let Some(confirmation) = event.human_confirmation() else {
-            continue;
-        };
-        let review_digest = match &event.provenance {
-            Provenance::Tagged { admission } => admission.rule_review.as_ref().and_then(|review| {
-                (review.outcome == ReviewOutcome::Overridden).then(|| review.review_digest.clone())
-            }),
-            Provenance::Confirmed { .. } => None,
-        };
-        let subject =
-            crate::proof::candidate_subject(&before, &projection, &event.payload, review_digest)?;
+    ensure!(
+        matches!(
+            first.action,
+            Action::ObjectCreated { .. } | Action::ObjectMigrated { .. }
+        ),
+        EXIT_SCHEMA,
+        "{}: a stream begins with the Object being created or migrated, not with {}",
+        path.display(),
+        first.action.event_type()
+    );
+    // Only ever the first. A bootstrap replaces the whole projection, so a
+    // second one anywhere in a stream would silently discard everything before
+    // it — the reducer refuses that too, and saying so here names the actual
+    // fault instead of reporting it as a failed replay.
+    for event in &events[1..] {
         ensure!(
-            subject.digest()? == confirmation.candidate_digest,
+            !matches!(
+                event.action,
+                Action::ObjectCreated { .. } | Action::ObjectMigrated { .. }
+            ),
             EXIT_SCHEMA,
-            "{id}: Event rev {} carries a candidate digest no Human transition produced",
-            event.rev
+            "{}: {} establishes an Object, so it appears once, at revision 1",
+            path.display(),
+            event.action.event_type()
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for event in events {
+        ensure!(
+            seen.insert(event.id.clone()),
+            EXIT_SCHEMA,
+            "{}: event id {} appears more than once in the stream for {id}",
+            path.display(),
+            event.id
         );
     }
     Ok(())

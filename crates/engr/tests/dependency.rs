@@ -9,9 +9,9 @@ use engr::dependency::{
     canonical_fields, check_not_stale_at_birth, compare, parse_target, ref_snapshot,
     semantic_projection, semantic_value, Dependency, SemanticField,
 };
-use engr::model::{Ref, Section};
+use engr::model::{Content, Ref, Section, SectionValue};
 use engr::proof::section_target;
-use engr::semantics::{Admission, Relation, Role, Supplement};
+use engr::semantics::{Admission, Admitted, Relation, Role, Supplement};
 
 fn object_id() -> String {
     "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f".to_owned()
@@ -26,18 +26,18 @@ fn commit() -> String {
 }
 
 fn section() -> Section {
-    Section {
-        id: 1,
-        admission: Admission::Agent,
-        role: Some(Role::Decision),
-        text: "the store appends under a lock".to_owned(),
-        content: Vec::new(),
-        based_on: None,
-        refs: Vec::new(),
-        relations: Vec::new(),
-        sha256: String::new(),
-        admitted_at: "2026-08-24T00:00:00Z".to_owned(),
-    }
+    Section::from_value(
+        1,
+        SectionValue::new(
+            Admitted::new(Admission::Agent, "2026-08-24T00:00:00Z"),
+            Content {
+                role: Some(Role::Decision),
+                text: "the store appends under a lock".to_owned(),
+                ..Content::default()
+            },
+        ),
+    )
+    .expect("section")
 }
 
 fn snapshot(section: &Section, fields: &[SemanticField]) -> engr::dependency::RefSnapshot {
@@ -58,7 +58,7 @@ fn digest_of(snapshot: &engr::dependency::RefSnapshot) -> String {
 fn promotion_drifts_a_reference_that_selected_admission_and_not_one_that_did_not() {
     let before = section();
     let mut after = before.clone();
-    after.admission = Admission::Human;
+    after.admitted.by = Admission::Human;
     assert_eq!(before.text, after.text, "not a word changed");
 
     let text_only = snapshot(&before, &[SemanticField::Text]);
@@ -179,6 +179,7 @@ fn a_selector_outside_the_vocabulary_is_refused_by_name() {
         "admission",
         "based_on",
         "content",
+        "header",
         "refs",
         "relations",
         "role",
@@ -193,8 +194,8 @@ fn a_selector_outside_the_vocabulary_is_refused_by_name() {
 #[test]
 fn the_projection_excludes_identity_provenance_and_the_seal() {
     let projected = semantic_projection(&section()).expect("project");
-    assert_eq!(projected.len(), 7);
-    for absent in ["id", "admitted_at", "sha256"] {
+    assert_eq!(projected.len(), 8);
+    for absent in ["id", "admitted", "digest"] {
         assert!(
             !projected.contains_key(absent),
             "{absent} is not a selectable semantic fact"
@@ -235,7 +236,19 @@ fn absent_optionals_project_as_null_and_sets_project_canonically() {
 }
 
 fn reference(section: u64) -> Ref {
-    Ref::legacy(object_id(), section, "c".repeat(64), commit())
+    stored_ref(section, &commit(), &"c".repeat(64))
+}
+
+/// A stored Ref, built the only way one can be: through the constructor that
+/// holds it to the canonical spelling.
+fn stored_ref(section: u64, commit: &str, digest: &str) -> Ref {
+    engr::dependency::SelectiveRef::stored(
+        section_target(&object_id(), section),
+        vec![SemanticField::Text],
+        commit,
+        format!("1:{digest}"),
+    )
+    .expect("a well formed stored reference")
 }
 
 /// Ordered values keep their order — `content` is a sequence a reader goes
@@ -290,7 +303,7 @@ fn an_unreproducible_digest_is_invalid_rather_than_drifted() {
 fn every_moved_field_is_named() {
     let before = section();
     let mut after = before.clone();
-    after.admission = Admission::Human;
+    after.admitted.by = Admission::Human;
     after.text = "revised".to_owned();
     after.relations = vec![Relation::superseded_by(object_id())];
 
@@ -392,8 +405,8 @@ fn a_sha256_repository_object_id_is_a_full_object_id() {
 /// depending on which contract asked.
 #[test]
 fn incidental_set_order_reaches_no_projection_that_hashes_it() {
-    let low_section_late_commit = Ref::legacy(object_id(), 1, "a".repeat(64), "f".repeat(40));
-    let high_section_early_commit = Ref::legacy(object_id(), 2, "a".repeat(64), "0".repeat(40));
+    let low_section_late_commit = stored_ref(1, &"f".repeat(40), &"a".repeat(64));
+    let high_section_early_commit = stored_ref(2, &"0".repeat(40), &"a".repeat(64));
     let mut one = section();
     one.refs = vec![
         low_section_late_commit.clone(),
@@ -429,19 +442,26 @@ fn incidental_set_order_reaches_no_projection_that_hashes_it() {
         let mut after = before.clone();
         after.rev = 2;
         after.sections[0].text = "revised".to_owned();
-        let payload = engr::model::Payload {
-            action: engr::model::Action::SectionRevised { section: 1 },
-            object: object_id(),
-            becomes: None,
-            content: engr::model::Content {
-                text: "revised".to_owned(),
-                ..engr::model::Content::default()
+        before.reseal().expect("seal");
+        after.sections[0] = engr::integrity::sealed_section(&after.sections[0]).expect("seal");
+        after.reseal().expect("seal");
+        let payload = engr::model::Payload::new(
+            object_id(),
+            engr::model::Action::SectionUpdated {
+                section: 1,
+                value: SectionValue::new(
+                    Admitted::new(Admission::Human, "2026-08-24T00:00:00Z"),
+                    Content {
+                        text: "revised".to_owned(),
+                        ..Content::default()
+                    },
+                ),
+                becomes: None,
             },
-        };
-        engr::proof::candidate_subject(&before, &after, &payload, None)
-            .expect("subject")
-            .digest()
-            .expect("digest")
+        );
+        let projected =
+            engr::proof::object_projection(&before, &after, &payload).expect("projection");
+        engr::proof::canonical_bytes(&projected.after, "after").expect("canonical")
     };
     assert_eq!(
         subject(&one),
@@ -471,53 +491,41 @@ fn the_vocabulary_is_exactly_the_canonical_projection() {
     assert_eq!(names, vocabulary);
 }
 
-/// A legacy Ref whose `section` predates the Phase-3 numeric domain. Valid v2
-/// history: v2's `Ref::validate` bounds the object id and the commit, never
-/// this number.
-fn out_of_domain_legacy_ref() -> Ref {
-    Ref::legacy(object_id(), 1u64 << 53, "c".repeat(64), commit())
-}
-
-/// An unselected field cannot break a dependency that never declared it.
+/// Selection is field-relative: `[text]` must not consult `refs` at all.
 ///
-/// #35 keeps historical representations under their own contracts, and v2 never
-/// bounded a Ref's `section` by the Phase-3 safe-integer domain. So a retained
-/// v2 Section can hold such a Ref and still be legitimate history. A `[text]`
-/// dependency has nothing to do with it.
-///
-/// This regressed once, from projecting all seven fields to answer a question
-/// about one: the walk reached the unselected Ref, applied the P3 bound, and
-/// failed the selection. Field-relative selection exists precisely to stop a
-/// Ref from depending on what it did not declare.
+/// Two Sections with identical wording and different references project the
+/// same `text`, and a `[text]` snapshot over either hashes the same. This
+/// regressed once, from projecting the whole vocabulary to answer a question
+/// about one field — which made a Ref depend on what it never declared.
 #[test]
-fn an_unselected_field_outside_the_phase_three_domain_does_not_break_a_selection() {
-    let mut legacy = section();
-    legacy.refs = vec![out_of_domain_legacy_ref()];
+fn a_selection_reads_only_the_fields_it_declares() {
+    let bare = section();
+    let mut carrying = bare.clone();
+    carrying.refs = vec![reference(4), reference(2)];
+    engr::proof::canonical_set(&mut carrying.refs, "reference").expect("canonical");
+    carrying.relations = vec![Relation::superseded_by(object_id())];
 
-    // The unselected field is genuinely uninterpretable under P3 rules.
-    semantic_value(&legacy, SemanticField::Refs)
-        .expect_err("the P3 domain does not reach that far");
-
-    // And every other field still projects, because none of them looks at it.
     for field in [
         SemanticField::Text,
         SemanticField::Admission,
         SemanticField::Role,
         SemanticField::BasedOn,
         SemanticField::Content,
-        SemanticField::Relations,
+        SemanticField::Header,
     ] {
-        semantic_value(&legacy, field)
-            .unwrap_or_else(|error| panic!("{} must not depend on refs: {error}", field.as_str()));
+        assert_eq!(
+            semantic_value(&bare, field).expect("value"),
+            semantic_value(&carrying, field).expect("value"),
+            "{} must not depend on refs or relations",
+            field.as_str()
+        );
     }
 
-    // A whole-vocabulary projection is a different request and may fail; the
-    // point is that nothing on the selective-Ref path makes it.
-    semantic_projection(&legacy).expect_err("asking for everything asks for that too");
-
-    // The snapshot a `[text]` reference hashes is unaffected.
-    ref_snapshot(target(), &[SemanticField::Text], &legacy, commit()).expect("text alone");
-    check_not_stale_at_birth(&legacy, &legacy, &[SemanticField::Text]).expect("unchanged");
+    // And the snapshot a `[text]` reference hashes is unaffected by either.
+    let plain = snapshot(&bare, &[SemanticField::Text]);
+    let with_refs = snapshot(&carrying, &[SemanticField::Text]);
+    assert_eq!(digest_of(&plain), digest_of(&with_refs));
+    check_not_stale_at_birth(&bare, &carrying, &[SemanticField::Text]).expect("unchanged");
 }
 
 /// The two projections give the same answer for every field in the vocabulary.
@@ -533,7 +541,7 @@ fn the_two_projections_agree_field_by_field() {
     section.refs = vec![reference(4), reference(2)];
     section.relations = vec![Relation::superseded_by(object_id())];
     section.content = vec![Supplement::new("data.note", "a note")];
-    section.based_on = Some("a".repeat(40));
+    section.based_on = Some(engr::semantics::BasedOn::new("a".repeat(40)));
 
     let proof = serde_json::to_value(engr::proof::SectionSemantic::of(&section).expect("project"))
         .expect("value");
@@ -552,7 +560,7 @@ fn the_two_projections_agree_field_by_field() {
 mod against_a_workspace {
     use super::*;
     use engr::dependency::{admit, evaluate, parse_target, SelectiveRef};
-    use engr::integrity::{sealed_object, sealed_section};
+    use engr::integrity::sealed_section;
     use engr::model::Object;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -596,42 +604,34 @@ mod against_a_workspace {
         object.rev = 1;
         object.next_section_id = 2;
         let mut section = section();
-        section.admission = Admission::Human;
-        section.sha256 = section.recomputed_sha256().expect("v2 seal");
-        object.sections = vec![section];
-        let (mut object, seal) = phase_three_seals(&object);
-        object.sha256 = Some(seal);
+        section.admitted.by = Admission::Human;
+        object.sections = vec![sealed_section(&section).expect("seal")];
+        let object = resealed(&object);
         save_raw(&root, &object).expect("save");
 
         let commit = commit_all(&root, "record");
         (dir, root, object, commit)
     }
 
-    /// Recompute the v3 Section and Object seals after a test mutation.
-    fn phase_three_seals(object: &Object) -> (Object, String) {
+    /// Recompute every Section seal and then the aggregate, after a test
+    /// mutation.
+    fn resealed(object: &Object) -> Object {
         let mut sealed = object.clone();
         for section in &mut sealed.sections {
-            section.sha256 = sealed_section(section)
-                .expect("project")
-                .seal()
-                .expect("seal");
+            *section = sealed_section(section).expect("seal");
         }
-        let seal = sealed_object(&sealed)
-            .expect("project")
-            .seal()
-            .expect("seal");
-        (sealed, seal)
+        sealed.reseal().expect("seal");
+        sealed
     }
 
     #[test]
     fn a_reference_is_admitted_against_the_commit_it_pins() {
         let (_dir, root, object, commit) = workspace();
-        let (object, seal) = phase_three_seals(&object);
+        let object = resealed(&object);
 
         let reference = admit(
             &root,
             &object,
-            &seal,
             1,
             &[SemanticField::Text, SemanticField::Admission],
             &commit,
@@ -647,7 +647,7 @@ mod against_a_workspace {
         assert!(reference.digest().starts_with("1:"));
 
         assert_eq!(
-            evaluate(&root, &object, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &object, &reference).expect("evaluate"),
             Dependency::Unchanged,
             "a fresh reference is non-drifting by construction"
         );
@@ -659,17 +659,17 @@ mod against_a_workspace {
     #[test]
     fn a_target_that_fails_its_own_integrity_cannot_be_referenced() {
         let (_dir, root, object, commit) = workspace();
-        let (mut object, seal) = phase_three_seals(&object);
+        let mut object = resealed(&object);
         object.sections[0].text = "rewritten out of band".to_owned();
 
-        admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit)
+        admit(&root, &object, 1, &[SemanticField::Role], &commit)
             .expect_err("even selecting a field the edit did not touch");
 
         // And when the tampering also makes the selection stale, the refusal
         // still names the integrity failure. Order is why: reporting staleness
         // here would tell the author to re-pin the commit, when what actually
         // happened is that the target was rewritten out of band.
-        let refused = admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit)
+        let refused = admit(&root, &object, 1, &[SemanticField::Text], &commit)
             .expect_err("both wrong at once");
         assert!(
             !refused.to_string().contains("stale at birth"),
@@ -684,7 +684,7 @@ mod against_a_workspace {
         )
         .expect("canonical");
         assert_eq!(
-            evaluate(&root, &object, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &object, &reference).expect("evaluate"),
             Dependency::TargetIntegrityFailure,
             "and reading one reports the tampering rather than drift"
         );
@@ -695,7 +695,7 @@ mod against_a_workspace {
     #[test]
     fn missing_provenance_is_not_drift() {
         let (_dir, root, object, _commit) = workspace();
-        let (object, seal) = phase_three_seals(&object);
+        let object = resealed(&object);
 
         let unknown = SelectiveRef::stored(
             target(),
@@ -705,7 +705,7 @@ mod against_a_workspace {
         )
         .expect("canonical");
         assert_eq!(
-            evaluate(&root, &object, &seal, &unknown).expect("evaluate"),
+            evaluate(&root, &object, &unknown).expect("evaluate"),
             Dependency::ProvenanceUnavailable
         );
     }
@@ -715,26 +715,25 @@ mod against_a_workspace {
     #[test]
     fn a_selected_fact_that_moved_is_reported_as_drift() {
         let (_dir, root, object, commit) = workspace();
-        let (object, seal) = phase_three_seals(&object);
+        let object = resealed(&object);
         let reference =
-            admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+            admit(&root, &object, 1, &[SemanticField::Text], &commit).expect("admitted");
 
         let mut moved = object.clone();
         moved.sections[0].text = "revised through the gate".to_owned();
-        let (moved, moved_seal) = phase_three_seals(&moved);
+        let moved = resealed(&moved);
 
         assert_eq!(
-            evaluate(&root, &moved, &moved_seal, &reference).expect("evaluate"),
+            evaluate(&root, &moved, &reference).expect("evaluate"),
             Dependency::Drifted {
                 fields: vec![SemanticField::Text]
             }
         );
 
         // The same movement, for a reference that never selected `text`.
-        let other =
-            admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit).expect("admitted");
+        let other = admit(&root, &object, 1, &[SemanticField::Role], &commit).expect("admitted");
         assert_eq!(
-            evaluate(&root, &moved, &moved_seal, &other).expect("evaluate"),
+            evaluate(&root, &moved, &other).expect("evaluate"),
             Dependency::Unchanged,
             "drift is relative to the dependency actually declared"
         );
@@ -744,17 +743,16 @@ mod against_a_workspace {
     #[test]
     fn a_reference_stale_at_birth_is_refused() {
         let (_dir, root, object, commit) = workspace();
-        let (mut object, _) = phase_three_seals(&object);
+        let mut object = resealed(&object);
         object.sections[0].text = "moved since the commit".to_owned();
-        let (object, seal) = phase_three_seals(&object);
+        let object = resealed(&object);
 
-        let refused = admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit)
+        let refused = admit(&root, &object, 1, &[SemanticField::Text], &commit)
             .expect_err("text already differs from the pinned commit");
         assert!(refused.to_string().contains("stale at birth"), "{refused}");
 
         // And the same moment admits a reference that selects something else.
-        admit(&root, &object, &seal, 1, &[SemanticField::Role], &commit)
-            .expect("role has not moved");
+        admit(&root, &object, 1, &[SemanticField::Role], &commit).expect("role has not moved");
     }
 
     /// History that was changed outside the gate cannot become the authority
@@ -789,10 +787,9 @@ mod against_a_workspace {
         // exactly the case that used to slip through: nothing looks stale.
         let mut current = object.clone();
         current.sections[0].text = "hand edited in history".to_owned();
-        current.sections[0].sha256 = current.sections[0].recomputed_sha256().expect("v2 seal");
-        let (current, seal) = phase_three_seals(&current);
+        let current = resealed(&current);
 
-        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tampered)
+        let refused = admit(&root, &current, 1, &[SemanticField::Text], &tampered)
             .expect_err("the pinned commit holds a section that fails its own seal");
         assert!(
             refused.to_string().contains("outside the gate"),
@@ -810,24 +807,15 @@ mod against_a_workspace {
         )
         .expect("canonical");
         assert_eq!(
-            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &current, &reference).expect("evaluate"),
             Dependency::TargetIntegrityFailure
         );
 
         // The honest commit is still usable, so the check refuses tampering
         // rather than refusing history.
-        let mut original = object.clone();
-        original.sections[0].sha256 = original.sections[0].recomputed_sha256().expect("v2 seal");
-        let (original, original_seal) = phase_three_seals(&original);
-        admit(
-            &root,
-            &original,
-            &original_seal,
-            1,
-            &[SemanticField::Text],
-            &honest,
-        )
-        .expect("untouched history is still authority");
+        let original = resealed(&object);
+        admit(&root, &original, 1, &[SemanticField::Text], &honest)
+            .expect("untouched history is still authority");
     }
 
     fn rev_parse(root: &Path, revision: &str) -> String {
@@ -895,8 +883,8 @@ mod against_a_workspace {
             "that peels to the commit"
         );
 
-        let (current, seal) = phase_three_seals(&object);
-        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tag)
+        let current = resealed(&object);
+        let refused = admit(&root, &current, 1, &[SemanticField::Text], &tag)
             .expect_err("the tag is not the commit");
         assert!(
             refused.to_string().contains("names a tag object"),
@@ -905,8 +893,8 @@ mod against_a_workspace {
 
         // The peeled commit id is accepted, so this refuses the wrong identity
         // rather than refusing tagged history.
-        let reference = admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit)
-            .expect("the commit itself");
+        let reference =
+            admit(&root, &current, 1, &[SemanticField::Text], &commit).expect("the commit itself");
         assert_eq!(reference.commit(), commit);
 
         // And the read path fails closed on a stored Ref that names the tag.
@@ -917,7 +905,7 @@ mod against_a_workspace {
             reference.digest(),
         )
         .expect("canonical spelling; the commit kind is evaluate's question");
-        evaluate(&root, &current, &seal, &stored).expect_err("not a commit id");
+        evaluate(&root, &current, &stored).expect_err("not a commit id");
     }
 
     /// A tree id is full-length hex too, and `git show <tree>:<path>` reads
@@ -928,8 +916,8 @@ mod against_a_workspace {
         let tree = rev_parse(&root, &format!("{commit}^{{tree}}"));
         assert_eq!(object_type(&root, &tree), "tree");
 
-        let (current, seal) = phase_three_seals(&object);
-        let refused = admit(&root, &current, &seal, 1, &[SemanticField::Text], &tree)
+        let current = resealed(&object);
+        let refused = admit(&root, &current, 1, &[SemanticField::Text], &tree)
             .expect_err("a tree is not a commit");
         assert!(
             refused.to_string().contains("names a tree object"),
@@ -937,98 +925,61 @@ mod against_a_workspace {
         );
     }
 
-    /// Selecting a field that cannot be interpreted under the applicable
-    /// contract is `SchemaMismatch`, a state #35 §9 defines — not a raw error.
-    ///
-    /// The material sits in history, which is where it belongs: v2 never
-    /// bounded a Ref's `section` by the Phase-3 domain, so a committed Section
-    /// holding one is legitimate history under its own contract, and #35 says
-    /// history is not reinterpreted under the newer one. Its v2 seal still
-    /// verifies, because that seal is taken over serde bytes and never applied
-    /// the P3 numeric walk.
+    /// A snapshot the current contract cannot interpret is `SchemaMismatch`, a
+    /// state the protocol defines — not a raw error.
     ///
     /// The difference matters to a caller: a classified state is an answer it
     /// was told to expect and can act on, a raw error is a failure it has no
-    /// contract for. This escaped as an error until the classification landed.
+    /// contract for.
     #[test]
-    fn a_selected_field_the_contract_cannot_interpret_is_a_schema_mismatch() {
-        let (_dir, root, object, _first) = workspace();
+    fn a_snapshot_the_contract_cannot_interpret_is_a_schema_mismatch() {
+        let (_dir, root, object, commit) = workspace();
+        let current = resealed(&object);
+        let reference =
+            admit(&root, &current, 1, &[SemanticField::Text], &commit).expect("admitted");
+        assert_eq!(
+            evaluate(&root, &current, &reference).expect("evaluate"),
+            Dependency::Unchanged
+        );
 
-        // Commit a Section carrying a legacy out-of-domain Ref.
-        let path = root
-            .join(".engr")
-            .join("objects")
-            .join(format!("{}.json", object.id));
-        let mut legacy = object.clone();
-        legacy.sections[0].refs = vec![Ref::legacy(
-            object_id(),
-            1u64 << 53,
-            "c".repeat(64),
-            "d".repeat(40),
-        )];
-        legacy.sections[0].sha256 = legacy.sections[0].recomputed_sha256().expect("v2 seal");
-        let mut legacy: serde_json::Value = serde_json::to_value(&legacy).expect("serialize");
-        let stored = legacy.as_object_mut().expect("object");
-        stored.remove("sha256");
-        let section = stored
-            .get_mut("sections")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|sections| sections.first_mut())
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("section");
-        section.remove("admission");
-        let admitted_at = section.remove("admitted_at").expect("admitted_at");
-        section.insert("confirmed_at".to_owned(), admitted_at);
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&legacy).expect("serialize"),
-        )
-        .expect("write");
-        let format_path = root.join(".engr").join("format.json");
-        std::fs::write(&format_path, r#"{"format":"engr-workspace","version":2}"#)
-            .expect("predecessor authority");
-        let historical = commit_all(&root, "legacy reference");
+        // Commit a `.engr` that declares a generation this build does not write.
+        // The bytes are perfectly well formed; they are simply not this
+        // generation's, and reading them under its rules is what the marker
+        // exists to prevent.
+        let version = root.join(".engr").join("VERSION");
+        std::fs::write(&version, "2\n").expect("write VERSION");
+        let foreign = commit_all(&root, "a newer generation");
+        std::fs::write(&version, engr::WORKSPACE_VERSION_FILE).expect("restore VERSION");
 
-        // Evaluation compares that retained snapshot with a current v3 target.
-        write_raw(&path, &object).expect("restore current object");
-        std::fs::write(
-            &format_path,
-            format!(
-                r#"{{"format":"engr-workspace","version":{}}}"#,
-                engr::WORKSPACE_VERSION
-            ),
-        )
-        .expect("restore current authority");
-
-        // The current target is clean, and carries a Phase-3 seal.
-        let (current, seal) = phase_three_seals(&object);
-
-        let selecting_refs = SelectiveRef::stored(
-            target(),
-            vec![SemanticField::Refs],
-            historical.clone(),
-            format!("1:{}", "a".repeat(64)),
+        let pinned_at_foreign = SelectiveRef::stored(
+            reference.target(),
+            reference.fields().to_vec(),
+            foreign,
+            reference.digest(),
         )
         .expect("canonical");
         assert_eq!(
-            evaluate(&root, &current, &seal, &selecting_refs).expect("classified, not errored"),
+            evaluate(&root, &current, &pinned_at_foreign).expect("classified, not errored"),
             Dependency::SchemaMismatch
         );
 
-        // A reference selecting something else is answered normally: the
-        // uninterpretable field is not part of its dependency.
-        let selecting_text = SelectiveRef::stored(
-            selecting_refs.target(),
-            vec![SemanticField::Text],
-            selecting_refs.commit(),
-            selecting_refs.digest(),
+        // And a commit that holds no workspace at all is absence rather than a
+        // mismatch: there is nothing there to have misread.
+        std::fs::remove_dir_all(root.join(".engr")).expect("remove");
+        let bare = commit_all(&root, "no workspace");
+        let pinned_at_bare = SelectiveRef::stored(
+            reference.target(),
+            reference.fields().to_vec(),
+            bare,
+            reference.digest(),
         )
         .expect("canonical");
-        let answer = evaluate(&root, &current, &seal, &selecting_text).expect("answered");
-        assert_ne!(
-            answer,
-            Dependency::SchemaMismatch,
-            "text is interpretable regardless of what refs holds"
+        assert!(
+            matches!(
+                evaluate(&root, &current, &pinned_at_bare),
+                Ok(Dependency::SchemaMismatch | Dependency::ProvenanceUnavailable)
+            ),
+            "an unreadable pin is classified, never an escaped error"
         );
     }
 
@@ -1052,13 +1003,12 @@ mod against_a_workspace {
     #[test]
     fn a_stored_reference_carries_the_canonical_field_order_and_only_that() {
         let (_dir, root, object, commit) = workspace();
-        let (current, seal) = phase_three_seals(&object);
+        let current = resealed(&object);
 
         // Authoring: either order is accepted, and one order comes back.
         let canonical = admit(
             &root,
             &current,
-            &seal,
             1,
             &[SemanticField::Text, SemanticField::Admission],
             &commit,
@@ -1072,7 +1022,6 @@ mod against_a_workspace {
         let other_way = admit(
             &root,
             &current,
-            &seal,
             1,
             &[SemanticField::Admission, SemanticField::Text],
             &commit,
@@ -1099,7 +1048,7 @@ mod against_a_workspace {
         )
         .expect("canonical");
         assert_eq!(
-            evaluate(&root, &current, &seal, &stored).expect("evaluate"),
+            evaluate(&root, &current, &stored).expect("evaluate"),
             Dependency::Unchanged
         );
 
@@ -1140,13 +1089,13 @@ mod against_a_workspace {
     #[test]
     fn a_target_removed_through_a_supported_transition_is_missing_not_broken() {
         let (_dir, root, object, commit) = workspace();
-        let (current, seal) = phase_three_seals(&object);
+        let current = resealed(&object);
         let reference =
-            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+            admit(&root, &current, 1, &[SemanticField::Text], &commit).expect("admitted");
 
         // The history the Ref pins is untouched and still verifies.
         assert_eq!(
-            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &current, &reference).expect("evaluate"),
             Dependency::Unchanged
         );
 
@@ -1154,12 +1103,12 @@ mod against_a_workspace {
         let mut without = current.clone();
         without.sections.clear();
         without.rev += 1;
-        let (without, resealed) = phase_three_seals(&without);
-        engr::integrity::check_object_integrity(&without, &resealed)
+        let without = resealed(&without);
+        engr::integrity::check_object_integrity(&without)
             .expect("the object still vouches for itself");
 
         assert_eq!(
-            evaluate(&root, &without, &resealed, &reference).expect("evaluate"),
+            evaluate(&root, &without, &reference).expect("evaluate"),
             Dependency::TargetMissing
         );
     }
@@ -1174,16 +1123,16 @@ mod against_a_workspace {
     #[test]
     fn a_section_deleted_by_hand_is_not_reported_as_a_removal() {
         let (_dir, root, object, commit) = workspace();
-        let (current, seal) = phase_three_seals(&object);
+        let current = resealed(&object);
         let reference =
-            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+            admit(&root, &current, 1, &[SemanticField::Text], &commit).expect("admitted");
 
         // Same deletion, but the old seal is kept rather than recomputed.
         let mut tampered = current.clone();
         tampered.sections.clear();
 
         assert_eq!(
-            evaluate(&root, &tampered, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &tampered, &reference).expect("evaluate"),
             Dependency::TargetIntegrityFailure,
             "the aggregate no longer follows from what the object holds"
         );
@@ -1204,13 +1153,13 @@ mod against_a_workspace {
     #[test]
     fn admission_reports_tampering_as_tampering_and_not_as_a_missing_target() {
         let (_dir, root, object, commit) = workspace();
-        let (current, seal) = phase_three_seals(&object);
+        let current = resealed(&object);
 
         // Deleted out of band: the old aggregate seal is kept.
         let mut tampered = current.clone();
         tampered.sections.clear();
-        let refused = admit(&root, &tampered, &seal, 1, &[SemanticField::Text], &commit)
-            .expect_err("refused");
+        let refused =
+            admit(&root, &tampered, 1, &[SemanticField::Text], &commit).expect_err("refused");
         assert_eq!(
             refused.code,
             engr::EXIT_INVARIANT,
@@ -1223,16 +1172,9 @@ mod against_a_workspace {
         let mut removed = current.clone();
         removed.sections.clear();
         removed.rev += 1;
-        let (removed, resealed) = phase_three_seals(&removed);
-        let refused = admit(
-            &root,
-            &removed,
-            &resealed,
-            1,
-            &[SemanticField::Text],
-            &commit,
-        )
-        .expect_err("nothing to reference");
+        let removed = resealed(&removed);
+        let refused = admit(&root, &removed, 1, &[SemanticField::Text], &commit)
+            .expect_err("nothing to reference");
         assert_eq!(
             refused.code,
             engr::EXIT_NOT_FOUND,
@@ -1262,15 +1204,14 @@ mod against_a_workspace {
     #[test]
     fn a_reference_is_only_evaluated_against_the_object_it_names() {
         let (_dir, root, object, commit) = workspace();
-        let (object, seal) = phase_three_seals(&object);
+        let object = resealed(&object);
         let reference =
-            admit(&root, &object, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+            admit(&root, &object, 1, &[SemanticField::Text], &commit).expect("admitted");
 
         let mut stranger = object.clone();
         stranger.id = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
-        let (stranger, stranger_seal) = phase_three_seals(&stranger);
-        evaluate(&root, &stranger, &stranger_seal, &reference)
-            .expect_err("that is a different object");
+        let stranger = resealed(&stranger);
+        evaluate(&root, &stranger, &reference).expect_err("that is a different object");
     }
 
     /// Every read-time state is reachable, and no two of them collapse.
@@ -1293,35 +1234,35 @@ mod against_a_workspace {
     #[test]
     fn the_read_time_states_are_reachable_and_none_of_them_collapse() {
         let (_dir, root, object, commit) = workspace();
-        let (current, seal) = phase_three_seals(&object);
+        let current = resealed(&object);
         let reference =
-            admit(&root, &current, &seal, 1, &[SemanticField::Text], &commit).expect("admitted");
+            admit(&root, &current, 1, &[SemanticField::Text], &commit).expect("admitted");
 
         let mut answers: Vec<(&str, Dependency)> = Vec::new();
 
         answers.push((
             "unchanged",
-            evaluate(&root, &current, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &current, &reference).expect("evaluate"),
         ));
 
         // The selected field moved, through a transition the Object vouches for.
         let mut moved = current.clone();
         moved.sections[0].text = "wording that is not what was pinned".to_owned();
         moved.rev += 1;
-        let (moved, moved_seal) = phase_three_seals(&moved);
+        let moved = resealed(&moved);
         answers.push((
             "drifted",
-            evaluate(&root, &moved, &moved_seal, &reference).expect("evaluate"),
+            evaluate(&root, &moved, &reference).expect("evaluate"),
         ));
 
         // The target is gone, through a transition the Object still vouches for.
         let mut removed = current.clone();
         removed.sections.clear();
         removed.rev += 1;
-        let (removed, removed_seal) = phase_three_seals(&removed);
+        let removed = resealed(&removed);
         answers.push((
             "target missing",
-            evaluate(&root, &removed, &removed_seal, &reference).expect("evaluate"),
+            evaluate(&root, &removed, &reference).expect("evaluate"),
         ));
 
         // The current target was edited outside an admission path: the wording
@@ -1330,7 +1271,7 @@ mod against_a_workspace {
         tampered.sections[0].text = "wording nobody admitted".to_owned();
         answers.push((
             "target integrity failure",
-            evaluate(&root, &tampered, &seal, &reference).expect("evaluate"),
+            evaluate(&root, &tampered, &reference).expect("evaluate"),
         ));
 
         // The recorded commit resolves to nothing.
@@ -1343,7 +1284,7 @@ mod against_a_workspace {
         .expect("canonical");
         answers.push((
             "provenance unavailable",
-            evaluate(&root, &current, &seal, &lost).expect("evaluate"),
+            evaluate(&root, &current, &lost).expect("evaluate"),
         ));
 
         // The commit is right there; the digest it claims is not the one that
@@ -1357,7 +1298,7 @@ mod against_a_workspace {
         .expect("canonical");
         answers.push((
             "digest invalid",
-            evaluate(&root, &current, &seal, &wrong).expect("evaluate"),
+            evaluate(&root, &current, &wrong).expect("evaluate"),
         ));
 
         // Every situation above is a different answer. Compared by discriminant,

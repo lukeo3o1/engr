@@ -8,43 +8,15 @@
 //! membership rather than the target, completing a plan proves nothing about
 //! what is in it, and a consumed member is shown rather than quietly repointed.
 
+mod common;
+
 use engr::backlog::Prepared;
 use engr::collection::{self, Level, Priority, Schedule, State};
-use engr::model::{Action, Content, Object, Payload};
-use engr::{backlog, gate, ops, store};
+use engr::{backlog, ops, store};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
+use std::path::Path;
 
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
-
-fn admit(root: &Path, payload: Payload) -> Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(
-        root,
-        Payload {
-            action: Action::ObjectCreated,
-            object: id.clone(),
-            becomes: None,
-            content: Content {
-                text: title.to_owned(),
-                ..Content::default()
-            },
-        },
-    );
-    id
-}
+use common::{new_object, workspace};
 
 fn object_ref(id: &str) -> String {
     format!(
@@ -60,8 +32,37 @@ fn backlog_ref(id: &str) -> String {
     )
 }
 
-fn plan(root: &Path, name: &str) -> collection::Collection {
-    collection::create(root, name, None, None, engr::rules::Attempt::FIRST).expect("create")
+/// A plan under a caller-chosen id derived from its title, so a test that makes
+/// several plans does not have to invent keys.
+fn plan(root: &Path, title: &str) -> collection::Collection {
+    plan_id(root, &slug(title), title)
+}
+
+fn plan_id(root: &Path, id: &str, title: &str) -> collection::Collection {
+    collection::create(root, id, title, None, None, engr::rules::Attempt::FIRST).expect("create")
+}
+
+/// The id grammar is `[a-z0-9][a-z0-9-]{0,31}`, so a title becomes one by
+/// lowercasing, replacing anything else with a dash, and trimming to fit.
+fn slug(title: &str) -> String {
+    let mut out: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    out.truncate(32);
+    while out.starts_with('-') {
+        out.remove(0);
+    }
+    if out.is_empty() {
+        out.push('p');
+    }
+    out
 }
 
 /// Edit a stored plan the way a text editor would.
@@ -78,21 +79,11 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
 /// those would be a fact that can stop being true while the id cannot change,
 /// and renaming a plan must not make it a different plan.
 #[test]
-fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
+fn a_collection_id_is_the_callers_stable_key_independent_of_the_title() {
     let (_dir, root) = workspace();
-    let item = collection::create(
-        &root,
-        "Q3 authentication",
-        None,
-        None,
-        engr::rules::Attempt::FIRST,
-    )
-    .expect("create");
-    assert_eq!(item.id.len(), 10);
-    assert!(item
-        .id
-        .bytes()
-        .all(|byte| "0123456789abcdefghjkmnpqrstvwxyz".contains(byte as char)));
+    let item = plan_id(&root, "auth-q3", "Q3 authentication");
+    assert_eq!(item.id, "auth-q3", "the caller chose it");
+    engr::reference::validate_collection_id(&item.id).expect("the id grammar");
     assert_eq!(item.state, State::Open, "a new plan is being pursued");
 
     // The canonical reference form resolves, and the id survives a rename.
@@ -106,17 +97,10 @@ fn a_collection_id_is_stable_opaque_and_independent_of_the_name() {
     )
     .expect("rename");
     assert_eq!(renamed.id, item.id);
-    assert_eq!(renamed.name, "Q4 authentication");
+    assert_eq!(renamed.title, "Q4 authentication");
 
     // Ids are unique, and a prefix resolves the way object ids do.
-    let other = collection::create(
-        &root,
-        "another plan",
-        None,
-        None,
-        engr::rules::Attempt::FIRST,
-    )
-    .expect("create");
+    let other = plan_id(&root, "billing", "another plan");
     assert_ne!(other.id, item.id);
     assert_eq!(
         collection::resolve_id(&root, &item.id[..6]).expect("prefix"),
@@ -397,6 +381,7 @@ fn a_schedule_is_calendar_dates_and_never_a_timestamp() {
     let (_dir, root) = workspace();
     let dated = collection::create(
         &root,
+        "dated",
         "with dates",
         None,
         Some(Schedule {
@@ -598,6 +583,7 @@ fn deleting_a_plan_is_carried_out_and_reported_rather_than_refused() {
     let object = new_object(&root, "a member");
     let item = collection::create(
         &root,
+        "auth-q3",
         "Q3 authentication",
         None,
         None,
@@ -616,7 +602,7 @@ fn deleting_a_plan_is_carried_out_and_reported_rather_than_refused() {
 
     let removed = collection::remove(&root, &item.id, engr::rules::Attempt::FIRST)
         .expect("the rule is the agent's");
-    assert_eq!(removed.name, "Q3 authentication");
+    assert_eq!(removed.title, "Q3 authentication");
     assert_eq!(removed.members, 1, "and what went with it is reported");
     assert!(collection::load(&root, &item.id).is_err());
 
@@ -633,6 +619,7 @@ fn a_hand_edited_plan_outside_the_schema_is_refused_rather_than_repaired() {
     let object = new_object(&root, "a member");
     let item = collection::create(
         &root,
+        "schema",
         "schema",
         Some("what this plan covers"),
         Some(Schedule {
@@ -759,10 +746,11 @@ fn a_member_must_exist_when_it_is_added_whichever_door_it_comes_through() {
 /// cannot produce. Two names a listing can only tell apart by alignment is the
 /// shadow schema the other domains were already closed against.
 #[test]
-fn a_stored_collection_name_carries_no_surrounding_whitespace() {
+fn a_stored_collection_title_carries_no_surrounding_whitespace() {
     let (_dir, root) = workspace();
     let item = collection::create(
         &root,
+        "auth-q3",
         "  Q3 authentication  ",
         None,
         None,
@@ -770,28 +758,28 @@ fn a_stored_collection_name_carries_no_surrounding_whitespace() {
     )
     .expect("create");
     assert_eq!(
-        item.name, "Q3 authentication",
+        item.title, "Q3 authentication",
         "the write path trims, and that is the existing behaviour"
     );
     let renamed =
         collection::rename(&root, &item.id, "  Q4  ", engr::rules::Attempt::FIRST).expect("rename");
-    assert_eq!(renamed.name, "Q4");
+    assert_eq!(renamed.title, "Q4");
 
     for stored in ["  Q3 ", "Q3 ", " Q3", "Q3\t"] {
         rewrite(&root, &item.id, |value| {
-            value["name"] = json!(stored);
+            value["title"] = json!(stored);
         });
         let error = collection::load(&root, &item.id).expect_err(stored);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{stored:?}");
         assert!(error.message.contains("surrounding whitespace"), "{error}");
     }
 
-    // The trimmed spelling of the same name is fine, which is the point: one
-    // name, one way of storing it.
+    // The trimmed spelling of the same title is fine, which is the point: one
+    // title, one way of storing it.
     rewrite(&root, &item.id, |value| {
-        value["name"] = json!("Q3");
+        value["title"] = json!("Q3");
     });
-    assert_eq!(collection::load(&root, &item.id).expect("load").name, "Q3");
+    assert_eq!(collection::load(&root, &item.id).expect("load").title, "Q3");
 }
 
 /// Admission is decided inside the workspace lock, not before it.

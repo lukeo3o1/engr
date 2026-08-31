@@ -1,38 +1,32 @@
-use engr::model::{
-    Action, Content, Event, HumanConfirmation, Payload, Provenance, TaggedAdmission,
-};
+//! The two admission doors, and the one recovery path behind the Human one.
+//!
+//! What is pinned here is which door a mutation came through, what the record
+//! keeps of it, and that neither door can be used to reach the other's
+//! authority.
+
+mod common;
+
+use common::{payload, wording, Act};
+use engr::model::{Content, Event, EventAdmission, Payload};
 use engr::semantics::Admission;
 use engr::{gate, integrity, proof, rules, store};
 use std::path::Path;
 use std::process::Command;
 
 fn creation(id: &str) -> Payload {
-    Payload {
-        action: Action::ObjectCreated,
-        object: id.to_owned(),
-        becomes: None,
-        content: Content {
-            text: "workspace generation three".to_owned(),
-            ..Content::default()
-        },
-    }
+    payload(Act::Create, id, wording("workspace generation one"))
 }
 
 fn add(id: &str, text: &str) -> Payload {
-    Payload {
-        action: Action::SectionAdded,
-        object: id.to_owned(),
-        becomes: None,
-        content: Content {
-            text: text.to_owned(),
-            ..Content::default()
-        },
-    }
+    payload(Act::Add, id, wording(text))
+}
+
+fn agent_add(id: &str, text: &str) -> Payload {
+    common::agent_payload(Act::Add, id, wording(text))
 }
 
 fn admit_human(root: &Path, payload: Payload) {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.challenge)).expect("confirm");
+    common::admit(root, payload);
 }
 
 fn object_rule(root: &Path) {
@@ -51,26 +45,33 @@ fn attestation(
     result: proof::ReviewResult,
     explanation: Option<&str>,
 ) -> gate::ReviewAttestation {
+    // The value carries its own admission, so a review of an Agent mutation has
+    // to be a review of the Agent-admitted value — not of the same wording with
+    // a Human label on it.
+    let mut payload = payload.clone();
+    if let Some(value) = payload.action.value_mut() {
+        value.admitted.by = admission;
+    }
+    let payload = &payload;
     let before = store::load_object(root, &payload.object).expect("before");
     let mut after = before.clone();
-    let event = Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
-        rev: before.rev + 1,
-        time: "2026-08-25T00:00:00Z".to_owned(),
-        payload: payload.clone(),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: admission,
-                confirmation: (admission == Admission::Human).then(|| HumanConfirmation {
-                    challenge: "ABCD-EFGH".to_owned(),
-                    candidate_digest: format!("1:{}", "0".repeat(64)),
-                }),
-                rule_review: None,
-            },
+    let admitted = match admission {
+        Admission::Human => EventAdmission::human("2026-08-25T00:00:00Z", "ABC234"),
+        Admission::Agent => EventAdmission {
+            by: Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: None,
         },
     };
+    let event = Event::sealed(
+        &payload.object,
+        engr::model::new_id(),
+        payload.action.clone(),
+        before.rev + 1,
+        admitted,
+    )
+    .expect("event");
     engr::model::project(&mut after, &event).expect("project");
     let mutation = proof::object_review_mutation(&before, &after, payload).expect("mutation");
     let binding = rules::bind_object(root, &mutation, before.rev).expect("binding");
@@ -84,34 +85,30 @@ fn attestation(
 }
 
 #[test]
-fn human_gate_emits_candidate_v3_event_v2_and_a_sealed_object() {
+fn the_human_gate_records_the_spent_code_and_seals_what_it_admitted() {
     let temp = tempfile::tempdir().expect("temp");
     store::init(temp.path()).expect("init");
     let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
 
     let prepared = gate::prepare(temp.path(), creation(id)).expect("prepare");
-    assert_eq!(prepared.candidate.version, 3);
-    assert!(prepared.candidate.candidate_digest.starts_with("1:"));
-    assert_eq!(prepared.candidate.integrity_sha256.len(), 64);
+    assert!(prepared.candidate.challenge.digest.starts_with("1:"));
+    let code = prepared.candidate.code().to_owned();
 
-    let admitted = gate::confirm(
-        temp.path(),
-        &format!("CONFIRM {}", prepared.candidate.challenge),
-    )
-    .expect("confirm");
-
-    assert_eq!(admitted.event.version, 2);
-    let Provenance::Tagged { admission } = &admitted.event.provenance else {
-        panic!("Event v2 must carry tagged provenance");
+    let admitted = match engr::confirm(temp.path(), &format!("CONFIRM {code}")).expect("confirm") {
+        engr::Confirmed::Object(admitted) => *admitted,
+        engr::Confirmed::Migration(_) => panic!("an Object confirmation"),
     };
-    assert_eq!(admission.kind, engr::semantics::Admission::Human);
+
+    let recorded = &admitted.event.metadata.admitted;
+    assert_eq!(recorded.by, Admission::Human);
     assert_eq!(
-        admission
+        recorded
             .confirmation
             .as_ref()
             .expect("human confirmation")
-            .candidate_digest,
-        prepared.candidate.candidate_digest
+            .challenge,
+        code,
+        "the record keeps the spent code and nothing else of the challenge"
     );
     integrity::check_stored_object_integrity(&admitted.object).expect("object integrity");
     let loaded = store::load_object(temp.path(), id).expect("load");
@@ -125,7 +122,7 @@ fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
     let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
     admit_human(temp.path(), creation(id));
     object_rule(temp.path());
-    let payload = add(id, "agent-reviewed knowledge");
+    let payload = agent_add(id, "agent-reviewed knowledge");
     let review = attestation(
         temp.path(),
         &payload,
@@ -137,18 +134,12 @@ fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
 
     let admitted = gate::admit_agent(temp.path(), payload, Some(review)).expect("agent admit");
 
-    assert_eq!(admitted.object.sections[0].admission, Admission::Agent);
-    let Provenance::Tagged { admission } = &admitted.event.provenance else {
-        panic!("tagged provenance");
-    };
-    assert_eq!(admission.kind, Admission::Agent);
+    assert_eq!(admitted.object.sections[0].admitted.by, Admission::Agent);
+    let admission = &admitted.event.metadata.admitted;
+    assert_eq!(admission.by, Admission::Agent);
     assert!(admission.confirmation.is_none());
     assert_eq!(
-        admission
-            .rule_review
-            .as_ref()
-            .expect("durable review")
-            .review_digest,
+        admission.review.as_ref().expect("durable review").digest,
         expected
     );
     integrity::check_stored_object_integrity(&admitted.object).expect("integrity");
@@ -222,11 +213,11 @@ fn agent_cli_surfaces_the_review_then_admits_the_same_bound_mutation() {
         String::from_utf8_lossy(&admitted.stderr)
     );
     let output: serde_json::Value = serde_json::from_slice(&admitted.stdout).expect("json");
-    assert_eq!(output["event"]["version"], 2);
-    assert_eq!(output["event"]["admission"]["kind"], "agent");
-    assert_eq!(output["object"]["sections"][0]["admission"], "agent");
+    assert_eq!(output["event"]["type"], "section.created.v1");
+    assert_eq!(output["event"]["metadata"]["admitted"]["by"], "agent");
+    assert_eq!(output["object"]["sections"][0]["admitted"]["by"], "agent");
     assert_eq!(
-        output["event"]["admission"]["rule_review"]["review_digest"],
+        output["event"]["metadata"]["admitted"]["review"]["digest"],
         review.review_digest
     );
 }
@@ -238,7 +229,7 @@ fn human_source_cannot_treat_agent_semantics_as_human_authority() {
     let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
     admit_human(temp.path(), creation(id));
     object_rule(temp.path());
-    let agent_payload = add(id, "agent authority");
+    let agent_payload = agent_add(id, "agent authority");
     let review = attestation(
         temp.path(),
         &agent_payload,
@@ -257,16 +248,15 @@ fn human_source_cannot_treat_agent_semantics_as_human_authority() {
     .expect("stored ref shape");
     let error = gate::prepare(
         temp.path(),
-        Payload {
-            action: Action::SectionAdded,
-            object: id.to_owned(),
-            becomes: None,
-            content: Content {
+        payload(
+            Act::Add,
+            id,
+            Content {
                 text: "human assertion".to_owned(),
-                refs: vec![engr::model::Ref::selective(reference)],
+                refs: vec![reference],
                 ..Content::default()
             },
-        },
+        ),
     )
     .expect_err("Human source authority cannot be borrowed from an Agent Section");
 
@@ -296,29 +286,35 @@ fn human_override_binds_the_review_explanation_and_persists_minimal_provenance()
 
     let prepared = gate::prepare_reviewed(temp.path(), payload, gate::Allowance::Normal, review)
         .expect("reviewed candidate");
+    // The agent's explanation is surfaced at the moment the human is asked; it
+    // is not persisted, because the Challenge freezes the value being confirmed
+    // rather than the argument for confirming it.
     assert_eq!(
         prepared
-            .candidate
-            .context
-            .rule_review
+            .review
             .as_ref()
-            .expect("candidate review")
+            .expect("the review the human is being shown")
             .explanation
             .as_deref(),
         Some("The rule conflicts with an explicit compatibility requirement.")
     );
-    let admitted = gate::confirm(
-        temp.path(),
-        &format!("CONFIRM {}", prepared.candidate.challenge),
-    )
-    .expect("confirm override");
-    let Provenance::Tagged { admission } = &admitted.event.provenance else {
-        panic!("tagged provenance");
-    };
-    let durable = admission.rule_review.as_ref().expect("durable review");
+    // What the Challenge does freeze is the outcome the Event will record, so a
+    // human cannot be shown a failed review and have a passing one written down.
+    let frozen = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .expect("the review being overridden");
+    assert_eq!(frozen.outcome, engr::model::ReviewOutcome::Overridden);
+    assert_eq!(frozen.digest, expected);
+
+    let admitted = common::admitted_code(temp.path(), prepared.candidate.code());
+    let admission = &admitted.event.metadata.admitted;
+    let durable = admission.review.as_ref().expect("durable review");
     assert_eq!(durable.outcome, engr::model::ReviewOutcome::Overridden);
-    assert_eq!(durable.review_digest, expected);
-    assert_eq!(admitted.object.sections[0].admission, Admission::Human);
+    assert_eq!(durable.digest, expected);
+    assert_eq!(admitted.object.sections[0].admitted.by, Admission::Human);
 }
 
 /// Tamper with stored authority without resealing it.
@@ -366,9 +362,9 @@ fn an_integrity_invalid_object_is_recovered_only_through_explicit_repair() {
     let prepared = gate::prepare_repair(root, id).expect("repair prepares");
     assert!(matches!(
         prepared.candidate.payload.action,
-        engr::model::Action::ObjectRepaired
+        engr::model::Action::ObjectRepaired {}
     ));
-    gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.challenge)).expect("confirm");
+    common::confirm(root, prepared.candidate.code());
 
     let repaired = store::load_object(root, id).expect("repaired");
     integrity::check_stored_object_integrity(&repaired).expect("repair reseals");
@@ -381,10 +377,10 @@ fn an_integrity_invalid_object_is_recovered_only_through_explicit_repair() {
     let events = store::load_events(root, id).expect("history");
     let last = events.last().expect("an event");
     assert!(
-        matches!(last.payload.action, engr::model::Action::ObjectRepaired),
+        matches!(last.action, engr::model::Action::ObjectRepaired {}),
         "the repair is visible in immutable history"
     );
-    assert_eq!(last.payload.action.label(), "object.repaired");
+    assert_eq!(last.action.event_type(), "object.repaired.v1");
 
     // And ordinary work is possible again afterwards.
     admit_human(
@@ -470,8 +466,9 @@ fn repair_is_available_as_a_supported_command() {
         String::from_utf8_lossy(&output.stderr)
     );
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("repair json");
-    let candidate = &document["candidate"];
-    assert_eq!(candidate["action"], "object_repaired");
+    let challenge = &document["challenge"];
+    assert_eq!(challenge["subject"]["type"], "object");
+    assert_eq!(challenge["subject"]["data"]["action"], "repair");
 
     // The 3B comparison travels with it: what is restored, what is on disk, and
     // that the stored record does not verify.
@@ -485,11 +482,11 @@ fn repair_is_available_as_a_supported_command() {
         "wording nobody admitted"
     );
 
-    let challenge = candidate["challenge"].as_str().expect("challenge");
+    let code = challenge["id"].as_str().expect("the minted code");
     let confirmed = Command::new(env!("CARGO_BIN_EXE_engr"))
         .arg("--root")
         .arg(root)
-        .args(["confirm", &format!("CONFIRM {challenge}")])
+        .args(["confirm", &format!("CONFIRM {code}")])
         .output()
         .expect("run engr confirm");
     assert!(
@@ -517,12 +514,7 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
     admit_human(root, creation(id));
     admit_human(root, add(id, "wording admitted through the gate"));
 
-    let repair = Payload {
-        action: engr::model::Action::ObjectRepaired,
-        object: id.to_owned(),
-        becomes: None,
-        content: Content::default(),
-    };
+    let repair = Payload::new(id, engr::model::Action::ObjectRepaired {});
     let error = gate::admit_agent(root, repair.clone(), None).expect_err("no agent repair");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("human gate only"), "{error}");
@@ -531,33 +523,31 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
     // call: append an Event-v2 record tagged `agent` carrying the action.
     let path = store::events_path(root, id);
     let history = std::fs::read_to_string(&path).expect("history");
-    let forged = Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
-        rev: store::load_object(root, id).expect("object").rev + 1,
-        time: "2026-08-27T00:00:00Z".to_owned(),
-        payload: repair,
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: Admission::Agent,
-                confirmation: None,
-                // A passing review, so the forgery gets past the check that an
-                // Agent event carries one and reaches the authority rule this
-                // test is actually about.
-                rule_review: Some(engr::model::ReviewProvenance {
-                    outcome: engr::model::ReviewOutcome::Passed,
-                    review_digest: format!("1:{}", "0".repeat(64)),
-                }),
-            },
+    let forged = Event::sealed(
+        id,
+        engr::model::new_id(),
+        repair.action.clone(),
+        store::load_object(root, id).expect("object").rev + 1,
+        EventAdmission {
+            by: Admission::Agent,
+            at: "2026-08-27T00:00:00Z".to_owned(),
+            confirmation: None,
+            // A passing review, so the forgery gets past the check that an Agent
+            // event carries one and reaches the authority rule this test is
+            // actually about.
+            review: Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                digest: format!("1:{}", "0".repeat(64)),
+            }),
         },
-    };
+    )
+    .expect("a well formed but unauthorized record");
     let line = proof::canonical_bytes(&forged, "forged repair").expect("canonical");
     std::fs::write(&path, format!("{history}{line}\n")).expect("append");
 
     let error = store::load_events(root, id).expect_err("a stored agent repair is not history");
     assert!(
-        error.message.contains("human admission"),
+        error.message.contains("Human admission"),
         "refused as an authority violation: {error}"
     );
 }

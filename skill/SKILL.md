@@ -38,17 +38,18 @@ right about what the tool does — say so rather than working around it.
 
 ## The one rule
 
-If engr reports a legacy workspace, reading remains safe but mutation is
-blocked. Get explicit human direction before running `engr migrate`; never
-silently create `.engr/format.json` or rewrite stored records. Never change an
-unknown or newer workspace version.
+If engr reports the released predecessor workspace, every command refuses and
+says so. Get explicit human direction before running `engr migrate`; it only
+proposes the transition, and a human answers the code like any other. Never
+silently create `.engr/VERSION` or rewrite stored records. Never change an
+unknown or newer workspace generation.
 
-Read the refusal before deciding what it means. A workspace at version 1 or 2 is
-a recognized predecessor: it is intact, `engr migrate` moves it forward, and
-version 1 is what the published release wrote, so an old record is a migration
-away rather than lost. A workspace mid-migration says so and asks you to resume.
-A version this build has never heard of is neither — do not offer migration for
-it, and do not go looking for an older binary to bridge with.
+Read the refusal before deciding what it means. The released predecessor is
+intact, `engr migrate` moves it forward, and it is what the published release
+wrote — so an old record is a migration away rather than lost. A workspace
+mid-migration says so and asks you to resume. A generation this build has never
+heard of is neither — do not offer migration for it, and do not go looking for
+an older binary to bridge with.
 
 If engr reports that an object's integrity has failed, every ordinary change to
 it is refused — the record was edited outside an admission path, and letting
@@ -78,8 +79,8 @@ the tool stops you typing it yourself, which is exactly why this is on you:
 > conversation.** Not to finish a task, not to unblock yourself, not because the
 > change is obviously right.
 
-If you confirm your own proposal, its `admission: human` becomes a lie no later
-reader can detect. Use `--agent` for autonomous work; do not impersonate the
+If you confirm your own proposal, its `admitted.by = human` becomes a lie no
+later reader can detect. Use `--agent` for autonomous work; do not impersonate the
 Human path to avoid Rule Review.
 
 ## The loop
@@ -695,13 +696,14 @@ selected values. A Section cannot directly reference itself.
 ## Committing
 
 Objects and admitted history live in the repository. **Remind the human to
-commit `.engr/objects`, `.engr/events`, `.engr/rules`, `.engr/backlog`,
+commit `.engr/objects`, `.engr/eventstore`, `.engr/rules`, `.engr/backlog`,
 `.engr/work` and `.engr/collections`.**
 
 All six. Rules, Work and Collections are non-authoritative, but git is the only
 history they have — an uncommitted policy, plan or handoff is simply lost, and
-losing it silently is worse than never writing it. `.engr/candidates` is the one
-directory that must never be committed, and `.gitignore` already excludes it.
+losing it silently is worse than never writing it. `.engr/local` is the one
+directory that must never be committed — it holds the writer lock and every live
+challenge code — and `.gitignore` already excludes it.
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and

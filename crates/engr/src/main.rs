@@ -143,10 +143,10 @@ impl DomainArg {
 /// what they meant before, which is admitted record and nothing else.
 #[derive(Subcommand)]
 enum Backlog {
-    /// Start a topic with its first unresolved point
+    /// Start a topic under a title, with its first unresolved point
     New {
         #[arg(long)]
-        topic: String,
+        title: String,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
@@ -165,11 +165,11 @@ enum Backlog {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Replace the topic. Does not touch section activity
+    /// Replace the title. Does not touch section activity
     Rename {
         item: String,
         #[arg(long)]
-        topic: String,
+        title: String,
         #[command(flatten)]
         review: ReviewArg,
     },
@@ -437,7 +437,7 @@ enum Format {
     Json,
 }
 
-/// The Phase 3 vocabularies, spelled for a command line. They are the protocol
+/// The Object vocabularies, spelled for a command line. They are the protocol
 /// values, so `clap` rejects anything outside them before a payload exists.
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum TypeArg {
@@ -601,6 +601,10 @@ struct Prepare {
     /// Wording, from a file
     #[arg(long)]
     text_file: Option<PathBuf>,
+    /// A short label for the section, for navigation. Part of what a reference
+    /// can depend on, so changing it is a change to the assertion
+    #[arg(long)]
+    header: Option<String>,
     /// What this section asserts, semantically
     #[arg(long, value_enum, value_name = "ROLE")]
     role: Option<RoleArg>,
@@ -872,7 +876,7 @@ fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
         // what the repair discards. The comparison is reported beside it, as
         // diagnostic material rather than as anything being admitted.
         let document = serde_json::json!({
-            "candidate": prepared.candidate,
+            "challenge": prepared.candidate.challenge,
             "repair": {
                 "stored_verifies": store::load_object(root, object)
                     .ok()
@@ -920,28 +924,37 @@ fn run(cli: Cli) -> Result<()> {
             println!("git          ok");
         } else {
             println!(
-                "git          not a repository — commit {}/objects and {}/events to preserve the record",
+                "git          not a repository — commit {}/objects and {}/eventstore to preserve the record",
                 store::DIR,
                 store::DIR
             );
         }
         return Ok(());
     }
-
     let root = store::find_root(cli.root.as_deref())?;
     if matches!(cli.command, Command::Migrate) {
-        store::migrate(&root)?;
-        println!(
-            "migrated {} to workspace version {}",
-            store::engr_dir(&root).display(),
-            engr::WORKSPACE_VERSION
-        );
+        let proposed = engr::migration::prepare(&root)?;
+        print!("{}", render_migration(&root, &proposed));
         return Ok(());
     }
-    store::validate_format(&root)?;
-    if matches!(
+    // `confirm` is exempt, and only `confirm`. A staged migration makes the
+    // workspace unreadable to every ordinary command until it is resolved — and
+    // resolving it *is* a confirmation, so a boundary that refused this one
+    // would leave the only way out behind the door it locks. What a Challenge
+    // may then do is still decided by its own domain: an Object confirmation
+    // goes through `require_current` and is refused mid-migration like anything
+    // else.
+    if !matches!(cli.command, Command::Confirm { .. }) {
+        store::validate_format(&root)?;
+    }
+    // Every domain but the migration itself reads through this generation’s own
+    // schema, and the released predecessor is a different one. A reader that
+    // fell through to it would not be lenient, it would be answering about a
+    // file it cannot interpret — so the whole surface refuses by name and says
+    // what to do, rather than each command failing somewhere lower down.
+    if !matches!(
         cli.command,
-        Command::Backlog(_) | Command::Work { .. } | Command::Collection { .. } | Command::Rules(_)
+        Command::Confirm { .. } | Command::Candidate { .. }
     ) {
         store::require_current(&root)?;
     }
@@ -953,22 +966,32 @@ fn run(cli: Cli) -> Result<()> {
             prepare(&root, *command)
         }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
-        Command::Confirm { response } => {
-            store::require_current(&root)?;
-            let admitted = gate::confirm(&root, &response)?;
-            println!(
-                "CONFIRMED  {}  {}  rev {}",
-                shorten(&admitted.object.id, view::width(&root)),
-                admitted.event.payload.action.label(),
-                // The event's rev, not the object's. They coincide except on
-                // the already-applied retry — the one path that exists to
-                // reassure someone after a crash, and the one where naming a
-                // later revision would say the wrong thing happened.
-                admitted.event.rev
-            );
-            warn_uncommitted(&root, &admitted.object.id);
-            Ok(())
-        }
+        Command::Confirm { response } => match engr::confirm(&root, &response)? {
+            engr::Confirmed::Object(admitted) => {
+                println!(
+                    "CONFIRMED  {}  {}  rev {}",
+                    shorten(&admitted.object.id, view::width(&root)),
+                    admitted.event.action.event_type(),
+                    // The event's rev, not the object's. They coincide except on
+                    // the already-applied retry — the one path that exists to
+                    // reassure someone after a crash, and the one where naming a
+                    // later revision would say the wrong thing happened.
+                    admitted.event.rev
+                );
+                warn_uncommitted(&root, &admitted.object.id);
+                Ok(())
+            }
+            engr::Confirmed::Migration(report) => {
+                println!(
+                    "MIGRATED   {}  {} objects, {} sections, generation {}",
+                    store::engr_dir(&root).display(),
+                    report.objects.len(),
+                    report.sections,
+                    engr::WORKSPACE_GENERATION
+                );
+                Ok(())
+            }
+        },
         Command::Ls {
             keyword,
             all,
@@ -977,22 +1000,17 @@ fn run(cli: Cli) -> Result<()> {
         } => ls(&root, keyword.as_deref(), all, sections, stale),
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
-            let object = if store::validate_format(&root)? == store::WorkspaceFormat::Current {
-                let stored = store::load_object(&root, &id);
-                if stored.as_ref().is_ok_and(|stored| {
-                    engr::integrity::check_stored_object_integrity(stored).is_ok()
-                }) {
-                    // Reconciliation is a write and shares the same lock as
-                    // admission. The integrity check is repeated inside the
-                    // lock by `reconcile`; this first check only decides
-                    // whether show may repair or must remain diagnostic-only.
-                    ops::reconcile(&root, &id)?
-                } else {
-                    ops::effective(&root, &id)?
-                }
+            let stored = store::load_object(&root, &id);
+            let object = if stored
+                .as_ref()
+                .is_ok_and(|stored| engr::integrity::check_stored_object_integrity(stored).is_ok())
+            {
+                // Reconciliation is a write and shares the same lock as
+                // admission. The integrity check is repeated inside the lock by
+                // `reconcile`; this first check only decides whether show may
+                // repair or must remain diagnostic-only.
+                ops::reconcile(&root, &id)?
             } else {
-                // Explicit migration is the only write allowed to a
-                // predecessor generation, including creation of its lock file.
                 ops::effective(&root, &id)?
             };
             if format == Format::Json {
@@ -1008,12 +1026,7 @@ fn run(cli: Cli) -> Result<()> {
                 .count();
             // Same rule as `verify`: in a current workspace a missing aggregate
             // seal is a failure, not an absence of anything to check.
-            let object_forged = match object.sha256.as_deref() {
-                Some(seal) => engr::integrity::check_object_integrity(&object, seal).is_err(),
-                None => {
-                    engr::store::validate_format(&root)? == engr::store::WorkspaceFormat::Current
-                }
-            };
+            let object_forged = engr::integrity::check_object_integrity(&object).is_err();
             if forged > 0 || object_forged {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
@@ -1040,14 +1053,14 @@ fn run(cli: Cli) -> Result<()> {
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
     match command {
         Backlog::New {
-            topic,
+            title,
             text,
             subjects,
             review,
         } => {
             let item = backlog::create(
                 root,
-                &topic,
+                &title,
                 &text.read()?,
                 subjects.build(root)?,
                 // Creation binds nothing, so it is never treated as governed
@@ -1082,13 +1095,13 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
         }
         Backlog::Rename {
             item,
-            topic,
+            title,
             review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let prepared =
-                review.prepared(|| Ok(vec![backlog::Precondition::topic(root, &id)?]))?;
-            let item = backlog::rename(root, &id, &topic, &prepared)?;
+                review.prepared(|| Ok(vec![backlog::Precondition::title(root, &id)?]))?;
+            let item = backlog::rename(root, &id, &title, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
         }
@@ -1217,15 +1230,80 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
     }
 }
 
+/// Which command was asked for, before its wording is gathered.
+///
+/// The action variants carry their payload, and the payload is not built until
+/// every flag has been read — so the CLI settles *which* action first and fills
+/// it in afterwards. Keeping the two apart is what lets one set of flag checks
+/// serve every action.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chosen {
+    Create,
+    Rename,
+    SectionCreate,
+    SectionUpdate(u64),
+    SectionMerge,
+    SectionDelete(u64),
+    ChangeState,
+    Classify,
+    Supersede,
+}
+
+impl Chosen {
+    fn carries_title(self) -> bool {
+        matches!(self, Self::Create | Self::Rename)
+    }
+
+    fn carries_content(self) -> bool {
+        matches!(
+            self,
+            Self::Create
+                | Self::Rename
+                | Self::SectionCreate
+                | Self::SectionUpdate(_)
+                | Self::SectionMerge
+                | Self::Supersede
+        )
+    }
+
+    /// The actions a destination is admissible on: exactly the ones the
+    /// attention guard would otherwise refuse.
+    fn requires_attention(self) -> bool {
+        matches!(
+            self,
+            Self::Rename
+                | Self::SectionCreate
+                | Self::SectionUpdate(_)
+                | Self::SectionMerge
+                | Self::SectionDelete(_)
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Create => "object.created.v1",
+            Self::Rename => "object.renamed.v1",
+            Self::SectionCreate => "section.created.v1",
+            Self::SectionUpdate(_) => "section.updated.v1",
+            Self::SectionMerge => "section.merged.v1",
+            Self::SectionDelete(_) => "section.deleted.v1",
+            Self::ChangeState => "object.state_changed.v1",
+            Self::Classify => "object.classified.v1",
+            Self::Supersede => "object.superseded.v1",
+        }
+    }
+}
+
 fn prepare(root: &Path, command: Prepare) -> Result<()> {
-    let action = if command.new {
-        Action::ObjectCreated
+    let mut merge = None;
+    let chosen = if command.new {
+        Chosen::Create
     } else if command.rename {
-        Action::ObjectRenamed
+        Chosen::Rename
     } else if command.add {
-        Action::SectionAdded
+        Chosen::SectionCreate
     } else if let Some(section) = command.revise {
-        Action::SectionRevised { section }
+        Chosen::SectionUpdate(section)
     } else if let Some(destination) = command.merge {
         let mut sources = command.sources.clone();
         sources.sort_unstable();
@@ -1237,18 +1315,15 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 ));
             }
         }
-        Action::SectionMerged {
-            merge: Merge::Into {
-                destination,
-                sources,
-            },
-        }
+        merge = Some(Merge {
+            destination,
+            sources,
+        });
+        Chosen::SectionMerge
     } else if let Some(section) = command.delete {
-        Action::SectionDeleted { section }
-    } else if command.close {
-        Action::ObjectClosed
-    } else if command.reopen {
-        Action::ObjectReopened
+        Chosen::SectionDelete(section)
+    } else if command.close || command.reopen {
+        Chosen::ChangeState
     } else if command.classify {
         // Both halves, always. `--untyped` is a word rather than the absence of
         // `--type` because "I want no type" and "I forgot to say" look identical
@@ -1260,15 +1335,9 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 "--classify needs the destination type: --type <TYPE>, or --untyped",
             ));
         }
-        Action::ObjectClassified {
-            object_type: command.object_type.map(TypeArg::model),
-            state: command
-                .state
-                .ok_or_else(|| Error::new(EXIT_USAGE, "--classify needs a destination --state"))?
-                .model(),
-        }
+        Chosen::Classify
     } else {
-        Action::ObjectSuperseded
+        Chosen::Supersede
     };
     // A destination belongs either to `--classify`, which is only a
     // classification, or to an action that needs the object back in the
@@ -1281,15 +1350,32 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     // reducer's call, not the parser's: `gate::prepare` projects a trial event,
     // so an object that already needs attention is refused there, once, with
     // the authority that will still be enforcing it when the event replays.
-    let becomes = if command.classify {
+    let names_a_destination =
+        command.state.is_some() || command.object_type.is_some() || command.untyped;
+    let becomes = if chosen == Chosen::Classify {
         None
-    } else if command.state.is_some() || command.object_type.is_some() || command.untyped {
-        if !action.requires_attention() {
+    } else if chosen == Chosen::ChangeState {
+        // `--close` and `--reopen` *are* the state change, so a destination
+        // riding along would be a second one nobody was asked about. Refused
+        // rather than dropped: a flag that is silently ignored is a flag that
+        // told the caller something untrue about what they confirmed.
+        if names_a_destination {
             return Err(Error::new(
                 EXIT_USAGE,
                 format!(
                     "{} already names the state it produces, so it takes no destination",
-                    action.label()
+                    chosen.label()
+                ),
+            ));
+        }
+        None
+    } else if names_a_destination {
+        if !chosen.requires_attention() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{} already names the state it produces, so it takes no destination",
+                    chosen.label()
                 ),
             ));
         }
@@ -1310,14 +1396,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         None
     };
 
-    let object = match (&action, &command.object) {
-        (Action::ObjectCreated, Some(_)) => {
+    let object = match (chosen, &command.object) {
+        (Chosen::Create, Some(_)) => {
             return Err(Error::new(
                 EXIT_USAGE,
                 "--new mints its own id; drop --object",
             ))
         }
-        (Action::ObjectCreated, None) => model::new_id(),
+        (Chosen::Create, None) => model::new_id(),
         (_, Some(prefix)) => resolve_object_argument(root, "--object", prefix)?,
         (_, None) => {
             return Err(Error::new(
@@ -1342,7 +1428,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         (None, None) => None,
     };
 
-    if action.carries_title() && (command.based_on.is_some() || command.no_based_on) {
+    if chosen.carries_title() && (command.based_on.is_some() || command.no_based_on) {
         return Err(Error::new(
             EXIT_USAGE,
             "a title has no repository basis; use --based-on or --no-based-on only for section wording",
@@ -1350,26 +1436,30 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
     let supplements = command.supplements()?;
     let mut relations = command.relations(root)?;
-    if action.carries_title()
+    if chosen.carries_title()
         && (!command.references.is_empty()
             || command.role.is_some()
+            || command.header.is_some()
             || !supplements.is_empty()
             || !relations.is_empty())
     {
         return Err(Error::new(
             EXIT_USAGE,
-            "a title is a label: --ref, --role, --content and --implemented-by apply only to \
-             section wording",
+            "a title is a label: --ref, --role, --header, --content and --implemented-by apply \
+             only to section wording",
         ));
     }
-    if !action.carries_content()
-        && (command.role.is_some() || !supplements.is_empty() || !relations.is_empty())
+    if !chosen.carries_content()
+        && (command.role.is_some()
+            || command.header.is_some()
+            || !supplements.is_empty()
+            || !relations.is_empty())
     {
         return Err(Error::new(
             EXIT_USAGE,
             format!(
-                "{} carries no wording, so it carries no role, content or relations",
-                action.label()
+                "{} carries no wording, so it carries no header, role, content or relations",
+                chosen.label()
             ),
         ));
     }
@@ -1385,7 +1475,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         references.push(parse_ref(root, spec, fields)?);
     }
     check_unique_arguments(&references, "--ref")?;
-    if !action.carries_content() && command.no_based_on {
+    if !chosen.carries_content() && command.no_based_on {
         return Err(Error::new(
             EXIT_USAGE,
             "--no-based-on applies only to section wording",
@@ -1416,21 +1506,59 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 
     let mut content = gate::content(
         root,
-        text,
+        text.clone(),
         command.based_on.clone(),
-        command.no_based_on || action.carries_title(),
+        command.no_based_on || chosen.carries_title(),
         references,
     )?;
+    content.header = command.header.clone();
     content.role = role;
     content.content = supplements;
     content.relations = relations;
-    let payload = Payload {
-        action,
-        object,
-        becomes,
-        content,
+
+    let admission = if command.agent {
+        semantics::Admission::Agent
+    } else {
+        semantics::Admission::Human
+    };
+    let title = text.unwrap_or_default();
+    let value = || gate::value(content.clone(), admission);
+    let action = match chosen {
+        Chosen::Create => Action::ObjectCreated { title },
+        Chosen::Rename => Action::ObjectRenamed { title, becomes },
+        Chosen::SectionCreate => Action::SectionCreated {
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionUpdate(section) => Action::SectionUpdated {
+            section,
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionMerge => Action::SectionMerged {
+            merge: merge.expect("the merge branch set it"),
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionDelete(section) => Action::SectionDeleted { section, becomes },
+        Chosen::ChangeState => Action::ObjectStateChanged {
+            state: if command.close {
+                semantics::State::Closed
+            } else {
+                semantics::State::Open
+            },
+        },
+        Chosen::Classify => Action::ObjectClassified {
+            object_type: command.object_type.map(TypeArg::model),
+            state: command
+                .state
+                .ok_or_else(|| Error::new(EXIT_USAGE, "--classify needs a destination --state"))?
+                .model(),
+        },
+        Chosen::Supersede => Action::ObjectSuperseded { value: value() },
     };
     let review = command.review()?;
+    let payload = Payload::new(object, action);
     if command.agent {
         ensure!(
             !command.oversize,
@@ -1451,7 +1579,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             println!(
                 "ADMITTED   {}  {}  rev {}  agent",
                 shorten(&admitted.object.id, view::width(root)),
-                admitted.event.payload.action.label(),
+                admitted.event.action.event_type(),
                 admitted.event.rev
             );
             warn_uncommitted(root, &admitted.object.id);
@@ -1472,7 +1600,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     if command.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&prepared.candidate)
+            serde_json::to_string_pretty(&prepared.candidate.challenge)
                 .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
         );
         return Ok(());
@@ -1694,14 +1822,7 @@ fn parse_ref(root: &Path, spec: &str, field_names: &str) -> Result<Ref> {
             })?,
         };
         let target = ops::effective(root, &id)?;
-        let seal = target.sha256.as_deref().ok_or_else(|| {
-            Error::new(
-                engr::EXIT_SCHEMA,
-                format!("reference target object {id} has no aggregate seal"),
-            )
-        })?;
-        return engr::dependency::admit(root, &target, seal, section, &fields, &commit)
-            .map(Ref::selective);
+        return engr::dependency::admit(root, &target, section, &fields, &commit);
     }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
@@ -1723,13 +1844,7 @@ fn parse_ref(root: &Path, spec: &str, field_names: &str) -> Result<Ref> {
         )
     })?;
     let target = ops::effective(root, &id)?;
-    let seal = target.sha256.as_deref().ok_or_else(|| {
-        Error::new(
-            engr::EXIT_SCHEMA,
-            format!("reference target object {id} has no aggregate seal"),
-        )
-    })?;
-    engr::dependency::admit(root, &target, seal, section, &fields, &commit).map(Ref::selective)
+    engr::dependency::admit(root, &target, section, &fields, &commit)
 }
 
 fn shorten(id: &str, width: usize) -> &str {
@@ -1737,31 +1852,21 @@ fn shorten(id: &str, width: usize) -> &str {
 }
 
 fn render_ref(reference: &Ref, width: usize) -> String {
-    let (object, section) = reference
-        .target_identity()
+    let (object, section) = engr::dependency::parse_target(reference.target())
         .unwrap_or_else(|_| ("invalid".to_owned(), 0));
-    match reference {
-        Ref::Selective(reference) => format!(
-            "{} §{}  fields {}  digest {}  commit {}",
-            shorten(&object, width),
-            section,
-            reference
-                .fields()
-                .iter()
-                .map(|field| field.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-            shorten(reference.digest(), 10),
-            shorten(reference.commit(), 8)
-        ),
-        Ref::Legacy(reference) => format!(
-            "{} §{}  sha256 {}  commit {}",
-            shorten(&reference.object, width),
-            reference.section,
-            shorten(&reference.sha256, 8),
-            shorten(&reference.commit, 8)
-        ),
-    }
+    format!(
+        "{} §{}  fields {}  digest {}  commit {}",
+        shorten(&object, width),
+        section,
+        reference
+            .fields()
+            .iter()
+            .map(|field| field.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        shorten(reference.digest(), 10),
+        shorten(reference.commit(), 8)
+    )
 }
 
 fn render_relation(relation: &Relation) -> String {
@@ -1965,9 +2070,9 @@ fn tail_suffix(separator: &str, note: String) -> String {
     }
 }
 
-fn render_basis(basis: Option<&str>) -> String {
+fn render_basis(basis: Option<&semantics::BasedOn>) -> String {
     basis
-        .map(|commit| shorten(commit, 8).to_owned())
+        .map(|basis| shorten(&basis.commit, 8).to_owned())
         .unwrap_or_else(|| "none (explicit)".to_owned())
 }
 
@@ -2048,33 +2153,91 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
     out
 }
 
+/// What the Section being changed says right now, for the screen.
+///
+/// Derived rather than stored. A pending Challenge is only actionable while the
+/// Object still stands at `expected_rev`, so the current Object *is* the
+/// predecessor the human is being shown a change against — and a second copy on
+/// disk could only ever disagree with it. Absent when the Object has moved, in
+/// which case the Challenge is dead and the screen says so separately.
+struct Shown {
+    title: Option<String>,
+    text: Option<String>,
+    section: Option<model::Section>,
+}
+
+fn shown(root: &Path, candidate: &gate::Candidate) -> Shown {
+    let object = ops::effective(root, candidate.object()).ok();
+    let fresh = object
+        .as_ref()
+        .is_some_and(|object| object.rev == candidate.expected_rev());
+    let title = object
+        .as_ref()
+        .filter(|_| fresh)
+        .map(|object| object.title.clone())
+        .filter(|title| !title.is_empty());
+    let section = |id: u64| {
+        object
+            .as_ref()
+            .filter(|_| fresh)
+            .and_then(|object| object.section(id).ok().cloned())
+    };
+    let (text, held) = match &candidate.payload.action {
+        Action::ObjectRenamed { .. } => (title.clone(), None),
+        Action::SectionUpdated { section: id, .. } => {
+            let held = section(*id);
+            (held.as_ref().map(|held| held.text.clone()), held)
+        }
+        Action::SectionDeleted { section: id, .. } => {
+            let held = section(*id);
+            (held.as_ref().map(|held| held.text.clone()), held)
+        }
+        Action::SectionMerged { merge, .. } => {
+            // Every participant, survivor first, because the survivor's own
+            // wording is being replaced too. Showing only what is consumed would
+            // present a merge as if the destination were untouched.
+            let mut parts = Vec::new();
+            for id in merge.participants() {
+                match section(id) {
+                    Some(held) => parts.push(format!("§{id}: {}", held.text.trim_end())),
+                    None => {
+                        return Shown {
+                            title,
+                            text: None,
+                            section: None,
+                        }
+                    }
+                }
+            }
+            (Some(parts.join("\n")), None)
+        }
+        _ => (None, None),
+    };
+    Shown {
+        title,
+        text,
+        section: held,
+    }
+}
+
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
     let mut out = String::new();
+    let payload = &candidate.payload;
+    let shown = shown(root, candidate);
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
     // then `--delete 1` and `--delete 2` render the same screen for two
     // mutations that are not interchangeable: ids are never reused, so
     // confirming the wrong one breaks every reference pinning it with no way
-    // back. `Payload`'s own rustdoc promises "delete §3 cannot become delete §5
-    // after it was displayed" — the hash kept that promise, the screen did not.
-    //
-    // The object gets its title for the same reason. A human asked to assent to
-    // a change is entitled to be told which record they are changing by a name
-    // they would recognise, not only by an abbreviated uuid.
-    //
-    // It comes from the prepared context, never from a fresh read. A live
-    // lookup would put part of the confirmation identity outside the candidate
-    // and outside its integrity value, so a title rewritten afterwards would
-    // change what a pending candidate presents while the payload hash, the
-    // integrity hash and `expected_rev` all still checked out. Omitted when
-    // there is none, which is the case for `object.created` — its title is the
-    // wording below.
-    let subject = match &candidate.payload.action {
-        Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+    // back. The frozen subject's own rustdoc promises "delete §3 cannot become
+    // delete §5 after it was displayed" — the digest kept that promise, the
+    // screen did not.
+    let subject = match &payload.action {
+        Action::SectionUpdated { section, .. } | Action::SectionDeleted { section, .. } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { merge } => {
+        Action::SectionMerged { merge, .. } => {
             // Persisted order is the shared canonical set order, which is over
             // JCS bytes: §10 comes before §2. That is right for hashing and
             // wrong for the line a person reads before answering, so the
@@ -2092,43 +2255,49 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         }
         _ => String::new(),
     };
-    let title = candidate
-        .context
-        .object_title
+    // A human asked to assent to a change is entitled to be told which record
+    // they are changing by a name they would recognise, not only by an
+    // abbreviated uuid.
+    let title = shown
+        .title
         .as_deref()
         .map(|title| format!("  {title}"))
         .unwrap_or_default();
+    // The command, not the Event type. A person is being asked to assent to an
+    // act; what that act becomes in history is a second statement, and the
+    // Challenge makes the first. Showing `section.deleted.v1` would describe the
+    // record rather than the question.
     out.push_str(&format!(
-        "Candidate  {}{}\nObject     {}{}\n",
-        candidate.payload.action.label(),
+        "Challenge  {}{}\nObject     {}{}\n",
+        candidate.subject.action,
         subject,
-        shorten(&candidate.payload.object, width),
+        shorten(payload.object.as_str(), width),
         title
     ));
     // A repair is confirmed against a comparison, not against wording. It
     // carries no content of its own, so without this the screen would say only
     // that something is being restored, and a person would be assenting to the
     // discarding of material they were never shown.
-    if matches!(candidate.payload.action, Action::ObjectRepaired) {
-        out.push_str(&render_repair_comparison(root, &candidate.payload.object));
+    if matches!(payload.action, Action::ObjectRepaired {}) {
+        out.push_str(&render_repair_comparison(root, &payload.object));
     }
-    // A title is a label, not wording written against code, so the commit it
-    // happened to be typed at says nothing about the change being confirmed.
-    // It stays in the payload; it just does not belong on this screen, where
-    // every line that means nothing is a line that trains people to skim.
     // The whole destination, both halves, because that is what is being
     // confirmed: a state read without the type it belongs to is a word that
     // means different things on different objects.
-    // Both spellings of a destination reach this screen the same way: one is a
-    // classification on its own, the other rides along with a section action to
-    // bring the object back into attention in the same confirmation. Either way
-    // it is part of what is being confirmed, so it is part of what is shown.
-    let destination = match &candidate.payload.action {
+    //
+    // Both spellings reach this screen the same way: a classification on its
+    // own, or a destination riding along with a section action to bring the
+    // object back into attention in the same confirmation.
+    let destination = match &payload.action {
         Action::ObjectClassified { object_type, state } => Some((*object_type, *state)),
-        _ => candidate
-            .payload
-            .becomes
-            .as_ref()
+        Action::ObjectStateChanged { state } => {
+            let object_type = ops::effective(root, &payload.object)
+                .ok()
+                .and_then(|object| object.object_type);
+            Some((object_type, *state))
+        }
+        _ => payload
+            .becomes()
             .map(|becomes| (becomes.object_type, becomes.state)),
     };
     if let Some((object_type, state)) = destination {
@@ -2143,88 +2312,89 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             }
         ));
     }
-    if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
-        if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
-            if !candidate.context.previous_semantics_recorded {
-                out.push_str(
-                    "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
+    if let Some(value) = payload.action.value() {
+        let content = &value.content;
+        match &shown.section {
+            Some(previous) => {
+                render_header(
+                    &mut out,
+                    previous.header.as_deref(),
+                    content.header.as_deref(),
                 );
-            }
-            render_role(
-                &mut out,
-                candidate.context.previous_role,
-                candidate.payload.content.role,
-            );
-            render_supplement_diff(
-                &mut out,
-                &candidate.context.previous_content,
-                &candidate.payload.content.content,
-            );
-            for relation in &candidate.context.previous_relations {
-                if !candidate.payload.content.relations.contains(relation) {
-                    out.push_str(&format!("Relation - {}\n", render_relation(relation)));
+                render_role(&mut out, previous.role, content.role);
+                render_supplement_diff(&mut out, &previous.content, &content.content);
+                for relation in &previous.relations {
+                    if !content.relations.contains(relation) {
+                        out.push_str(&format!("Relation - {}\n", render_relation(relation)));
+                    }
+                }
+                for relation in &content.relations {
+                    if !previous.relations.contains(relation) {
+                        out.push_str(&format!("Relation + {}\n", render_relation(relation)));
+                    }
+                }
+                if previous.based_on != content.based_on {
+                    out.push_str(&format!(
+                        "Based on - {}\nBased on + {}\n",
+                        render_basis(previous.based_on.as_ref()),
+                        render_basis(content.based_on.as_ref())
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "Based on   {}\n",
+                        render_basis(content.based_on.as_ref())
+                    ));
+                }
+                for reference in &previous.refs {
+                    if !content.refs.contains(reference) {
+                        out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                    }
+                }
+                for reference in &content.refs {
+                    if !previous.refs.contains(reference) {
+                        out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
+                    }
                 }
             }
-            for relation in &candidate.payload.content.relations {
-                if !candidate.context.previous_relations.contains(relation) {
-                    out.push_str(&format!("Relation + {}\n", render_relation(relation)));
+            None => {
+                if let Some(header) = &content.header {
+                    out.push_str(&format!("Header     {header}\n"));
                 }
-            }
-            if candidate.context.previous_based_on != candidate.payload.content.based_on {
-                out.push_str(&format!(
-                    "Based on - {}\nBased on + {}\n",
-                    render_basis(candidate.context.previous_based_on.as_deref()),
-                    render_basis(candidate.payload.content.based_on.as_deref())
-                ));
-            } else {
+                if let Some(role) = content.role {
+                    out.push_str(&format!("Role       {}\n", role.as_str()));
+                }
+                for (index, entry) in content.content.iter().enumerate() {
+                    out.push_str(&format!("Content    [{index}] {}\n", entry.content_type));
+                }
+                for relation in &content.relations {
+                    out.push_str(&format!("Relation   {}\n", render_relation(relation)));
+                }
                 out.push_str(&format!(
                     "Based on   {}\n",
-                    render_basis(candidate.payload.content.based_on.as_deref())
+                    render_basis(content.based_on.as_ref())
                 ));
-            }
-            for reference in &candidate.context.previous_refs {
-                if !candidate.payload.content.refs.contains(reference) {
-                    out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                for reference in &content.refs {
+                    out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
                 }
-            }
-            for reference in &candidate.payload.content.refs {
-                if !candidate.context.previous_refs.contains(reference) {
-                    out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
-                }
-            }
-        } else {
-            if let Some(role) = candidate.payload.content.role {
-                out.push_str(&format!("Role       {}\n", role.as_str()));
-            }
-            for (index, entry) in candidate.payload.content.content.iter().enumerate() {
-                out.push_str(&format!("Content    [{index}] {}\n", entry.content_type));
-            }
-            for relation in &candidate.payload.content.relations {
-                out.push_str(&format!("Relation   {}\n", render_relation(relation)));
-            }
-            out.push_str(&format!(
-                "Based on   {}\n",
-                render_basis(candidate.payload.content.based_on.as_deref())
-            ));
-            for reference in &candidate.payload.content.refs {
-                out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
             }
         }
-        if matches!(candidate.payload.action, Action::ObjectSuperseded) {
+        out.push_str(&format!(
+            "Admitted   {} by {}\n",
+            value.admitted.at,
+            value.admitted.by.as_str()
+        ));
+        if matches!(payload.action, Action::ObjectSuperseded { .. }) {
             out.push_str(
                 "State      superseded — this object leaves the default listing, and the \
                  relation above is where a reader is sent instead\n",
             );
         }
-        // Loud, and above the wording. The human is being asked to admit
-        // something engr already refused once, and the only way that stays a
-        // decision rather than a formality is if the screen says so before they
-        // read the text.
-        if candidate.context.oversize {
-            let exceeded = semantics::exceeded(
-                &candidate.payload.content.text,
-                &candidate.payload.content.content,
-            );
+        // Loud, and above the wording. A proposal that broke a normal threshold
+        // was refused once already, and the only way its admission stays a
+        // decision rather than a formality is if the screen says so before the
+        // text is read.
+        let exceeded = semantics::exceeded(&content.text, &content.content);
+        if !exceeded.is_empty() {
             out.push_str(&format!(
                 "OVERSIZE   admitted by exception: {}\n",
                 exceeded
@@ -2235,36 +2405,36 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             ));
         }
     }
-    if let Some(review) = &candidate.context.rule_review {
-        let result = match review.result {
-            engr::proof::ReviewResult::Passed => "passed",
-            engr::proof::ReviewResult::Failed => "failed — Human override required",
-            engr::proof::ReviewResult::Exhausted => "exhausted — Human override required",
+    // The Rule Review is rebound from live Rules rather than read off the
+    // Challenge, so what the screen says is what confirmation will find.
+    if let Some(review) = &candidate.subject.review {
+        let outcome = match review.outcome {
+            model::ReviewOutcome::Passed => "passed",
+            model::ReviewOutcome::Overridden => {
+                "failed or exhausted — confirming this overrides it"
+            }
         };
         out.push_str(&format!(
-            "Review     {result}\nAttempt    {}\nDigest     {}\nRules      {}\n",
-            review.attempt,
-            review.review_digest,
-            review
-                .rules
-                .iter()
-                .map(|rule| rule.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "Review     {outcome}\nDigest     {}\n",
+            review.digest
         ));
-        if let Some(explanation) = &review.explanation {
-            out.push_str("Explanation\n");
-            for line in explanation.lines() {
-                out.push_str(&format!("  {line}\n"));
+        if let Ok(rules) = live_rules(root, candidate) {
+            if !rules.is_empty() {
+                out.push_str(&format!("Rules      {}\n", rules.join(", ")));
             }
         }
     }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
     // everything is how confirmation decays into rubber-stamping.
-    match (&candidate.context.previous_text, &candidate.payload.action) {
-        (Some(previous), _) => {
-            let diff = similar::TextDiff::from_lines(previous, &candidate.payload.content.text);
+    let wording = payload
+        .action
+        .value()
+        .map(|value| value.content.text.clone())
+        .or_else(|| payload.action.title().map(str::to_owned));
+    match (&shown.text, wording) {
+        (Some(previous), Some(current)) => {
+            let diff = similar::TextDiff::from_lines(previous.as_str(), current.as_str());
             out.push_str(
                 &diff
                     .unified_diff()
@@ -2273,24 +2443,31 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .to_string(),
             );
         }
-        (None, _) if candidate.payload.action.carries_content() => {
-            out.push_str(candidate.payload.content.text.trim_end());
+        (None, Some(current)) => {
+            out.push_str(current.trim_end());
             out.push('\n');
         }
-        (None, action) => {
-            out.push_str(&format!("({})\n", action.label()));
+        (_, None) => {
+            out.push_str(&format!("({})\n", payload.action.event_type()));
         }
     }
     // In full, and never elided. Supplementary content is part of the assertion
     // being confirmed and part of what gets hashed, so a human who was shown
     // only its type has not read what they are about to admit. It is bounded
     // precisely so that printing all of it stays reasonable.
-    render_supplement_bodies(
-        &mut out,
-        &candidate.context.previous_content,
-        &candidate.payload.content.content,
-        candidate.context.previous_semantics_recorded,
-    );
+    if let Some(value) = payload.action.value() {
+        let previous = shown
+            .section
+            .as_ref()
+            .map(|section| section.content.clone())
+            .unwrap_or_default();
+        render_supplement_bodies(
+            &mut out,
+            &previous,
+            &value.content.content,
+            shown.section.is_some(),
+        );
+    }
     // Above the code, not below it: the point of a note is to be read while
     // there is still a decision to make.
     for note in notes {
@@ -2303,9 +2480,36 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     }
     out.push_str(&format!(
         "\nType this exactly to confirm:  CONFIRM {}\n",
-        candidate.challenge
+        candidate.code()
     ));
     out
+}
+
+/// The Rules governing this mutation right now, for the screen.
+fn live_rules(root: &Path, candidate: &gate::Candidate) -> Result<Vec<String>> {
+    let before = ops::effective(root, candidate.object()).unwrap_or(model::Object::new(
+        candidate.object().to_owned(),
+        String::new(),
+    )?);
+    let mut after = before.clone();
+    let probe = gate::preview_event(&candidate.payload, before.rev + 1)?;
+    model::project(&mut after, &probe)?;
+    let mutation = engr::proof::object_review_mutation(&before, &after, &candidate.payload)?;
+    Ok(rules::bind_object(root, &mutation, candidate.expected_rev())?.rule_ids())
+}
+
+fn render_header(out: &mut String, previous: Option<&str>, current: Option<&str>) {
+    if previous == current {
+        if let Some(header) = current {
+            out.push_str(&format!("Header     {header}\n"));
+        }
+        return;
+    }
+    out.push_str(&format!(
+        "Header   - {}\nHeader   + {}\n",
+        previous.unwrap_or("(none)"),
+        current.unwrap_or("(none)")
+    ));
 }
 
 fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
@@ -2346,15 +2550,15 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                 };
                 println!(
                     "{}   {:<16} {} {:<8} {}",
-                    candidate.challenge,
-                    candidate.payload.action.label(),
+                    candidate.code(),
+                    candidate.payload.action.event_type(),
                     shorten(&candidate.payload.object, width),
                     match gate::candidate_state(root, &candidate)? {
                         gate::CandidateState::Pending => "pending",
                         gate::CandidateState::AlreadyApplied(_) => "retry",
                         gate::CandidateState::Stale { .. } => "stale",
                     },
-                    candidate.created_at
+                    candidate.challenge.created_at
                 );
             }
             Ok(())
@@ -2502,7 +2706,7 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
 fn warn_uncommitted(root: &Path, id: &str) {
     if git::uncommitted(root, &store::object_path(root, id)) == Some(true) {
         println!(
-            "note       commit {}/objects and {}/events to preserve history and look-back",
+            "note       commit {}/objects and {}/eventstore to preserve history and look-back",
             store::DIR,
             store::DIR
         );
@@ -2860,10 +3064,12 @@ fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) ->
 /// that looks like one that does.
 #[derive(Subcommand)]
 enum CollectionCommand {
-    /// Start a plan
+    /// Start a plan under an id you choose
     New {
+        /// The plan's stable workspace-scoped key: [a-z0-9][a-z0-9-]{0,31}
+        id: String,
         #[arg(long)]
-        name: String,
+        title: String,
         #[arg(long)]
         description: Option<String>,
         #[command(flatten)]
@@ -2877,11 +3083,11 @@ enum CollectionCommand {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Replace the name
+    /// Replace the title
     Rename {
         collection: String,
         #[arg(long)]
-        name: String,
+        title: String,
     },
     /// Replace the description. Omit --text to clear it
     Describe {
@@ -3059,13 +3265,15 @@ fn collection_command(
 ) -> Result<()> {
     match command {
         CollectionCommand::New {
-            name,
+            id,
+            title,
             description,
             schedule,
         } => {
             let item = collection::create(
                 root,
-                &name,
+                &id,
+                &title,
                 description.as_deref(),
                 schedule.build(),
                 attempt,
@@ -3093,7 +3301,7 @@ fn collection_command(
                         collection::State::Completed => 1,
                         collection::State::Cancelled => 2,
                     },
-                    item.name.to_lowercase(),
+                    item.title.to_lowercase(),
                 )
             });
             print!("{}", view::render_collection_ls(root, &found));
@@ -3106,9 +3314,9 @@ fn collection_command(
                 Format::Json => println!("{}", view::render_collection_json(&item)?),
             }
         }
-        CollectionCommand::Rename { collection, name } => {
+        CollectionCommand::Rename { collection, title } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::rename(root, &id, &name, attempt)?;
+            let item = collection::rename(root, &id, &title, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Describe { collection, text } => {
@@ -3179,7 +3387,7 @@ fn collection_command(
             // was discarded rather than pretending it can.
             println!(
                 "deleted collection {id} — {:?}, {} member(s) of planning context",
-                removed.name, removed.members
+                removed.title, removed.members
             );
         }
     }
@@ -3361,4 +3569,57 @@ fn basis_trouble(root: &Path, rule: &rules::Rule) -> Option<String> {
         .iter()
         .find_map(|basis| basis.resolve(root, &rule.id).err())
         .map(|error| error.message)
+}
+
+/// What `engr migrate` puts on the screen.
+///
+/// A migration is confirmed like any other question, so the screen has the same
+/// job: say exactly what is being asked, and end with the phrase that answers
+/// it. What makes it different is scale — the human is assenting to every Object
+/// at once — so each one is named with what it becomes.
+fn render_migration(root: &Path, proposed: &engr::migration::Proposed) -> String {
+    let mut out = String::new();
+    let width = view::width(root);
+    out.push_str(&format!(
+        "Challenge  migration\nWorkspace  {}\nFrom       {} version {}\nTo         generation {}\n",
+        store::engr_dir(root).display(),
+        proposed.subject.from.format,
+        proposed.subject.from.version,
+        proposed.subject.to
+    ));
+    if proposed.resumed {
+        out.push_str(
+            "Resumed    this plan was already staged; the code below is the one it is waiting on\n",
+        );
+    }
+    out.push('\n');
+    for object in &proposed.subject.objects {
+        out.push_str(&format!(
+            "{}  rev {} -> 1  {} section{}  {}\n",
+            shorten(&object.object, width),
+            object.predecessor_rev,
+            object.sections,
+            if object.sections == 1 { "" } else { "s" },
+            object.title
+        ));
+    }
+    out.push_str(&format!(
+        "\n{} predecessor file{} will be read, converted, and replaced.\n",
+        proposed.subject.source.len(),
+        if proposed.subject.source.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    ));
+    out.push_str(
+        "The predecessor's own event history is discarded rather than translated: each Object\n\
+         gets one object.migrated.v1 bootstrap at revision 1. Any pending candidate is not\n\
+         migrated and must be prepared again.\n",
+    );
+    out.push_str(&format!(
+        "\nType this exactly to confirm:  CONFIRM {}\n",
+        proposed.challenge
+    ));
+    out
 }
