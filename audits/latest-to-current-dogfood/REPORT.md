@@ -216,21 +216,31 @@ None of these blocks the upgrade. All are surface defects; the record itself was
 correct throughout. They are recorded as Backlog points in the audit workspace
 as well as here.
 
-### F1 — `verify` reports PASS on a workspace whose dependency has moved
+### F1 — `verify` says PASS on a moved dependency, and its help does not say why
 
-`engr verify --help` says "Verify Object and Section integrity plus
-dependencies". After a *selected* field of a Ref target was changed through the
-ordinary gate, `verify` printed `PASS` and exited 0 for the dependent Object,
-while at the same moment `ls` printed `1 stale` and `show` printed `refs moved`
-with the moved fields named.
+After a *selected* field of a Ref target was changed through the ordinary gate,
+`verify` printed `PASS` and exited 0 for the dependent Object, while at the same
+moment `ls` printed `1 stale` and `show` printed `refs moved` with the moved
+fields named.
 
-The drift detection is correct. The disagreement between surfaces is the
-problem: an agent that uses `verify` as its health gate — the natural choice,
-given the name and the help text — gets a clean answer on a workspace that two
-other surfaces call stale.
+The behaviour is deliberate. `ops::verify` matches
+`Dependency::Unchanged | Dependency::Drifted { .. } => {}` and reports only
+`TargetIntegrityFailure`, `TargetMissing`, `DigestInvalid`, `SchemaMismatch` and
+`ProvenanceUnavailable`. That is a coherent line to draw: a broken seal is
+corruption, and drift is a legitimate change somebody made on purpose. The
+adversarial matrix confirms the line holds — a bad Ref digest, a repointed Ref
+and an unavailable historical commit all make `verify` FAIL with exit 5.
 
-This is not caused by PR #67; the Ref-target change does not touch drift
-reporting. Evidence: `evidence/adv-verify-vs-show.txt`.
+The finding is that nothing tells an agent where that line is. `verify --help`
+reads "Verify Object and Section integrity **plus dependencies**", which is true
+of dependency *faults* and not of dependency *drift*, and the two sibling
+surfaces both report the drift the same second. An agent that picks `verify` as
+its health gate — the natural choice, given the name and the help text — gets a
+clean answer on a workspace `ls` calls stale, and has no way to learn from the
+CLI that this was intended.
+
+Not caused by PR #67: `crates/engr/src/ops.rs` is untouched across the whole PR
+range. Evidence: `evidence/adv-verify-vs-show.txt`.
 
 ### F2 — a refusal names a command-line flag that does not exist
 
@@ -318,9 +328,11 @@ right.
 
 **Where it costs an agent.**
 
-- *`verify` is the obvious health check and is the one that under-reports* (F1).
-  An agent will run `verify`, see PASS, and never learn its dependencies moved.
-  Of everything here, this is the one most likely to produce a confidently wrong
+- *`verify` is the obvious health check, and the one place drift does not
+  surface* (F1). The split between dependency faults and dependency drift is
+  deliberate and defensible, but no CLI surface says where it falls, so an agent
+  will run `verify`, see PASS, and never learn its dependencies moved. Of
+  everything here, this is the one most likely to produce a confidently wrong
   agent.
 - *Two-step Rule Review needs the full command repeated.* The first attempt is
   always a refusal that hands back a digest; the agent must reissue the entire
@@ -359,7 +371,9 @@ A migration killed mid-publication resumed to a byte-identical result and kept
 the instant the human's answer was actually applied, six seconds after the
 process died.
 
-The gaps are surface-level. F1 is the one worth fixing before an agent is told
-to rely on `verify` as its health gate; F2 and F4 are wrong text on surfaces an
-agent reads first. None of them can put a false fact into the record, which is
-the property the record exists to have.
+The gaps are surface-level, and every one of them is text rather than behaviour.
+F1 is the one worth settling before an agent is told to rely on `verify` as its
+health gate — the split it draws is defensible, but nothing on the CLI says
+where the split falls. F2 and F4 are simply wrong on surfaces an agent reads
+first. None of them can put a false fact into the record, which is the property
+the record exists to have.
