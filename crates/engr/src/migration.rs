@@ -574,6 +574,17 @@ pub fn prepare(root: &Path) -> Result<Proposed> {
 }
 
 fn prepare_locked(root: &Path) -> Result<Proposed> {
+    // A completed transaction that did not finish sweeping up.
+    //
+    // `VERSION` is written after the last destination byte, so once it exists
+    // there is no migration left to resume — only residue from a crash between
+    // spending the Challenge and removing the stage. Reading the stage as an
+    // unfinished transaction here is what made that window unrecoverable: the
+    // resume branch below demands the Challenge the same `finish` had already
+    // removed, and answers with an instruction to delete files by hand.
+    if store::version_path(root).exists() {
+        sweep_completed_stage(root)?;
+    }
     if let Some(manifest) = staged(root)? {
         // A staged plan is the question a human is already holding. Re-deriving
         // it would mint a second code for the same migration and void the one
@@ -792,29 +803,58 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
             "the destination was staged and cannot be read back".to_owned(),
         )
     })?;
-    stop_after_destination_for_test(&challenge.id)?;
+    stop_for_test(Stage::AfterDestination, &challenge.id)?;
     finish(root, challenge, ready, sections)
 }
 
-/// Integration tests need to exercise the real post-confirmation crash
-/// boundary. The value is the exact Challenge code, so an inherited or stale
-/// variable cannot stop an unrelated migration. Release builds contain no
-/// failure hook.
+/// The points in the confirmed transaction a crash can land between.
+///
+/// Each one is a real boundary the publication crosses, named so a test can ask
+/// for it. They exist because the properties that matter here — converges, does
+/// not duplicate, does not lie about when it was admitted — are properties *of
+/// the windows between writes*, and a window nothing can stop inside is a window
+/// nothing checks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Destination staged and verified; nothing published.
+    AfterDestination,
+    /// Every destination byte published; `VERSION` not yet written.
+    BeforeVersion,
+    /// `VERSION` written; the spent Challenge and the stage still on disk.
+    BeforeChallenge,
+}
+
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Stage::AfterDestination => "destination",
+            Stage::BeforeVersion => "version",
+            Stage::BeforeChallenge => "challenge",
+        }
+    }
+}
+
+/// Stop at a named boundary, for tests that need the real one.
+///
+/// The variable carries `<stage>:<challenge>`, so an inherited or stale value
+/// cannot stop a migration it was not aimed at. Release builds contain no
+/// failure hook at all.
 #[cfg(debug_assertions)]
-fn stop_after_destination_for_test(challenge: &str) -> Result<()> {
-    if std::env::var_os("ENGR_TEST_STOP_MIGRATION_AFTER_DESTINATION")
-        .is_some_and(|requested| requested == std::ffi::OsStr::new(challenge))
+fn stop_for_test(stage: Stage, challenge: &str) -> Result<()> {
+    let requested = format!("{}:{challenge}", stage.as_str());
+    if std::env::var_os("ENGR_TEST_STOP_MIGRATION")
+        .is_some_and(|value| value == std::ffi::OsStr::new(&requested))
     {
         return Err(Error::new(
             EXIT_INVARIANT,
-            "test interruption after confirmed migration destination staging".to_owned(),
+            format!("test interruption at migration stage {}", stage.as_str()),
         ));
     }
     Ok(())
 }
 
 #[cfg(not(debug_assertions))]
-fn stop_after_destination_for_test(_challenge: &str) -> Result<()> {
+fn stop_for_test(_stage: Stage, _challenge: &str) -> Result<()> {
     Ok(())
 }
 /// Everything from the staged destination onward, which is also the whole of
@@ -827,24 +867,44 @@ fn finish(
 ) -> Result<Report> {
     publish(root, &ready)?;
     let ids = ready.iter().map(|(id, _, _)| id.clone()).collect();
-    // Last, and only after everything else landed. While `VERSION` is absent the
-    // transaction is unfinished and the staged destination is what finishes it;
-    // the moment it exists, every read surface is looking at the new generation.
+    stop_for_test(Stage::BeforeVersion, &challenge.id)?;
+    // Last of the authoritative writes, and only after everything else landed.
+    // While `VERSION` is absent the transaction is unfinished and the staged
+    // destination is what finishes it; the moment it exists, every read surface
+    // is looking at the new generation and nothing left under `local/` can make
+    // it not so.
     store::write_generation(root)?;
-    // A spent code resolves to nothing, so the file goes with the question it
-    // asked — the same disposal an ordinary confirmation performs.
-    let spent = store::challenge_path(root, &challenge.id)?;
-    if spent.exists() {
-        fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
+    stop_for_test(Stage::BeforeChallenge, &challenge.id)?;
+    sweep_completed_stage(root)?;
+    Ok(Report {
+        objects: ids,
+        sections,
+    })
+}
+
+/// Dispose of what a completed migration leaves behind.
+///
+/// Called at the end of `finish` and again by `prepare` whenever `VERSION`
+/// already exists, because those are the two moments the answer is knowable and
+/// the writer lock is held. Every step is conditional and order-independent, so
+/// a crash part way through leaves work this can simply do again.
+///
+/// The spent Challenge goes first. It is the one piece of residue that still
+/// looks actionable — a code sitting in `challenges/` reads as a question
+/// somebody could answer — and the stage is what tells a later sweep which code
+/// that was.
+fn sweep_completed_stage(root: &Path) -> Result<()> {
+    if let Some(manifest) = staged(root)? {
+        let spent = store::challenge_path(root, &manifest.challenge)?;
+        if spent.exists() {
+            fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
+        }
     }
     let stage = stage_dir(root);
     if stage.exists() {
         fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
     }
-    Ok(Report {
-        objects: ids,
-        sections,
-    })
+    Ok(())
 }
 
 /// The destination workspace, written where the predecessor cannot be harmed by
@@ -964,12 +1024,38 @@ fn confirmed_destination(
         "the staged destination was written for challenge {}, not {challenge}",
         destination.challenge
     );
+    // The exact set, not the count and a lookup each way.
+    //
+    // Counting entries and then finding a plan for each one is satisfied by a
+    // manifest that names one Object twice and another not at all: every entry
+    // finds its plan, the lengths match, and `ready` comes out holding the
+    // duplicate while the missing Object is never published. `VERSION` would
+    // then be written over a workspace where that Object's predecessor bytes
+    // still sit at the canonical current path with no stream behind them.
+    let staged: BTreeSet<&str> = destination
+        .files
+        .iter()
+        .map(|file| file.object.as_str())
+        .collect();
     ensure!(
-        destination.files.len() == subject.objects.len(),
+        staged.len() == destination.files.len(),
         EXIT_INVARIANT,
-        "the staged destination holds {} objects and the confirmed plan names {}",
-        destination.files.len(),
-        subject.objects.len()
+        "the staged destination names the same Object more than once"
+    );
+    let planned: BTreeSet<&str> = subject
+        .objects
+        .iter()
+        .map(|object| object.object.as_str())
+        .collect();
+    ensure!(
+        planned.len() == subject.objects.len(),
+        EXIT_INVARIANT,
+        "the confirmed migration plan names the same Object more than once"
+    );
+    ensure!(
+        staged == planned,
+        EXIT_INVARIANT,
+        "the staged destination is not the set of Objects the confirmed plan names"
     );
     let mut ready = Vec::new();
     for file in &destination.files {
@@ -989,18 +1075,27 @@ fn confirmed_destination(
             "{} was staged as a value the confirmed plan does not name",
             file.object
         );
-        let object_text = read_staged(&dir.join("objects").join(format!("{}.json", file.object)))?;
-        let event_text = read_staged(
-            &dir.join("eventstore")
-                .join(format!("{}.jsonl", file.object)),
-        )?;
-        let object = store::decode_object(
-            Path::new(&file.object),
-            &file.object,
-            serde_json::from_str(&object_text).map_err(|error| {
-                Error::new(EXIT_SCHEMA, format!("staged {}: {error}", file.object))
-            })?,
-        )?;
+        let object_path = dir.join("objects").join(format!("{}.json", file.object));
+        let event_path = dir
+            .join("eventstore")
+            .join(format!("{}.jsonl", file.object));
+        let object_text = read_staged(&object_path)?;
+        let event_text = read_staged(&event_path)?;
+
+        // Read through the ordinary current-generation readers, on the exact
+        // bytes publication will write.
+        //
+        // Publication copies these strings verbatim, so anything this accepts is
+        // something the workspace will hold — and `VERSION` goes down after it,
+        // declaring the result current. A check that only proved the bytes
+        // *parse into* the right value would let a semantically identical
+        // rewrite through: different member order, different whitespace, an
+        // explicit null where the writer omits the member. All of those satisfy
+        // the digests, because the digests are taken over the value. None of
+        // them satisfy the read path, which requires the canonical JCS bytes —
+        // so the transaction would activate a workspace unable to read its own
+        // migrated resources.
+        let object = store::decode_object_text(&object_path, &file.object, &object_text)?;
         ensure!(
             object.digest == file.object_digest
                 && object.recomputed_digest()? == file.object_digest,
@@ -1008,9 +1103,17 @@ fn confirmed_destination(
             "the staged Object for {} is not the value it was staged as",
             file.object
         );
-        let event: Event = serde_json::from_str(event_text.trim_end())
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("staged {}: {error}", file.object)))?;
-        event.validate(&file.object)?;
+        let events = store::decode_events(&event_path, &file.object, &event_text)?;
+        let [event] = events.as_slice() else {
+            return Err(Error::new(
+                EXIT_INVARIANT,
+                format!(
+                    "the staged stream for {} holds {} Events; a migrated Object bootstraps with exactly one",
+                    file.object,
+                    events.len()
+                ),
+            ));
+        };
         ensure!(
             event.digest == file.event_digest,
             EXIT_INVARIANT,

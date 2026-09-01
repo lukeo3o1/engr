@@ -214,6 +214,20 @@ pub fn init(root: &Path) -> Result<PathBuf> {
 }
 
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
+    // `VERSION` first, and the order is the whole of what makes this correct.
+    // It is written last, after every destination byte is published, so its
+    // presence *is* the statement that the transaction completed. A stage left
+    // beside it is therefore residue from a crash between spending the
+    // Challenge and sweeping up — not an unfinished migration, and not a reason
+    // to refuse reads of a workspace that is already current.
+    //
+    // Asking about the stage first said the opposite, and left a crash window
+    // in which every read refused while the only command the refusal named
+    // could no longer do anything about it.
+    if version_path(root).exists() {
+        read_generation(root)?;
+        return Ok(WorkspaceFormat::Current);
+    }
     let migration = crate::migration::stage_dir(root);
     ensure!(
         !migration.exists(),
@@ -221,10 +235,6 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         "{} marks an incomplete coordinated migration; run `engr migrate` to resume it",
         migration.display()
     );
-    if version_path(root).exists() {
-        read_generation(root)?;
-        return Ok(WorkspaceFormat::Current);
-    }
     ensure!(
         predecessor_bootstrap(root)?.is_some(),
         EXIT_SCHEMA,
@@ -636,11 +646,24 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
 pub fn load_object(root: &Path, id: &str) -> Result<Object> {
     require_readable(root)?;
     let path = object_path(root, id);
-    let text = read_text(&path)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
+    decode_object_text(&path, id, &read_text(&path)?)
+}
+
+/// One current Object from bytes a caller already holds.
+///
+/// Every check `load_object` performs, in the order it performs them, so a
+/// caller holding the bytes some other way is held to the same contract. That
+/// is not tidiness: migration resume reads its staged destination from a
+/// different path, and when it did its own parse-and-decode it skipped the
+/// canonical-bytes check — so a semantically equivalent rewrite of a staged file
+/// could pass the digest checks, be published verbatim, and then be refused by
+/// the ordinary read path of the workspace that had just declared itself
+/// current. A second dialect of "read an Object" is how that happens.
+pub(crate) fn decode_object_text(path: &Path, id: &str, text: &str) -> Result<Object> {
+    let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    check_canonical_bytes(&path, &text, &value)?;
-    decode_object(&path, id, value)
+    check_canonical_bytes(path, text, &value)?;
+    decode_object(path, id, value)
 }
 
 /// Read one pending Challenge, checked as an envelope and nothing more.

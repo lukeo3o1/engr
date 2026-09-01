@@ -164,24 +164,33 @@ fn migrate(root: &Path) -> engr::migration::Report {
     }
 }
 
-/// Accept the Human response, then simulate the process disappearing at the
-/// real apply boundary after the destination is durable and before publication.
-fn interrupt_after_confirmed_destination(root: &Path, challenge: &str) {
+/// Accept the Human response, then stop at one named boundary inside the real
+/// apply path.
+///
+/// `stage` is `destination`, `version` or `challenge`: after the destination is
+/// durable and before anything is published, after publication and before
+/// `VERSION`, and after `VERSION` and before the spent Challenge and the stage
+/// are swept up. Each is a window a crash can land in, and each has to converge.
+fn interrupt_at(root: &Path, stage: &str, challenge: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_engr"))
         .arg("--root")
         .arg(root)
         .arg("confirm")
         .arg(format!("CONFIRM {challenge}"))
-        .env("ENGR_TEST_STOP_MIGRATION_AFTER_DESTINATION", challenge)
+        .env("ENGR_TEST_STOP_MIGRATION", format!("{stage}:{challenge}"))
         .output()
         .expect("run interrupted confirmation");
     assert!(!output.status.success(), "the test boundary must interrupt");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("test interruption after confirmed migration destination staging"),
+            .contains(&format!("test interruption at migration stage {stage}")),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn interrupt_after_confirmed_destination(root: &Path, challenge: &str) {
+    interrupt_at(root, "destination", challenge);
 }
 
 /// Every relative path under `.engr`, with the digest of its bytes.
@@ -1182,6 +1191,230 @@ fn a_rewritten_staged_destination_is_refused_rather_than_published() {
         .expect_err("a rewritten stage publishes nothing");
     assert_ne!(error.code, 0);
     assert!(!store::version_path(&root).exists());
+}
+
+/// Publication writes the staged bytes verbatim, so the resume path holds them
+/// to exactly the contract the ordinary read path holds them to.
+///
+/// A rewrite that keeps the value and changes the bytes — member order,
+/// whitespace, an explicit null where the writer omits the member — satisfies
+/// every digest, because a digest is taken over the value. It does not satisfy
+/// the current generation's canonical JCS representation. Publishing it would
+/// write `VERSION` over a workspace unable to read its own migrated resources,
+/// and `VERSION` is the last thing written, so nothing after it would notice.
+#[test]
+fn a_rewritten_staged_byte_is_refused_even_when_the_value_survives() {
+    let object_path = |root: &Path| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("objects")
+            .join(format!("{AUTHORITY}.json"))
+    };
+    let event_path = |root: &Path| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("eventstore")
+            .join(format!("{AUTHORITY}.jsonl"))
+    };
+
+    /// One way of writing the same value differently, applied to a staged file.
+    type Rewrite = (&'static str, Box<dyn Fn(&Path)>);
+
+    // Each rewrite parses to the same value the digests were taken over.
+    let rewrites: Vec<Rewrite> = vec![
+        (
+            "an Object with its members in another order",
+            Box::new(move |root: &Path| {
+                let value: Value = serde_json::from_str(&read(&object_path(root))).expect("staged");
+                let reordered: Vec<String> = value
+                    .as_object()
+                    .expect("object")
+                    .iter()
+                    .rev()
+                    .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
+                    .collect();
+                write(&object_path(root), &format!("{{{}}}", reordered.join(",")));
+            }),
+        ),
+        (
+            "an Object with insignificant whitespace",
+            Box::new(move |root: &Path| {
+                let value: Value = serde_json::from_str(&read(&object_path(root))).expect("staged");
+                write(
+                    &object_path(root),
+                    &serde_json::to_string_pretty(&value).expect("pretty"),
+                );
+            }),
+        ),
+        (
+            "an Event with insignificant whitespace",
+            Box::new(move |root: &Path| {
+                let text = read(&event_path(root));
+                let value: Value = serde_json::from_str(text.trim_end()).expect("staged");
+                write(
+                    &event_path(root),
+                    &format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&value).expect("pretty")
+                    ),
+                );
+            }),
+        ),
+        (
+            "an Event with its members in another order",
+            Box::new(move |root: &Path| {
+                let text = read(&event_path(root));
+                let value: Value = serde_json::from_str(text.trim_end()).expect("staged");
+                let reordered: Vec<String> = value
+                    .as_object()
+                    .expect("object")
+                    .iter()
+                    .rev()
+                    .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
+                    .collect();
+                write(&event_path(root), &format!("{{{}}}\n", reordered.join(",")));
+            }),
+        ),
+    ];
+
+    for (what, rewrite) in rewrites {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_after_confirmed_destination(&root, &proposed.challenge);
+        rewrite(&root);
+
+        let refused = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect_err(&format!("{what} must be refused"));
+        assert_eq!(refused.code, engr::EXIT_SCHEMA, "{what}: {refused}");
+        assert!(
+            !store::version_path(&root).exists(),
+            "{what}: nothing may activate"
+        );
+        // Still an unfinished transaction, and still saying so: the stage is
+        // present and `VERSION` is not, which is exactly the state a refusal
+        // naming `engr migrate` describes.
+        let refused = store::validate_format(&root).expect_err("the transaction is unfinished");
+        assert!(
+            refused.message.contains("incomplete coordinated migration"),
+            "{what}: {refused}"
+        );
+    }
+}
+
+/// The staged set is the confirmed set, exactly.
+///
+/// Counting entries and looking each one up in the plan is satisfied by a
+/// manifest naming one Object twice and another not at all: every entry finds a
+/// plan and the lengths agree. What would then publish is the duplicate, while
+/// the missing Object keeps its predecessor bytes at the canonical current path
+/// with no stream behind them — under a `VERSION` saying the workspace is
+/// current.
+#[test]
+fn a_staged_destination_that_drops_an_object_activates_nothing() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_after_confirmed_destination(&root, &proposed.challenge);
+
+    let manifest_path = store::local_dir(&root)
+        .join("migration")
+        .join("destination")
+        .join("destination.json");
+    let mut manifest: Value = serde_json::from_str(&read(&manifest_path)).expect("manifest");
+    let files = manifest["files"].as_array().expect("files").clone();
+    assert_eq!(files.len(), 4, "the fixture is four Objects");
+    // The shape the old check could not see: same length, every entry still
+    // found in the plan, and one Object silently gone.
+    let dropped = vec![
+        files[0].clone(),
+        files[0].clone(),
+        files[2].clone(),
+        files[3].clone(),
+    ];
+    manifest["files"] = Value::Array(dropped);
+    write(&manifest_path, &manifest.to_string());
+
+    let refused = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect_err("a manifest that drops an Object must be refused");
+    assert_eq!(refused.code, engr::EXIT_INVARIANT, "{refused}");
+    assert!(!store::version_path(&root).exists(), "nothing may activate");
+    for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
+        assert!(
+            !store::events_path(&root, id).exists(),
+            "{id} must have no current stream"
+        );
+    }
+}
+
+/// A crash after `VERSION` leaves residue, not an unfinished transaction.
+///
+/// `VERSION` is written after the last destination byte, so once it exists the
+/// migration is over. What can still be on disk is the spent Challenge and the
+/// stage. Treating that stage as an incomplete migration refused every read —
+/// and the only command the refusal named could not act, because resuming
+/// demanded the Challenge the same code path had already removed. The window
+/// has to converge on its own.
+#[test]
+fn a_crash_after_activation_leaves_residue_that_clears_itself() {
+    let stage_dir_of = engr::migration::stage_dir;
+
+    // Before `VERSION`: everything is published but nothing is activated. The
+    // stage is still the transaction, so this must resume, not sweep.
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "version", &proposed.challenge);
+    assert!(!store::version_path(&root).exists());
+    assert!(stage_dir_of(&root).exists());
+    let refused = store::validate_format(&root).expect_err("not activated yet");
+    assert!(
+        refused.message.contains("incomplete coordinated migration"),
+        "{refused}"
+    );
+    let resumed = engr::migration::prepare(&root).expect("preparing resumes the same question");
+    assert_eq!(resumed.challenge, proposed.challenge, "and the same code");
+    match engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge)).expect("resume") {
+        engr::Confirmed::Migration(_) => {}
+        engr::Confirmed::Object(_) => panic!("a migration confirmation"),
+    }
+    assert!(!stage_dir_of(&root).exists(), "and it finishes the sweep");
+
+    // After `VERSION`, before the sweep: the migration is over and what is left
+    // is residue. It must not refuse a read, and it must clear without anybody
+    // deleting a file by hand.
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "challenge", &proposed.challenge);
+
+    assert!(store::version_path(&root).exists(), "it did activate");
+    assert!(stage_dir_of(&root).exists(), "and the sweep never ran");
+    assert_eq!(
+        store::validate_format(&root).expect("a current workspace reads"),
+        WorkspaceFormat::Current,
+        "residue must not make an activated workspace unreadable"
+    );
+    let listed = engr::store::object_ids(&root).expect("object ids");
+    assert_eq!(listed.len(), 4, "every migrated Object is there");
+    for id in &listed {
+        ops::effective(&root, id).expect("and each one resolves");
+        assert!(
+            ops::verify(&root, id).expect("verify").passed(),
+            "{id} verifies through the residue"
+        );
+    }
+
+    // The supported command converges it. Nothing is left to migrate, the
+    // residue is gone, and the spent code goes with it.
+    let error = engr::migration::prepare(&root).expect_err("there is nothing left to migrate");
+    assert_eq!(error.code, engr::EXIT_SCHEMA, "{error}");
+    assert!(error.message.contains("nothing to migrate"), "{error}");
+    assert!(!stage_dir_of(&root).exists(), "the residue is gone");
+    assert!(
+        engr::gate::pending_codes(&root)
+            .expect("pending codes")
+            .is_empty(),
+        "and the spent code with it"
+    );
 }
 
 /// Staging is not admission. No destination Event carrying final provenance

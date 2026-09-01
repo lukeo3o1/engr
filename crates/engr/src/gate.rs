@@ -616,23 +616,30 @@ pub struct Prepared {
     pub candidate: Candidate,
     pub superseded: Vec<String>,
     pub notes: Vec<Note>,
-    /// The Rule Review a human is being asked to stand behind, as it stood at
-    /// prepare.
+    /// The Rule Review this preparation composed, for a caller that wants it in
+    /// hand without reopening the Challenge.
     ///
-    /// Returned rather than stored. The digest and the Rule material are
-    /// rebuilt from live state whenever the Challenge is rendered or admitted —
-    /// so a second copy on disk would only be able to disagree with them. The
-    /// agent's explanation is the one part that cannot be rebuilt, which is why
-    /// it is surfaced here, at the moment the human is asked.
+    /// **Not the authoritative copy.** That one is frozen inside
+    /// `candidate.subject.review`, and it is what rendering and confirmation
+    /// both read: the digest, the result, the attempt, the exact Rule ids and
+    /// the agent's explanation, fixed at the moment the question was asked. An
+    /// earlier design kept only the outcome there and rebuilt the rest from live
+    /// Rules whenever the Challenge was shown, which meant a Rule edited in the
+    /// meantime changed what a frozen Challenge appeared to say. Live Rules now
+    /// decide staleness and nothing else.
     pub review: Option<crate::proof::CandidateReview>,
 }
 
 /// What an Agent attests after reviewing the exact binding engr surfaced.
 ///
 /// The digest and Rule ids are checked against a fresh binding inside the writer
-/// lock. The attempt/result/explanation are process context: they do not alter
-/// ReviewDigest, and only the outcome survives into the frozen subject, because
-/// only the outcome changes what the Event records.
+/// lock. None of the rest alters the ReviewDigest — the attempt, the result and
+/// the explanation describe the review process, not the material reviewed — but
+/// all of it is frozen into the Challenge subject, because all of it is what a
+/// human is being asked to weigh. What history keeps afterwards is narrower
+/// still: `{outcome, result, attempts}`, without the digest that binds artifacts
+/// which will have moved, and without an argument written to persuade somebody
+/// in a particular moment.
 #[derive(Clone, Debug)]
 pub struct ReviewAttestation {
     pub review_digest: String,
