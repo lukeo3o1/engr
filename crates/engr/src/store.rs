@@ -43,15 +43,16 @@
 //! ```
 //!
 //! The durable Event append is closed for a further reason, and not for
-//! visibility's own sake. Event provenance is deliberately minimal — the
-//! review's outcome and digest, and none of the transient inputs the decision
-//! was made from. The attempt is the one that matters: every mutation carries
-//! one Agent-attested attempt, each applicable Rule judges it against its own
-//! ceiling, and past any ceiling autonomous admission stops. None of that
-//! survives into the record, so re-deriving what the record *does* carry can
-//! never ask the question, and a public raw append would be a second Agent
-//! admission API holding strictly less state than the gate. [`check_appendable`]
-//! is the read-only half.
+//! visibility's own sake. Event provenance is deliberately minimal — `outcome`,
+//! `result` and `attempts`, and none of the material the decision was made
+//! against. The exact Rule artifacts, the digest that bound them and the agent's
+//! explanation are decision-time material and stay out. So every mutation
+//! carries one Agent-attested attempt, each applicable Rule judges it against
+//! its own ceiling, and past any ceiling autonomous admission stops — and what
+//! survives is the number, not the judgement it was put through. Re-deriving
+//! what the record *does* carry can therefore never ask the question, and a
+//! public raw append would be a second Agent admission API holding strictly less
+//! state than the gate. [`check_appendable`] is the read-only half.
 //!
 //! ```compile_fail
 //! # use std::path::Path;
@@ -945,13 +946,15 @@ fn check_event_record(
 ///
 /// **There is no public append, and that is the contract.** Recomputing what an Event
 /// persists is not the same as proving admission, because Event provenance is
-/// deliberately minimal: it carries the review's outcome and digest and not the
-/// transient inputs the decision was made from. The attempt is the one that
-/// matters — every mutation carries one Agent-attested attempt, each applicable
-/// Rule judges it against its own ceiling, and past any ceiling autonomous
-/// Object admission stops. None of that is in the record, so no amount of
-/// re-derivation at this boundary can ask it, and a public raw append would be a
-/// second Agent admission API holding strictly less state than the gate.
+/// deliberately minimal: it carries `outcome`, `result` and `attempts`, and not
+/// the material the decision was made against — the exact Rule artifacts, the
+/// digest that bound them and the agent's explanation all stop at the Challenge.
+/// So every mutation carries one Agent-attested attempt, each applicable Rule
+/// judges it against its own ceiling, and past any ceiling autonomous Object
+/// admission stops, but the record keeps the number rather than the judgement.
+/// No amount of re-derivation at this boundary can ask the question, and a
+/// public raw append would be a second Agent admission API holding strictly less
+/// state than the gate.
 ///
 /// So this is the read-only half and the only half a consumer gets: every check
 /// the append performs, and no capacity to perform the append. A caller that

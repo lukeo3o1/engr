@@ -19,6 +19,7 @@ serde_norway = "=0.9.42"
 sha2 = "0.10"
 similar = "2.6"
 time = { version = "=0.3.36", features = ["formatting", "macros", "parsing"] }
+unsafe-libyaml-norway = "=0.2.15"
 uuid = { version = "=1.10.0", features = ["v7"] }
 
 [dev-dependencies]

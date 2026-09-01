@@ -78,19 +78,50 @@ impl Generator {
 
 /// Everything about this build that decides how a pending Challenge is read.
 ///
-/// Deliberately a *declaration* rather than a hash of the binary. Two builds
-/// that differ only in an unrelated bug fix must be able to admit each other's
-/// pending Challenges; two that differ in the vocabulary, the digest contract,
-/// the code alphabet or the response phrase must not. So the fingerprint is
-/// taken over exactly those, and extending any of them changes it.
-#[derive(Serialize)]
+/// Deliberately a *declaration* rather than a hash of the binary. It names the
+/// subject schemas and the confirmation semantics that can change what a
+/// pending question means; unrelated implementation changes stay compatible.
+#[derive(Serialize, Clone)]
 struct Contract {
-    families: Vec<&'static str>,
-    object_commands: Vec<&'static str>,
+    challenge: &'static str,
+    subject_envelope: &'static str,
+    object: ObjectContract,
+    migration: MigrationContract,
     digest_contract: u32,
     alphabet: &'static str,
     length: usize,
     response: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+struct ObjectContract {
+    family: &'static str,
+    subject: &'static str,
+    commands: Vec<&'static str>,
+    action_data: Vec<&'static str>,
+    section_value: &'static str,
+    vocabularies: &'static str,
+    frozen_review: &'static str,
+    confirmation: &'static str,
+    /// The two digest contracts whose scalars a frozen Object subject carries
+    /// literally: a Ref's own digest inside the Section value, and the
+    /// ReviewDigest inside the frozen review.
+    ///
+    /// Neither is the Challenge's own digest, and both decide what the frozen
+    /// bytes *mean*. A pending Challenge holding a `1:` Ref digest under an
+    /// implementation that has moved to contract 2 is not a Challenge this build
+    /// can interpret, so it is one this build must decline to interpret.
+    ref_digest_contract: u32,
+    review_digest_contract: u32,
+}
+
+#[derive(Serialize, Clone)]
+struct MigrationContract {
+    family: &'static str,
+    subject: &'static str,
+    planned_object: &'static str,
+    interpretation: &'static str,
+    confirmation: &'static str,
 }
 
 /// The command vocabulary an Object subject may name.
@@ -111,28 +142,63 @@ pub const OBJECT_COMMANDS: &[&str] = &[
     "section.merge",
 ];
 
+fn contract() -> Contract {
+    Contract {
+        challenge: "Challenge{id,generator:{version,fingerprint},created_at,subject,digest}; deny unknown members; id is six characters from the declared alphabet; created_at is RFC3339; digest is over id+generator+created_at+subject; a foreign fingerprint is re-prepared, never reinterpreted",
+        subject_envelope: "Subject{type,data}; deny unknown members; type is the closed object|migration vocabulary; data is interpreted only by that family",
+        object: ObjectContract {
+            family: SubjectType::Object.as_str(),
+            subject: "ObjectSubject{action,object,expected_rev,value,review?}; deny unknown members; action+value reconstruct exactly one Action; object is canonical UUIDv7; expected_rev is the stale/replay precondition",
+            commands: OBJECT_COMMANDS.to_vec(),
+            action_data: vec![
+                "create:{title}",
+                "rename:{title,becomes?}",
+                "classify:{type?,state}",
+                "change_state:{state}",
+                "supersede:{value:SectionValue}",
+                "repair:{}",
+                "section.create:{value:SectionValue,becomes?}",
+                "section.update:{section,value:SectionValue,becomes?}",
+                "section.delete:{section,becomes?}",
+                "section.merge:{destination,sources,value:SectionValue,becomes?}",
+            ],
+            section_value: "SectionValue{admitted:{by,at},header?,role?,text,content?,based_on?,refs?,relations?}; optional empty members are omitted; content entries are ordered {type,body}; based_on is {commit}; refs are canonical sets of {target,fields,commit,digest} with compact target identity; relations are canonical sets of {type,target}; admitted.by is human|agent and is frozen; admitted.at is RFC3339 and is the unassigned placeholder 0001-01-01T00:00:00Z until confirmation stamps the actual instant",
+            vocabularies: "type/state is null:{open|closed}, design:{draft|proposed|accepted|rejected|superseded}, decision:{proposed|accepted|rejected|superseded}, or risk:{identified|accepted|mitigated|invalidated}; role is decision|risk|supersession|acceptance_criterion; destination is {type?,state}; relation and Ref vocabularies are the workspace-generation-1 schemas; section ids and all JSON integers are positive/shared-safe where applicable",
+            frozen_review: "FrozenReview{digest,result,attempts,rules,explanation?}; deny unknown members; digest binds the exact mutation and Rule artifacts; result is passed|failed|exhausted; attempts is positive; rules is the exact canonical Rule-id set rendered to the human; explanation is decision-time material; live rebind must match before confirmation",
+            confirmation: "Human confirmation revalidates the frozen subject and review, stamps one actual confirmation instant into Event.metadata.admitted.at and every ordinary changed Section.admitted.at, records review {outcome,result,attempts} without digest/explanation, then applies exactly once; Agent admission has no Challenge and requires a live passing review",
+            ref_digest_contract: crate::digest::REF.current,
+            review_digest_contract: crate::digest::REVIEW.current,
+        },
+        migration: MigrationContract {
+            family: SubjectType::Migration.as_str(),
+            subject: "MigrationSubject{from,to,objects,source}; deny unknown members; objects is canonical by object identity; source maps each predecessor .engr-relative path to the digest of its exact bytes",
+            planned_object: "PlannedObject{object,title,sections,predecessor_rev,digest}; object is canonical UUIDv7; sections and predecessor_rev are safe integers; digest is the exact destination Object digest",
+            interpretation: "the sole released predecessor format is validated and deterministically converted to workspace generation 1; predecessor history is discarded; one object.migrated.v1 bootstrap Event recreates each destination Object; migrated Sections preserve predecessor admission provenance",
+            confirmation: "Human confirmation rederives and matches the frozen plan, then stamps one actual migration confirmation/apply instant into every migration Event; no destination containing final Event admission provenance exists before that confirmation; an intact post-confirm destination may only resume forward for the same Challenge",
+        },
+        digest_contract: crate::digest::CHALLENGE.current,
+        alphabet: std::str::from_utf8(ALPHABET).expect("the alphabet is ASCII"),
+        length: CHALLENGE_LEN,
+        response: "CONFIRM <code>",
+    }
+}
+
+fn fingerprint_of(contract: &Contract) -> Result<String> {
+    let digest = crate::digest::CHALLENGE
+        .emit(crate::proof::sha256_of(&crate::proof::canonical_bytes(
+            contract,
+            "challenge generator",
+        )?))?
+        .to_string();
+    Ok(digest)
+}
+
 fn fingerprint() -> Result<&'static str> {
     static VALUE: OnceLock<String> = OnceLock::new();
     if let Some(value) = VALUE.get() {
         return Ok(value);
     }
-    let contract = Contract {
-        families: vec![
-            SubjectType::Object.as_str(),
-            SubjectType::Migration.as_str(),
-        ],
-        object_commands: OBJECT_COMMANDS.to_vec(),
-        digest_contract: crate::digest::CHALLENGE.current,
-        alphabet: std::str::from_utf8(ALPHABET).expect("the alphabet is ASCII"),
-        length: CHALLENGE_LEN,
-        response: "CONFIRM <code>",
-    };
-    let digest = crate::digest::CHALLENGE
-        .emit(crate::proof::sha256_of(&crate::proof::canonical_bytes(
-            &contract,
-            "challenge generator",
-        )?))?
-        .to_string();
+    let digest = fingerprint_of(&contract())?;
     Ok(VALUE.get_or_init(|| digest))
 }
 
@@ -410,6 +476,95 @@ mod tests {
     #[test]
     fn the_generator_fingerprint_is_stable_within_a_build() {
         assert_eq!(fingerprint().expect("first"), fingerprint().expect("again"));
-        assert!(fingerprint().expect("value").starts_with("1:"));
+    }
+
+    /// The value is pinned, and the pin is the point.
+    ///
+    /// A fingerprint that changes is a statement that pending Challenges minted
+    /// by the previous build can no longer be interpreted, and every one of them
+    /// has to be prepared again. That is the correct outcome whenever the
+    /// declaration below genuinely changed meaning, and a bad one when a member
+    /// was reworded for taste. Neither can be told apart from the diff, so the
+    /// value is written down: changing it is a deliberate act with a reviewer,
+    /// rather than a side effect nobody noticed.
+    #[test]
+    fn the_generator_fingerprint_is_the_value_this_build_publishes() {
+        assert_eq!(
+            fingerprint().expect("value"),
+            "1:e9d22f142ab3b88082095bb47e6e5a9213254fe79a06c496d43cfb52e78339e2"
+        );
+    }
+
+    /// Compatibility follows interpretation, not just the family and command
+    /// names.
+    ///
+    /// This is the finding the earlier fingerprint failed: `FrozenReview`
+    /// changed incompatibly — `attempt`/`outcome` became `attempts`/`result`,
+    /// and what history keeps changed with it — while the families, the command
+    /// vocabulary, the digest contract, the alphabet and the response phrase all
+    /// stayed byte-identical. A pending Challenge from the old build therefore
+    /// carried a fingerprint the new build accepted as its own. Every member
+    /// that can change what a frozen question *means* is now an input, so the
+    /// same class of change invalidates the pending question it would have
+    /// silently misread.
+    #[test]
+    fn the_generator_fingerprint_binds_each_subject_contract() {
+        let current = contract();
+        let baseline = fingerprint_of(&current).expect("baseline");
+
+        // The exact shape of the earlier miss: a frozen-review schema change
+        // under an unchanged command vocabulary.
+        let mut object_changed = current.clone();
+        object_changed.object.frozen_review =
+            "FrozenReview{digest,outcome,attempt,rules,explanation?}; the superseded spelling";
+        assert_ne!(
+            fingerprint_of(&object_changed).expect("frozen review"),
+            baseline
+        );
+
+        // A pure semantics change, where no schema moves at all: same members,
+        // different meaning at admission.
+        let mut semantics_changed = current.clone();
+        semantics_changed.object.confirmation =
+            "Human confirmation stamps the preparation instant rather than the admission instant";
+        assert_ne!(
+            fingerprint_of(&semantics_changed).expect("admission mapping"),
+            baseline
+        );
+
+        // The value schema the human is actually deciding about.
+        let mut value_changed = current.clone();
+        value_changed.object.section_value =
+            "SectionValue with a different admitted placeholder convention";
+        assert_ne!(
+            fingerprint_of(&value_changed).expect("section value"),
+            baseline
+        );
+
+        // The digest contracts whose scalars the frozen subject carries
+        // literally. These are numbers rather than prose, and they move on their
+        // own schedule, so they are checked separately from the wording.
+        let mut ref_contract_changed = current.clone();
+        ref_contract_changed.object.ref_digest_contract += 1;
+        assert_ne!(
+            fingerprint_of(&ref_contract_changed).expect("ref digest contract"),
+            baseline
+        );
+        let mut review_contract_changed = current.clone();
+        review_contract_changed.object.review_digest_contract += 1;
+        assert_ne!(
+            fingerprint_of(&review_contract_changed).expect("review digest contract"),
+            baseline
+        );
+
+        // And the other family, which has its own frozen subject and its own
+        // apply-time interpretation.
+        let mut migration_changed = current;
+        migration_changed.migration.confirmation =
+            "a different apply-time interpretation with the same migration family name";
+        assert_ne!(
+            fingerprint_of(&migration_changed).expect("migration contract"),
+            baseline
+        );
     }
 }

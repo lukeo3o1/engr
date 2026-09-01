@@ -115,7 +115,7 @@ fn repointing_a_reference_is_detected() {
     // swapping which section this depends on would pass verification.
     tamper(&root, &source, |value| {
         value["sections"][0]["refs"][0]["target"] =
-            Value::String(engr::proof::section_target(&target, 2));
+            Value::String(engr::proof::section_target(&target, 2).expect("section target"));
     });
 
     let report = ops::verify(&root, &source).expect("verify");

@@ -354,10 +354,9 @@ pub fn object_projection(
     payload: &Payload,
 ) -> Result<ObjectProjection> {
     // The identities first, because everything below formats them into a target
-    // that a proof then names. `object_target` and `section_target` only build
-    // strings — a payload naming `not-an-id`, or naming an Object the states
-    // either side are not, would produce a perfectly well-formed digest over a
-    // target that denotes nothing.
+    // that a proof then names. A payload naming `not-an-id`, or naming an
+    // Object the states either side are not, would otherwise produce a
+    // perfectly well-formed digest over a target that denotes nothing.
     crate::model::validate_object_id(&payload.object)?;
     ensure!(
         payload.object == before.id && payload.object == after.id,
@@ -391,7 +390,7 @@ pub fn object_projection(
     let (target, parameters, after_state) =
         match &payload.action {
             Action::ObjectCreated { .. } => (
-                object_target(id),
+                object_target(id)?,
                 serde_json::json!({}),
                 json(&ObjectCreation {
                     title: after.title.clone(),
@@ -401,17 +400,17 @@ pub fn object_projection(
                 })?,
             ),
             Action::ObjectRenamed { .. } => (
-                object_target(id),
+                object_target(id)?,
                 serde_json::json!({ "becomes": becomes }),
                 json(&TitleLifecycle::of(after))?,
             ),
             Action::ObjectStateChanged { state } => (
-                object_target(id),
+                object_target(id)?,
                 serde_json::json!({ "state": state }),
                 json(&Lifecycle::of(after))?,
             ),
             Action::ObjectClassified { object_type, state } => (
-                object_target(id),
+                object_target(id)?,
                 serde_json::json!({ "type": object_type, "state": state }),
                 json(&Lifecycle::of(after))?,
             ),
@@ -420,18 +419,18 @@ pub fn object_projection(
                 // it is read off what the reducer produced rather than predicted.
                 let added = added_section(before, after)?;
                 (
-                    object_target(id),
+                    object_target(id)?,
                     serde_json::json!({ "section": added, "becomes": becomes }),
                     json(&section_state(after, added)?)?,
                 )
             }
             Action::SectionUpdated { section, .. } => (
-                section_target(id, *section),
+                section_target(id, *section)?,
                 serde_json::json!({ "becomes": becomes }),
                 json(&section_state(after, *section)?)?,
             ),
             Action::SectionDeleted { section, .. } => (
-                section_target(id, *section),
+                section_target(id, *section)?,
                 serde_json::json!({ "becomes": becomes }),
                 json(&SectionOperation {
                     lifecycle: Lifecycle::of(after),
@@ -439,14 +438,14 @@ pub fn object_projection(
                 })?,
             ),
             Action::SectionMerged { merge, .. } => (
-                section_target(id, merge.destination),
+                section_target(id, merge.destination)?,
                 serde_json::json!({ "sources": merge.sources, "becomes": becomes }),
                 json(&ObjectInvariant::of(after)?)?,
             ),
             Action::ObjectSuperseded { .. } => {
                 let added = added_section(before, after)?;
                 (
-                    object_target(id),
+                    object_target(id)?,
                     serde_json::json!({ "rationale_section": added }),
                     json(&ObjectInvariant::of(after)?)?,
                 )
@@ -458,7 +457,7 @@ pub fn object_projection(
             // diagnostic material shown beside the proposal, and a digest that bound
             // them could not be recomputed from history later.
             Action::ObjectRepaired {} => (
-                object_target(id),
+                object_target(id)?,
                 serde_json::json!({}),
                 json(&ObjectInvariant::of(after)?)?,
             ),
@@ -518,34 +517,40 @@ mod erased_json {
 }
 
 /// The canonical target of an operation that names a whole Object.
-pub fn object_target(id: &str) -> String {
-    format!("obj:{id}")
+pub fn object_target(id: &str) -> Result<String> {
+    crate::model::validate_object_id(id)?;
+    Ok(format!("obj:{}", crate::reference::encode_uuid_str(id)?))
 }
 
 /// A formatted target must parse back as the identity it claims to be.
 ///
-/// `object_target` and `section_target` format; they do not check. Whether the
-/// result denotes anything is a separate question, and it is the one a proof
-/// naming that target depends on.
+/// ReviewDigest input accepts the same compact reference grammar as every
+/// persisted Ref. A second raw-UUID target dialect would make the digest
+/// contract non-portable even if both strings happened to name the same bits.
 fn check_canonical_target(target: &str) -> Result<()> {
-    match target.rsplit_once(':') {
-        Some((_, section)) if section.chars().all(|c| c.is_ascii_digit()) => {
-            crate::dependency::parse_target(target).map(|_| ())
-        }
-        _ => {
-            let id = target.strip_prefix("obj:").ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{target:?} is not a canonical object target"),
-                )
-            })?;
-            crate::model::validate_object_id(id)
-        }
+    let reference = crate::reference::canonical_embedded(
+        target,
+        &[crate::reference::ResourceKind::Object],
+        "Review target",
+    )?;
+    if let Some(section) = reference.section() {
+        ensure!(
+            section <= MAX_SAFE_INTEGER,
+            EXIT_SCHEMA,
+            "section id {section} is outside the shared safe-integer domain"
+        );
     }
+    Ok(())
 }
 /// The canonical target of an operation that names one Section.
-pub fn section_target(id: &str, section: u64) -> String {
-    format!("obj:{id}:{section}")
+pub fn section_target(id: &str, section: u64) -> Result<String> {
+    ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    ensure!(
+        section <= MAX_SAFE_INTEGER,
+        EXIT_SCHEMA,
+        "section id {section} is outside the shared safe-integer domain"
+    );
+    Ok(format!("{}:{section}", object_target(id)?))
 }
 
 #[cfg(test)]
@@ -649,20 +654,20 @@ mod table_tests {
                     title: "after".to_owned(),
                     becomes: None,
                 },
-                object_target(&id),
+                object_target(&id).expect("object target"),
             ),
             (
                 Action::ObjectStateChanged {
                     state: State::Closed,
                 },
-                object_target(&id),
+                object_target(&id).expect("object target"),
             ),
             (
                 Action::ObjectClassified {
                     object_type: Some(ObjectType::Design),
                     state: State::Draft,
                 },
-                object_target(&id),
+                object_target(&id).expect("object target"),
             ),
             (
                 Action::SectionUpdated {
@@ -670,14 +675,14 @@ mod table_tests {
                     value: value("one, revised"),
                     becomes: None,
                 },
-                section_target(&id, 1),
+                section_target(&id, 1).expect("section target"),
             ),
             (
                 Action::SectionDeleted {
                     section: 2,
                     becomes: None,
                 },
-                section_target(&id, 2),
+                section_target(&id, 2).expect("section target"),
             ),
             (
                 Action::SectionMerged {
@@ -688,9 +693,12 @@ mod table_tests {
                     value: value("merged"),
                     becomes: None,
                 },
-                section_target(&id, 1),
+                section_target(&id, 1).expect("section target"),
             ),
-            (Action::ObjectRepaired {}, object_target(&id)),
+            (
+                Action::ObjectRepaired {},
+                object_target(&id).expect("object target"),
+            ),
         ];
         for (action, target) in cases {
             let name = action.command().to_owned();
@@ -727,7 +735,7 @@ mod table_tests {
             ),
         )
         .expect("projection");
-        assert_eq!(projected.target, object_target(&id));
+        assert_eq!(projected.target, object_target(&id).expect("object target"));
         assert_eq!(projected.operation.parameters["section"], 1);
     }
 
@@ -1153,7 +1161,7 @@ mod review_context_tests {
                 name: "section_revised".to_owned(),
                 parameters: serde_json::json!({"section": 1}),
             },
-            target: "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1".to_owned(),
+            target: "obj:01jbrcg6hbfgyrwkttddy8v7gf:1".to_owned(),
             after: serde_json::json!({"admission": "human", "text": "revised"}),
         };
         (mutation, 7)
@@ -1392,12 +1400,12 @@ mod object_binding_tests {
         let canonical = canonical_bytes(&binding, "review binding").expect("canonical");
         assert_eq!(
             canonical,
-            r#"{"domain":"object","mutation":{"after":{"lifecycle":{"state":"open","type":null},"section":{"admission":"human","based_on":null,"content":[],"header":null,"refs":[],"relations":[],"role":null,"text":"as revised"}},"operation":{"name":"section.update","parameters":{"becomes":null}},"target":"obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1"},"precondition":{"expected_rev":7},"rules":[]}"#,
+            r#"{"domain":"object","mutation":{"after":{"lifecycle":{"state":"open","type":null},"section":{"admission":"human","based_on":null,"content":[],"header":null,"refs":[],"relations":[],"role":null,"text":"as revised"}},"operation":{"name":"section.update","parameters":{"becomes":null}},"target":"obj:01jbrcg6hbfgyrwkttddy8v7gf:1"},"precondition":{"expected_rev":7},"rules":[]}"#,
             "the frozen JCS bytes of an object review binding"
         );
         assert_eq!(
             binding.digest().expect("digest").to_string(),
-            "1:619cdd24b9a3edcd04174dbe35dd727a24c02d41815ddf5f84921a71e5265033"
+            "1:339dff0725eda8ac29ff2893fa3fb2f15a7a1dc57e6c40c2cb17fc85bb9d82ba"
         );
     }
 
@@ -1425,7 +1433,7 @@ mod object_binding_tests {
                 "an operation the table does not define",
                 serde_json::json!({
                     "operation": {"name": "not.a.frozen.operation", "parameters": {}},
-                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
                     "after": serde_json::Value::Null
                 }),
             ),
@@ -1433,7 +1441,7 @@ mod object_binding_tests {
                 "an operation carrying a member of its own",
                 serde_json::json!({
                     "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
-                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
                     "after": serde_json::Value::Null
                 }),
             ),

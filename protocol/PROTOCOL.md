@@ -613,11 +613,12 @@ is bound to, and the exact payload:
 `change_state`, `supersede`, `repair`, `section.create`, `section.update`,
 `section.delete`, `section.merge` — and not the Event type. What is being asked
 for and what enters history are two statements, and the Challenge makes the
-first. `value` is the same payload the resulting Event carries, so there is one
-schema rather than two that have to agree — with one member settled later: its
-`admitted.at` says when the value was put up, which is what `created_at` says
-about the envelope around it, and the record replaces it with the instant the act
-was admitted.
+first. `value` is the same payload shape the resulting Event carries, so there
+is one schema rather than two that have to agree — with one member settled
+later. `admitted.by` is frozen with the question; `admitted.at` does not yet
+exist as provenance and MUST NOT be rendered as an admission time. Confirmation
+stamps the actual instant into both the ordinary Section value and Event before
+either enters the record. `created_at` says only when the question was prepared.
 
 `generator.fingerprint` is the opaque identity of the generator that minted the
 Challenge. A pending Challenge is not migrated across incompatible generators:
@@ -894,14 +895,17 @@ being malformed rather than for failing a proof about a shape nothing could admi
 anyway.
 
 Recomputation is necessary and it is not sufficient, which is why there is no
-public raw append. Event provenance is deliberately minimal: it carries the
-review's outcome and digest and none of the transient inputs the decision was
-made from. The attempt is the one that matters — every mutation carries one
-Agent-attested attempt, each applicable Rule judges it against its own ceiling,
-and past any ceiling autonomous Object admission stops — and none of that
-survives into the record. A boundary that can only re-derive what the record
-carries therefore cannot ask the question at all, so a public raw append would
-be a second Agent admission API holding strictly less state than the gate.
+public raw append. Event provenance is deliberately minimal: it carries how the
+mutation got in, what the review concluded and which attempt it was — `outcome`,
+`result` and `attempts` — and none of the material that decision was made
+against. The exact Rule artifacts, the digest that bound them and the agent's
+explanation stay out of history, because they are decision-time material. So
+every mutation carries one Agent-attested attempt and each applicable Rule
+judges it against its own ceiling, and past any ceiling autonomous Object
+admission stops — but what survives is the number, not the judgement it was put
+through. A boundary that can only re-derive what the record carries therefore
+cannot ask the question at all, so a public raw append would be a second Agent
+admission API holding strictly less state than the gate.
 Asking whether a record *would* be accepted is a separate, read-only question
 and may be public.
 

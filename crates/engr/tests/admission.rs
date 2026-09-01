@@ -260,7 +260,7 @@ fn human_source_cannot_treat_agent_semantics_as_human_authority() {
     gate::admit_agent(temp.path(), agent_payload, Some(review)).expect("agent section");
 
     let reference = engr::dependency::SelectiveRef::stored(
-        engr::proof::section_target(id, 1),
+        engr::proof::section_target(id, 1).expect("section target"),
         vec![engr::dependency::SemanticField::Text],
         "0".repeat(40),
         format!("1:{}", "0".repeat(64)),

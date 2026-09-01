@@ -177,7 +177,7 @@ fn each_protected_section_field_moves_the_seal() {
 
 fn reference(section: u64) -> Ref {
     engr::dependency::SelectiveRef::stored(
-        engr::proof::section_target(&object_id(), section),
+        engr::proof::section_target(&object_id(), section).expect("section target"),
         vec![engr::dependency::SemanticField::Text],
         "d".repeat(40),
         format!("1:{}", "c".repeat(64)),

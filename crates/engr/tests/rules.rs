@@ -2461,12 +2461,12 @@ fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
         serde_json::json!({"action": "section_revised"}),
         serde_json::json!({
             "operation": {"name": "not.a.frozen.operation", "parameters": {}},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
             "after": null
         }),
         serde_json::json!({
             "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
             "after": null
         }),
     ] {
@@ -3062,12 +3062,28 @@ fn the_restricted_yaml_profile_refuses_what_it_says_it_refuses() {
             "id: policy\napplies: { domains: [&d object] }\n",
         ),
         (
+            "an anchor on an explicit key, block",
+            "? &key id\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "an anchor on an explicit key, flow",
+            "{ ? &key id : policy, applies: { domains: [object] } }\n",
+        ),
+        (
             "an alias, block",
             "id: policy\napplies:\n  domains: &d\n    - object\nunused: *d\n",
         ),
         (
             "an alias, flow",
             "id: policy\napplies: { domains: &d [object], spare: *d }\n",
+        ),
+        (
+            "an alias on an explicit key, block",
+            "? *key\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "an alias on an explicit key, flow",
+            "{ ? *key : policy, applies: { domains: [object] } }\n",
         ),
         (
             "a tag, block",
@@ -3082,6 +3098,14 @@ fn the_restricted_yaml_profile_refuses_what_it_says_it_refuses() {
             "id: policy\napplies: { domains: !!seq [object] }\n",
         ),
         (
+            "a tag on an explicit key, block",
+            "? !policy-key id\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "a tag on an explicit key, flow",
+            "{ ? !policy-key id : policy, applies: { domains: [object] } }\n",
+        ),
+        (
             "a duplicate key, block",
             "id: policy\nid: other\napplies:\n  domains:\n    - object\n",
         ),
@@ -3094,12 +3118,60 @@ fn the_restricted_yaml_profile_refuses_what_it_says_it_refuses() {
             "id: policy\napplies: { domains: [object], domains: [backlog] }\n",
         ),
         (
+            "a folded block scalar",
+            "id: policy\napplies:\n  domains:\n    - object\nspare: >\n  smuggled\n",
+        ),
+        (
             "a block scalar",
             "id: policy\napplies:\n  domains:\n    - object\nspare: |\n  id: smuggled\n",
         ),
         (
             "a second document",
             "id: policy\napplies:\n  domains:\n    - object\n...\n",
+        ),
+        (
+            "an explicit document start",
+            "---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a directive, which forces an explicit document",
+            "%YAML 1.2\n---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a tag directive",
+            "%TAG !e! tag:example.com,2026:\n---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        // The document node itself is a node, and node properties are refused
+        // there for the same reason they are refused anywhere else.
+        (
+            "an anchor on the document root",
+            "&root\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a tag on the document root",
+            "!!map\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        // A mapping keyed by a collection. libyaml normalizes explicit-key
+        // syntax into the same key/value alternation as `key:`, so this is
+        // caught by the same rule rather than by a special case.
+        (
+            "a sequence used as a mapping key",
+            "? [a, b]\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "a mapping used as a mapping key",
+            "? { a: b }\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        // Duplicate keys are compared as resolved scalar *values*. Two
+        // spellings of one key are one key, which a scanner comparing raw
+        // source text would report as two different keys and let through.
+        (
+            "a duplicate key spelled two ways",
+            "id: policy\n\"id\": other\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a duplicate key across block and flow presentation",
+            "applies:\n  domains: [object]\napplies: { domains: [backlog] }\nid: policy\n",
         ),
     ] {
         write_rule(&root, "policy", &body(front));

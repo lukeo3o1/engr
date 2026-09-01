@@ -27,6 +27,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -1074,176 +1075,238 @@ pub struct BoundRule {
 /// afterwards the evidence is gone: the constructs have been resolved away and
 /// the typed value cannot say which of them produced it.
 ///
-/// **It scans token positions, not line beginnings, and that distinction is the
-/// whole of what makes it sound.** An earlier version asked only what a node
-/// *started* with, which flow style walks straight past:
-/// `applies: { domains: [&x object] }` has a node beginning with `{`, so the
-/// anchor inside it was never looked at. Refusing flow style outright would
-/// close that and cost more than it is worth — `domains: [object]` is ordinary
-/// YAML that this schema has every reason to accept. So instead every position
-/// where a node may begin is examined, in either presentation: the start of a
-/// value, and anything following `[`, `{`, `,` or `:`. An indicator can only
-/// introduce a node, so that is everywhere one can be.
-///
-/// Quoted spans are masked out first, because inside them these are content:
-/// `id: "a*b"` is a string, not an alias.
-///
-/// Duplicate keys are caught in two places and both fail closed. Block-style
-/// keys are lines, so the scanner below tracks them by indentation; flow-style
-/// mappings put their keys on one line, where the deserializer refuses a
-/// repeated field against this fixed schema. Two mechanisms for one rule is
-/// worth noting rather than hiding — what would not be acceptable is a case
-/// neither covers.
+/// The parser's event stream is the boundary. Presentation details such as
+/// block versus flow style and ordinary versus explicit keys have already been
+/// resolved there, while anchors, aliases, tags, scalar style and mapping
+/// membership are still observable. That is exactly the point at which the
+/// profile can be complete without trying to reimplement YAML with a textual
+/// scanner.
+/// The parser is libyaml, and it is the same libyaml `serde_norway` will use on
+/// the same bytes a moment later — one pinned copy of one crate, checked in
+/// `Cargo.lock`. A second YAML implementation would be a second opinion about
+/// what the document says, and the gap between two opinions is precisely where
+/// something forbidden survives being looked for.
 fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
-    let mut keys: Vec<(usize, String)> = Vec::new();
-    for (number, line) in front.lines().enumerate() {
-        let number = number + 1;
-        let content = strip_comment(line);
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        ensure!(
-            trimmed != "---" && trimmed != "...",
-            EXIT_SCHEMA,
-            "{where_}:{number}: a rule's front matter is one document"
-        );
-        check_indicators(trimmed, where_, number)?;
-        // A block scalar makes the lines under it content rather than nodes,
-        // which this scanner would then read as structure. No field in this
-        // schema needs one, so the shape is refused rather than mis-scanned.
-        if let Some(node) = value_of(trimmed) {
-            let first = node.chars().next();
-            ensure!(
-                first != Some('|') && first != Some('>'),
-                EXIT_SCHEMA,
-                "{where_}:{number}: a rule's front matter uses no block scalars"
-            );
-        }
-        if let Some((key, _)) = split_key(trimmed) {
-            let indent = content.len() - content.trim_start().len();
-            keys.retain(|(depth, _)| *depth < indent);
-            ensure!(
-                !keys
-                    .iter()
-                    .any(|(depth, seen)| *depth == indent && seen == &key),
-                EXIT_SCHEMA,
-                "{where_}:{number}: {key:?} appears twice in one mapping, and a rule has one value for it"
-            );
-            keys.push((indent, key));
-        }
-    }
-    Ok(())
+    // SAFETY: `front` outlives the parser. The parser is initialized before any
+    // use and deleted on every path that leaves this call after initialization;
+    // each event is deleted exactly once, immediately after inspection, and
+    // inspection never returns out of the loop. Union members are read only
+    // under the tag that selects them.
+    unsafe { check_restricted_yaml_events(front, where_) }
 }
 
-/// Refuse an anchor, an alias or a tag wherever a node may begin.
-fn check_indicators(line: &str, where_: &str, number: usize) -> Result<()> {
-    let masked = mask_quoted(line);
-    let bytes = masked.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        let what = match byte {
-            b'&' => "anchors; write the value out",
-            b'*' => "aliases; write the value out",
-            b'!' => "tags",
-            _ => continue,
-        };
-        // A node begins at the start of the line, or after one of the
-        // indicators that opens or separates one. Anything else is content.
-        let opens = bytes[..index]
-            .iter()
-            .rev()
-            .find(|byte| !byte.is_ascii_whitespace());
-        let node_position = match opens {
-            None => true,
-            Some(b'[') | Some(b'{') | Some(b',') | Some(b':') | Some(b'-') => true,
-            Some(_) => false,
-        };
-        ensure!(
-            !node_position,
-            EXIT_SCHEMA,
-            "{where_}:{number}: a rule's front matter uses no YAML {what}"
-        );
-    }
-    Ok(())
+enum YamlContainer {
+    Mapping {
+        expecting_key: bool,
+        keys: BTreeSet<Vec<u8>>,
+    },
+    Sequence,
 }
 
-/// The line with the contents of quoted spans replaced by spaces.
+/// Where in the document the next node will land, and what has been there.
 ///
-/// Length-preserving, so positions still line up, and content-erasing, so an
-/// indicator character inside a string is not read as structure.
-fn mask_quoted(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut quote: Option<char> = None;
-    for character in line.chars() {
-        match quote {
-            Some(open) if character == open => {
-                quote = None;
-                out.push(character);
-            }
-            Some(_) => out.push(' '),
-            None if character == '"' || character == '\'' => {
-                quote = Some(character);
-                out.push(character);
-            }
-            None => out.push(character),
-        }
-    }
-    out
+/// The event stream says a node *begins*; it does not say whether that node is
+/// a mapping key. That is positional, so it is tracked here: inside a mapping
+/// the two alternate, and libyaml has already normalized explicit `? key`
+/// syntax and flow style into the same alternation as ordinary block `key:`.
+/// Keeping the answer in one place is what makes the duplicate-key rule and the
+/// scalar-keys-only rule hold in every presentation rather than in the ones
+/// somebody thought to write a scanner for.
+struct YamlProfile {
+    stack: Vec<YamlContainer>,
+    documents: usize,
 }
 
-/// A line with any trailing comment removed, respecting quotes.
-fn strip_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut quote: Option<u8> = None;
-    for (index, byte) in bytes.iter().enumerate() {
-        match quote {
-            Some(open) if *byte == open => quote = None,
-            Some(_) => {}
-            None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
-            None if *byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) => {
-                return &line[..index];
-            }
-            None => {}
+impl YamlProfile {
+    /// Account for a node beginning at the current position.
+    ///
+    /// `scalar` is the key bytes when the node is a scalar, and `None` for a
+    /// collection — which is only ever refused, because a rule's front matter
+    /// has no use for a mapping keyed by a sequence.
+    fn begin_node(&mut self, scalar: Option<&[u8]>, where_: &str, line: u64) -> Result<()> {
+        let Some(YamlContainer::Mapping {
+            expecting_key,
+            keys,
+        }) = self.stack.last_mut()
+        else {
+            // The document root, or a sequence entry: nothing alternates.
+            return Ok(());
+        };
+        if *expecting_key {
+            let key = scalar.ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{where_}:{line}: a rule's front matter uses only scalar mapping keys"),
+                )
+            })?;
+            // Compared as scalar *values*, so `id` and `"id"` are the one key
+            // they mean, rather than two spellings that slip past each other.
+            ensure!(
+                keys.insert(key.to_vec()),
+                EXIT_SCHEMA,
+                "{where_}:{line}: a mapping key appears twice, and a rule has one value for it"
+            );
+            *expecting_key = false;
+        } else {
+            *expecting_key = true;
         }
+        Ok(())
     }
-    line
 }
 
-/// What this line offers as a value, if it offers one.
-fn value_of(trimmed: &str) -> Option<&str> {
-    let rest = match trimmed.strip_prefix("- ") {
-        Some(rest) => rest.trim(),
-        None if trimmed == "-" => return None,
-        None => trimmed,
+unsafe fn check_restricted_yaml_events(front: &str, where_: &str) -> Result<()> {
+    use unsafe_libyaml_norway::{
+        yaml_event_delete, yaml_event_t, yaml_parser_delete, yaml_parser_initialize,
+        yaml_parser_parse, yaml_parser_set_input_string, yaml_parser_t, YAML_STREAM_END_EVENT,
     };
-    match split_key(rest) {
-        Some((_, value)) if !value.is_empty() => Some(value),
-        Some(_) => None,
-        None => Some(rest),
-    }
-}
 
-/// `key: value` split at the first unquoted colon followed by space or end.
-fn split_key(trimmed: &str) -> Option<(String, &str)> {
-    let candidate = trimmed.strip_prefix("- ").map(str::trim).unwrap_or(trimmed);
-    let bytes = candidate.as_bytes();
-    let mut quote: Option<u8> = None;
-    for (index, byte) in bytes.iter().enumerate() {
-        match quote {
-            Some(open) if *byte == open => quote = None,
-            Some(_) => continue,
-            None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
-            None if *byte == b':' && (index + 1 == bytes.len() || bytes[index + 1] == b' ') => {
-                let key = candidate[..index].trim().trim_matches(['"', '\'']);
-                if key.is_empty() {
-                    return None;
-                }
-                return Some((key.to_owned(), candidate[index + 1..].trim()));
-            }
-            None => continue,
+    let mut parser = MaybeUninit::<yaml_parser_t>::uninit();
+    let parser = parser.as_mut_ptr();
+    ensure!(
+        !yaml_parser_initialize(parser).fail,
+        EXIT_SCHEMA,
+        "{where_}: could not initialize the YAML parser"
+    );
+    yaml_parser_set_input_string(parser, front.as_ptr(), front.len() as u64);
+
+    let mut state = YamlProfile {
+        stack: Vec::new(),
+        documents: 0,
+    };
+    loop {
+        let mut event = MaybeUninit::<yaml_event_t>::uninit();
+        let event = event.as_mut_ptr();
+        if yaml_parser_parse(parser, event).fail {
+            yaml_parser_delete(parser);
+            return Err(Error::new(
+                EXIT_SCHEMA,
+                format!("{where_}: invalid YAML front matter"),
+            ));
+        }
+        let kind = (*event).type_;
+        // Inspection is a call rather than a block, and that is what keeps the
+        // cleanup below correct. Every refusal in this profile is written with
+        // `ensure!`, which expands to `return` — inside the loop body that would
+        // leave this event and the whole parser allocated on the way out. A
+        // function boundary turns each of those returns into a value, so there
+        // is exactly one place that leaves the loop early and it frees both.
+        let checked = inspect_yaml_event(event, &mut state, where_);
+        yaml_event_delete(event);
+        if let Err(error) = checked {
+            yaml_parser_delete(parser);
+            return Err(error);
+        }
+        if kind == YAML_STREAM_END_EVENT {
+            break;
         }
     }
-    None
+    yaml_parser_delete(parser);
+    Ok(())
+}
+
+/// What the profile allows one event to be.
+///
+/// # Safety
+///
+/// `event` must point at an event the parser produced and has not yet deleted.
+unsafe fn inspect_yaml_event(
+    event: *const unsafe_libyaml_norway::yaml_event_t,
+    state: &mut YamlProfile,
+    where_: &str,
+) -> Result<()> {
+    use unsafe_libyaml_norway::{
+        YAML_ALIAS_EVENT, YAML_DOCUMENT_END_EVENT, YAML_DOCUMENT_START_EVENT,
+        YAML_FOLDED_SCALAR_STYLE, YAML_LITERAL_SCALAR_STYLE, YAML_MAPPING_END_EVENT,
+        YAML_MAPPING_START_EVENT, YAML_SCALAR_EVENT, YAML_SEQUENCE_END_EVENT,
+        YAML_SEQUENCE_START_EVENT,
+    };
+
+    let kind = (*event).type_;
+    let line = (*event).start_mark.line + 1;
+    if kind == YAML_DOCUMENT_START_EVENT {
+        state.documents += 1;
+        ensure!(
+            state.documents == 1 && (*event).data.document_start.implicit,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter is one implicit document"
+        );
+    } else if kind == YAML_DOCUMENT_END_EVENT {
+        ensure!(
+            (*event).data.document_end.implicit,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter is one implicit document"
+        );
+    } else if kind == YAML_ALIAS_EVENT {
+        // An alias is the one construct with no node properties to inspect: it
+        // *is* the reference.
+        return Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{where_}:{line}: a rule's front matter uses no YAML aliases"),
+        ));
+    } else if kind == YAML_SCALAR_EVENT {
+        let scalar = (*event).data.scalar;
+        check_yaml_properties(scalar.anchor, scalar.tag, where_, line)?;
+        ensure!(
+            scalar.style != YAML_LITERAL_SCALAR_STYLE && scalar.style != YAML_FOLDED_SCALAR_STYLE,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter uses no block scalars"
+        );
+        // libyaml NUL-terminates every scalar, so the pointer is live even at
+        // length zero; the guard is here because `from_raw_parts` is undefined
+        // on a null base regardless of length, and that is not a property to
+        // depend on a C library for.
+        let value = if scalar.value.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(scalar.value, scalar.length as usize)
+        };
+        state.begin_node(Some(value), where_, line)?;
+    } else if kind == YAML_MAPPING_START_EVENT {
+        let mapping = (*event).data.mapping_start;
+        check_yaml_properties(mapping.anchor, mapping.tag, where_, line)?;
+        state.begin_node(None, where_, line)?;
+        state.stack.push(YamlContainer::Mapping {
+            expecting_key: true,
+            keys: BTreeSet::new(),
+        });
+    } else if kind == YAML_SEQUENCE_START_EVENT {
+        let sequence = (*event).data.sequence_start;
+        check_yaml_properties(sequence.anchor, sequence.tag, where_, line)?;
+        state.begin_node(None, where_, line)?;
+        state.stack.push(YamlContainer::Sequence);
+    } else if kind == YAML_MAPPING_END_EVENT {
+        ensure!(
+            matches!(state.stack.pop(), Some(YamlContainer::Mapping { .. })),
+            EXIT_SCHEMA,
+            "{where_}:{line}: invalid YAML mapping structure"
+        );
+    } else if kind == YAML_SEQUENCE_END_EVENT {
+        ensure!(
+            matches!(state.stack.pop(), Some(YamlContainer::Sequence)),
+            EXIT_SCHEMA,
+            "{where_}:{line}: invalid YAML sequence structure"
+        );
+    }
+    Ok(())
+}
+
+/// Anchors and tags are node properties, and every node kind can carry both.
+///
+/// One function for all three kinds, because "an anchor is allowed on a
+/// sequence but not a scalar" is exactly the sort of asymmetry that opens a
+/// bypass, and having a single place to state the rule is how it stays absent.
+fn check_yaml_properties(anchor: *const u8, tag: *const u8, where_: &str, line: u64) -> Result<()> {
+    ensure!(
+        anchor.is_null(),
+        EXIT_SCHEMA,
+        "{where_}:{line}: a rule's front matter uses no YAML anchors"
+    );
+    ensure!(
+        tag.is_null(),
+        EXIT_SCHEMA,
+        "{where_}:{line}: a rule's front matter uses no YAML tags"
+    );
+    Ok(())
 }
 
 /// The rule-id grammar, in one place so the loader and the snapshot check

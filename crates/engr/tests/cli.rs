@@ -2174,6 +2174,98 @@ fn code_from(screen: &str) -> String {
         .to_owned()
 }
 
+/// A pending question knows which admission door the Section will use, but the
+/// admission instant does not exist until confirmation succeeds.
+///
+/// Two things are checked, because either alone would leave the finding open.
+/// The frozen question holds no preparation-time clock read at all — it holds
+/// the unassigned placeholder — and the screen does not present that
+/// placeholder as provenance. Confirmation then stamps the real instant, and
+/// the placeholder survives nowhere in the record.
+#[test]
+fn a_pending_section_does_not_claim_a_future_admission_instant() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "pending provenance"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id");
+
+    let output = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "the timestamp belongs to confirmation",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8_lossy(&output.stdout);
+    let code = code_from(&shown);
+    let pending: Value = serde_json::from_str(
+        &std::fs::read_to_string(store::challenge_path(root, &code).expect("challenge path"))
+            .expect("challenge bytes"),
+    )
+    .expect("challenge");
+    let placeholder = pending["subject"]["data"]["value"]["value"]["admitted"]["at"]
+        .as_str()
+        .expect("proposal placeholder");
+    assert_eq!(
+        placeholder, "0001-01-01T00:00:00Z",
+        "the frozen question carries no preparation-time clock read"
+    );
+    assert!(!shown.contains("Admitted   "), "{shown}");
+    assert!(
+        !shown.contains(placeholder),
+        "the internal proposal placeholder must not be presented as provenance: {shown}"
+    );
+    assert!(
+        shown.contains("Admission  human; time assigned on confirmation"),
+        "{shown}"
+    );
+
+    // And the placeholder is replaced rather than carried: confirmation stamps
+    // one real instant into both the Section and the Event that admitted it.
+    let before = time::OffsetDateTime::now_utc();
+    confirm(root, &pending);
+    let stored = std::fs::read_to_string(store::object_path(root, id)).expect("object bytes");
+    let object: Value = serde_json::from_str(&stored).expect("object");
+    let admitted = object["sections"][0]["admitted"]["at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("admitted at: {stored}"))
+        .to_owned();
+    assert_ne!(admitted, placeholder, "the placeholder must not survive");
+    let stamped =
+        time::OffsetDateTime::parse(&admitted, &time::format_description::well_known::Rfc3339)
+            .expect("stamped instant");
+    assert!(
+        stamped >= before - time::Duration::seconds(2),
+        "the stamped instant belongs to confirmation, not preparation: {admitted}"
+    );
+    let event = store::load_events(root, id)
+        .expect("events")
+        .pop()
+        .expect("the admitting event");
+    assert_eq!(
+        event.metadata.admitted.at, admitted,
+        "the Section and the Event that admitted it state one instant"
+    );
+    assert!(
+        !stored.contains(placeholder),
+        "no persisted byte keeps the unassigned placeholder: {stored}"
+    );
+}
+
 /// The screen a human reads before typing a code has to carry the whole
 /// destination. A state without its type is a word that means different things
 /// on different objects, and attention is what they are actually deciding.

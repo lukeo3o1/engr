@@ -5,12 +5,11 @@
 //! exact mutation passes every applicable usable Object Rule.
 //!
 //! What a Challenge stores is deliberately narrow: the subject, and nothing
-//! else. Everything a human is *shown* beside it — the previous wording, the
-//! Object's title, the Rules that govern the mutation — is derived at render
-//! time from the workspace, because a pending Challenge is only actionable while
-//! the Object still stands at `expected_rev`. Storing a second copy of state
-//! that has to agree with the workspace is how the copy and the workspace come
-//! to disagree.
+//! else. Previous wording and the Object's title are derived at render time
+//! from the workspace, because a pending Challenge is actionable only while the
+//! Object still stands at `expected_rev`. A Rule Review is different: the exact
+//! review a human is being asked to overrule is frozen inside the subject and
+//! rendered from there, while live Rules are used only to decide staleness.
 
 use crate::confirmation::{Challenge, Subject, SubjectType};
 use crate::model::{
@@ -54,14 +53,14 @@ pub struct ObjectSubject {
 /// The Rule Review a human is being asked to stand behind, frozen with the rest
 /// of the question.
 ///
-/// The Event keeps two members of this — the outcome and the digest — because
-/// that is all durable provenance needs. What a *person* needs to answer is more
-/// than that, and it is not recoverable afterwards.
+/// The Event keeps the interpretable result as `{ outcome, result, attempts }`.
+/// The binding digest, exact Rule list and explanation are decision-time
+/// material: they are meaningful while this Challenge can rebind them, not
+/// after the artifacts have moved and the Challenge is gone.
 ///
-/// `result` is the distinction the Event deliberately loses: a review that
-/// **failed** and one that was **exhausted** both become `overridden` in
-/// history, and they are not the same thing to overrule. `attempt` says which
-/// try this was. `rules` names the exact Rule set that was reviewed, so the
+/// `result` preserves the distinction between a review that **failed** and one
+/// that was **exhausted**, even though both have outcome `overridden` in
+/// history. `attempts` says which try this was. `rules` names the exact Rule set that was reviewed, so the
 /// screen renders what was actually considered rather than recomputing the list
 /// from live state — a Rule edited afterwards would otherwise change what a
 /// frozen Challenge appears to say. `explanation` is the agent's own account of
@@ -307,13 +306,14 @@ fn check_projection_is_representable(projected: &Object) -> Result<()> {
 /// who assembled a well-formed record.
 ///
 /// The shape checks establish that a record is schema-exact, contiguous and
-/// replayable. None of that is admission. The envelope's own validation reads
-/// the ReviewDigest scalar for *syntax*; it cannot tell an attested review from
-/// an invented sixty-four hex characters, and it cannot tell a confirmation a
-/// person gave from one nobody was ever shown. Without this, a direct library
-/// caller could append `by: agent, outcome: passed` with a plausible digest, or
-/// a Human record naming a challenge that was never minted, and let recovery
-/// project either into current authority.
+/// replayable. None of that is admission. Review provenance is three
+/// self-consistent facts — `outcome`, `result`, `attempts` — and self-consistent
+/// is all the envelope can check: it cannot tell an attested review from an
+/// asserted one, and it cannot tell a confirmation a person gave from one nobody
+/// was ever shown. Without this, a direct library caller could append
+/// `by: agent` with a review it simply declares passed, or a Human record naming
+/// a challenge that was never minted, and let recovery project either into
+/// current authority.
 ///
 /// Asked at the boundary rather than at the two callers, because the point is
 /// the boundary and not the route to it — and asked under the writer lock, so
@@ -924,13 +924,14 @@ const REFUSALS_REMEMBERED: usize = 32;
 /// Not a protocol digest and never persisted as provenance — it is scratch
 /// memory that has to be able to say "this exact proposal, again".
 ///
-/// `admitted` is stripped before hashing, and that is the whole reason this is
-/// not simply the payload's canonical bytes. A frozen Section value carries the
-/// instant it was put up for admission, so two runs of the identical command
-/// differ by a timestamp — and a receipt keyed on that would never match the
-/// retry it was written for, which turns the two-stage size rule into a
-/// permanent refusal. What "the same proposal" means here is the same wording
-/// against the same basis, which is what a person would say too.
+/// `admitted` is stripped before hashing, and that is deliberate rather than
+/// incidental. What "the same proposal" means here is the same wording against
+/// the same basis — which is what a person would say too, and which is a
+/// question about the content rather than about the door it comes through or
+/// when it is answered. Stripping it also keeps the receipt correct no matter
+/// what the pending placeholder is: the retry has to match the proposal it was
+/// written for, and a key that could move under it turns the two-stage size rule
+/// into a permanent refusal.
 fn proposal_key(payload: &Payload) -> Result<String> {
     let mut value = serde_json::to_value(payload)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("proposal: {error}")))?;
@@ -1849,14 +1850,32 @@ pub fn content(
     })
 }
 
-/// The Section value a proposal admits, with the admission path it will come
-/// through and the instant it was put up.
+/// The `admitted.at` a proposal carries while there is no admission instant.
 ///
-/// `admitted` is frozen with the rest of the value, so the bytes a human reads
-/// are the bytes the Event carries and the Section stores. The instant it holds
-/// is when the value was put up for admission through that door;
-/// `Event.metadata.admitted.at` is when it entered history, and the two are
-/// separate facts for the reason migration makes obvious.
+/// A Challenge freezes *which* act, against *which* Object, at *which*
+/// revision, through *which* door. It cannot freeze *when* the act was
+/// admitted, because that has not happened yet — and reading the clock at
+/// preparation would put a plausible false answer where the record expects a
+/// true one, which is the shape of mistake nothing downstream can detect.
+///
+/// The member cannot simply be absent: the proposal's value is the same schema
+/// the Event's `data` carries, and one schema rather than two that have to
+/// agree is worth more than a nullable member. So it holds an instant no
+/// admission can have. Two properties follow, and both are wanted. Preparing
+/// the same mutation twice produces the same frozen bytes, because nothing in
+/// the question is a clock read; and a value that ever reached a record still
+/// wearing this would be visibly, unmistakably wrong rather than quietly
+/// plausible.
+pub const UNASSIGNED_ADMISSION: &str = "0001-01-01T00:00:00Z";
+
+/// The Section value a proposal admits, with the admission path it will come
+/// through.
+///
+/// `admitted.by` is frozen because the door is part of the question.
+/// `admitted.at` is [`UNASSIGNED_ADMISSION`] until there is an admission:
+/// pending rendering never presents it as provenance, and confirmation replaces
+/// it with the one actual Section/Event admission instant. Migration preserves
+/// predecessor Section instants separately.
 pub fn value(content: Content, by: Admission) -> SectionValue {
-    SectionValue::new(SectionAdmitted::new(by, now()), content)
+    SectionValue::new(SectionAdmitted::new(by, UNASSIGNED_ADMISSION), content)
 }

@@ -82,18 +82,24 @@ struct RefClosure<'a> {
     visiting: BTreeSet<HistoricalKey>,
 }
 
-/// The six semantic fields the predecessor's whole-content seal covered.
+/// The semantic fields the predecessor's whole-content seal actually covered.
 ///
-/// `admission` and `header` are deliberately absent: the original Ref never
-/// attested either, and adding them would make the migrated Ref claim a
-/// dependency nobody declared — which would then drift the first time a Section
-/// was promoted or given a header.
-const PREDECESSOR_REF_FIELDS: [crate::dependency::SemanticField; 6] = [
+/// Three, because the predecessor Section *was* three semantic members. Its
+/// seal is taken over `{based_on, refs, text}` — see
+/// [`crate::predecessor::Section`], whose shape is the released schema — and a
+/// whole-content reference therefore attested those and could not have attested
+/// anything else.
+///
+/// Every later field is deliberately absent, and the reason is the same for all
+/// of them. `admission`, `header`, `role`, `content` and `relations` did not
+/// exist in the released contract, so a migrated Ref that selected them would
+/// claim a dependency nobody ever declared — and would then report drift the
+/// first time somebody legitimately gave the target a role, a supplement, a
+/// heading or a relation. Migration converts a dependency; it does not widen
+/// one.
+const PREDECESSOR_REF_FIELDS: [crate::dependency::SemanticField; 3] = [
     crate::dependency::SemanticField::BasedOn,
-    crate::dependency::SemanticField::Content,
     crate::dependency::SemanticField::Refs,
-    crate::dependency::SemanticField::Relations,
-    crate::dependency::SemanticField::Role,
     crate::dependency::SemanticField::Text,
 ];
 
@@ -156,7 +162,7 @@ impl<'a> RefClosure<'a> {
             reference.sha256
         );
         let fields = crate::dependency::canonical_fields(&PREDECESSOR_REF_FIELDS)?;
-        let target = crate::proof::section_target(&reference.object, reference.section);
+        let target = crate::proof::section_target(&reference.object, reference.section)?;
         let snapshot = crate::dependency::ref_snapshot(
             target.clone(),
             &fields,
@@ -200,7 +206,7 @@ impl<'a> RefClosure<'a> {
                         EXIT_NOT_FOUND,
                         format!(
                             "predecessor reference target {} is absent at {}",
-                            crate::proof::section_target(&key.object, key.section),
+                            crate::proof::section_target(&key.object, key.section)?,
                             key.commit
                         ),
                     ))
@@ -786,45 +792,30 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
             "the destination was staged and cannot be read back".to_owned(),
         )
     })?;
+    stop_after_destination_for_test(&challenge.id)?;
     finish(root, challenge, ready, sections)
 }
 
-/// Stage the destination and stop, which is the state a crash between staging
-/// and publication leaves behind.
-///
-/// A test seam, and deliberately a blunt one. There is no legitimate reason for
-/// a caller to want half a migration, so this is hidden from the documented
-/// surface rather than dressed up as an option — but the resumable property it
-/// exists to exercise is the one that decides whether a crash mid-publication
-/// is recoverable, and a property nothing can reach is a property nothing
-/// checks.
-#[doc(hidden)]
-pub fn stage_destination_only(root: &Path, challenge: &str) -> Result<()> {
-    store::with_lock(root, || {
-        let manifest = staged(root)?
-            .ok_or_else(|| Error::new(EXIT_INVARIANT, "no migration is staged".to_owned()))?;
-        ensure!(
-            manifest.challenge == challenge,
+/// Integration tests need to exercise the real post-confirmation crash
+/// boundary. The value is the exact Challenge code, so an inherited or stale
+/// variable cannot stop an unrelated migration. Release builds contain no
+/// failure hook.
+#[cfg(debug_assertions)]
+fn stop_after_destination_for_test(challenge: &str) -> Result<()> {
+    if std::env::var_os("ENGR_TEST_STOP_MIGRATION_AFTER_DESTINATION")
+        .is_some_and(|requested| requested == std::ffi::OsStr::new(challenge))
+    {
+        return Err(Error::new(
             EXIT_INVARIANT,
-            "the staged migration is waiting on challenge {}, not {challenge}",
-            manifest.challenge
-        );
-        let (_, predecessors) = preflight(root)?;
-        let admitted = EventAdmission {
-            by: Admission::Human,
-            at: now(),
-            confirmation: Some(HumanConfirmation {
-                challenge: challenge.to_owned(),
-            }),
-            review: None,
-        };
-        let mut closure = RefClosure::new(root);
-        let mut derived = Vec::new();
-        for predecessor in &predecessors {
-            derived.push(derive(&mut closure, predecessor, admitted.clone())?);
-        }
-        stage_destination(root, challenge, &derived)
-    })
+            "test interruption after confirmed migration destination staging".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn stop_after_destination_for_test(_challenge: &str) -> Result<()> {
+    Ok(())
 }
 /// Everything from the staged destination onward, which is also the whole of
 /// what resuming has to do.

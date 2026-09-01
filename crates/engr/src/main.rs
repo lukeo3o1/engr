@@ -2379,8 +2379,7 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             }
         }
         out.push_str(&format!(
-            "Admitted   {} by {}\n",
-            value.admitted.at,
+            "Admission  {}; time assigned on confirmation\n",
             value.admitted.by.as_str()
         ));
         if matches!(payload.action, Action::ObjectSuperseded { .. }) {

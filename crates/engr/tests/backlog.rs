@@ -905,7 +905,7 @@ fn the_record_still_cannot_depend_on_unconfirmed_staging() {
     // section from standing on wording nobody read.
     let mut content = wording("stands on something");
     content.refs = vec![engr::dependency::SelectiveRef::stored(
-        engr::proof::section_target(&staging, 1),
+        engr::proof::section_target(&staging, 1).expect("section target"),
         vec![engr::dependency::SemanticField::Text],
         engr::git::head(&root).expect("HEAD"),
         format!("1:{}", "0".repeat(64)),

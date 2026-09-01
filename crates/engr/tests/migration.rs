@@ -164,6 +164,26 @@ fn migrate(root: &Path) -> engr::migration::Report {
     }
 }
 
+/// Accept the Human response, then simulate the process disappearing at the
+/// real apply boundary after the destination is durable and before publication.
+fn interrupt_after_confirmed_destination(root: &Path, challenge: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .arg("confirm")
+        .arg(format!("CONFIRM {challenge}"))
+        .env("ENGR_TEST_STOP_MIGRATION_AFTER_DESTINATION", challenge)
+        .output()
+        .expect("run interrupted confirmation");
+    assert!(!output.status.success(), "the test boundary must interrupt");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("test interruption after confirmed migration destination staging"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Every relative path under `.engr`, with the digest of its bytes.
 ///
 /// `local/` is left out: it is this machine's alone — the writer lock, a live
@@ -516,7 +536,7 @@ fn predecessor_references_convert_to_what_they_attested_and_still_resolve() {
 
     assert_eq!(
         reference.target(),
-        proof::section_target(MODEL, 1),
+        proof::section_target(MODEL, 1).expect("section target"),
         "the same target the predecessor named"
     );
     assert_eq!(
@@ -531,13 +551,16 @@ fn predecessor_references_convert_to_what_they_attested_and_still_resolve() {
         .collect();
     assert_eq!(
         selected,
-        vec!["based_on", "content", "refs", "relations", "role", "text"],
-        "exactly what the whole-content seal covered"
+        vec!["based_on", "refs", "text"],
+        "exactly what the released whole-content seal covered, and nothing else"
     );
-    assert!(
-        !selected.contains(&"admission") && !selected.contains(&"header"),
-        "the original Ref never attested either, so the migrated one does not claim to"
-    );
+    for later in ["admission", "content", "header", "relations", "role"] {
+        assert!(
+            !selected.contains(&later),
+            "{later} did not exist in the released contract, so the original Ref \
+             cannot have attested it and the migrated one must not claim to"
+        );
+    }
 
     // And it verifies against the predecessor commit it pins, which means the
     // conversion the read path performs is the one the migration performed.
@@ -546,6 +569,66 @@ fn predecessor_references_convert_to_what_they_attested_and_still_resolve() {
         dependency::evaluate(&root, &target, reference).expect("evaluate"),
         dependency::Dependency::Unchanged,
         "a migrated reference is not born stale"
+    );
+}
+
+/// A migrated Ref depends on what the predecessor Ref actually attested, and on
+/// nothing the predecessor could not have said.
+///
+/// The released Section was `{based_on, refs, text}`; `role`, `content`,
+/// `relations`, `header` and `admission` did not exist in that contract. So
+/// giving the target one of them afterwards is somebody adding a fact, not the
+/// dependency moving — and a Ref that reported drift for it would be reporting
+/// a dependency the original reference never declared. This is the observable
+/// consequence of the selected field set, which is why it is checked here
+/// rather than only in the list of field names.
+#[test]
+fn a_migrated_reference_does_not_drift_on_fields_the_predecessor_never_had() {
+    let (_temp, root) = released();
+    migrate(&root);
+
+    let source = store::load_object(&root, PROVENANCE_OBJECT).expect("source");
+    let reference = source.section(4).expect("§4").refs[0].clone();
+
+    // Restate the target's whole semantic value, changing only members the
+    // released contract had no way to express.
+    let target = store::load_object(&root, MODEL).expect("target");
+    let mut content = target.section(1).expect("§1").value().content;
+    assert!(
+        content.role.is_none() && content.content.is_empty() && content.relations.is_empty(),
+        "the migrated target starts without any of the later fields"
+    );
+    content.role = Some(engr::semantics::Role::Decision);
+    content.content = vec![engr::semantics::Supplement {
+        content_type: "code.rs".to_owned(),
+        body: "// a supplement the predecessor contract could not hold\n".to_owned(),
+    }];
+
+    let payload = engr::model::Payload::new(
+        MODEL,
+        engr::model::Action::SectionUpdated {
+            section: 1,
+            value: engr::gate::value(content, engr::semantics::Admission::Human),
+            becomes: None,
+        },
+    );
+    let prepared = engr::gate::prepare(&root, payload).expect("prepare");
+    match engr::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code())).expect("confirm")
+    {
+        engr::Confirmed::Object(_) => {}
+        engr::Confirmed::Migration(_) => panic!("an Object confirmation"),
+    }
+
+    let moved = ops::effective(&root, MODEL).expect("target");
+    assert_eq!(
+        moved.section(1).expect("§1").role,
+        Some(engr::semantics::Role::Decision),
+        "the target really did gain the field"
+    );
+    assert_eq!(
+        dependency::evaluate(&root, &moved, &reference).expect("evaluate"),
+        dependency::Dependency::Unchanged,
+        "a field the predecessor Ref could not have attested is not drift"
     );
 }
 
@@ -1035,7 +1118,7 @@ fn a_crash_at_any_publication_step_is_resumable() {
     for (what, damage) in steps {
         let (_temp, root) = released();
         let proposed = engr::migration::prepare(&root).expect("prepare");
-        engr::migration::stage_destination_only(&root, &proposed.challenge).expect("stage");
+        interrupt_after_confirmed_destination(&root, &proposed.challenge);
         let staged: Vec<String> = objects
             .iter()
             .map(|id| {
@@ -1084,7 +1167,7 @@ fn a_crash_at_any_publication_step_is_resumable() {
 fn a_rewritten_staged_destination_is_refused_rather_than_published() {
     let (_temp, root) = released();
     let proposed = engr::migration::prepare(&root).expect("prepare");
-    engr::migration::stage_destination_only(&root, &proposed.challenge).expect("stage");
+    interrupt_after_confirmed_destination(&root, &proposed.challenge);
 
     let staged = store::local_dir(&root)
         .join("migration")
@@ -1099,6 +1182,64 @@ fn a_rewritten_staged_destination_is_refused_rather_than_published() {
         .expect_err("a rewritten stage publishes nothing");
     assert_ne!(error.code, 0);
     assert!(!store::version_path(&root).exists());
+}
+
+/// Staging is not admission. No destination Event carrying final provenance
+/// exists until the exact Human response has crossed the real apply boundary;
+/// a retry publishes that one admitted Event rather than restamping it.
+#[test]
+fn a_destination_is_staged_only_after_human_confirmation() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let challenge: Value = serde_json::from_str(&read(
+        &store::challenge_path(&root, &proposed.challenge).expect("challenge path"),
+    ))
+    .expect("challenge");
+    let created_at = time::OffsetDateTime::parse(
+        challenge["created_at"].as_str().expect("created_at"),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("created_at time");
+    let destination = store::local_dir(&root)
+        .join("migration")
+        .join("destination");
+    assert!(
+        !destination.exists(),
+        "preparation must not stage final Event provenance"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    interrupt_after_confirmed_destination(&root, &proposed.challenge);
+
+    let staged: Value = serde_json::from_str(
+        read(
+            &destination
+                .join("eventstore")
+                .join(format!("{AUTHORITY}.jsonl")),
+        )
+        .trim_end(),
+    )
+    .expect("staged event");
+    let staged_at = staged["metadata"]["admitted"]["at"]
+        .as_str()
+        .expect("staged admission time")
+        .to_owned();
+    let admitted_at =
+        time::OffsetDateTime::parse(&staged_at, &time::format_description::well_known::Rfc3339)
+            .expect("admitted_at time");
+    assert!(
+        admitted_at > created_at,
+        "the final Event timestamp must be acquired after the Human response"
+    );
+
+    match engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge)).expect("confirm") {
+        engr::Confirmed::Migration(_) => {}
+        engr::Confirmed::Object(_) => panic!("migration confirmation"),
+    }
+    let event = &store::load_events(&root, AUTHORITY).expect("events")[0];
+    assert_eq!(
+        event.metadata.admitted.at, staged_at,
+        "resume must publish the admitted transaction, not mint a second instant"
+    );
 }
 
 /// The local exclude lands where git actually reads it, including from a linked

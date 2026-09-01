@@ -543,38 +543,33 @@ pub fn check_not_stale_at_birth(
 /// **The spelling is the canonical one.** `:01` and `:1` name the same Section
 /// and produce different bytes, so accepting both would mean one Section
 /// identity with two digests — exactly the ambiguity a canonical form exists to
-/// remove. Checked by rebuilding the target from what was parsed and requiring
-/// the result to equal what arrived, so the emitter and the reader cannot drift
-/// apart: whatever [`crate::proof::section_target`] writes is by definition the
-/// only spelling this accepts.
+/// remove. Parsed through the shared compact engr-reference codec, so the
+/// emitter and reader cannot drift into separate raw-UUID and compact
+/// identities.
 ///
 /// A target this cannot read is refused rather than guessed at, because the
 /// alternative is deciding which Section a stored Ref meant and then reporting
 /// drift against whatever that guess landed on.
 pub fn parse_target(target: &str) -> Result<(String, u64)> {
-    let malformed = || {
+    let reference = crate::reference::canonical_embedded(
+        target,
+        &[crate::reference::ResourceKind::Object],
+        "Ref target",
+    )?;
+    let section = reference.section().ok_or_else(|| {
         Error::new(
             EXIT_SCHEMA,
             format!("{target:?} is not a canonical section target"),
         )
-    };
-    let rest = target.strip_prefix("obj:").ok_or_else(malformed)?;
-    let (id, section) = rest.rsplit_once(':').ok_or_else(malformed)?;
-    crate::model::validate_object_id(id)?;
-    let section: u64 = section.parse().map_err(|_| malformed())?;
-    ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    })?;
     ensure!(
         section <= crate::proof::MAX_SAFE_INTEGER,
         EXIT_SCHEMA,
         "section id {section} is outside the shared safe-integer domain, and \
          writing it inside a target string does not put it back in"
     );
-    ensure!(
-        crate::proof::section_target(id, section) == target,
-        EXIT_SCHEMA,
-        "{target:?} is not the canonical spelling of section {section}"
-    );
-    Ok((id.to_owned(), section))
+    let id = crate::reference::decode_uuid(reference.id())?.to_string();
+    Ok((id, section))
 }
 
 /// The target as it stood at the commit a Ref pins.
@@ -734,7 +729,7 @@ pub fn admit(
     fields: &[SemanticField],
     commit: &str,
 ) -> Result<SelectiveRef> {
-    let target = crate::proof::section_target(&current.id, section);
+    let target = crate::proof::section_target(&current.id, section)?;
     // 1 + 2. The whole aggregate, not just the Section being referenced: a
     // Section is only as trustworthy as the Object that says it belongs there.
     //

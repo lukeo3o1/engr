@@ -119,7 +119,7 @@ fn edit(payload: &mut Payload, adjust: impl FnOnce(&mut Content)) {
 
 fn stored_text_ref(object: &str, section: u64, commit: &str, digest: &str) -> Ref {
     engr::dependency::SelectiveRef::stored(
-        engr::proof::section_target(object, section),
+        engr::proof::section_target(object, section).expect("section target"),
         vec![engr::dependency::SemanticField::Text],
         commit,
         digest,

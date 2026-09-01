@@ -18,7 +18,7 @@ fn object_id() -> String {
 }
 
 fn target() -> String {
-    section_target(&object_id(), 1)
+    section_target(&object_id(), 1).expect("section target")
 }
 
 fn commit() -> String {
@@ -114,6 +114,11 @@ fn birth_and_read_agree_by_construction() {
 #[test]
 fn the_snapshot_is_the_four_member_object_the_contract_writes_out() {
     let snapshot = snapshot(&section(), &[SemanticField::Text, SemanticField::Admission]);
+    assert_eq!(
+        snapshot.target(),
+        "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
+        "persisted Ref identity is the compact canonical reference, not raw UUID text"
+    );
     let value = serde_json::to_value(&snapshot).expect("value");
     let members = value.as_object().expect("object");
     assert_eq!(
@@ -140,7 +145,7 @@ fn the_snapshot_is_the_four_member_object_the_contract_writes_out() {
     );
     assert_eq!(
         digest_of(&snapshot),
-        "1:9d1e70bb095529df7ff0229e2bd76d45d2eb448a3bdd48aa628375279f4b8e5f"
+        "1:46657f5091da995b1bfd37dbcd3294bba583e78119be229a91e661c2aad455e6"
     );
 }
 
@@ -243,7 +248,7 @@ fn reference(section: u64) -> Ref {
 /// holds it to the canonical spelling.
 fn stored_ref(section: u64, commit: &str, digest: &str) -> Ref {
     engr::dependency::SelectiveRef::stored(
-        section_target(&object_id(), section),
+        section_target(&object_id(), section).expect("section target"),
         vec![SemanticField::Text],
         commit,
         format!("1:{digest}"),
@@ -1329,7 +1334,8 @@ mod against_a_workspace {
 #[test]
 fn a_section_id_in_target_text_cannot_escape_the_shared_domain() {
     let ceiling = (1u64 << 53) - 1;
-    let at_the_bound = format!("obj:{}:{ceiling}", object_id());
+    let compact = engr::reference::encode_uuid_str(&object_id()).expect("compact id");
+    let at_the_bound = format!("obj:{compact}:{ceiling}");
     assert_eq!(
         parse_target(&at_the_bound)
             .expect("the bound itself is inside")
@@ -1338,7 +1344,7 @@ fn a_section_id_in_target_text_cannot_escape_the_shared_domain() {
     );
 
     for outside in [1u64 << 53, (1u64 << 53) + 1, u64::MAX] {
-        let target = format!("obj:{}:{outside}", object_id());
+        let target = format!("obj:{compact}:{outside}");
         let refused = parse_target(&target).expect_err("past the ceiling");
         assert!(
             refused.to_string().contains("safe-integer domain"),
@@ -1353,31 +1359,30 @@ fn a_section_id_in_target_text_cannot_escape_the_shared_domain() {
 ///
 /// `:01` and `:1` name the same Section and hash differently, so accepting both
 /// would give one identity two digests — the ambiguity a canonical form exists
-/// to remove. The check rebuilds the target from what it parsed, so the reader
-/// accepts exactly what the emitter writes and the two cannot drift apart.
+/// to remove. The reader uses the same compact reference codec as the emitter,
+/// so raw UUID text is not a second target dialect.
 #[test]
 fn a_target_has_exactly_one_canonical_spelling() {
     let id = object_id();
-    parse_target(&format!("obj:{id}:1")).expect("canonical");
+    let compact = engr::reference::encode_uuid_str(&id).expect("compact id");
+    parse_target(&format!("obj:{compact}:1")).expect("canonical");
+    parse_target(&format!("obj:{id}:1")).expect_err("raw UUID target text is not canonical");
 
     for padded in [
-        format!("obj:{id}:01"),
-        format!("obj:{id}:001"),
-        format!("obj:{id}:+1"),
-        format!("obj:{id}:1 "),
+        format!("obj:{compact}:01"),
+        format!("obj:{compact}:001"),
+        format!("obj:{compact}:+1"),
+        format!("obj:{compact}:1 "),
     ] {
         let refused = parse_target(&padded).expect_err(&padded);
-        assert!(
-            refused.to_string().contains("canonical"),
-            "{padded}: {refused}"
-        );
+        assert_eq!(refused.code, engr::EXIT_SCHEMA, "{padded}: {refused}");
         ref_snapshot(&padded, &[SemanticField::Text], &section(), commit())
             .expect_err("and it cannot be hashed either");
     }
 
     // Whatever the emitter writes is what the reader accepts, by construction.
     for section in [1u64, 9, 10, 4095, (1u64 << 53) - 1] {
-        let emitted = engr::proof::section_target(&id, section);
+        let emitted = engr::proof::section_target(&id, section).expect("section target");
         assert_eq!(parse_target(&emitted).expect("round trip").1, section);
     }
 }
