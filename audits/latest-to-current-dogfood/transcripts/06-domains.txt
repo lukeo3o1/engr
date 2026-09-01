@@ -1,0 +1,413 @@
+﻿$ engr-current backlog new --title Open questions from the upgrade audit --text Is the candidate screen supposed to report Rule-material staleness? Confirming a drifted challenge refuses, but engr candidate <code> renders it as confirmable with no warning, so an agent learns about the drift only by spending a round trip on it.   # cwd=project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a05e5e  Open questions from the upgrade audit
+1 unresolved   updated 2026-09-01T19:07:36Z
+engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+
+?? 禮1 ?? unresolved
+Is the candidate screen supposed to report Rule-material staleness? Confirming a drifted challenge refuses, but engr candidate <code> renders it as confirmable with no warning, so an agent learns about the drift only by spending a round trip on it.
+    updated  2026-09-01T19:07:36Z
+--- exit 0 ---
+
+$ engr-current backlog ls   # cwd=project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a05e5e   1 unresolved  -             2026-09-01T19:07:36Z  Open questions from the upgrade audit
+--- exit 0 ---
+
+$ engr-current backlog add --backlog 01a05e5e --text Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.   # cwd=project
+--- stderr ---
+error: unexpected argument '--backlog' found
+
+  tip: to pass '--backlog' as a value, use '-- --backlog'
+
+Usage: engr-current backlog add [OPTIONS] <--text <TEXT>|--text-file <TEXT_FILE>> <ITEM>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current backlog subjects --backlog 01a05e5e --section 1 --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=project
+--- stderr ---
+error: unexpected argument '--backlog' found
+
+  tip: to pass '--backlog' as a value, use '-- --backlog'
+
+Usage: engr-current backlog subjects [OPTIONS] --section <SECTION> <ITEM>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current backlog produced --backlog 01a05e5e --section 2 --target engr:obj:01m1f5bxq8fa8y3s7zh8b7t8be:2   # cwd=project
+--- stderr ---
+error: unexpected argument '--backlog' found
+
+  tip: to pass '--backlog' as a value, use '-- --backlog'
+
+Usage: engr-current backlog produced [OPTIONS] --section <SECTION> --target <ENGR_REF> <ITEM>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current backlog add 01a05e5e --text Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.   # cwd=project
+--- stderr ---
+error: this needs --expect: run `engr backlog show <item> --json`, read the point, and pass its expect value back
+--- exit 2 ---
+
+$ engr-current backlog subjects --help   # cwd=project
+--- stdout ---
+Replace what an unresolved point concerns
+
+Usage: engr-current backlog subjects [OPTIONS] --section <SECTION> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --section <SECTION>               
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+--- exit 0 ---
+
+$ engr-current backlog produced --help   # cwd=project
+--- stdout ---
+Record durable knowledge this point produced. Does not resolve it
+
+Usage: engr-current backlog produced [OPTIONS] --section <SECTION> --target <ENGR_REF> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --root <ROOT>        Workspace root. Defaults to the nearest ancestor containing .engr
+      --section <SECTION>  
+      --target <ENGR_REF>  The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+      --forget             Take the outcome back off: the bookkeeping was wrong, not the record
+      --attempt <N>        Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>     The `expect` value from `backlog show --json` for what you read. Repeat once per point for a merge
+  -h, --help               Print help
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect  --text Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog subjects 01a05e5e --section 1 --expect  --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog revise 01a05e5e --section 1 --expect  --text stale-token probe   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog add 01a05e5e --expect @{rename=2790af6d07a403477f8d047ce5f74faf8e5b11610c74b592373415213d42e96b; add=f7f6be3bd3655d7114165630e57469aadd39dda0b5aa0377a6ffd659fa172e92} --text Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog subjects 01a05e5e --section 1 --expect @{rename=2790af6d07a403477f8d047ce5f74faf8e5b11610c74b592373415213d42e96b; add=f7f6be3bd3655d7114165630e57469aadd39dda0b5aa0377a6ffd659fa172e92} --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog revise 01a05e5e --section 1 --expect @{rename=2790af6d07a403477f8d047ce5f74faf8e5b11610c74b592373415213d42e96b; add=f7f6be3bd3655d7114165630e57469aadd39dda0b5aa0377a6ffd659fa172e92} --text stale-token probe   # cwd=project
+--- stderr ---
+error: --expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`
+--- exit 2 ---
+
+$ engr-current backlog add 01a05e5e --expect f7f6be3bd3655d7114165630e57469aadd39dda0b5aa0377a6ffd659fa172e92 --text Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.   # cwd=project
+--- stdout ---
+added 禮2
+--- exit 0 ---
+
+$ engr-current backlog subjects 01a05e5e --section 1 --expect ac2853738140d7fc94de261af048d9176045d0d7df900240af71c7169df1e7aa --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=project
+--- stdout ---
+禮1 now concerns 1 subject(s)
+--- exit 0 ---
+
+$ engr-current backlog produced 01a05e5e --section 2 --expect 539e47f0aa878c6e2a0942d5173657019526ce96011e77a32f261c2de647050a --target engr:obj:01m1f5bxq8fa8y3s7zh8b7t8be:3   # cwd=project
+--- stderr ---
+error: produced outcome names object 01a05e55, which does not exist: /audit/project/.engr/objects/01a05e55-f6e8-7a91-e1e4-ff8a167d216e.json: not found
+--- exit 3 ---
+
+$ engr-current backlog revise 01a05e5e --section 1 --expect ac2853738140d7fc94de261af048d9176045d0d7df900240af71c7169df1e7aa --text stale-token probe   # cwd=project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+
+$ engr-current backlog produced 01a05e5e --section 2 --expect 539e47f0aa878c6e2a0942d5173657019526ce96011e77a32f261c2de647050a --target    # cwd=project
+--- stderr ---
+error: --target "": an engr reference must begin with `engr:`
+--- exit 2 ---
+
+$ engr-current backlog show 01a05e5e   # cwd=project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a05e5e  Open questions from the upgrade audit
+2 unresolved   updated 2026-09-01T19:09:08Z
+engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+
+?? 禮1 ?? unresolved
+Is the candidate screen supposed to report Rule-material staleness? Confirming a drifted challenge refuses, but engr candidate <code> renders it as confirmable with no warning, so an agent learns about the drift only by spending a round trip on it.
+    updated  2026-09-01T19:09:08Z
+    concerns engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮2 ?? unresolved
+Should migration remove the predecessor's now-dead .engr/lock file? It survives the migration and the new lock lives at .engr/local/lock.
+    updated  2026-09-01T19:09:07Z
+--- exit 0 ---
+
+$ engr-current backlog produced 01a05e5e --section 2 --expect 539e47f0aa878c6e2a0942d5173657019526ce96011e77a32f261c2de647050a --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c:2   # cwd=project
+--- stderr ---
+error: produced outcome names 01a05e55 禮2, which does not exist
+--- exit 3 ---
+
+$ engr-current backlog produced 01a05e5e --section 2 --expect 539e47f0aa878c6e2a0942d5173657019526ce96011e77a32f261c2de647050a --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c:6   # cwd=project
+--- stdout ---
+禮2 produced engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c:6; still unresolved
+--- exit 0 ---
+
+$ engr-current work start engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      active
+Updated    2026-09-01T19:10:08Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+--- exit 0 ---
+
+$ engr-current work ls   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+01a05e55  obj       active     0 open  2026-09-01T19:10:08Z  Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current work item add engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --text Run the crash/resume matrix on disposable checkpoints   # cwd=project
+--- stdout ---
+work item 1
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      active
+Updated    2026-09-01T19:10:23Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+--- exit 0 ---
+
+$ engr-current work item add engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --text Write REPORT.md with the scenario matrix   # cwd=project
+--- stdout ---
+work item 2
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      active
+Updated    2026-09-01T19:10:24Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+  2. pending  Write REPORT.md with the scenario matrix
+--- exit 0 ---
+
+$ engr-current work summary engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --text Migration verified end to end; domains exercised; crash/resume and adversarial scenarios remain.   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      active
+Updated    2026-09-01T19:10:25Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+Migration verified end to end; domains exercised; crash/resume and adversarial scenarios remain.
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+  2. pending  Write REPORT.md with the scenario matrix
+--- exit 0 ---
+
+$ engr-current work depend engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --target engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy --reason The open questions decide what the report can claim.   # cwd=project
+--- stderr ---
+error: unexpected argument '--target' found
+
+  tip: to pass '--target' as a value, use '-- --target'
+
+Usage: engr-current work depend <SUBJECT|--on <ENGR_REF>|--reason <REASON>>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current work block engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --reason Crash/resume needs the release binary, which has no debug failure hook; interruption must be induced from outside the process.   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      blocked
+Updated    2026-09-01T19:10:27Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+Migration verified end to end; domains exercised; crash/resume and adversarial scenarios remain.
+
+Blocked by
+  [0] Crash/resume needs the release binary, which has no debug failure hook; interruption must be induced from outside the process.
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+  2. pending  Write REPORT.md with the scenario matrix
+--- exit 0 ---
+
+$ engr-current work show engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      blocked
+Updated    2026-09-01T19:10:27Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+Migration verified end to end; domains exercised; crash/resume and adversarial scenarios remain.
+
+Blocked by
+  [0] Crash/resume needs the release binary, which has no debug failure hook; interruption must be induced from outside the process.
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+  2. pending  Write REPORT.md with the scenario matrix
+--- exit 0 ---
+
+$ engr-current work depend engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --on engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy --reason The open questions decide what the report can claim.   # cwd=project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-ee
+State      blocked
+Updated    2026-09-01T19:10:43Z
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+Migration verified end to end; domains exercised; crash/resume and adversarial scenarios remain.
+
+Depends on
+  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+    The open questions decide what the report can claim.
+
+Blocked by
+  [0] Crash/resume needs the release binary, which has no debug failure hook; interruption must be induced from outside the process.
+
+  1. pending  Run the crash/resume matrix on disposable checkpoints
+  2. pending  Write REPORT.md with the scenario matrix
+--- exit 0 ---
+
+$ engr-current work item done engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c 1 --result Matrix run on checkpoints/crash-a..c   # cwd=project
+--- stderr ---
+error: unrecognized subcommand 'done'
+
+Usage: engr-current work item [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current collection new upgrade-audit --title latest to generation-1 upgrade audit --description Everything this audit has to finish before the report can answer its question.   # cwd=project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+no members
+--- exit 0 ---
+
+$ engr-current collection add upgrade-audit --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --order 10 --priority high --priority-reason Continuity evidence gates the answer.   # cwd=project
+--- stderr ---
+error: unexpected argument '--priority-reason' found
+
+  tip: a similar argument exists: '--priority'
+
+Usage: engr-current collection add <COLLECTION|--target <ENGR_REF>|--order <ORDER>|--priority <PRIORITY>|--reason <REASON>>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current collection add upgrade-audit --target engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy --order 20   # cwd=project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+  20  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+      unresolved  Open questions from the upgrade audit
+--- exit 0 ---
+
+$ engr-current collection show upgrade-audit   # cwd=project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+  20  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+      unresolved  Open questions from the upgrade audit
+--- exit 0 ---
+
+$ engr-current work item --help   # cwd=project
+--- stdout ---
+The steps of the current decomposition
+
+Usage: engr-current work item [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add a step
+  revise  Reword a step
+  state   Move a step's progress
+  result  Record what a step produced. Omit --text to clear it
+  commit  Point a step at a commit, as navigation rather than proof
+  rm      Prune a step. Its id is not reused
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current collection add upgrade-audit --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --order 10 --priority high --reason Continuity evidence gates the answer.   # cwd=project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+  10  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      [high] attention   Predecessor fixture construction
+      Continuity evidence gates the answer.
+  20  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+      unresolved  Open questions from the upgrade audit
+--- exit 0 ---
+
+$ engr-current collection show upgrade-audit   # cwd=project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+  10  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      [high] attention   Predecessor fixture construction
+      Continuity evidence gates the answer.
+  20  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+      unresolved  Open questions from the upgrade audit
+--- exit 0 ---
+

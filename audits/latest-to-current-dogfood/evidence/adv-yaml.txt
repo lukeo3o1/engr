@@ -1,0 +1,25 @@
+Captured output of harness/adv-yaml.sh. Both legal spellings of the real schema
+load; every construct the restricted profile forbids is refused, in both block
+and flow presentation and behind YAML's explicit-key indicator.
+
+plain block spelling (must LOAD)           exit=0   loads
+plain flow spelling (must LOAD)            exit=0   loads
+anchor, block                              exit=4   probe.md:3: a rule's front matter uses no YAML anchors
+anchor, flow                               exit=4   probe.md:2: a rule's front matter uses no YAML anchors
+anchor on explicit key, block              exit=4   probe.md:1: a rule's front matter uses no YAML anchors
+anchor on explicit key, flow               exit=4   probe.md:1: a rule's front matter uses no YAML anchors
+alias, block                               exit=4   probe.md:3: a rule's front matter uses no YAML anchors
+alias on explicit key, flow                exit=4   probe.md:1: a rule's front matter uses no YAML aliases
+custom tag                                 exit=4   probe.md:3: a rule's front matter uses no YAML tags
+tag on explicit key, block                 exit=4   probe.md:1: a rule's front matter uses no YAML tags
+duplicate key, block                       exit=4   probe.md:2: a mapping key appears twice, and a rule has one value for it
+duplicate key, flow                        exit=4   probe.md:2: a mapping key appears twice, and a rule has one value for it
+duplicate key spelled two ways             exit=4   probe.md:2: a mapping key appears twice, and a rule has one value for it
+block scalar                               exit=4   probe.md:4: a rule's front matter uses no block scalars
+second document                            exit=4   probe.md:4: a rule's front matter is one implicit document
+explicit document start                    exit=4   refused
+YAML directive                             exit=4   probe.md: invalid YAML front matter
+
+"anchor on explicit key" is the exact form reported as a bypass in review
+5068793243. "duplicate key spelled two ways" is `id:` against `"id":`, which a
+scanner comparing source text would read as two different keys.

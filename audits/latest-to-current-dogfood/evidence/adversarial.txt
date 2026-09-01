@@ -1,0 +1,25 @@
+Captured output of harness/adversarial.sh against a clean migrated generation-1
+workspace. Each row is a fresh copy, one mutation, one command.
+
+===== integrity =====
+object tamper (title)              exit=5   01a05e55-74  open  Migration continuity AUDIT|2 sections   2 ok   rev 1|!!  Object integrity failed; current authority changed outside a supported path
+section tamper (text)              exit=5   01a05e55-74  FAIL  2 sections|current Object integrity failed|§1 content does not match its recorded seal
+event tamper (rev)                 exit=4   error: ...jsonl:1: event 01a05e66-6d89-7e51-b6a8-73ce87027735 does not match its own seal
+event moved to another stream      exit=4   error: (the Event's digest binds the owning Object, so it stops verifying in another stream)
+truncated object file              exit=4   error: ...json: EOF while parsing a string at line 1 column 120
+truncated event file               exit=4   error: ...jsonl:1: EOF while parsing a string at line 1 column 200
+malformed JSON                     exit=4   error: ...json: expected ident at line 1 column 2
+duplicate JSON key                 exit=4   error: ...json: a current resource is persisted as its canonical JCS bytes, and these are not them
+noncanonical JSON (reordered)      exit=4   error: ...json: a current resource is persisted as its canonical JCS bytes, and these are not them
+unknown member added               exit=4   error: ...json: a current resource is persisted as its canonical JCS bytes, and these are not them
+filename != embedded id            exit=4   error: ...json exists but its append-only Event history is missing
+
+===== references =====
+invalid Ref digest                 exit=5   01a05e55-e6  FAIL
+Ref repointed to another section   exit=5   01a05e55-e6  FAIL
+Ref target commit unavailable      exit=5   01a05e55-e6  FAIL
+Ref target raw UUID (old dialect)  exit=4   refused
+
+The last row matters beyond tampering: the superseded raw-UUID Ref spelling is
+not merely no longer emitted, it is no longer readable. The compact reference is
+the identity, not a rendering of one.

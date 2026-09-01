@@ -1,0 +1,30 @@
+Captured output of harness/crash-sweep.sh against checkpoints/crash-a with
+migration challenge 8DZM7N pending. The process is killed with SIGKILL, so
+nothing gets a chance to tidy up: this is the machine disappearing, not the
+program handling an error.
+
+uninterrupted confirm: 747 ms
+---- SIGKILL sweep across that window ----
+t300 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t400 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t500 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t550 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t600 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t620 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t640 ms exit=137  VERSION=no  format.json=yes staged_dest=no  new_eventstore=0 migrated_objects=0 old_events=3
+t660 ms exit=137  VERSION=no  format.json=yes staged_dest=yes new_eventstore=0 migrated_objects=0 old_events=3
+t680 ms exit=137  VERSION=no  format.json=yes staged_dest=yes new_eventstore=0 migrated_objects=0 old_events=3
+t700 ms exit=137  VERSION=no  format.json=yes staged_dest=yes new_eventstore=3 migrated_objects=3 old_events=3
+t720 ms exit=137  VERSION=no  format.json=no  staged_dest=yes new_eventstore=3 migrated_objects=3 old_events=0
+t740 ms exit=0    VERSION=yes format.json=no  staged_dest=no  new_eventstore=3 migrated_objects=3 old_events=0
+t760 ms exit=0    VERSION=yes format.json=no  staged_dest=no  new_eventstore=3 migrated_objects=3 old_events=0
+t780 ms exit=0    VERSION=yes format.json=no  staged_dest=no  new_eventstore=3 migrated_objects=3 old_events=0
+t800 ms exit=0    VERSION=yes format.json=no  staged_dest=no  new_eventstore=3 migrated_objects=3 old_events=0
+t900 ms exit=0    VERSION=yes format.json=no  staged_dest=no  new_eventstore=3 migrated_objects=3 old_events=0
+
+Four distinct interrupted states, in publication order:
+  <=640ms  nothing staged, predecessor whole
+  660-680  destination staged, nothing published, predecessor whole
+  700      staged and published, predecessor events/ still present, no VERSION
+  720      staged and published, predecessor format.json and events/ gone, no VERSION
+  >=740    complete

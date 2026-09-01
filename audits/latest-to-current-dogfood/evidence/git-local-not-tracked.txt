@@ -1,0 +1,32 @@
+Git evidence that the audit's local Human-Gate material was never tracked.
+
+===== git log =====
+5d16a22 the audit's own record, kept in the system it audits
+ede6e94 the rules the audit's own mutations answer to
+707048e migrated to generation 1
+91b4bae the historical engineering record, complete and verified
+221a5db the record so far, so references have a history to pin
+1dae5f4 the project the audit is about
+
+===== git status (working tree) =====
+ M .engr/backlog/01a05e5e-a6c2-7e52-b733-764d05d8521e.json
+ M .engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+ M .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+
+===== every path git can see, including untracked =====
+ M .engr/backlog/01a05e5e-a6c2-7e52-b733-764d05d8521e.json
+ M .engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+ M .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+
+===== is anything under .engr/local tracked or visible? =====
+(no TRACKED or VISIBLE line above means the local challenge material stayed out of git)
+
+===== what is actually on disk under .engr/local =====
+.engr/local/lock
+
+===== the local exclude that keeps it out =====
+# *~
+# engr: a live challenge code is a filename here, and it is meant for one
+# person. Added while a migration was prepared; the migrated workspace
+# carries the same rule in its own tracked .gitignore.
+/.engr/local/

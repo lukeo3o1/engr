@@ -1,0 +1,158 @@
+﻿$ engr-current rules ls   # cwd=project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  object
+    review 2 attempts; on_exhaustion = reject
+evidence-discipline  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+--- exit 0 ---
+
+$ engr-current rules show evidence-discipline   # cwd=project
+--- stdout ---
+Rule       evidence-discipline
+Governs    backlog, object
+Review     3 attempts; on_exhaustion = human_confirmation
+Based on   nothing outside the rule itself
+
+
+# Evidence discipline
+
+A durable assertion in this record must be something this audit observed, not
+something it expects.
+
+A Section states a conclusion only if a transcript in `transcripts/` shows the
+behaviour it describes. Where the audit reasoned rather than observed, the
+Section says so in its own words ??"not run", "inferred from source" ??so a
+later reader can tell the two apart without re-running anything.
+
+An assertion that cannot name its evidence belongs in the Backlog, not here.
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --text Observed: preflight left every Git-tracked byte untouched and wrote the /local/ exclusion to .git/info/exclude instead of the tracked .gitignore. Transcript 03-migration.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:46a659d3aceb82313a6ebdd2db93b40f3f9572d415563a83d158e58df0b0cadd and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --text Observed: preflight left every Git-tracked byte untouched and wrote the /local/ exclusion to .git/info/exclude instead of the tracked .gitignore. Transcript 03-migration. --review 1:46a659d3aceb82313a6ebdd2db93b40f3f9572d415563a83d158e58df0b0cadd --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-result passed   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:46a659d3aceb82313a6ebdd2db93b40f3f9572d415563a83d158e58df0b0cadd
+Rules      audit-scope, evidence-discipline
+
+Observed: preflight left every Git-tracked byte untouched and wrote the /local/ exclusion to .git/info/exclude instead of the tracked .gitignore. Transcript 03-migration.
+
+Type this exactly to confirm:  CONFIRM P43F6S
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM P43F6S   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migrate subcommand help still says it upgrades to v3, while the destination it writes is generation 1. Stale vocabulary on a discovery surface.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:dce4e0825035db5d8c9f3871636709b68905efd785b9164b0f41c9193c6ca6cf and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migrate subcommand help still says it upgrades to v3, while the destination it writes is generation 1. Stale vocabulary on a discovery surface. --review 1:dce4e0825035db5d8c9f3871636709b68905efd785b9164b0f41c9193c6ca6cf --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 2 --review-result failed --review-explanation audit-scope says findings are recorded, not repaired; this Section records one and repairs nothing, but the reviewer could not satisfy itself that naming a defect in the audited build stays inside scope.   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:dce4e0825035db5d8c9f3871636709b68905efd785b9164b0f41c9193c6ca6cf
+Rules      audit-scope, evidence-discipline
+Reason     audit-scope says findings are recorded, not repaired; this Section records one and repairs nothing, but the reviewer could not satisfy itself that naming a defect in the audited build stays inside scope.
+
+The migrate subcommand help still says it upgrades to v3, while the destination it writes is generation 1. Stale vocabulary on a discovery surface.
+
+Type this exactly to confirm:  CONFIRM X7SQTB
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM X7SQTB   # cwd=project
+--- stderr ---
+error: the Rule Review material moved after challenge X7SQTB was prepared
+--- exit 5 ---
+
+$ engr-current candidate X7SQTB   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:dce4e0825035db5d8c9f3871636709b68905efd785b9164b0f41c9193c6ca6cf
+Rules      audit-scope, evidence-discipline
+Reason     audit-scope says findings are recorded, not repaired; this Section records one and repairs nothing, but the reviewer could not satisfy itself that naming a defect in the audited build stays inside scope.
+
+The migrate subcommand help still says it upgrades to v3, while the destination it writes is generation 1. Stale vocabulary on a discovery surface.
+
+Type this exactly to confirm:  CONFIRM X7SQTB
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM X7SQTB   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-e6 --add --no-based-on --agent --text Agent-admitted note: transcripts 01 through 05 are the evidence base for every PASS in this report.   # cwd=project
+--- stderr ---
+error: section.created.v1 requires an object that needs attention, and closed does not; reopen it first
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-e6 --add --no-based-on --agent --text Agent-admitted note: transcripts 01 through 05 are the evidence base for every PASS in this report.   # cwd=project
+--- stderr ---
+error: section.created.v1 requires an object that needs attention, and closed does not; reopen it first
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --agent --text Agent-admitted: transcripts 01 through 06 under transcripts/ are the evidence base for every PASS in this report.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:50ec3e244a3594e2071a7b2499b2af6e77d5c4b294713da1d56c90b1ee708ef4 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --agent --text Agent-admitted: transcripts 01 through 06 under transcripts/ are the evidence base for every PASS in this report. --review 1:50ec3e244a3594e2071a7b2499b2af6e77d5c4b294713da1d56c90b1ee708ef4 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-result passed   # cwd=project
+--- stdout ---
+ADMITTED   01a05e55-74  section.created.v1  rev 3  agent
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text Exhaustion probe: audit-scope rejects at its ceiling, evidence-discipline escalates at its own.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:c0b8464868da0444f21714d69a95b70ffd6faeff7d4f8a8867ebedb515aa4833 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text Exhaustion probe: audit-scope rejects at its ceiling, evidence-discipline escalates at its own. --review 1:c0b8464868da0444f21714d69a95b70ffd6faeff7d4f8a8867ebedb515aa4833 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 3 --review-result exhausted   # cwd=project
+--- stderr ---
+error: a review offered for override must say what is being overridden
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text Exhaustion probe: audit-scope rejects at its ceiling, evidence-discipline escalates at its own. --review 1:c0b8464868da0444f21714d69a95b70ffd6faeff7d4f8a8867ebedb515aa4833 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 4 --review-result exhausted --review-explanation Four attempts could not reconcile recording a finding with audit-scope's no-repair clause; a human decides whether this Section is in scope.   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     EXHAUSTED at attempt 4 ??confirming this admits work no passing review allowed
+Digest     1:c0b8464868da0444f21714d69a95b70ffd6faeff7d4f8a8867ebedb515aa4833
+Rules      audit-scope, evidence-discipline
+Reason     Four attempts could not reconcile recording a finding with audit-scope's no-repair clause; a human decides whether this Section is in scope.
+
+Exhaustion probe: audit-scope rejects at its ceiling, evidence-discipline escalates at its own.
+
+Type this exactly to confirm:  CONFIRM S7MGW7
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM S7MGW7   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+

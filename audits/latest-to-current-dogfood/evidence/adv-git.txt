@@ -1,0 +1,22 @@
+Captured output of harness/adv-git.sh and the dirty-basis half of
+harness/adv-final.sh.
+
+===== linked worktree: does the local exclude land where git reads it? =====
+linked worktree .git is a file: gitdir: /audit/advg/main/.git/worktrees/linked
+prepared: CONFIRM B6K2ZS
+per-worktree admin dir  : absent (correct)
+common dir info/exclude : 1 matching lines
+is the live challenge visible to git from inside the worktree?
+  NOT VISIBLE TO GIT (correct)
+MIGRATED   advg/linked/.engr  3 objects, 7 sections, generation 1
+  still NOT VISIBLE after publication
+
+$GIT_DIR for a linked worktree is the per-worktree admin directory, while info/
+resolves through $GIT_COMMON_DIR. The exclusion landed in the common directory,
+which is the one git actually consults, so the safeguard holds where the naive
+path join would have silently failed.
+
+===== dirty git basis =====
+exit=5  error: source files have uncommitted changes; choose a committed basis
+        with --based-on or explicitly choose no repository basis with --no-based-on
+exit=0  with --no-based-on: Based on   none (explicit)

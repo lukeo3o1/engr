@@ -1,0 +1,21 @@
+Captured output of harness/crash-instant.sh. This is the decisive check for the
+#66 amendment's rule that migration Events carry the actual confirmation/apply
+instant: the process is killed after staging, and the retry happens six seconds
+later. If the instant were minted at resume, it would show the later time.
+
+wall clock before the answer : 2026-09-01T19:15:57.047275920Z
+killed with exit 137 ; destination staged: yes
+wall clock after the kill    : 2026-09-01T19:15:57.752590095Z
+...waiting 6 seconds, as a crashed machine would before somebody retried...
+wall clock at resume         : 2026-09-01T19:16:03.753394362Z
+MIGRATED   crash-instant/run/.engr  3 objects, 7 sections, generation 1
+resumed event admitted.at    : 2026-09-01T19:15:57.362552545Z
+
+The admitted instant lies between the answer and the kill. It is the moment the
+confirmed migration was applied, not the moment somebody retried it.
+
+===== does the resumed result match an uninterrupted one? =====
+objects/   : BYTE-IDENTICAL
+eventstore : identical except each Event's own id, its admission instant, and
+             therefore its own seal -- the three facts that cannot match between
+             two separate confirmations.

@@ -1,0 +1,322 @@
+﻿$ engr-latest ls   # cwd=project
+--- stdout ---
+no objects
+--- exit 0 ---
+
+$ engr-latest prepare --new --text Migration continuity audit   # cwd=project
+--- stdout ---
+Candidate  object.created
+Object     01a05e55
+
+Migration continuity audit
+
+Type this exactly to confirm:  CONFIRM UQW9AH
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM UQW9AH   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55 --add --text The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55
+Based on   1dae5f46
+
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+
+Type this exactly to confirm:  CONFIRM VAUAJE
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM VAUAJE   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55 --add --no-based-on --text Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55
+Based on   none (explicit)
+
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one.
+
+Type this exactly to confirm:  CONFIRM PHULQ4
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM PHULQ4   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --new --text Evidence rules for this audit   # cwd=project
+--- stdout ---
+Candidate  object.created
+Object     01a05e55
+
+Evidence rules for this audit
+
+Type this exactly to confirm:  CONFIRM F6VVVQ
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM F6VVVQ   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-e  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --new --text Predecessor fixture construction   # cwd=project
+--- stdout ---
+Candidate  object.created
+Object     01a05e55-e
+
+Predecessor fixture construction
+
+Type this exactly to confirm:  CONFIRM D4V2RE
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM D4V2RE   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.created  rev 1
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest ls --all   # cwd=project
+--- stdout ---
+01a05e55-74  open     2 sections  ok            Migration continuity audit
+01a05e55-e6  open     0 sections  ok            Evidence rules for this audit
+01a05e55-ee  open     0 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-e62b-75c3-8b32-6c388dec4c4b --add --no-based-on --text A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-e6
+Based on   none (explicit)
+
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+
+Type this exactly to confirm:  CONFIRM BSJUGS
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM BSJUGS   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-e6  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-e62b-75c3-8b32-6c388dec4c4b --add --no-based-on --ref 01a05e55-74:1 --text Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.   # cwd=project
+--- stderr ---
+error: historical workspace at commit 1dae5f46717a8967662236f69694bf4ee9ef76d8 has no format.json and is not a recognized legacy v0 workspace
+--- exit 4 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --add --text The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-ee
+Based on   1dae5f46
+
+The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+
+Type this exactly to confirm:  CONFIRM WD662V
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM WD662V   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.added  rev 2
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-e62b-75c3-8b32-6c388dec4c4b --add --ref 01a05e55-74:1 --text Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-e6
+Based on   221a5db3
+Ref        01a05e55-74 禮1  sha256 0b0724d0  commit 221a5db3
+
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+
+Type this exactly to confirm:  CONFIRM A6QPF6
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM A6QPF6   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-e6  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --add --no-based-on --text Exercise enough real usage that continuity matters: several Objects, several Sections, revisions, a merge, a cross-Object reference, a closed Object, and at least one candidate that goes stale. A fixture with one Section proves almost nothing about a migration.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-ee
+Based on   none (explicit)
+
+Exercise enough real usage that continuity matters: several Objects, several Sections, revisions, a merge, a cross-Object reference, a closed Object, and at least one candidate that goes stale. A fixture with one Section proves almost nothing about a migration.
+
+Type this exactly to confirm:  CONFIRM SJXCC2
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM SJXCC2   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.added  rev 3
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-74eb-7370-b771-0008bd71d149 --revise 2 --no-based-on --text Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.   # cwd=project
+--- stdout ---
+Candidate  section.revised
+Object     01a05e55-74
+Based on   none (explicit)
+
+--- previous
++++ candidate
+@@ -1 +1 @@
+-Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one.
+\ No newline at end of file
++Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+\ No newline at end of file
+
+Type this exactly to confirm:  CONFIRM GFVLEM
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM GFVLEM   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-74  section.revised  rev 4
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --add --no-based-on --text Interruption boundaries are exercised on disposable copies of this exact workspace, never on the one being carried forward.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-ee
+Based on   none (explicit)
+
+Interruption boundaries are exercised on disposable copies of this exact workspace, never on the one being carried forward.
+
+Type this exactly to confirm:  CONFIRM FYJA9B
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM FYJA9B   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.added  rev 4
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --merge 2,3 --no-based-on --text Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.   # cwd=project
+--- stdout ---
+Candidate  section.merged
+Object     01a05e55-ee
+Based on   none (explicit)
+
+--- previous
++++ candidate
+@@ -1,2 +1 @@
+-禮2: Exercise enough real usage that continuity matters: several Objects, several Sections, revisions, a merge, a cross-Object reference, a closed Object, and at least one candidate that goes stale. A fixture with one Section proves almost nothing about a migration.
+-禮3: Interruption boundaries are exercised on disposable copies of this exact workspace, never on the one being carried forward.
+\ No newline at end of file
++Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+\ No newline at end of file
+
+Type this exactly to confirm:  CONFIRM 4C4L48
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM 4C4L48   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.merged  rev 5
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --revise 1 --no-based-on --text This candidate is deliberately left to go stale.   # cwd=project
+--- stdout ---
+Candidate  section.revised
+Object     01a05e55-ee
+Based on - 1dae5f46
+Based on + none (explicit)
+
+--- previous
++++ candidate
+@@ -1 +1 @@
+-The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+\ No newline at end of file
++This candidate is deliberately left to go stale.
+\ No newline at end of file
+
+Type this exactly to confirm:  CONFIRM YU4L8D
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-ee46-7a91-983f-fa79b297b10c --add --no-based-on --text A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-ee
+Based on   none (explicit)
+
+A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+
+Type this exactly to confirm:  CONFIRM KYTE9W
+(candidate YU4L8D was superseded by this one)
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM KYTE9W   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.added  rev 6
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM YU4L8D   # cwd=project
+--- stderr ---
+error: no candidate awaiting YU4L8D
+--- exit 3 ---
+
+$ engr-latest prepare --object 01a05e55-e62b-75c3-8b32-6c388dec4c4b --close   # cwd=project
+--- stdout ---
+Candidate  object.closed
+Object     01a05e55-e6
+
+(object.closed)
+
+Type this exactly to confirm:  CONFIRM W84WC9
+--- exit 0 ---
+
+$ engr-latest confirm CONFIRM W84WC9   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-e6  object.closed  rev 4
+note       commit .engr/objects and .engr/events to preserve history and look-back
+--- exit 0 ---
+
+$ engr-latest verify   # cwd=project
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---
+
+$ engr-latest ls --all   # cwd=project
+--- stdout ---
+01a05e55-74  open     2 sections  ok            Migration continuity audit
+01a05e55-e6  closed   2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open     3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-latest prepare --object 01a05e55-74eb-7370-b771-0008bd71d149 --add --no-based-on --text Deliberately left pending across the migration: old Candidate state is unsupported and must be prepared again.   # cwd=project
+--- stdout ---
+Candidate  section.added
+Object     01a05e55-74
+Based on   none (explicit)
+
+Deliberately left pending across the migration: old Candidate state is unsupported and must be prepared again.
+
+Type this exactly to confirm:  CONFIRM 8TTSM6
+--- exit 0 ---
+
+$ engr-latest candidate   # cwd=project
+--- stdout ---
+8TTSM6   section.added    01a05e55-74 pending  2026-09-01T19:00:13.30272383Z
+--- exit 0 ---
+

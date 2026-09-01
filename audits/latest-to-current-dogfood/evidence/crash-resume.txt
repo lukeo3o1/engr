@@ -1,0 +1,42 @@
+Captured output of harness/crash-resume.sh. Each interrupted state from the
+sweep is asked to resume with the same challenge code.
+
+===== baseline (uninterrupted) =====
+inventory: 9e7807b027ab4c50ee56919c43c04dee4a0236bfb217d1f7348a56fe2912c74d
+event admitted.at: 2026-09-01T19:13:56.064838778Z
+events per stream: 1 1 1
+
+===== interrupted at 640ms =====
+ls exit=4 : error: crash-runs/t640/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+confirm exit=0 : MIGRATED   crash-runs/t640/.engr  3 objects, 7 sections, generation 1
+confirm again exit=3 : error: no challenge awaiting 8DZM7N
+event admitted.at: 2026-09-01T19:15:07.045922714Z   (fresh: nothing had been staged)
+events per stream: 1 1 1
+verify exit=0 : 3 PASS
+
+===== interrupted at 660ms =====
+ls exit=4 : error: crash-runs/t660/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+confirm exit=0 : MIGRATED   crash-runs/t660/.engr  3 objects, 7 sections, generation 1
+confirm again exit=3 : error: no challenge awaiting 8DZM7N
+event admitted.at: 2026-09-01T19:14:16.603230017Z   (the original confirmation instant)
+events per stream: 1 1 1
+verify exit=0 : 3 PASS
+
+===== interrupted at 700ms =====
+ls exit=4 : error: crash-runs/t700/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+confirm exit=0 : MIGRATED   crash-runs/t700/.engr  3 objects, 7 sections, generation 1
+confirm again exit=3 : error: no challenge awaiting 8DZM7N
+event admitted.at: 2026-09-01T19:14:21.946570932Z   (the original confirmation instant)
+events per stream: 1 1 1
+verify exit=0 : 3 PASS
+
+===== interrupted at 720ms =====
+ls exit=4 : error: crash-runs/t720/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+confirm exit=0 : MIGRATED   crash-runs/t720/.engr  3 objects, 7 sections, generation 1
+confirm again exit=3 : error: no challenge awaiting 8DZM7N
+event admitted.at: 2026-09-01T19:14:24.6191952Z     (the original confirmation instant)
+events per stream: 1 1 1
+verify exit=0 : 3 PASS
+
+Every interrupted state fails closed on reads, names the resume command, resumes
+to a complete workspace, ends with exactly one Event per stream, and verifies.

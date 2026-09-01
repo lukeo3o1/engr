@@ -1,0 +1,43 @@
+﻿Final state of the audit's own engr workspace, kept in the system it audits.
+
+===== ls --all =====
+01a05e55-74  open                   7 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   5 sections  ok            Predecessor fixture construction
+
+===== verify =====
+01a05e55-74  PASS  7 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  5 sections  Predecessor fixture construction
+
+===== backlog ls =====
+UNCONFIRMED STAGING — nothing here is admitted to the record
+01a05e5e   8 unresolved  1 produced    2026-09-01T19:21:59Z  Open questions from the upgrade audit
+
+===== work ls =====
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+01a05e55  obj       blocked    2 open  2026-09-01T19:10:43Z  Predecessor fixture construction
+
+===== collection show upgrade-audit =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection upgrade-audit
+Reference  engr:collection:upgrade-audit
+State      open
+Name       latest to generation-1 upgrade audit
+
+Everything this audit has to finish before the report can answer its question.
+
+  10  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      [high] attention   Predecessor fixture construction
+      Continuity evidence gates the answer.
+  20  engr:backlog:01m1f5x9p2fs9becvp9m2xgmgy
+      unresolved  Open questions from the upgrade audit
+
+===== rules ls =====
+PROJECT POLICY — read these before the mutation they govern
+
+audit-scope  object
+    review 2 attempts; on_exhaustion = reject
+evidence-discipline  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation

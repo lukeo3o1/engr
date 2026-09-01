@@ -1,0 +1,26 @@
+Captured output of harness/adv-verify.sh, immediately after a SELECTED field of a
+Ref target was changed through the ordinary gate. Three surfaces, one moment.
+
+===== verify, whole workspace =====
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+exit=0
+
+===== verify, just the object whose ref moved =====
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+exit=0
+
+===== show, same object, same moment =====
+-- §2 -- refs moved
+    refs     01a05e55-74 §1
+    advice   01a05e55-74 §1 changed selected fields: based_on, text
+
+===== ls =====
+01a05e55-e6  closed   2 sections  1 stale       Evidence rules for this audit
+
+The drift itself is correct, and selective: `header` was changed in the same
+mutation and is not reported, because the migrated Ref does not select it.
+What is inconsistent is which surface says so. `engr verify --help` reads
+"Verify Object and Section integrity plus dependencies", and it returned PASS
+with exit 0 while ls and show both reported the moved dependency.
