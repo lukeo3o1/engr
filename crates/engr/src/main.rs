@@ -2438,14 +2438,6 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         if let Some(explanation) = &review.explanation {
             out.push_str(&format!("Reason     {explanation}\n"));
         }
-        if let Ok(live) = live_rules(root, candidate) {
-            if live != review.rules {
-                out.push_str(
-                    "note       the applicable Rules have moved since this was prepared; \
-                     confirming will be refused, prepare it again\n",
-                );
-            }
-        }
     }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
@@ -2501,24 +2493,23 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             )),
         }
     }
-    out.push_str(&format!(
-        "\nType this exactly to confirm:  CONFIRM {}\n",
-        candidate.code()
-    ));
+    // Whether this question can still be answered, asked the way confirmation
+    // asks it. A screen that printed the instruction anyway would be telling a
+    // person to answer something already refused — and the previous version did
+    // exactly that whenever a Rule changed under the same id, a Rule appeared
+    // where none had applied, or the Rule material stopped loading, because it
+    // compared ids only, only for reviewed Challenges, and discarded errors.
+    match gate::check_rule_material(root, candidate) {
+        Ok(()) => out.push_str(&format!(
+            "\nType this exactly to confirm:  CONFIRM {}\n",
+            candidate.code()
+        )),
+        Err(error) => out.push_str(&format!(
+            "\nUNANSWERABLE  {}\n              prepare it again; nothing here can be confirmed\n",
+            error.message
+        )),
+    }
     out
-}
-
-/// The Rules governing this mutation right now, for the screen.
-fn live_rules(root: &Path, candidate: &gate::Candidate) -> Result<Vec<String>> {
-    let before = ops::effective(root, candidate.object()).unwrap_or(model::Object::new(
-        candidate.object().to_owned(),
-        String::new(),
-    )?);
-    let mut after = before.clone();
-    let probe = gate::preview_event(&candidate.payload, before.rev + 1)?;
-    model::project(&mut after, &probe)?;
-    let mutation = engr::proof::object_review_mutation(&before, &after, &candidate.payload)?;
-    Ok(rules::bind_object(root, &mutation, candidate.expected_rev())?.rule_ids())
 }
 
 fn render_header(out: &mut String, previous: Option<&str>, current: Option<&str>) {

@@ -5653,13 +5653,102 @@ fn an_override_screen_shows_the_review_it_is_overruling_and_keeps_showing_it() {
         "a Rule written afterwards was not part of what was reviewed: {after}"
     );
     assert!(
-        after.contains("the applicable Rules have moved"),
+        after.contains("UNANSWERABLE") && after.contains("Rule Review material moved"),
         "and the screen says the code is no longer good: {after}"
+    );
+    assert!(
+        !after.contains("Type this exactly to confirm"),
+        "and does not tell a person to answer it anyway: {after}"
     );
 
     let refused = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
     assert!(
         !refused.status.success(),
         "confirming a challenge whose review material moved admits nothing"
+    );
+}
+
+/// The pending screen is fail-closed about Rule freshness, not advisory.
+///
+/// It used to compare live rule *ids* against the frozen ids, only when a review
+/// had been frozen at all, and discard any error computing them. So three
+/// ordinary situations printed the confirmation instruction for a question the
+/// current Rules had already made unanswerable, and a person found out only
+/// after answering. The frozen context is still what is displayed; the live
+/// material only decides whether that question can still be put.
+#[test]
+fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "freshness"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    // (a) No Rule applied when this was prepared, and one appears afterwards.
+    // The Challenge has no frozen review at all, so the old screen performed no
+    // live check whatsoever.
+    let pending = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "prepared where nothing governed it",
+        ],
+    );
+    let code = pending["id"].as_str().expect("code").to_owned();
+    let screen =
+        String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        screen.contains("Type this exactly to confirm"),
+        "it is answerable while nothing governs it: {screen}"
+    );
+
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("appeared.md"),
+        "---\nid: appeared\napplies:\n  domains:\n    - object\n---\n\n# Appeared\n\nAfter the code was minted.\n",
+    )
+    .expect("rule");
+
+    let after = String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        after.contains("UNANSWERABLE") && after.contains("appeared"),
+        "a Rule appearing makes the question unanswerable, and the screen says which: {after}"
+    );
+    assert!(
+        !after.contains("Type this exactly to confirm"),
+        "and it does not tell a person to answer it: {after}"
+    );
+    assert!(
+        !run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+            .status
+            .success(),
+        "which is what confirmation does too"
+    );
+
+    // (b) Rule material that no longer loads. The old screen swallowed the
+    // error and printed the instruction regardless.
+    std::fs::write(
+        engr::rules::dir(root).join("appeared.md"),
+        "---\nid: appeared\napplies:\n  domains: &anchor\n    - object\n---\n\n# Appeared\n\nNow unreadable.\n",
+    )
+    .expect("rule");
+    let broken =
+        String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
+    assert!(
+        broken.contains("UNANSWERABLE"),
+        "Rule material that cannot be read cannot say a question is still good: {broken}"
+    );
+    assert!(
+        !broken.contains("Type this exactly to confirm"),
+        "and the instruction is withheld: {broken}"
     );
 }

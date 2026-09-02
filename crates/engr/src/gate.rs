@@ -558,6 +558,93 @@ pub fn preview_event(payload: &Payload, rev: u64) -> Result<Event> {
     Ok(probe(payload, rev, Admission::Human, &now()))
 }
 
+/// Whether the Rule material this Challenge was frozen against still stands.
+///
+/// **The same question the screen asks and confirmation asks**, which is the
+/// whole reason it is one function. The renderer used to ask a weaker one — it
+/// compared live *rule ids* against the frozen ids, only when a review was
+/// frozen at all, and swallowed any error computing them. So three ordinary
+/// situations printed `Type this exactly to confirm` for a question the current
+/// Rules had already made unanswerable: a Rule whose bytes changed under the
+/// same id, a Rule added where none had applied, and Rule material that no
+/// longer loads. The mutation was safe — confirmation refuses all three — but a
+/// person was told to answer something that could not be answered, and only
+/// found out afterwards.
+///
+/// The frozen review is still what gets *displayed*. Live material decides only
+/// whether that frozen question is still actionable, which is exactly the split
+/// the amendment draws.
+pub fn check_rule_material(root: &Path, candidate: &Candidate) -> Result<()> {
+    let before = ops::effective(root, candidate.object()).or_else(|error| match error.code {
+        EXIT_NOT_FOUND => Object::new(candidate.object().to_owned(), String::new()),
+        _ => Err(error),
+    })?;
+    let mut after = before.clone();
+    project(
+        &mut after,
+        &preview_event(&candidate.payload, before.rev + 1)?,
+    )?;
+    let mutation = crate::proof::object_review_mutation(&before, &after, &candidate.payload)?;
+    let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
+    check_frozen_review_against(&live, candidate)
+}
+
+/// The frozen review against the Rules as they stand now.
+///
+/// One statement of the policy, used by the pending screen and by admission, so
+/// what a person is told is answerable is what will actually be answerable.
+fn check_frozen_review_against(
+    live: &crate::rules::ReviewBinding,
+    candidate: &Candidate,
+) -> Result<()> {
+    match &candidate.subject.review {
+        Some(review) => {
+            ensure!(
+                live.digest()?.to_string() == review.digest,
+                EXIT_INVARIANT,
+                "the Rule Review material moved after challenge {} was prepared",
+                candidate.code()
+            );
+            // The digest binds the mutation and the exact Rule artifacts; it
+            // does not bind the human-readable context beside them. A frozen
+            // review naming other Rules, or an attempt its ceilings make
+            // impossible, keeps the right digest and would be rendered as
+            // settled and then written into history as `{outcome, result,
+            // attempts}`.
+            //
+            // So the rest is bound here, where the live binding exists: the same
+            // id set both sides derive independently, and the same report check
+            // the preparing side ran — now against the real ceilings rather than
+            // against ids alone.
+            ensure!(
+                review.rules == live.rule_ids(),
+                EXIT_INVARIANT,
+                "challenge {} was frozen against {}, and this mutation is governed by {}",
+                candidate.code(),
+                review.rules.join(", "),
+                live.rule_ids().join(", ")
+            );
+            crate::proof::check_review_report(&crate::proof::CandidateReview {
+                review_digest: review.digest.clone(),
+                attempt: review.attempts,
+                result: review.result,
+                rules: live.rules().to_vec(),
+                explanation: review.explanation.clone(),
+            })
+        }
+        None => {
+            ensure!(
+                !live.has_rules(),
+                EXIT_INVARIANT,
+                "challenge {} was prepared where no Object Rule applied, and this mutation is now governed by {}",
+                candidate.code(),
+                live.rule_ids().join(", ")
+            );
+            Ok(())
+        }
+    }
+}
+
 /// The actionable state of an outstanding Challenge.
 ///
 /// A Challenge can survive the narrow crash window after its Event/projection
@@ -1879,48 +1966,7 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     // admitted against a policy that has since moved.
     let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
     let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
-    match &candidate.subject.review {
-        Some(review) => {
-            ensure!(
-                live.digest()?.to_string() == review.digest,
-                EXIT_INVARIANT,
-                "the Rule Review material moved after challenge {} was prepared",
-                candidate.code()
-            );
-            // The digest binds the mutation and the exact Rule artifacts; it
-            // does not bind the human-readable context beside them. A frozen
-            // review naming other Rules, or an attempt its ceilings make
-            // impossible, keeps the right digest and would be rendered as
-            // settled and then written into history as `{outcome, result,
-            // attempts}`.
-            //
-            // So the rest is bound here, where the live binding exists: the same
-            // id set both sides derive independently, and the same report check
-            // the preparing side ran — now against the real ceilings rather than
-            // against ids alone.
-            ensure!(
-                review.rules == live.rule_ids(),
-                EXIT_INVARIANT,
-                "challenge {} was frozen against {}, and this mutation is governed by {}",
-                candidate.code(),
-                review.rules.join(", "),
-                live.rule_ids().join(", ")
-            );
-            crate::proof::check_review_report(&crate::proof::CandidateReview {
-                review_digest: review.digest.clone(),
-                attempt: review.attempts,
-                result: review.result,
-                rules: live.rules().to_vec(),
-                explanation: review.explanation.clone(),
-            })?;
-        }
-        None => ensure!(
-            !live.has_rules(),
-            EXIT_INVARIANT,
-            "the applicable Rule set moved after challenge {} was prepared",
-            candidate.code()
-        ),
-    }
+    check_frozen_review_against(&live, &candidate)?;
     // After the projection, because the acyclic walk has to see the section this
     // Event is adding: the relation being admitted is part of the graph it must
     // not close.
