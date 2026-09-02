@@ -590,18 +590,28 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
         // it would mint a second code for the same migration and void the one
         // they have.
         let path = store::challenge_path(root, &manifest.challenge)?;
-        ensure!(
-            path.exists(),
-            EXIT_INVARIANT,
-            "the staged migration names challenge {}, which is gone; remove {} to start again",
-            manifest.challenge,
-            stage_dir(root).display()
-        );
-        return Ok(Proposed {
-            challenge: manifest.challenge,
-            subject: manifest.subject,
-            resumed: true,
-        });
+        if !path.exists() {
+            // The plan outlived its code. Nothing can ever apply it — the code
+            // is the only thing that authorises it — so the question is only
+            // whether re-deriving is safe, and the destination answers that. No
+            // destination means nobody ever answered, so nothing was published
+            // and this is an abandoned preparation: sweep it and ask again.
+            ensure!(
+                !destination_dir(root).exists(),
+                EXIT_INVARIANT,
+                "the staged migration was confirmed as challenge {} and part-published, and that code is gone; {} holds the only copy of what was confirmed",
+                manifest.challenge,
+                stage_dir(root).display()
+            );
+            let stage = stage_dir(root);
+            fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
+        } else {
+            return Ok(Proposed {
+                challenge: manifest.challenge,
+                subject: manifest.subject,
+                resumed: true,
+            });
+        }
     }
     ensure!(
         matches!(
@@ -882,6 +892,47 @@ fn finish(
     })
 }
 
+/// Withdraw a prepared migration a human declined to assent to.
+///
+/// The Challenge and the local plan go together, because neither means anything
+/// without the other: a plan whose code is gone can never be applied, and a code
+/// whose plan is gone names nothing. Removing only the file — which is all the
+/// Object family's disposal knows how to do — would leave `engr migrate` stuck
+/// on a manifest naming a Challenge that no longer exists.
+///
+/// Nothing tracked is touched. Both live under `local/`, which is the whole
+/// point of preparing there.
+pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
+    let path = store::challenge_path(root, code)?;
+    ensure!(
+        path.exists(),
+        EXIT_NOT_FOUND,
+        "no challenge awaiting {code}"
+    );
+    // A destination exists only after somebody answered exactly. Past that
+    // point the transaction is under way and publication may already have
+    // begun, so withdrawing is no longer a thing anybody can do — the only way
+    // out is forward.
+    ensure!(
+        !destination_dir(root).exists(),
+        EXIT_INVARIANT,
+        "migration {code} was already confirmed and is part-published; finish it with `engr confirm CONFIRM {code}` rather than withdrawing it"
+    );
+    // The code goes first. A crash between the two removals then leaves a plan
+    // whose Challenge is gone, which `prepare` recognises as an abandoned
+    // preparation and sweeps; the other order would leave a live-looking code
+    // with nothing behind it, and preparing again would mint a second one
+    // beside it.
+    fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+    if staged(root)?.is_some_and(|manifest| manifest.challenge == code) {
+        let stage = stage_dir(root);
+        if stage.exists() {
+            fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
+        }
+    }
+    Ok(())
+}
+
 /// Dispose of what a completed migration leaves behind.
 ///
 /// Called at the end of `finish` and again by `prepare` whenever `VERSION`
@@ -1118,6 +1169,53 @@ fn confirmed_destination(
             event.digest == file.event_digest,
             EXIT_INVARIANT,
             "the staged bootstrap Event for {} is not the record it was staged as",
+            file.object
+        );
+
+        // And the Event has to be *this* migration's bootstrap, deriving *this*
+        // Object.
+        //
+        // Everything above it is satisfiable by a different record. The Object
+        // is pinned to the confirmed plan, but the Event was pinned only to its
+        // own seal and to `event_digest` — which lives in the same local
+        // manifest an interrupted transaction leaves lying around, and is no
+        // part of what a human confirmed. A canonical, self-sealed rev-1 Event
+        // for the same Object, with the local digest updated to match, passed
+        // every check; `decode_events` would even accept an `object.created.v1`
+        // as a legitimate bootstrap. The permanent revision-1 history could
+        // therefore stop reproducing the Object it belongs to, under a `VERSION`
+        // saying the workspace is current.
+        //
+        // So it is re-derived rather than trusted: project the staged Event from
+        // nothing, exactly as `derive` did when the plan was built, and require
+        // the result to be the Object the confirmed plan pins. That binds the
+        // Event to the human's answer through the Object, which is the only
+        // thing in this transaction the human actually saw.
+        ensure!(
+            matches!(event.action, Action::ObjectMigrated { .. }),
+            EXIT_INVARIANT,
+            "revision 1 of a migrated Object is its object.migrated.v1 bootstrap, and {} was staged with {}",
+            file.object,
+            event.action.event_type()
+        );
+        let admitted = &event.metadata.admitted;
+        ensure!(
+            admitted.by == Admission::Human
+                && admitted
+                    .confirmation
+                    .as_ref()
+                    .is_some_and(|confirmation| confirmation.challenge == challenge),
+            EXIT_INVARIANT,
+            "the staged bootstrap Event for {} does not record this migration's confirmation",
+            file.object
+        );
+        let mut projected = empty(&file.object)?;
+        crate::model::project(&mut projected, event)?;
+        projected.validate()?;
+        ensure!(
+            projected == object,
+            EXIT_INVARIANT,
+            "the staged bootstrap Event for {} does not replay to the Object the confirmed plan names",
             file.object
         );
         ready.push((file.object.clone(), object_text, event_text));

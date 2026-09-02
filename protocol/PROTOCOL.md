@@ -548,7 +548,7 @@ There is no field-local exception. A merge's `sources[]` was once specified
 as numeric-ascending; that wording is superseded, and the shared algorithm
 applies to it like every other set.
 
-**Current-generation resources are persisted in that order.** A workspace-v3
+**Current-generation resources are persisted in that order.** A generation-1
 resource has one persisted representation, so a stored set written another way
 round is not valid current data however sound its seals are, and MUST be refused
 on the read path rather than normalized. This is the same rule that makes the
@@ -670,9 +670,12 @@ selected(current target semantics)
 
 Selected semantic identity decides drift; git history explains it.
 `refs[].commit` remains provenance and recovery, not identity. A migrated
-predecessor Ref selects exactly the six fields the predecessor's whole-content
-seal covered, and deliberately gains neither `admission` nor `header`, which it
-never asserted.
+predecessor Ref selects exactly `based_on`, `refs` and `text` — the three fields
+the released predecessor's whole-content seal covered, which is the whole of
+what a predecessor Section was. It gains none of `admission`, `header`, `role`,
+`content` or `relations`: those did not exist in that contract, so the original
+Ref cannot have asserted them, and a migrated Ref that selected them would
+report drift the first time somebody legitimately gave the target one.
 
 There is **one live Challenge per object**. Preparing again supersedes the
 previous one, so a human never holds two codes for the same thing.

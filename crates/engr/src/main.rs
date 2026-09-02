@@ -24,7 +24,7 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
-    /// Explicitly upgrade a recognized predecessor workspace to v3
+    /// Explicitly upgrade the released predecessor workspace to generation 1
     Migrate,
     /// Print the protocol this build implements
     Protocol,

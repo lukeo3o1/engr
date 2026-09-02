@@ -1417,6 +1417,157 @@ fn a_crash_after_activation_leaves_residue_that_clears_itself() {
     );
 }
 
+/// A qualified yes withdraws a migration, the same way it withdraws anything
+/// else.
+///
+/// `CONFIRM <code>` followed by commentary is hedged assent, and the documented
+/// consequence is that the Challenge is discarded. Routing that through the
+/// Object family's disposal meant it hit `require_current` on a workspace that
+/// is a predecessor by definition — so the withdrawal quietly did not happen and
+/// the code the human had just declined stayed live. The plan goes with it,
+/// because a plan whose code is gone can never be applied.
+#[test]
+fn a_qualified_response_withdraws_a_prepared_migration() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let before = fingerprint(&root);
+
+    let refused = engr::confirm(
+        &root,
+        &format!(
+            "CONFIRM {} but only the first two objects",
+            proposed.challenge
+        ),
+    )
+    .expect_err("a qualified yes is not assent");
+    assert_eq!(refused.code, engr::EXIT_USAGE, "{refused}");
+    assert!(
+        refused.message.contains("qualified yes") && refused.message.contains("was discarded"),
+        "{refused}"
+    );
+
+    assert!(
+        !store::challenge_path(&root, &proposed.challenge)
+            .expect("challenge path")
+            .exists(),
+        "the code the human declined must not stay live"
+    );
+    assert!(
+        !engr::migration::stage_dir(&root).exists(),
+        "and the plan standing behind it goes too"
+    );
+    assert!(!store::version_path(&root).exists(), "nothing activated");
+
+    // Not one predecessor byte moved: withdrawing is as local as preparing was.
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "withdrawing a migration changes nothing the record is made of"
+    );
+
+    // And the workspace is ready to be asked again, with a new code.
+    let again = engr::migration::prepare(&root).expect("prepare again");
+    assert_ne!(again.challenge, proposed.challenge, "a fresh question");
+    assert!(!again.resumed, "not a resumption of the withdrawn one");
+    match engr::confirm(&root, &format!("CONFIRM {}", again.challenge)).expect("confirm") {
+        engr::Confirmed::Migration(report) => assert_eq!(report.objects.len(), 4),
+        engr::Confirmed::Object(_) => panic!("a migration confirmation"),
+    }
+    assert!(store::version_path(&root).exists());
+}
+
+/// Revision 1 of a migrated Object has to be the bootstrap that derives it.
+///
+/// The Object is pinned to the confirmed plan, but the staged Event was pinned
+/// only to its own seal and to `event_digest` — which lives in the same local
+/// manifest an interrupted transaction leaves behind, and is no part of what
+/// anybody confirmed. So a canonical, self-sealed rev-1 Event for the same
+/// Object, with that local digest updated to match, satisfied every check, and
+/// the permanent history could stop reproducing the Object under a `VERSION`
+/// saying the workspace is current.
+#[test]
+fn a_restaged_bootstrap_that_does_not_derive_the_object_activates_nothing() {
+    let event_path = |root: &Path| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("eventstore")
+            .join(format!("{AUTHORITY}.jsonl"))
+    };
+    let manifest_path = |root: &Path| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("destination.json")
+    };
+
+    // Two records that are each perfectly valid on their own terms, and neither
+    // of which replays to the Object the human confirmed.
+    let forgeries = vec![
+        (
+            "a creation standing where the bootstrap belongs",
+            engr::model::Action::ObjectCreated {
+                title: "Something else entirely".to_owned(),
+            },
+        ),
+        (
+            "a migration bootstrap carrying a different snapshot",
+            engr::model::Action::ObjectMigrated {
+                snapshot: Box::new(engr::model::Snapshot {
+                    title: "A title nobody confirmed".to_owned(),
+                    object_type: None,
+                    state: engr::semantics::State::Open,
+                    next_section_id: 1,
+                    sections: Vec::new(),
+                }),
+            },
+        ),
+    ];
+
+    for (what, action) in forgeries {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_after_confirmed_destination(&root, &proposed.challenge);
+
+        // Sealed by the library, so it is exactly as canonical and as
+        // self-consistent as the record it replaces.
+        let forged = engr::model::Event::sealed(
+            AUTHORITY,
+            engr::model::new_id(),
+            action,
+            1,
+            engr::model::EventAdmission::human("2026-09-02T00:00:00Z", proposed.challenge.clone()),
+        )
+        .expect("seal the replacement");
+        let bytes = proof::canonical_bytes(&forged, "event").expect("canonical");
+        write(&event_path(&root), &format!("{bytes}\n"));
+
+        // And the local manifest is updated to agree with it, which is the
+        // whole point: nothing in `destination.json` is covered by the
+        // confirmation.
+        let mut manifest: Value =
+            serde_json::from_str(&read(&manifest_path(&root))).expect("manifest");
+        for file in manifest["files"].as_array_mut().expect("files") {
+            if file["object"] == Value::String(AUTHORITY.to_owned()) {
+                file["event_digest"] = Value::String(forged.digest.clone());
+            }
+        }
+        write(&manifest_path(&root), &manifest.to_string());
+
+        let refused = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect_err(&format!("{what} must be refused"));
+        assert_eq!(refused.code, engr::EXIT_INVARIANT, "{what}: {refused}");
+        assert!(
+            !store::version_path(&root).exists(),
+            "{what}: nothing may activate"
+        );
+        assert!(
+            !store::events_path(&root, AUTHORITY).exists(),
+            "{what}: and no current stream is written"
+        );
+    }
+}
+
 /// Staging is not admission. No destination Event carrying final provenance
 /// exists until the exact Human response has crossed the real apply boundary;
 /// a retry publishes that one admitted Event rather than restamping it.

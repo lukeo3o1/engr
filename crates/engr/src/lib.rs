@@ -109,7 +109,7 @@ pub fn confirm(root: &std::path::Path, response: &str) -> Result<Confirmed> {
                     .map(|path| path.exists())
                     .unwrap_or(false)
             },
-            |code| gate::discard_locked(root, code),
+            |code| discard_challenge(root, code),
         )?;
         let challenge = store::load_challenge(root, code)?;
         match challenge.subject.kind {
@@ -120,6 +120,23 @@ pub fn confirm(root: &std::path::Path, response: &str) -> Result<Confirmed> {
             }
         }
     })
+}
+
+/// Withdraw the Challenge a qualified response declined to give assent to.
+///
+/// Dispatched by family for the same reason confirmation is. Disposal is not a
+/// neutral file deletion: an Object Challenge is answered in a current
+/// workspace and nothing but the file is its, while a migration Challenge is
+/// answered while the workspace is still the predecessor and has a local plan
+/// standing behind it. Routing both through the Object family's disposal meant
+/// a qualified migration response hit `require_current` on a workspace that is
+/// by definition not current, and the withdrawal silently did not happen — so
+/// the code the human had just declined to give stayed live.
+fn discard_challenge(root: &std::path::Path, code: &str) -> Result<()> {
+    match store::load_challenge(root, code)?.subject.kind {
+        confirmation::SubjectType::Object => gate::discard_locked(root, code),
+        confirmation::SubjectType::Migration => migration::discard_locked(root, code),
+    }
 }
 
 /// Invalid command line, or a confirmation response that did not match.
