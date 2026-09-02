@@ -509,9 +509,37 @@ pub(crate) fn write_generation(root: &Path) -> Result<()> {
     write_text(&version_path(root), crate::WORKSPACE_VERSION_FILE)
 }
 
+/// The released predecessor's writer lock.
+///
+/// A different file from this generation's, which is the whole problem it
+/// exists to solve: the released build takes `.engr/lock` and this one takes
+/// `.engr/local/lock`, so two processes each holding "the" workspace lock do not
+/// contend at all. Ordinary current work has nothing to say to that — a released
+/// build refuses a generation-1 workspace on sight — but migration runs *on* a
+/// predecessor workspace, with a released build perfectly entitled to be writing
+/// to it.
+pub fn predecessor_lock_path(root: &Path) -> PathBuf {
+    engr_dir(root).join("lock")
+}
+
 /// Hold the workspace write lock for the duration of `body`.
 pub fn with_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
-    let path = lock_path(root);
+    with_lock_at(&lock_path(root), body)
+}
+
+/// Hold the *predecessor's* writer lock as well, for work that touches a
+/// workspace a released build could still be writing to.
+///
+/// **Order: this generation's lock first, then the predecessor's.** Nothing can
+/// deadlock against it, because the released build takes exactly one lock and
+/// never waits for ours; every path in this build that takes both takes them in
+/// this order, which is why this is a separate function rather than a second
+/// call site.
+pub fn with_predecessor_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    with_lock_at(&predecessor_lock_path(root), body)
+}
+
+fn with_lock_at<T>(path: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
@@ -519,7 +547,7 @@ pub fn with_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> 
         .create(true)
         .write(true)
         .truncate(false)
-        .open(&path)
+        .open(path)
         .map_err(|error| tool_error(path.display(), error))?;
     FileExt::lock_exclusive(&file).map_err(|error| tool_error("workspace lock", error))?;
     let outcome = body();

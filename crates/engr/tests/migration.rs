@@ -200,6 +200,11 @@ fn interrupt_after_confirmed_destination(root: &Path, challenge: &str) {
 /// lock is what any command does before it decides whether it may do anything
 /// at all. Counting it would make "preflight wrote nothing" fail on a migration
 /// that wrote nothing.
+///
+/// `lock` is left out for the same reason and is the predecessor's own: the
+/// released build creates `.engr/lock` on demand and its own `.gitignore` names
+/// it, and this build now takes it too so a released writer and a migration
+/// cannot both think they hold the workspace. Taking a lock is not publishing.
 fn fingerprint(root: &Path) -> std::collections::BTreeMap<String, String> {
     let base = store::engr_dir(root);
     let mut found = std::collections::BTreeMap::new();
@@ -217,6 +222,9 @@ fn fingerprint(root: &Path) -> std::collections::BTreeMap<String, String> {
                 if relative != "local" {
                     pending.push(path);
                 }
+                continue;
+            }
+            if relative == "lock" {
                 continue;
             }
             found.insert(relative, proof::sha256_of(&read(&path)));
@@ -1543,6 +1551,91 @@ fn an_uninterpretable_pending_migration_is_asked_again() {
         engr::Confirmed::Object(_) => panic!("a migration confirmation"),
     }
     assert!(store::version_path(&root).exists());
+}
+
+/// Migration serializes against the lock the *released* build takes.
+///
+/// The two generations lock different files — `.engr/lock` and
+/// `.engr/local/lock` — so a released process and this one could each hold "the"
+/// workspace lock and not contend at all. A migration runs on a workspace a
+/// released build is still entitled to write to, and the source revalidation
+/// completes before publication begins: in that interval an old writer could
+/// admit a predecessor mutation that publication then overwrote and deleted, or
+/// overwrite a just-published Object with predecessor bytes before `VERSION`.
+#[test]
+fn confirmation_waits_for_the_released_writer_lock() {
+    use fs2::FileExt;
+
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let before = fingerprint(&root);
+
+    // Stand in for a released build that is mid-write.
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(store::predecessor_lock_path(&root))
+        .expect("open the predecessor lock");
+    held.lock_exclusive().expect("hold the predecessor lock");
+
+    let mut confirming = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(&root)
+        .arg("confirm")
+        .arg(format!("CONFIRM {}", proposed.challenge))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the confirmation");
+
+    // It must not get past the lock. Nothing may be published while another
+    // writer holds the predecessor.
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    assert!(
+        confirming
+            .try_wait()
+            .expect("poll the confirmation")
+            .is_none(),
+        "the confirmation ran while a released writer held the predecessor"
+    );
+    assert!(
+        !store::version_path(&root).exists(),
+        "and nothing activated while it waited"
+    );
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "nor was a single predecessor byte published"
+    );
+
+    // Now the old writer commits something and lets go. This is the mutation
+    // the interval used to be able to swallow.
+    edit_predecessor(&root, AUTHORITY, |value| {
+        value["sections"][0]["text"] =
+            Value::String("admitted by a released build during the migration".to_owned());
+        reseal_predecessor_section(&mut value["sections"][0]);
+    });
+    let moved = read(&store::object_path(&root, AUTHORITY));
+    FileExt::unlock(&held).expect("release the predecessor lock");
+
+    // The migration proceeds, revalidates, and refuses — rather than publishing
+    // over a mutation it never saw.
+    let finished = confirming.wait_with_output().expect("await confirmation");
+    assert!(
+        !finished.status.success(),
+        "the source moved, so the confirmed plan is not the plan"
+    );
+    assert!(
+        !store::version_path(&root).exists(),
+        "nothing activated: {}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert_eq!(
+        read(&store::object_path(&root, AUTHORITY)),
+        moved,
+        "and the concurrent admission survived untouched"
+    );
 }
 
 /// Withdrawal is refused by the state of the transaction, not by reading the

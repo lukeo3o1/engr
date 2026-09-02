@@ -352,20 +352,31 @@ const LATER_DOMAINS: &[&str] = &["rules", "backlog", "work", "collections", "eve
 fn check_released_domains(root: &Path) -> Result<()> {
     for domain in LATER_DOMAINS {
         let path = store::engr_dir(root).join(domain);
-        // The directory entry, not what it resolves to. `exists()` follows
-        // links, so a dangling `.engr/rules` answered "absent" for a name that
-        // is plainly there — and the question here is whether this workspace
-        // has a later domain's *name* in it, which a broken redirection answers
-        // just as much as a real directory does. `rules::load_all` and
-        // `work::exists` already draw the line this way.
-        ensure!(
-            fs::symlink_metadata(&path).is_err(),
-            EXIT_SCHEMA,
-            "{} holds {domain}/, which the released version {} workspace never had; this is a later unreleased build's workspace and engr {} defines no route from it",
-            store::engr_dir(root).display(),
-            crate::PREDECESSOR_WORKSPACE_VERSION,
-            crate::IMPLEMENTATION_VERSION
-        );
+        // The directory entry, not what it resolves to, and three answers
+        // rather than two.
+        //
+        // `exists()` followed links, so a dangling `.engr/rules` answered
+        // "absent" for a name that is plainly there. Asking `is_err()` instead
+        // fixed that and kept the same flaw one step along: it reads
+        // `PermissionDenied` or `EIO` as absence too. This boundary decides
+        // whether the source is the one released workspace #66 permits, so not
+        // being able to establish absence is not absence. `rules::load_all`
+        // already makes exactly this distinction.
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(tool_error(path.display(), error)),
+            Ok(_) => {
+                return Err(Error::new(
+                    EXIT_SCHEMA,
+                    format!(
+                        "{} holds {domain}/, which the released version {} workspace never had; this is a later unreleased build's workspace and engr {} defines no route from it",
+                        store::engr_dir(root).display(),
+                        crate::PREDECESSOR_WORKSPACE_VERSION,
+                        crate::IMPLEMENTATION_VERSION
+                    ),
+                ))
+            }
+        }
     }
     Ok(())
 }
@@ -576,7 +587,13 @@ pub struct Proposed {
 
 /// Prepare the migration and mint the Challenge that admits it.
 pub fn prepare(root: &Path) -> Result<Proposed> {
-    store::with_lock(root, || prepare_locked(root))
+    // The predecessor's lock too, in the same order `apply` takes them. The
+    // preflight reads the whole predecessor to derive the plan a human is then
+    // shown; reading it while a released build is mid-write would freeze a plan
+    // of a state that was never a state, and the human would be asked about it.
+    store::with_lock(root, || {
+        store::with_predecessor_lock(root, || prepare_locked(root))
+    })
 }
 
 fn prepare_locked(root: &Path) -> Result<Proposed> {
@@ -737,6 +754,24 @@ pub struct Report {
 /// commit phase that trusted it would publish whatever a staged file happened to
 /// contain.
 pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {
+    // Under the *predecessor's* writer lock as well as this build's.
+    //
+    // The released build takes `.engr/lock`; this one takes
+    // `.engr/local/lock`. Two different files, so a released process and this
+    // one each held "the" workspace lock and did not contend at all — and a
+    // migration runs on a workspace a released build is still entitled to write
+    // to. The revalidation below proves the source is the one the human was
+    // shown, but it completes before publication begins; without this lock an
+    // old writer could admit a predecessor mutation in the interval and have it
+    // overwritten and deleted, or overwrite a just-published generation-1 Object
+    // with predecessor bytes before `VERSION` lands.
+    //
+    // Held across revalidation, staging, publication and activation together,
+    // because it is the whole of that span that has to see one unmoving source.
+    store::with_predecessor_lock(root, || apply_locked(root, challenge))
+}
+
+fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {
     let manifest = staged(root)?.ok_or_else(|| {
         Error::new(
             EXIT_INVARIANT,
@@ -1439,4 +1474,38 @@ fn ensure_local_ignored(root: &Path) -> Result<()> {
     }
     text.push_str("/local/\n");
     fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Not being able to establish absence is not absence.
+    ///
+    /// The later-domain guard decides whether the source is the one released
+    /// workspace #66 permits. It asked `exists()` first, which followed links
+    /// and read a dangling name as absent; asking `is_err()` instead fixed that
+    /// and kept the same flaw one step along, reading `PermissionDenied` or
+    /// `EIO` as absent too. Only `NotFound` means absent.
+    ///
+    /// Provoked here with a `.engr` that is a regular file, so the guard's own
+    /// `.engr/<domain>` lookup fails with something that is not `NotFound` —
+    /// which is the shape of every error this must not swallow.
+    #[test]
+    fn a_later_domain_that_cannot_be_looked_up_is_not_absent() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path();
+        fs::write(store::engr_dir(root), b"not a directory").expect("write");
+
+        let error = check_released_domains(root)
+            .expect_err("an unreadable later-domain name is not an absent one");
+        assert_ne!(
+            error.code, EXIT_SCHEMA,
+            "a lookup failure is a tool failure, not a verdict about the workspace"
+        );
+        assert!(
+            error.message.contains("rules"),
+            "and it names what it could not read: {error}"
+        );
+    }
 }
