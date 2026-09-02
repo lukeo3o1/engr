@@ -1468,7 +1468,54 @@ impl Event {
             self.id
         );
         self.metadata.admitted.validate()?;
+        self.check_one_admission()?;
         self.payload(object).validate()
+    }
+
+    /// A Section admitted by this Event was admitted *when* this Event was.
+    ///
+    /// The amendment says normal Human admission stores one instant in both
+    /// `Section.admitted.at` and `Event.metadata.admitted.at`, and the same
+    /// holds for Agent admission — they are two statements about one moment, not
+    /// two moments that happen to be close. The constructors stamp them from a
+    /// single clock read, but nothing durable required it, so a record carrying
+    /// two different RFC3339 instants passed the append and read boundaries and
+    /// history would then disagree with itself about when a thing was admitted.
+    ///
+    /// The unassigned placeholder is refused outright. A pending Challenge holds
+    /// it precisely because admission has not happened; a record that kept it
+    /// would be claiming an admission instant that was documented as impossible.
+    ///
+    /// `object.migrated.v1` is exempt by construction rather than by exception:
+    /// its Sections live inside the snapshot, not in `Action::value()`, because
+    /// migration is the one case where Section provenance and Event provenance
+    /// are deliberately different facts.
+    fn check_one_admission(&self) -> Result<()> {
+        let admitted = &self.metadata.admitted;
+        ensure!(
+            admitted.at != crate::gate::UNASSIGNED_ADMISSION,
+            EXIT_SCHEMA,
+            "event {} records the unassigned admission placeholder, which no admission has",
+            self.id
+        );
+        let Some(value) = self.action.value() else {
+            return Ok(());
+        };
+        ensure!(
+            value.admitted.by == admitted.by,
+            EXIT_SCHEMA,
+            "event {} admits a section through a different door than it came through itself",
+            self.id
+        );
+        ensure!(
+            value.admitted.at == admitted.at,
+            EXIT_SCHEMA,
+            "event {} was admitted at {} and admits a section at {}, and those are one moment",
+            self.id,
+            admitted.at,
+            value.admitted.at
+        );
+        Ok(())
     }
 }
 

@@ -733,14 +733,21 @@ fn a_human_event_carries_the_review_its_challenge_froze() {
     assert_eq!(truthful.result, proof::ReviewResult::Failed);
 
     let event = |review: Option<engr::model::ReviewProvenance>| {
+        // Stamped as confirmation stamps it: the Section and the Event state
+        // one admission instant, which the durable boundary now requires.
+        let at = "2026-09-02T00:00:00Z";
+        let mut action = prepared.candidate.payload.action.clone();
+        if let Some(value) = action.value_mut() {
+            value.admitted.at = at.to_owned();
+        }
         Event::sealed(
             id,
             engr::model::new_id(),
-            prepared.candidate.payload.action.clone(),
+            action,
             rev,
             EventAdmission {
                 by: Admission::Human,
-                at: "2026-09-02T00:00:00Z".to_owned(),
+                at: at.to_owned(),
                 confirmation: Some(engr::model::HumanConfirmation {
                     challenge: code.clone(),
                 }),
@@ -790,5 +797,230 @@ fn a_human_event_carries_the_review_its_challenge_froze() {
             error.message.contains("does not describe the transition"),
             "{what}: {error}"
         );
+    }
+}
+
+/// Two rules whose snapshot order is not their id order.
+///
+/// A `BoundRule`'s canonical bytes begin with `based_on`, so a rule that has one
+/// sorts before a rule that does not, whatever the ids say. That is right for a
+/// hash and wrong for the set a human reads.
+fn rules_whose_orders_disagree(root: &Path) {
+    std::fs::create_dir_all(rules::dir(root)).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "basis\n").expect("basis");
+    std::fs::write(
+        rules::dir(root).join("zebra.md"),
+        "---\nid: zebra\napplies:\n  domains:\n    - object\n---\n\n# Zebra\n\nReviewed.\n",
+    )
+    .expect("rule");
+    std::fs::write(
+        rules::dir(root).join("alpha.md"),
+        "---\nid: alpha\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Alpha\n\nReviewed.\n",
+    )
+    .expect("rule");
+}
+
+/// The frozen Rule-ID set is written in its own canonical order.
+///
+/// #66 orders set-like arrays by JCS element bytes, and the amendment defines
+/// `review.rules` as the applicable Rule-ID set. The freeze step mapped the
+/// snapshot order straight to ids, and the snapshot order is the hash's — which
+/// begins with a rule's bases rather than its name.
+#[test]
+fn a_frozen_review_names_its_rules_in_canonical_order() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681853";
+    admit_human(root, creation(id));
+    rules_whose_orders_disagree(root);
+
+    let payload = add(id, "wording governed by two rules");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Passed,
+        None,
+    );
+
+    // The premise: for this pair the two orders really do disagree, so the test
+    // is about the difference rather than about a case where there is none.
+    let before = store::load_object(root, id).expect("object");
+    let mut after = before.clone();
+    let probe = Event::sealed(
+        id,
+        engr::model::new_id(),
+        payload.action.clone(),
+        before.rev + 1,
+        EventAdmission::human("2026-09-02T00:00:00Z", "ABC234"),
+    )
+    .expect("event");
+    engr::model::project(&mut after, &probe).expect("project");
+    let mutation = proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+    let binding = rules::bind_object(root, &mutation, before.rev).expect("binding");
+    let snapshot_order: Vec<String> = binding.rules().iter().map(|rule| rule.id.clone()).collect();
+    assert_ne!(
+        snapshot_order,
+        binding.rule_ids(),
+        "the fixture must be one where the hash order and the id order differ"
+    );
+
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the governed mutation");
+    let frozen = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .expect("a frozen review");
+    assert_eq!(
+        frozen.rules,
+        binding.rule_ids(),
+        "the frozen set is the canonical spelling, not the hash's order"
+    );
+    assert_eq!(frozen.rules, vec!["alpha".to_owned(), "zebra".to_owned()]);
+
+    // And it survives the round trip through disk, where the load boundary
+    // requires the same order.
+    engr::confirm(root, &format!("CONFIRM {}", prepared.candidate.code())).expect("confirm");
+}
+
+/// A frozen review that could not have been produced is refused.
+///
+/// The Challenge digest proves nobody edited the envelope after it was written;
+/// it says nothing about whether the block was coherent when written. A rewrite
+/// that keeps the ReviewDigest can still change the context a human is shown as
+/// settled, and confirmation would then persist the matching
+/// `{outcome, result, attempts}`.
+#[test]
+fn a_rewritten_frozen_review_is_refused() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681854";
+    admit_human(root, creation(id));
+    object_rule(root);
+
+    let payload = add(id, "wording a human admitted over a failed review");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Failed,
+        Some("the policy was not satisfied"),
+    );
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the override");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(root, &code).expect("challenge path");
+    let original: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("challenge")).expect("json");
+
+    let reseal = |rewritten: serde_json::Value| {
+        let mut challenge: engr::confirmation::Challenge =
+            serde_json::from_value(rewritten).expect("challenge");
+        challenge.digest = challenge.recomputed_digest().expect("reseal");
+        std::fs::write(
+            &path,
+            proof::canonical_bytes(&challenge, "challenge").expect("canonical"),
+        )
+        .expect("rewrite");
+    };
+
+    // Each rewrite keeps the ReviewDigest, so only the human-readable decision
+    // context moves.
+    for (what, rules_value) in [
+        (
+            "another rule entirely",
+            serde_json::json!(["some-other-rule"]),
+        ),
+        (
+            "a rule named twice",
+            serde_json::json!(["object-policy", "object-policy"]),
+        ),
+        (
+            "an id no grammar allows",
+            serde_json::json!(["Object Policy"]),
+        ),
+        ("no rules at all", serde_json::json!([])),
+    ] {
+        let mut rewritten = original.clone();
+        rewritten["subject"]["data"]["review"]["rules"] = rules_value;
+        reseal(rewritten);
+
+        let error = engr::confirm(root, &format!("CONFIRM {code}"))
+            .expect_err(&format!("{what} must be refused"));
+        assert!(
+            error.code == engr::EXIT_SCHEMA || error.code == engr::EXIT_INVARIANT,
+            "{what}: {error}"
+        );
+    }
+
+    // An attempt its ceilings make impossible is decided against the live
+    // binding, not against the frozen bytes alone.
+    let mut rewritten = original;
+    rewritten["subject"]["data"]["review"]["result"] = serde_json::json!("exhausted");
+    rewritten["subject"]["data"]["review"]["attempts"] = serde_json::json!(1);
+    reseal(rewritten);
+    let error = engr::confirm(root, &format!("CONFIRM {code}"))
+        .expect_err("an attempt that is not past any ceiling is not exhausted");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{error}");
+}
+
+/// A Section is admitted when the Event that admits it is.
+///
+/// The amendment makes them one instant, and the constructors read one clock —
+/// but nothing durable required it, so a record carrying two different RFC3339
+/// instants passed the append and read boundaries and history disagreed with
+/// itself about when a thing was admitted.
+#[test]
+fn a_durable_event_states_one_admission_instant() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681855";
+    admit_human(root, creation(id));
+
+    let prepared = gate::prepare(root, add(id, "wording admitted at one moment")).expect("prepare");
+    let rev = store::load_object(root, id).expect("object").rev + 1;
+    let event = |section_at: &str, event_at: &str| {
+        let mut action = prepared.candidate.payload.action.clone();
+        if let Some(value) = action.value_mut() {
+            value.admitted.at = section_at.to_owned();
+        }
+        Event::sealed(
+            id,
+            engr::model::new_id(),
+            action,
+            rev,
+            EventAdmission::human(event_at, prepared.candidate.code()),
+        )
+        .expect("a well formed record")
+    };
+
+    store::check_appendable(root, &event("2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"))
+        .expect("one instant in both places is appendable");
+
+    for (what, section_at, event_at) in [
+        (
+            "a section admitted before its event",
+            "2026-09-01T00:00:00Z",
+            "2026-09-02T00:00:00Z",
+        ),
+        (
+            "a section admitted after its event",
+            "2026-09-03T00:00:00Z",
+            "2026-09-02T00:00:00Z",
+        ),
+        (
+            "the unassigned placeholder, kept in both",
+            "0001-01-01T00:00:00Z",
+            "0001-01-01T00:00:00Z",
+        ),
+    ] {
+        let error = store::check_appendable(root, &event(section_at, event_at))
+            .expect_err(&format!("{what} must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
     }
 }

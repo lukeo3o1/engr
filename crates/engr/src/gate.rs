@@ -106,6 +106,59 @@ impl FrozenReview {
             attempts: self.attempts,
         }
     }
+
+    /// Everything about a frozen review that its own bytes decide.
+    ///
+    /// The Challenge digest proves nobody edited the envelope after it was
+    /// written. It says nothing about whether the block was coherent *when*
+    /// written, and a review context a human is shown as settled must be one
+    /// this generation could have produced — the read boundary is fail-closed on
+    /// stored current-generation resources, and a frozen review is one.
+    ///
+    /// Deliberately only the half that needs no workspace. Whether the attempt
+    /// is genuinely exhausted depends on the ceilings of the actual Rules, and
+    /// those are not in here; that half is bound at confirmation against the
+    /// live binding whose digest already had to match, using the same
+    /// [`crate::proof::check_review_report`] the preparing side used rather than
+    /// a second statement of the policy.
+    pub fn validate(&self) -> Result<()> {
+        crate::digest::REVIEW.verify(&self.digest)?;
+        crate::rules::Attempt::new(self.attempts)?;
+        crate::proof::within_safe_integers(
+            &serde_json::json!(self.attempts),
+            "frozen review attempt",
+        )?;
+        ensure!(
+            !self.rules.is_empty(),
+            EXIT_SCHEMA,
+            "a frozen review names the Rules it was of"
+        );
+        for id in &self.rules {
+            crate::rules::check_rule_id(id, "a reviewed rule")?;
+        }
+        let mut canonical = self.rules.clone();
+        crate::proof::canonical_set(&mut canonical, "reviewed rule")?;
+        ensure!(
+            canonical == self.rules,
+            EXIT_SCHEMA,
+            "a frozen review names its Rules once each, in canonical set order"
+        );
+        // The same reading as the preparing side: a human overruling something
+        // must be able to read what, and an empty string is that absence
+        // respelled.
+        match (self.result, self.explanation.as_deref()) {
+            (crate::proof::ReviewResult::Passed, None) => Ok(()),
+            (crate::proof::ReviewResult::Passed, Some(_)) => Err(Error::new(
+                EXIT_INVARIANT,
+                "a passed review carries no explanation".to_owned(),
+            )),
+            (_, Some(text)) if !text.trim().is_empty() => Ok(()),
+            (_, _) => Err(Error::new(
+                EXIT_INVARIANT,
+                "a review offered for override must say what is being overridden".to_owned(),
+            )),
+        }
+    }
 }
 
 impl ObjectSubject {
@@ -302,7 +355,7 @@ pub fn find(root: &Path, code: &str) -> Result<Candidate> {
     // the record has no digest for are both admission provenance that nothing
     // produced.
     if let Some(review) = &subject.review {
-        crate::digest::REVIEW.verify(&review.digest)?;
+        review.validate()?;
     }
     Ok(Candidate {
         challenge,
@@ -1143,7 +1196,7 @@ fn frozen_review(review: Option<&crate::proof::CandidateReview>) -> Option<Froze
         digest: review.review_digest.clone(),
         result: review.result,
         attempts: review.attempt,
-        rules: review.rules.iter().map(|rule| rule.id.clone()).collect(),
+        rules: crate::rules::canonical_rule_ids(&review.rules),
         explanation: review.explanation.clone(),
     })
 }
@@ -1827,12 +1880,40 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
     let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
     match &candidate.subject.review {
-        Some(review) => ensure!(
-            live.digest()?.to_string() == review.digest,
-            EXIT_INVARIANT,
-            "the Rule Review material moved after challenge {} was prepared",
-            candidate.code()
-        ),
+        Some(review) => {
+            ensure!(
+                live.digest()?.to_string() == review.digest,
+                EXIT_INVARIANT,
+                "the Rule Review material moved after challenge {} was prepared",
+                candidate.code()
+            );
+            // The digest binds the mutation and the exact Rule artifacts; it
+            // does not bind the human-readable context beside them. A frozen
+            // review naming other Rules, or an attempt its ceilings make
+            // impossible, keeps the right digest and would be rendered as
+            // settled and then written into history as `{outcome, result,
+            // attempts}`.
+            //
+            // So the rest is bound here, where the live binding exists: the same
+            // id set both sides derive independently, and the same report check
+            // the preparing side ran — now against the real ceilings rather than
+            // against ids alone.
+            ensure!(
+                review.rules == live.rule_ids(),
+                EXIT_INVARIANT,
+                "challenge {} was frozen against {}, and this mutation is governed by {}",
+                candidate.code(),
+                review.rules.join(", "),
+                live.rule_ids().join(", ")
+            );
+            crate::proof::check_review_report(&crate::proof::CandidateReview {
+                review_digest: review.digest.clone(),
+                attempt: review.attempts,
+                result: review.result,
+                rules: live.rules().to_vec(),
+                explanation: review.explanation.clone(),
+            })?;
+        }
         None => ensure!(
             !live.has_rules(),
             EXIT_INVARIANT,

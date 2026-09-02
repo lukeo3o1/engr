@@ -44,11 +44,25 @@ fn content(text: &str) -> Content {
     }
 }
 
+/// The action as confirmation stamps it.
+///
+/// A Section admitted by an Event was admitted when that Event was, and the
+/// durable boundary requires the record to say so. A fixture that stamped only
+/// the envelope was building a record history could not hold, and would be
+/// refused for that rather than for whatever it was written to test.
+fn stamped(action: engr::model::Action, at: &str) -> engr::model::Action {
+    let mut action = action;
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = at.to_owned();
+    }
+    action
+}
+
 fn candidate_event(candidate: &gate::Candidate) -> engr::model::Event {
     engr::model::Event::sealed(
         candidate.object(),
         engr::model::new_id(),
-        candidate.payload.action.clone(),
+        stamped(candidate.payload.action.clone(), "2026-08-13T00:00:00Z"),
         candidate.expected_rev() + 1,
         EventAdmission::human("2026-08-13T00:00:00Z", candidate.code()),
     )
@@ -75,7 +89,7 @@ fn unadmitted_human_event(object: &str, payload: Payload, rev: u64) -> engr::mod
     engr::model::Event::sealed(
         object,
         engr::model::new_id(),
-        payload.action,
+        stamped(payload.action, "2026-08-23T00:00:00Z"),
         rev,
         EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
     )
@@ -91,7 +105,7 @@ fn direct_human_event(root: &Path, id: &str, payload: Payload, rev: u64) -> engr
     engr::model::Event::sealed(
         id,
         engr::model::new_id(),
-        payload.action,
+        stamped(payload.action, "2026-08-23T00:00:00Z"),
         rev,
         EventAdmission::human("2026-08-23T00:00:00Z", &confirmation.challenge),
     )
@@ -1927,7 +1941,10 @@ fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
     let path = store::events_path(&root, &id);
     let before = std::fs::read(&path).expect("events");
 
-    let action = common::agent_payload(Act::Add, &id, content("admitted by nobody")).action;
+    let action = stamped(
+        common::agent_payload(Act::Add, &id, content("admitted by nobody")).action,
+        "2026-08-25T00:00:00Z",
+    );
     let forged = engr::model::Event::sealed(
         &id,
         engr::model::new_id(),
@@ -2417,7 +2434,7 @@ fn agent_event_without_review(object: &str, payload: &Payload, rev: u64) -> engr
     engr::model::Event::sealed(
         object,
         engr::model::new_id(),
-        payload.action.clone(),
+        stamped(payload.action.clone(), "2026-08-27T00:00:00Z"),
         rev,
         engr::model::EventAdmission {
             by: engr::semantics::Admission::Agent,

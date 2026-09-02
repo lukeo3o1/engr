@@ -130,10 +130,16 @@ fn reconcile_applies_an_event_the_projection_missed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "reconciliation");
     let prepared = gate::prepare(&root, payload(Act::Add, &id, "one")).expect("prepare crash tail");
+    // Stamped as confirmation stamps it: the Section and the Event state one
+    // admission instant, which the durable boundary requires.
+    let mut action = prepared.candidate.payload.action.clone();
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = "2026-08-25T00:00:00Z".to_owned();
+    }
     let crashed = engr::model::Event::sealed(
         &id,
         engr::model::new_id(),
-        prepared.candidate.payload.action.clone(),
+        action,
         2,
         engr::model::EventAdmission::human("2026-08-25T00:00:00Z", prepared.candidate.code()),
     )

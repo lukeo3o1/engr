@@ -208,7 +208,10 @@ fn reference_admission_uses_the_effective_target_projection() {
     let revision_event = Event::sealed(
         &target,
         engr::model::new_id(),
-        revision.candidate.payload.action.clone(),
+        admitted_at(
+            revision.candidate.payload.action.clone(),
+            "2026-08-17T00:00:00Z",
+        ),
         revision.candidate.expected_rev() + 1,
         EventAdmission::human("2026-08-17T00:00:00Z", revision.candidate.code()),
     )
@@ -1515,7 +1518,10 @@ fn show_waits_for_the_workspace_writer_lock_before_reconciling() {
         &Event::sealed(
             &object,
             engr::model::new_id(),
-            prepared.candidate.payload.action.clone(),
+            admitted_at(
+                prepared.candidate.payload.action.clone(),
+                "2026-08-13T00:00:00Z",
+            ),
             prepared.candidate.expected_rev() + 1,
             EventAdmission::human("2026-08-13T00:00:00Z", prepared.candidate.code()),
         )
@@ -5281,6 +5287,19 @@ fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Resul
 /// reproduces is the state a crash leaves: the record is durable and the
 /// projection is not, which is exactly what recovery has to cope with. Written
 /// as the canonical JCS bytes, because that is what the read boundary requires.
+/// The action as confirmation stamps it.
+///
+/// A Section admitted by an Event was admitted when that Event was, and the
+/// durable boundary requires the two to say so. A fixture that stamped only the
+/// envelope was writing a record history could not hold.
+fn admitted_at(action: engr::model::Action, at: &str) -> engr::model::Action {
+    let mut action = action;
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = at.to_owned();
+    }
+    action
+}
+
 fn append_admitted_raw(root: &Path, object: &str, event: &engr::model::Event) {
     let path = store::events_path(root, object);
     let line = engr::proof::canonical_bytes(event, "Event").expect("canonical");

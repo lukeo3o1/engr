@@ -1317,7 +1317,7 @@ fn check_yaml_properties(anchor: *const u8, tag: *const u8, where_: &str, line: 
 /// a filename this build would write and some other filesystem would refuse.
 pub(crate) const RULE_ID_MAX: usize = 32;
 
-fn check_rule_id(id: &str, what: &str) -> Result<()> {
+pub(crate) fn check_rule_id(id: &str, what: &str) -> Result<()> {
     let canonical = id.len() <= RULE_ID_MAX
         && id
             .chars()
@@ -1671,10 +1671,27 @@ impl ReviewBinding {
     /// reviewed, so this answers the set question in the one order both sides
     /// can produce independently.
     pub fn rule_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.rules.iter().map(|rule| rule.id.clone()).collect();
-        ids.sort();
-        ids
+        canonical_rule_ids(&self.rules)
     }
+}
+
+/// The ids of a bound Rule set, in the one order two sides produce
+/// independently.
+///
+/// One function, because the frozen Challenge and the live binding have to
+/// agree on it and each used to derive it its own way: the Challenge mapped the
+/// *snapshot* order straight to ids, and the snapshot order is the hash's —
+/// which begins with a rule's bases rather than its name and is therefore not
+/// id order at all. Two rules whose bases sort the other way round produced a
+/// frozen `rules` list that was not the canonical spelling of its own set.
+///
+/// Sorting `String`s is the JCS element-byte order for these values: a rule id
+/// is `[a-z0-9][a-z0-9-]{0,31}`, so no escape can make the quoted encoding sort
+/// differently from the bare one.
+pub fn canonical_rule_ids(rules: &[BoundRule]) -> Vec<String> {
+    let mut ids: Vec<String> = rules.iter().map(|rule| rule.id.clone()).collect();
+    ids.sort();
+    ids
 }
 
 /// Hold a binding's two caller-supplied arguments to the shape its domain
