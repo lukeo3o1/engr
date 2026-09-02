@@ -129,6 +129,21 @@ struct MigrationContract {
     /// past is one it cannot interpret — the same reason the Object family
     /// declares the Ref and Review contracts it embeds.
     source_digest_contract: u32,
+    /// The destination generation, and every contract that decides what
+    /// `objects[].digest` comes out as.
+    ///
+    /// A frozen migration plan pins the exact destination Object digest, which
+    /// is an `ObjectDigestContract` scalar over a value whose members include
+    /// each Section's own `SectionDigestContract` seal. `to` is the generation
+    /// the plan converts into. Move any of the three and re-preflighting the
+    /// same predecessor produces a different plan — so a pending Challenge from
+    /// before the move is one this build cannot honour, and must say so rather
+    /// than resume it and fail at confirmation as though the *predecessor* had
+    /// moved. They are declared here rather than left to the Object family's
+    /// members, because what makes them matter is this subject.
+    destination_generation: u32,
+    object_digest_contract: u32,
+    section_digest_contract: u32,
 }
 
 /// The command vocabulary an Object subject may name.
@@ -183,6 +198,9 @@ fn contract() -> Contract {
             interpretation: "the sole released predecessor format is validated and deterministically converted to workspace generation 1; predecessor history is discarded; one object.migrated.v1 bootstrap Event recreates each destination Object; migrated Sections preserve predecessor admission provenance",
             confirmation: "Human confirmation rederives and matches the frozen plan, then stamps one actual migration confirmation/apply instant into every migration Event; no destination containing final Event admission provenance exists before that confirmation; an intact post-confirm destination may only resume forward for the same Challenge",
             source_digest_contract: crate::digest::SOURCE.current,
+            destination_generation: crate::WORKSPACE_GENERATION,
+            object_digest_contract: crate::digest::OBJECT.current,
+            section_digest_contract: crate::digest::SECTION.current,
         },
         digest_contract: crate::digest::CHALLENGE.current,
         alphabet: std::str::from_utf8(ALPHABET).expect("the alphabet is ASCII"),
@@ -499,7 +517,7 @@ mod tests {
     fn the_generator_fingerprint_is_the_value_this_build_publishes() {
         assert_eq!(
             fingerprint().expect("value"),
-            "1:dee3baff69e9777428a291c6758272c8a2253344dbc439c9ce30d695038a1df8"
+            "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd"
         );
     }
 
@@ -575,6 +593,33 @@ mod tests {
             fingerprint_of(&source_contract_changed).expect("source digest contract"),
             baseline
         );
+
+        // And everything that decides what the frozen plan's destination Object
+        // digest comes out as. Move one of these and re-preflighting the same
+        // predecessor produces a different plan, so a Challenge minted before
+        // the move cannot be honoured — it has to be prepared again rather than
+        // resumed and then failed as though the predecessor had moved.
+        for (what, move_it) in [
+            (
+                "destination generation",
+                &(|contract: &mut Contract| contract.migration.destination_generation += 1)
+                    as &dyn Fn(&mut Contract),
+            ),
+            ("object digest contract", &|contract: &mut Contract| {
+                contract.migration.object_digest_contract += 1
+            }),
+            ("section digest contract", &|contract: &mut Contract| {
+                contract.migration.section_digest_contract += 1
+            }),
+        ] {
+            let mut moved = current.clone();
+            move_it(&mut moved);
+            assert_ne!(
+                fingerprint_of(&moved).expect(what),
+                baseline,
+                "{what} must invalidate a pending migration Challenge"
+            );
+        }
 
         // And the other family, which has its own frozen subject and its own
         // apply-time interpretation.

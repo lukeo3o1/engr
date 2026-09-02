@@ -587,11 +587,24 @@ pub struct Proposed {
 
 /// Prepare the migration and mint the Challenge that admits it.
 pub fn prepare(root: &Path) -> Result<Proposed> {
-    // The predecessor's lock too, in the same order `apply` takes them. The
-    // preflight reads the whole predecessor to derive the plan a human is then
-    // shown; reading it while a released build is mid-write would freeze a plan
-    // of a state that was never a state, and the human would be asked about it.
     store::with_lock(root, || {
+        // A workspace that already carries `VERSION` has no predecessor for the
+        // compatibility lock to be the lock *of*, and taking it would create the
+        // very file the migration exists to have removed. So this branch does
+        // not take it — and retires it, because reaching here after a crash
+        // between activation and the sweep is one of the ways it can still be
+        // lying around. Cleanup converges through the same command that
+        // converges the rest of the residue.
+        if store::version_path(root).exists() {
+            let outcome = prepare_locked(root);
+            retire_predecessor_lock(root);
+            return outcome;
+        }
+        // Otherwise the predecessor's lock too, in the same order `apply` takes
+        // them. The preflight reads the whole predecessor to derive the plan a
+        // human is then shown; reading it while a released build is mid-write
+        // would freeze a plan of a state that was never a state, and the human
+        // would be asked about it.
         store::with_predecessor_lock(root, || prepare_locked(root))
     })
 }

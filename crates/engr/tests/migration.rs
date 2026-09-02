@@ -1425,8 +1425,15 @@ fn a_crash_after_activation_leaves_residue_that_clears_itself() {
         );
     }
 
-    // The supported command converges it. Nothing is left to migrate, the
-    // residue is gone, and the spent code goes with it.
+    // The compatibility lock is residue too, and this is the path that leaves
+    // it: `apply` never returned, so it never got to retire it.
+    assert!(
+        store::predecessor_lock_path(&root).exists(),
+        "the crash left the legacy lock behind"
+    );
+
+    // The supported command converges all of it. Nothing is left to migrate,
+    // the residue is gone, the spent code goes with it, and so does the lock.
     let error = engr::migration::prepare(&root).expect_err("there is nothing left to migrate");
     assert_eq!(error.code, engr::EXIT_SCHEMA, "{error}");
     assert!(error.message.contains("nothing to migrate"), "{error}");
@@ -1436,6 +1443,42 @@ fn a_crash_after_activation_leaves_residue_that_clears_itself() {
             .expect("pending codes")
             .is_empty(),
         "and the spent code with it"
+    );
+    assert!(
+        !store::predecessor_lock_path(&root).exists(),
+        "and the legacy lock with it"
+    );
+}
+
+/// `engr migrate` on a workspace that is already current does not invent a
+/// predecessor lock.
+///
+/// Taking the compatibility lock creates the file, and preparation took it
+/// before deciding whether there was a predecessor at all — so asking to
+/// migrate an ordinary generation-1 workspace materialized exactly the residue
+/// the migration exists to have removed, then returned "nothing to migrate"
+/// without cleaning it up.
+#[test]
+fn migrating_a_current_workspace_leaves_no_legacy_lock() {
+    let (_temp, root) = released();
+    migrate(&root);
+    assert!(!store::predecessor_lock_path(&root).exists());
+
+    for _ in 0..2 {
+        let error = engr::migration::prepare(&root).expect_err("nothing to migrate");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{error}");
+        assert!(
+            !store::predecessor_lock_path(&root).exists(),
+            "asking again must not create one either"
+        );
+    }
+
+    // And one left over from any earlier path is swept by the same command.
+    write(&store::predecessor_lock_path(&root), "");
+    engr::migration::prepare(&root).expect_err("nothing to migrate");
+    assert!(
+        !store::predecessor_lock_path(&root).exists(),
+        "a legacy lock found on a current workspace is residue"
     );
 }
 
