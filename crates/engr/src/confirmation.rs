@@ -122,6 +122,13 @@ struct MigrationContract {
     planned_object: &'static str,
     interpretation: &'static str,
     confirmation: &'static str,
+    /// The contract behind the digest scalars in `subject.source`.
+    ///
+    /// A migration subject carries one digest per predecessor file, and a
+    /// pending Challenge holding scalars under a contract this build has moved
+    /// past is one it cannot interpret — the same reason the Object family
+    /// declares the Ref and Review contracts it embeds.
+    source_digest_contract: u32,
 }
 
 /// The command vocabulary an Object subject may name.
@@ -175,6 +182,7 @@ fn contract() -> Contract {
             planned_object: "PlannedObject{object,title,sections,predecessor_rev,digest}; object is canonical UUIDv7; sections and predecessor_rev are safe integers; digest is the exact destination Object digest",
             interpretation: "the sole released predecessor format is validated and deterministically converted to workspace generation 1; predecessor history is discarded; one object.migrated.v1 bootstrap Event recreates each destination Object; migrated Sections preserve predecessor admission provenance",
             confirmation: "Human confirmation rederives and matches the frozen plan, then stamps one actual migration confirmation/apply instant into every migration Event; no destination containing final Event admission provenance exists before that confirmation; an intact post-confirm destination may only resume forward for the same Challenge",
+            source_digest_contract: crate::digest::SOURCE.current,
         },
         digest_contract: crate::digest::CHALLENGE.current,
         alphabet: std::str::from_utf8(ALPHABET).expect("the alphabet is ASCII"),
@@ -491,7 +499,7 @@ mod tests {
     fn the_generator_fingerprint_is_the_value_this_build_publishes() {
         assert_eq!(
             fingerprint().expect("value"),
-            "1:e9d22f142ab3b88082095bb47e6e5a9213254fe79a06c496d43cfb52e78339e2"
+            "1:dee3baff69e9777428a291c6758272c8a2253344dbc439c9ce30d695038a1df8"
         );
     }
 
@@ -554,6 +562,17 @@ mod tests {
         review_contract_changed.object.review_digest_contract += 1;
         assert_ne!(
             fingerprint_of(&review_contract_changed).expect("review digest contract"),
+            baseline
+        );
+
+        // The migration subject carries a digest per predecessor file, under a
+        // contract of its own. It used to borrow the Object family's, which
+        // said those scalars were something they are not and left them with no
+        // version namespace to move in.
+        let mut source_contract_changed = current.clone();
+        source_contract_changed.migration.source_digest_contract += 1;
+        assert_ne!(
+            fingerprint_of(&source_contract_changed).expect("source digest contract"),
             baseline
         );
 

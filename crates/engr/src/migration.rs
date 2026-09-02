@@ -309,7 +309,7 @@ fn capture(source: &mut BTreeMap<String, String>, root: &Path, path: &Path) -> R
     let text = fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?;
     source.insert(
         relative_to_engr(root, path)?,
-        crate::digest::OBJECT.emit(sha256_of(&text))?.to_string(),
+        crate::digest::SOURCE.emit(sha256_of(&text))?.to_string(),
     );
     Ok(text)
 }
@@ -768,7 +768,33 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
     //
     // Held across revalidation, staging, publication and activation together,
     // because it is the whole of that span that has to see one unmoving source.
-    store::with_predecessor_lock(root, || apply_locked(root, challenge))
+    let report = store::with_predecessor_lock(root, || apply_locked(root, challenge))?;
+    retire_predecessor_lock(root);
+    Ok(report)
+}
+
+/// Remove the compatibility lock, once there is no longer a predecessor for it
+/// to be the lock of.
+///
+/// `.engr/lock` is the released build's writer lock, and taking it creates it —
+/// so a migration leaves one behind even on a clean clone that never had one.
+/// #66's destination root has exactly one lock, `local/lock`, and the
+/// predecessor's own `.gitignore` names `/lock`, so the residue would be
+/// invisible rather than merely present.
+///
+/// **After the lock is released, not inside.** Windows will not unlink a file
+/// this process still holds open, so removing it inside the guard would work on
+/// one platform and quietly not on the others.
+///
+/// Best effort, and deliberately so: the migration has already succeeded and
+/// `VERSION` is written. If another process is still holding the old lock —
+/// which can only be a released build that is about to refuse this workspace
+/// anyway — the file survives as an untracked stale byte, and reporting that as
+/// a failed migration would be a worse answer than leaving it.
+fn retire_predecessor_lock(root: &Path) {
+    if store::version_path(root).exists() {
+        let _ = fs::remove_file(store::predecessor_lock_path(root));
+    }
 }
 
 fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {

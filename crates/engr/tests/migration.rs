@@ -935,6 +935,20 @@ fn the_migrated_workspace_carries_on_as_a_current_one() {
         assert!(path.is_dir(), "{} should exist", path.display());
     }
     assert!(read(&store::engr_dir(&root).join(".gitignore")).contains("/local/"));
+
+    // And the predecessor's writer lock is gone. Migration has to take it, so
+    // that a released build cannot be writing to the workspace underneath it,
+    // and taking it creates it — but #66's destination root has one lock and it
+    // is `local/lock`. Left behind it would be residue the predecessor's own
+    // `/lock` ignore rule then hides.
+    assert!(
+        !store::predecessor_lock_path(&root).exists(),
+        "the compatibility lock is migration-only and does not outlive it"
+    );
+    assert!(
+        store::lock_path(&root).starts_with(store::local_dir(&root)),
+        "the one lock a generation-1 workspace has is under local/"
+    );
 }
 
 // ------------------------------------- what the released contract really said

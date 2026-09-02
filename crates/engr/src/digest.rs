@@ -428,3 +428,30 @@ pub const REF: Family = Family {
         SHA256_HEX,
     )],
 };
+
+/// The exact bytes of one predecessor file a migration plan pins.
+///
+/// Its own family, because a digest scalar says what contract produced it and
+/// this one is not the contract any of the others describe. `MigrationSubject
+/// .source` holds a hash per predecessor file — `format.json` and Event JSONL
+/// as well as Objects — and each is a plain SHA-256 over the file's exact
+/// octets, not the canonical-persisted-value seal `ObjectDigestContract`
+/// defines. Labelling those with the Object family said they were something
+/// they are not, and left the one digest inside a migration Challenge without a
+/// version namespace it could move in.
+///
+/// Version 1 is undomained: it hashes the file bytes with nothing mixed in.
+/// What gives it meaning is the path it is filed under, and that path is part
+/// of the same confirmed subject.
+pub const SOURCE: Family = Family {
+    name: "SourceDigestContract",
+    current: 1,
+    versions: &[(
+        1,
+        Support {
+            emit: true,
+            verify: true,
+        },
+        SHA256_HEX,
+    )],
+};
