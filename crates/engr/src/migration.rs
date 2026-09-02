@@ -352,8 +352,14 @@ const LATER_DOMAINS: &[&str] = &["rules", "backlog", "work", "collections", "eve
 fn check_released_domains(root: &Path) -> Result<()> {
     for domain in LATER_DOMAINS {
         let path = store::engr_dir(root).join(domain);
+        // The directory entry, not what it resolves to. `exists()` follows
+        // links, so a dangling `.engr/rules` answered "absent" for a name that
+        // is plainly there — and the question here is whether this workspace
+        // has a later domain's *name* in it, which a broken redirection answers
+        // just as much as a real directory does. `rules::load_all` and
+        // `work::exists` already draw the line this way.
         ensure!(
-            !path.exists(),
+            fs::symlink_metadata(&path).is_err(),
             EXIT_SCHEMA,
             "{} holds {domain}/, which the released version {} workspace never had; this is a later unreleased build's workspace and engr {} defines no route from it",
             store::engr_dir(root).display(),
@@ -920,32 +926,45 @@ pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
-    // A destination exists only after somebody answered exactly. Past that
-    // point the transaction is under way and publication may already have
-    // begun, so withdrawing is no longer a thing anybody can do — the only way
-    // out is forward.
-    ensure!(
-        !destination_dir(root).exists(),
-        EXIT_INVARIANT,
-        "migration {code} was already confirmed and is part-published; finish it with `engr confirm CONFIRM {code}` rather than withdrawing it"
-    );
+    // Whether there is anything left to withdraw is `retire_prepared`'s
+    // question, and it asks it of the transaction rather than of the Challenge.
     retire_prepared(root, code)
 }
 
 /// Take a prepared migration out of existence: the question, then the plan.
 ///
-/// Only ever called where nothing has been published — a withdrawal before any
+/// Refused once anything has been published — a withdrawal before any
 /// answer, or a preparation this build can no longer put to anybody. The order
 /// matters. The code goes first, so a crash between the two leaves a plan whose
 /// Challenge is gone, which `prepare` recognises and finishes; the other way
 /// round would leave a live-looking code with nothing behind it, and preparing
 /// again would mint a second one beside it.
 pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
+    let mine = staged(root)?.is_some_and(|manifest| manifest.challenge == code);
+    // **The forward-only guard belongs here, not in one route to here.**
+    //
+    // A staged destination means somebody already answered exactly, and
+    // publication may have begun — the predecessor's own bytes may already be
+    // overwritten, which makes this directory the only copy of what was
+    // confirmed. Retiring it would not withdraw a question; it would destroy
+    // the transaction.
+    //
+    // The check used to sit in the withdrawal path, which was one caller. The
+    // other one is the fallback for a Challenge this build cannot read, and
+    // that is exactly the case where the guard cannot be reached by
+    // interpreting the Challenge — so it is asked of the transaction state
+    // instead, which needs no interpretation at all.
+    ensure!(
+        !(mine && destination_dir(root).exists()),
+        EXIT_INVARIANT,
+        "migration {code} was already confirmed and is part-published; {} holds the only copy of what was confirmed, so it can only be finished — `engr confirm CONFIRM {code}`",
+        stage_dir(root).display()
+    );
     let path = store::challenge_path(root, code)?;
     if path.exists() {
         fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
     }
-    if staged(root)?.is_some_and(|manifest| manifest.challenge == code) {
+    if mine {
         let stage = stage_dir(root);
         if stage.exists() {
             fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;

@@ -1545,6 +1545,109 @@ fn an_uninterpretable_pending_migration_is_asked_again() {
     assert!(store::version_path(&root).exists());
 }
 
+/// Withdrawal is refused by the state of the transaction, not by reading the
+/// question.
+///
+/// The fallback that makes an unreadable Challenge withdrawable is exactly what
+/// must not reach a confirmed one. Once a destination is staged somebody has
+/// already answered exactly and publication may have begun — at the `version`
+/// boundary the predecessor's own `events/` and `format.json` are already gone,
+/// so the stage is the only copy of what was confirmed. A qualified response
+/// arriving then must not be able to delete it, and it cannot be asked to prove
+/// that by interpreting a Challenge it cannot read.
+#[test]
+fn a_qualified_response_cannot_discard_a_confirmed_migration() {
+    for (stage, published) in [("destination", false), ("version", true)] {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_at(&root, stage, &proposed.challenge);
+        assert!(
+            engr::migration::stage_dir(&root)
+                .join("destination")
+                .exists(),
+            "{stage}: the destination is staged"
+        );
+        assert_eq!(
+            store::engr_dir(&root).join("format.json").exists(),
+            !published,
+            "{stage}: publication state is what the boundary says"
+        );
+
+        // Now make the Challenge unreadable, which is the only way into the
+        // fallback: a generator whose contract this build does not share.
+        restamp_challenge(&root, &proposed.challenge, |challenge| {
+            challenge.generator.fingerprint = format!("1:{}", "c".repeat(64));
+        });
+
+        let refused = engr::confirm(
+            &root,
+            &format!("CONFIRM {} on second thoughts", proposed.challenge),
+        )
+        .expect_err("a confirmed migration cannot be withdrawn");
+        assert_eq!(refused.code, engr::EXIT_INVARIANT, "{stage}: {refused}");
+        assert!(
+            refused.message.contains("only be finished"),
+            "{stage}: {refused}"
+        );
+
+        // Everything needed to finish is still there.
+        assert!(
+            engr::migration::stage_dir(&root)
+                .join("destination")
+                .exists(),
+            "{stage}: the only copy of what was confirmed is retained"
+        );
+        assert!(
+            store::challenge_path(&root, &proposed.challenge)
+                .expect("path")
+                .exists(),
+            "{stage}: and so is the code that finishes it"
+        );
+    }
+}
+
+/// A later domain's name is present whether or not it resolves to anything.
+///
+/// `exists()` follows links, so a dangling `.engr/rules` answered "absent" for
+/// an entry that is plainly there — and the released workspace never had that
+/// name under any target. Migration would have read a later build's workspace as
+/// the released one.
+#[test]
+fn a_dangling_later_domain_is_still_a_later_domain() {
+    for domain in ["rules", "backlog", "work", "collections", "eventstore"] {
+        let (_temp, root) = released();
+        let entry = store::engr_dir(&root).join(domain);
+        let nowhere = store::engr_dir(&root).join("no-such-target");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nowhere, &entry).expect("symlink");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&nowhere, &entry).is_err() {
+            // Windows needs privilege for this; the platform is covered by CI.
+            return;
+        }
+        assert!(!entry.exists(), "{domain}: it dangles, so exists() says no");
+        assert!(
+            std::fs::symlink_metadata(&entry).is_ok(),
+            "{domain}: but the entry is there"
+        );
+
+        let refused = engr::migration::prepare(&root).expect_err("not the released workspace");
+        assert_eq!(refused.code, engr::EXIT_SCHEMA, "{domain}: {refused}");
+        assert!(refused.message.contains(domain), "{domain}: {refused}");
+        // And it refused before minting or staging anything.
+        assert!(
+            !engr::migration::stage_dir(&root).exists(),
+            "{domain}: nothing staged"
+        );
+        assert!(
+            engr::gate::pending_codes(&root)
+                .expect("pending codes")
+                .is_empty(),
+            "{domain}: no code minted"
+        );
+    }
+}
+
 /// A six-character code names a live question, not a moment in history.
 ///
 /// The crash between removing the spent code and removing the plan leaves the
