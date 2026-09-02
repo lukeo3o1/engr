@@ -1491,11 +1491,24 @@ mod tests {
     /// Provoked here with a `.engr` that is a regular file, so the guard's own
     /// `.engr/<domain>` lookup fails with something that is not `NotFound` —
     /// which is the shape of every error this must not swallow.
+    ///
+    /// The premise is checked before the property, because it is
+    /// platform-dependent: Unix answers `NotADirectory`, while Windows resolves
+    /// the same path to `NotFound` and so cannot produce this shape at all. The
+    /// classification under test is one match on `ErrorKind` and is identical on
+    /// every platform; where the provocation does not reproduce, there is
+    /// nothing here to assert rather than something to assert differently.
     #[test]
     fn a_later_domain_that_cannot_be_looked_up_is_not_absent() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let root = temp.path();
         fs::write(store::engr_dir(root), b"not a directory").expect("write");
+
+        let probe = fs::symlink_metadata(store::engr_dir(root).join(LATER_DOMAINS[0]));
+        match probe {
+            Err(error) if error.kind() != ErrorKind::NotFound => {}
+            _ => return,
+        }
 
         let error = check_released_domains(root)
             .expect_err("an unreadable later-domain name is not an absent one");
