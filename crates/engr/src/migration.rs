@@ -586,31 +586,54 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
         sweep_completed_stage(root)?;
     }
     if let Some(manifest) = staged(root)? {
-        // A staged plan is the question a human is already holding. Re-deriving
-        // it would mint a second code for the same migration and void the one
-        // they have.
-        let path = store::challenge_path(root, &manifest.challenge)?;
-        if !path.exists() {
-            // The plan outlived its code. Nothing can ever apply it — the code
-            // is the only thing that authorises it — so the question is only
-            // whether re-deriving is safe, and the destination answers that. No
-            // destination means nobody ever answered, so nothing was published
-            // and this is an abandoned preparation: sweep it and ask again.
-            ensure!(
-                !destination_dir(root).exists(),
-                EXIT_INVARIANT,
-                "the staged migration was confirmed as challenge {} and part-published, and that code is gone; {} holds the only copy of what was confirmed",
-                manifest.challenge,
-                stage_dir(root).display()
-            );
-            let stage = stage_dir(root);
-            fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
-        } else {
-            return Ok(Proposed {
-                challenge: manifest.challenge,
-                subject: manifest.subject,
-                resumed: true,
-            });
+        // A staged plan is the question a human is already holding, so resuming
+        // returns their code rather than minting a second one for the same
+        // migration. That is true only while the question is still one this
+        // build can put to them.
+        //
+        // Two ways it stops being: the file is gone, or it is there and this
+        // build cannot interpret it — a Challenge minted by a generator whose
+        // contract has since changed, which `Challenge::validate` refuses by
+        // design and tells the reader to prepare again. Returning that code
+        // anyway made "prepare again" impossible to reach: confirming it failed
+        // the fingerprint check, and so did withdrawing it, because disposal has
+        // to load the file to learn whose it is. The only way out was deleting
+        // local files by hand.
+        //
+        // Both cases converge the same way, and the destination is what makes it
+        // safe. No destination means nobody ever answered exactly, so nothing
+        // was published and the local question and plan are simply retired and
+        // asked again. With one, somebody did answer and publication may have
+        // begun: that is forward-only, and it says so.
+        let unusable = match store::load_challenge(root, &manifest.challenge) {
+            Ok(_) => None,
+            // Absent, or present and not interpretable by this build.
+            Err(error) if error.code == EXIT_NOT_FOUND || error.code == EXIT_SCHEMA => {
+                Some(error.message)
+            }
+            // Anything else is the filesystem failing, not an answer about the
+            // question, and retiring a plan on a transient read would throw away
+            // the one thing that can finish the transaction.
+            Err(error) => return Err(error),
+        };
+        match unusable {
+            None => {
+                return Ok(Proposed {
+                    challenge: manifest.challenge,
+                    subject: manifest.subject,
+                    resumed: true,
+                })
+            }
+            Some(why) => {
+                ensure!(
+                    !destination_dir(root).exists(),
+                    EXIT_INVARIANT,
+                    "the staged migration was confirmed as challenge {} and is part-published, and that question is no longer usable ({why}); {} holds the only copy of what was confirmed, so it can only be finished",
+                    manifest.challenge,
+                    stage_dir(root).display()
+                );
+                retire_prepared(root, &manifest.challenge)?;
+            }
         }
     }
     ensure!(
@@ -631,7 +654,7 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
     exclude_local_from_git(root)?;
     let data = serde_json::to_value(&subject)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
-    let taken = pending_challenge_codes(root)?;
+    let taken = crate::gate::taken_codes(root)?;
     let challenge = crate::confirmation::Challenge::mint(
         crate::confirmation::Subject {
             kind: crate::confirmation::SubjectType::Migration,
@@ -661,25 +684,13 @@ fn now() -> String {
         .expect("formatting a timestamp cannot fail")
 }
 
-/// Challenge codes already on disk, read without holding any of them to this
-/// build's rules — minting must avoid a code even where the file is unreadable.
-fn pending_challenge_codes(root: &Path) -> Result<Vec<String>> {
-    let dir = store::challenges_dir(root);
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut codes = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
-        let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(code) = name.strip_suffix(".json") {
-            if crate::confirmation::valid_challenge(code) {
-                codes.push(code.to_owned());
-            }
-        }
-    }
-    codes.sort();
-    Ok(codes)
+/// The code a staged plan is waiting on, if there is one.
+///
+/// Read straight off the manifest and held to nothing: this answers "which code
+/// is spoken for", and a plan whose Challenge this build cannot interpret speaks
+/// for its code exactly as much as one it can.
+pub(crate) fn staged_code(root: &Path) -> Result<Option<String>> {
+    Ok(staged(root)?.map(|manifest| manifest.challenge))
 }
 
 fn staged(root: &Path) -> Result<Option<Manifest>> {
@@ -918,12 +929,22 @@ pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
         EXIT_INVARIANT,
         "migration {code} was already confirmed and is part-published; finish it with `engr confirm CONFIRM {code}` rather than withdrawing it"
     );
-    // The code goes first. A crash between the two removals then leaves a plan
-    // whose Challenge is gone, which `prepare` recognises as an abandoned
-    // preparation and sweeps; the other order would leave a live-looking code
-    // with nothing behind it, and preparing again would mint a second one
-    // beside it.
-    fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+    retire_prepared(root, code)
+}
+
+/// Take a prepared migration out of existence: the question, then the plan.
+///
+/// Only ever called where nothing has been published — a withdrawal before any
+/// answer, or a preparation this build can no longer put to anybody. The order
+/// matters. The code goes first, so a crash between the two leaves a plan whose
+/// Challenge is gone, which `prepare` recognises and finishes; the other way
+/// round would leave a live-looking code with nothing behind it, and preparing
+/// again would mint a second one beside it.
+pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
+    let path = store::challenge_path(root, code)?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+    }
     if staged(root)?.is_some_and(|manifest| manifest.challenge == code) {
         let stage = stage_dir(root);
         if stage.exists() {
@@ -944,10 +965,20 @@ pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
 /// looks actionable — a code sitting in `challenges/` reads as a question
 /// somebody could answer — and the stage is what tells a later sweep which code
 /// that was.
+///
+/// **The file at that code is identified before it is removed**, because the
+/// code alone is not an identity. Six characters are unique among *live*
+/// questions, not for all time: a crash between the two removals below leaves
+/// the plan naming a code with no file behind it, and the workspace is already
+/// current, so ordinary Human questions can be prepared again. Deleting by name
+/// would eventually take an unrelated one. `taken_codes` keeps the code
+/// reserved while the residue stands, and this proves the file is the same
+/// question the plan was waiting on before removing it — two answers to the
+/// same hazard, because the sweep runs on a workspace somebody is already using.
 fn sweep_completed_stage(root: &Path) -> Result<()> {
     if let Some(manifest) = staged(root)? {
         let spent = store::challenge_path(root, &manifest.challenge)?;
-        if spent.exists() {
+        if spent.exists() && is_this_migration(root, &manifest)? {
             fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
         }
     }
@@ -956,6 +987,25 @@ fn sweep_completed_stage(root: &Path) -> Result<()> {
         fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
     }
     Ok(())
+}
+
+/// Whether the Challenge at the plan's code is still that plan's own question.
+///
+/// Family and subject together, not the code. A question this build cannot even
+/// read is left alone: it cannot be shown to be ours, and leaving residue is
+/// always safer than removing something that is not.
+fn is_this_migration(root: &Path, manifest: &Manifest) -> Result<bool> {
+    let Ok(challenge) = store::load_challenge(root, &manifest.challenge) else {
+        return Ok(false);
+    };
+    if challenge.subject.kind != crate::confirmation::SubjectType::Migration {
+        return Ok(false);
+    }
+    let subject: MigrationSubject = match serde_json::from_value(challenge.subject.data) {
+        Ok(subject) => subject,
+        Err(_) => return Ok(false),
+    };
+    Ok(subject == manifest.subject)
 }
 
 /// The destination workspace, written where the predecessor cannot be harmed by
@@ -1109,6 +1159,10 @@ fn confirmed_destination(
         "the staged destination is not the set of Objects the confirmed plan names"
     );
     let mut ready = Vec::new();
+    // One confirmation, one instant. Every Event this migration produced was
+    // stamped from a single clock read, so a destination whose Events disagree
+    // about when they were admitted is not a destination this migration staged.
+    let mut migration_instant: Option<String> = None;
     for file in &destination.files {
         let planned = subject
             .objects
@@ -1198,6 +1252,18 @@ fn confirmed_destination(
             file.object,
             event.action.event_type()
         );
+        // Admission metadata is outside replay, so the check above cannot reach
+        // it: `project` derives Object state, and neither the review member nor
+        // the instant is Object state. Left unstated, a staged Event could be
+        // given a structurally valid Rule Review — which no migration has, since
+        // there are no Object Rules to review a generation change against — or
+        // its own admission time, then re-sealed with the local manifest updated
+        // to match. It would replay to the same Object and publish provenance
+        // describing something that never happened.
+        //
+        // The shape is exact, so it is stated exactly: Human, this
+        // confirmation, no review, and one instant across the whole
+        // destination.
         let admitted = &event.metadata.admitted;
         ensure!(
             admitted.by == Admission::Human
@@ -1209,6 +1275,22 @@ fn confirmed_destination(
             "the staged bootstrap Event for {} does not record this migration's confirmation",
             file.object
         );
+        ensure!(
+            admitted.review.is_none(),
+            EXIT_INVARIANT,
+            "the staged bootstrap Event for {} records a Rule Review, and a migration is not reviewed against Object Rules",
+            file.object
+        );
+        match &migration_instant {
+            None => migration_instant = Some(admitted.at.clone()),
+            Some(instant) => ensure!(
+                &admitted.at == instant,
+                EXIT_INVARIANT,
+                "the staged bootstrap Event for {} was admitted at {}, and this migration was confirmed once, at {instant}",
+                file.object,
+                admitted.at
+            ),
+        }
         let mut projected = empty(&file.object)?;
         crate::model::project(&mut projected, event)?;
         projected.validate()?;

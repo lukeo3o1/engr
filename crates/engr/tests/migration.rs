@@ -1476,6 +1476,144 @@ fn a_qualified_response_withdraws_a_prepared_migration() {
     assert!(store::version_path(&root).exists());
 }
 
+/// Rewrite a Challenge on disk and keep it self-consistent.
+fn restamp_challenge(
+    root: &Path,
+    code: &str,
+    change: impl FnOnce(&mut engr::confirmation::Challenge),
+) {
+    let path = store::challenge_path(root, code).expect("challenge path");
+    let mut challenge: engr::confirmation::Challenge =
+        serde_json::from_str(&read(&path)).expect("challenge");
+    change(&mut challenge);
+    challenge.digest = challenge.recomputed_digest().expect("reseal the challenge");
+    let target = store::challenge_path(root, &challenge.id).expect("challenge path");
+    write(
+        &target,
+        &proof::canonical_bytes(&challenge, "challenge").expect("canonical"),
+    );
+    if target != path {
+        std::fs::remove_file(&path).expect("remove the original");
+    }
+}
+
+/// A pending question this build cannot interpret has to be reachable by the
+/// route the protocol names: prepare again.
+///
+/// `Challenge::validate` refuses a foreign generator fingerprint and says so.
+/// But resuming only checked that the file existed, so `engr migrate` handed
+/// back the unusable code forever; confirming it failed the fingerprint check,
+/// and withdrawing it failed too, because disposal has to read the file to learn
+/// whose question it is. The only way out was deleting local files by hand.
+#[test]
+fn an_uninterpretable_pending_migration_is_asked_again() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+
+    // A perfectly well-formed Challenge from a generator whose contract has
+    // moved: resealed, so nothing but the fingerprint is wrong with it.
+    restamp_challenge(&root, &proposed.challenge, |challenge| {
+        challenge.generator.fingerprint = format!("1:{}", "b".repeat(64));
+        challenge.generator.version = "latest (something-else)".to_owned();
+    });
+    let refused = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect_err("this build cannot interpret it");
+    assert!(refused.message.contains("prepare it again"), "{refused}");
+
+    // So preparing again is what it says: the stale question and its plan are
+    // retired, and a fresh one is minted under this build's own generator.
+    let again = engr::migration::prepare(&root).expect("prepare again");
+    assert_ne!(again.challenge, proposed.challenge, "a new question");
+    assert!(!again.resumed, "not a resumption of the unusable one");
+    assert!(
+        !store::challenge_path(&root, &proposed.challenge)
+            .expect("path")
+            .exists(),
+        "and the unusable code is gone rather than lingering"
+    );
+    assert_eq!(
+        engr::gate::pending_codes(&root).expect("pending"),
+        vec![again.challenge.clone()],
+        "exactly one live question"
+    );
+
+    // And it is answerable, which is the whole point.
+    match engr::confirm(&root, &format!("CONFIRM {}", again.challenge)).expect("confirm") {
+        engr::Confirmed::Migration(report) => assert_eq!(report.objects.len(), 4),
+        engr::Confirmed::Object(_) => panic!("a migration confirmation"),
+    }
+    assert!(store::version_path(&root).exists());
+}
+
+/// A six-character code names a live question, not a moment in history.
+///
+/// The crash between removing the spent code and removing the plan leaves the
+/// plan naming a code with no file behind it — on a workspace that is already
+/// current, so ordinary Human questions can be prepared again and one of them
+/// may legitimately take that code back. Sweeping by name would then delete
+/// somebody else's live question.
+#[test]
+fn cleanup_does_not_take_a_reused_code_from_an_unrelated_question() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "challenge", &proposed.challenge);
+
+    // Exactly the crash state: activated, the spent code gone, the plan left.
+    let spent = proposed.challenge.clone();
+    let path = store::challenge_path(&root, &spent).expect("challenge path");
+    if path.exists() {
+        std::fs::remove_file(&path).expect("the sweep had removed it");
+    }
+    assert!(engr::migration::stage_dir(&root).exists());
+    assert!(store::version_path(&root).exists());
+
+    // The code is spoken for while the residue stands, so minting cannot take
+    // it — which is the first of the two answers to this.
+    let payload = engr::model::Payload::new(
+        AUTHORITY,
+        engr::model::Action::ObjectRenamed {
+            title: "A question that has nothing to do with the migration".to_owned(),
+            becomes: None,
+        },
+    );
+    let prepared = engr::gate::prepare(&root, payload).expect("prepare an ordinary question");
+    assert_ne!(
+        prepared.candidate.code(),
+        spent,
+        "a code the residue still names must not be minted"
+    );
+
+    // Force the collision anyway, which is what a build without that
+    // reservation would have produced, and require the sweep to leave it alone.
+    restamp_challenge(&root, prepared.candidate.code(), |challenge| {
+        challenge.id = spent.clone();
+    });
+    let survivor = store::challenge_path(&root, &spent).expect("challenge path");
+    assert!(
+        survivor.exists(),
+        "the unrelated question now holds the code"
+    );
+
+    engr::migration::prepare(&root).expect_err("there is nothing left to migrate");
+    assert!(
+        !engr::migration::stage_dir(&root).exists(),
+        "the residue is swept"
+    );
+    assert!(
+        survivor.exists(),
+        "but a Human question that merely reuses the code is not"
+    );
+    let still_there: engr::confirmation::Challenge =
+        serde_json::from_str(&read(&survivor)).expect("and it still reads");
+    assert_eq!(still_there.id, spent);
+    assert_eq!(
+        still_there.subject.kind,
+        engr::confirmation::SubjectType::Object,
+        "as the Object question it is"
+    );
+    still_there.validate().expect("and it is still usable");
+}
+
 /// Revision 1 of a migrated Object has to be the bootstrap that derives it.
 ///
 /// The Object is pinned to the confirmed plan, but the staged Event was pinned
@@ -1550,6 +1688,103 @@ fn a_restaged_bootstrap_that_does_not_derive_the_object_activates_nothing() {
         for file in manifest["files"].as_array_mut().expect("files") {
             if file["object"] == Value::String(AUTHORITY.to_owned()) {
                 file["event_digest"] = Value::String(forged.digest.clone());
+            }
+        }
+        write(&manifest_path(&root), &manifest.to_string());
+
+        let refused = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect_err(&format!("{what} must be refused"));
+        assert_eq!(refused.code, engr::EXIT_INVARIANT, "{what}: {refused}");
+        assert!(
+            !store::version_path(&root).exists(),
+            "{what}: nothing may activate"
+        );
+        assert!(
+            !store::events_path(&root, AUTHORITY).exists(),
+            "{what}: and no current stream is written"
+        );
+    }
+}
+
+/// Admission metadata is provenance, and replay cannot check it.
+///
+/// The bootstrap must replay to the confirmed Object, but `project` derives
+/// Object state and neither the review member nor the admission instant is
+/// Object state. So a staged Event could keep its snapshot, take on a
+/// structurally valid Rule Review — which no migration has — or its own
+/// admission time, be re-sealed, and have the local `event_digest` updated to
+/// agree. It would replay identically and publish permanent provenance
+/// describing something that never happened.
+#[test]
+fn a_restaged_bootstrap_with_invented_provenance_activates_nothing() {
+    let staged_event = |root: &Path, id: &str| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("eventstore")
+            .join(format!("{id}.jsonl"))
+    };
+    let manifest_path = |root: &Path| {
+        store::local_dir(root)
+            .join("migration")
+            .join("destination")
+            .join("destination.json")
+    };
+
+    /// One way of moving a bootstrap's provenance without moving its snapshot.
+    type Tamper = (&'static str, Box<dyn Fn(&mut engr::model::EventAdmission)>);
+
+    let cases: Vec<Tamper> = vec![
+        (
+            "a Rule Review no migration ever had",
+            Box::new(|admitted: &mut engr::model::EventAdmission| {
+                admitted.review = Some(engr::model::ReviewProvenance {
+                    outcome: engr::model::ReviewOutcome::Passed,
+                    result: engr::proof::ReviewResult::Passed,
+                    attempts: 1,
+                });
+            }),
+        ),
+        (
+            "an admission instant of its own",
+            Box::new(|admitted: &mut engr::model::EventAdmission| {
+                admitted.at = "2020-01-01T00:00:00Z".to_owned();
+            }),
+        ),
+    ];
+
+    for (what, tamper) in cases {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_after_confirmed_destination(&root, &proposed.challenge);
+
+        // The snapshot is untouched, so it still replays to the confirmed
+        // Object. Only the provenance moves.
+        let path = staged_event(&root, AUTHORITY);
+        let mut event: engr::model::Event =
+            serde_json::from_str(read(&path).trim_end()).expect("staged event");
+        tamper(&mut event.metadata.admitted);
+        let resealed = engr::model::Event::sealed(
+            AUTHORITY,
+            event.id.clone(),
+            event.action.clone(),
+            event.rev,
+            event.metadata.admitted.clone(),
+        )
+        .expect("reseal");
+        write(
+            &path,
+            &format!(
+                "{}\n",
+                proof::canonical_bytes(&resealed, "event").expect("canonical")
+            ),
+        );
+
+        let mut manifest: Value =
+            serde_json::from_str(&read(&manifest_path(&root))).expect("manifest");
+        for file in manifest["files"].as_array_mut().expect("files") {
+            if file["object"] == Value::String(AUTHORITY.to_owned()) {
+                file["event_digest"] = Value::String(resealed.digest.clone());
             }
         }
         write(&manifest_path(&root), &manifest.to_string());

@@ -133,9 +133,19 @@ pub fn confirm(root: &std::path::Path, response: &str) -> Result<Confirmed> {
 /// by definition not current, and the withdrawal silently did not happen — so
 /// the code the human had just declined to give stayed live.
 fn discard_challenge(root: &std::path::Path, code: &str) -> Result<()> {
-    match store::load_challenge(root, code)?.subject.kind {
-        confirmation::SubjectType::Object => gate::discard_locked(root, code),
-        confirmation::SubjectType::Migration => migration::discard_locked(root, code),
+    match store::load_challenge(root, code) {
+        Ok(challenge) => match challenge.subject.kind {
+            confirmation::SubjectType::Object => gate::discard_locked(root, code),
+            confirmation::SubjectType::Migration => migration::discard_locked(root, code),
+        },
+        // A question this build cannot read is still a question somebody was
+        // shown, and withdrawing it must not require reading it. Refusing here
+        // would make the least usable Challenge the only one that cannot be
+        // taken back — including a Challenge minted by a generator whose
+        // contract has since changed, which the protocol says to prepare again
+        // rather than interpret.
+        Err(error) if error.code == EXIT_SCHEMA => migration::retire_prepared(root, code),
+        Err(error) => Err(error),
     }
 }
 

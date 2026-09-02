@@ -198,6 +198,30 @@ pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     Ok(codes)
 }
 
+/// Every code a fresh Challenge may not be minted as.
+///
+/// Not the same question as "which Challenges are pending", and the difference
+/// is the whole reason this exists. A six-character code is unique among *live*
+/// questions, not for all time — but a migration that crashed between removing
+/// its spent code and removing its stage leaves a plan still naming that code
+/// with no file behind it. Minting from the filenames alone could hand that code
+/// straight back out, and the eventual sweep would then read the stale plan and
+/// delete a Human question that had nothing to do with it.
+///
+/// So a code named by migration residue stays spoken for until the residue is
+/// gone. One function, used by both minting paths, because two copies of "what
+/// is taken" is exactly how one of them ends up not knowing about the other.
+pub(crate) fn taken_codes(root: &Path) -> Result<Vec<String>> {
+    let mut codes = pending_codes(root)?;
+    if let Some(code) = crate::migration::staged_code(root)? {
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    codes.sort();
+    Ok(codes)
+}
+
 /// Every pending Challenge, fully loaded and checked.
 ///
 /// The strict half of the pair: one file this build refuses fails the whole
@@ -1120,7 +1144,7 @@ fn mint(
     let subject = ObjectSubject::of(payload, expected_rev, review)?;
     let data = serde_json::to_value(&subject)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("challenge subject: {error}")))?;
-    let taken = pending_codes(root)?;
+    let taken = taken_codes(root)?;
     let challenge = Challenge::mint(
         Subject {
             kind: SubjectType::Object,
