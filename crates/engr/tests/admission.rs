@@ -685,3 +685,110 @@ fn the_repair_screen_covers_sealed_members_it_was_never_taught() {
         "seals are how the difference was found, not the difference: {named:?}"
     );
 }
+
+/// The durable boundary binds review provenance to the review the human saw.
+///
+/// A Challenge that froze a Rule Review and one that froze none are two
+/// different questions, and `{outcome, result, attempts}` is what a person was
+/// standing behind rather than metadata beside it — overruling a failure and
+/// following a pass are two different assents to the same wording.
+/// `EventAdmission::validate` can only show a review block is internally
+/// coherent; the append boundary is where it can be shown to be *this* one,
+/// because the Challenge is still on disk at that moment.
+#[test]
+fn a_human_event_carries_the_review_its_challenge_froze() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681852";
+    admit_human(root, creation(id));
+
+    // A governed mutation, overruled by a human: the Challenge freezes a failed
+    // review, and history is meant to record `overridden` / `failed` / 2.
+    object_rule(root);
+    let payload = add(id, "wording a human admitted over a failed review");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Failed,
+        Some("the policy was not satisfied and a person decided anyway"),
+    );
+    let review = gate::ReviewAttestation {
+        attempt: 2,
+        ..review
+    };
+    let prepared = gate::prepare_reviewed(root, payload.clone(), gate::Allowance::Normal, review)
+        .expect("prepare the override");
+    let code = prepared.candidate.code().to_owned();
+    let rev = store::load_object(root, id).expect("object").rev + 1;
+    let truthful = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .map(gate::FrozenReview::admitted)
+        .expect("the challenge froze a review");
+    assert_eq!(truthful.attempts, 2);
+    assert_eq!(truthful.result, proof::ReviewResult::Failed);
+
+    let event = |review: Option<engr::model::ReviewProvenance>| {
+        Event::sealed(
+            id,
+            engr::model::new_id(),
+            prepared.candidate.payload.action.clone(),
+            rev,
+            EventAdmission {
+                by: Admission::Human,
+                at: "2026-09-02T00:00:00Z".to_owned(),
+                confirmation: Some(engr::model::HumanConfirmation {
+                    challenge: code.clone(),
+                }),
+                review,
+            },
+        )
+        .expect("a well formed record")
+    };
+
+    // The exact mapping is what the boundary accepts.
+    store::check_appendable(root, &event(Some(truthful.clone())))
+        .expect("the review the challenge froze is appendable");
+
+    // And every other structurally valid answer is refused, for the same
+    // challenge and the same mutation.
+    let forgeries = [
+        ("dropped", None),
+        (
+            "invented as a pass",
+            Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: proof::ReviewResult::Passed,
+                attempts: 2,
+            }),
+        ),
+        (
+            "restated as exhausted",
+            Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Overridden,
+                result: proof::ReviewResult::Exhausted,
+                attempts: 2,
+            }),
+        ),
+        (
+            "restated on another attempt",
+            Some(engr::model::ReviewProvenance {
+                attempts: 9,
+                ..truthful.clone()
+            }),
+        ),
+    ];
+    for (what, review) in forgeries {
+        let error = store::check_appendable(root, &event(review))
+            .expect_err(&format!("{what} review provenance must be refused"));
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}: {error}");
+        assert!(
+            error.message.contains("does not describe the transition"),
+            "{what}: {error}"
+        );
+    }
+}

@@ -536,10 +536,26 @@ pub enum CandidateState {
 ///
 /// Nothing is loosened by leaving it out. `admitted.at` is not a fact a person
 /// assents to; it is a fact the admission creates.
+///
+/// **The review provenance is part of the act, not metadata beside it.** What a
+/// person answered, when they answered a governed mutation, includes which
+/// review they were standing behind — a failed review overruled and a passing
+/// one followed are two different assents to the same wording. `EventAdmission
+/// ::validate` can only show that a review block is internally coherent; it
+/// cannot show it is the one that was frozen in the question. So the exact
+/// mapping is compared here, where the question is still on disk: an Event that
+/// drops the review, invents one, or restates its result or attempt is not the
+/// admission of this Challenge, whatever else about it matches.
 fn is_admission_of(id: &str, event: &Event, candidate: &Candidate, applied_rev: u64) -> bool {
     event.rev == applied_rev
         && id == candidate.object()
         && same_act(&event.action, &candidate.payload.action)
+        && event.metadata.admitted.review
+            == candidate
+                .subject
+                .review
+                .as_ref()
+                .map(FrozenReview::admitted)
         && event
             .human_confirmation()
             .is_some_and(|confirmation| confirmation.challenge == candidate.challenge.id)
