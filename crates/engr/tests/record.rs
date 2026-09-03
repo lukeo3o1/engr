@@ -9,6 +9,10 @@ use engr::model::{Content, Payload};
 use engr::{gate, integrity, ops, store, view};
 use serde_json::Value;
 use std::path::Path;
+/// Only the containment tests need one, and those are unix-only — a link is the
+/// thing they are about, and Windows will not create one without a privilege
+/// this build must not require.
+#[cfg(unix)]
 use tempfile::TempDir;
 
 fn commit_all(root: &Path, message: &str) -> String {

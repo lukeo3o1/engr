@@ -991,6 +991,7 @@ fn bootstrap_path(root: &Path) -> PathBuf {
 /// refused rather than guessed at.
 fn predecessor_locked_out(root: &Path) -> Result<bool> {
     let path = bootstrap_path(root);
+    store::contained(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         // Publication removes the bootstrap on its way past, so absence is the
