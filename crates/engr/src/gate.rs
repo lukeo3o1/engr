@@ -234,8 +234,7 @@ fn now() -> String {
 /// about some unrelated code.
 pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     let dir = store::challenges_dir(root);
-    store::contained(&dir)?;
-    if !dir.is_dir() {
+    if !store::namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut codes = Vec::new();
@@ -1128,10 +1127,27 @@ fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
     // Nothing to repair is a refusal, not a no-op. Repair is an exceptional
     // boundary, and one that ran on sound authority would be a general-purpose
     // rewrite with a special name.
+    //
+    // **Two damaged states, not one.** A failed seal is the obvious one. The
+    // other is a projection that seals perfectly and is not what admitted
+    // history produced — an out-of-band edit that was resealed — and it is the
+    // state every trust surface now reports and sends people here to fix. While
+    // eligibility was integrity alone, `repair` answered that exact state with
+    // "there is nothing to repair", which left the one thing a person could
+    // detect with no supported way to undo it.
+    //
+    // Unreplayable history stays a refusal, and is refused by `ops::provable`
+    // below rather than here: repair restores what history derives, so where
+    // history derives nothing there is nothing to restore *from*, and that is a
+    // different damage class.
     ensure!(
-        crate::integrity::check_stored_object_integrity(&stored).is_err(),
+        crate::integrity::check_stored_object_integrity(&stored).is_err()
+            || matches!(
+                ops::history_fault(root, &stored)?,
+                Some(ops::HistoryFault::Divergent(_))
+            ),
         EXIT_INVARIANT,
-        "{id} verifies, so there is nothing to repair; ordinary changes go through the normal path"
+        "{id} verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path"
     );
 
     let before = ops::provable(root, id)?;

@@ -1291,3 +1291,203 @@ fn discovery_does_not_walk_past_an_engr_it_cannot_establish() {
         std::fs::remove_file(&here).expect("remove");
     }
 }
+
+/// A namespace of the wrong shape is not an empty namespace.
+///
+/// `is_dir()` answers two of the three questions an enumerator has to ask, and
+/// the missing answer is the dangerous one: a regular file where a resource
+/// directory belongs is reported as nothing there, so every enumerator returned
+/// an empty set and the workspace read as one with no Objects, no Backlog, no
+/// Work, no Collections and no pending Challenges. A refusal is a far better
+/// answer than a confident empty one — an agent acts on empty.
+#[test]
+fn a_resource_namespace_of_the_wrong_shape_is_refused_rather_than_read_as_empty() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "shapes");
+    admit(&root, payload(Act::Add, &id, "wording"));
+
+    for (what, dir) in [
+        ("objects", store::objects_dir(&root)),
+        ("eventstore", store::eventstore_dir(&root)),
+        ("backlog", engr::backlog::dir(&root)),
+        ("collections", engr::collection::dir(&root)),
+        ("work", engr::work::root_dir(&root).join("objects")),
+        ("challenges", store::challenges_dir(&root)),
+    ] {
+        std::fs::remove_dir_all(&dir).expect("clear the namespace");
+        std::fs::write(&dir, "not a directory").expect("a file where the directory belongs");
+
+        // Whichever enumerator owns it, and every survey that reaches through
+        // one, refuses rather than answering "none".
+        let outcomes: Vec<(&str, Option<engr::Error>)> = vec![
+            ("objects", store::object_ids(&root).err()),
+            ("event ids", ops::object_ids(&root).err()),
+            ("backlog", engr::backlog::ids(&root).err()),
+            ("collections", engr::collection::ids(&root).err()),
+            ("work", engr::work::ids(&root).err()),
+            ("challenges", gate::pending_codes(&root).err()),
+        ];
+        let refused = outcomes
+            .iter()
+            .filter(|(_, error)| {
+                error.as_ref().is_some_and(|error| {
+                    error.code == engr::EXIT_SCHEMA && error.message.contains("not a directory")
+                })
+            })
+            .count();
+        assert!(
+            refused > 0,
+            "{what}: every enumerator reading it answered as though it were empty: {outcomes:?}"
+        );
+
+        std::fs::remove_file(&dir).expect("remove the file");
+        std::fs::create_dir_all(&dir).expect("put the directory back");
+    }
+}
+
+/// The final Backlog consume cannot be reached through an unestablished Work
+/// tree.
+///
+/// `work::exists` stat'ed the sidecar's own path, which answers about whatever
+/// the path leads *to*. An intermediate `work/…` link whose target is missing
+/// therefore answered `NotFound` — established absence, arrived at through a
+/// redirection nobody established — and absence is exactly what lets the last
+/// unresolved point be consumed and its parent item removed.
+#[test]
+#[cfg(unix)]
+fn work_reached_through_a_link_does_not_read_as_absence() {
+    let (_dir, root) = workspace();
+    let item = engr::backlog::create(
+        &root,
+        "unresolved topic",
+        "the only point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog item")
+    .id;
+    let subject = engr::work::Subject::Backlog(item.clone());
+
+    // The sidecar directory is redirected somewhere that holds nothing.
+    let backlog_work = engr::work::root_dir(&root).join("backlog");
+    let outside = TempDir::new().expect("outside");
+    std::fs::remove_dir_all(&backlog_work).expect("clear");
+    std::os::unix::fs::symlink(outside.path(), &backlog_work).expect("symlink");
+
+    let error = engr::work::exists(&root, &subject)
+        .expect_err("a redirection is not an answer about this workspace");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("link to somewhere else"), "{error}");
+
+    let refused = engr::backlog::consume_section(
+        &root,
+        &item,
+        1,
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(&root, &item, 1).expect("observe")),
+    )
+    .expect_err("the destructive path must not proceed on an unestablished sidecar tree");
+    assert_eq!(refused.code, engr::EXIT_SCHEMA);
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("the item survives")
+            .sections
+            .len(),
+        1
+    );
+
+    // Put the directory back and the ordinary rule applies again: no sidecar,
+    // so the last point resolves.
+    std::fs::remove_file(&backlog_work).expect("remove the link");
+    std::fs::create_dir_all(&backlog_work).expect("restore");
+    assert!(engr::backlog::consume_section(
+        &root,
+        &item,
+        1,
+        &engr::backlog::Prepared::first()
+            .against(engr::backlog::Precondition::section(&root, &item, 1).expect("observe")),
+    )
+    .expect("the last point resolves"));
+}
+
+/// A recoverable tail is never applied on top of a projection nothing admitted.
+///
+/// Both halves of this state are individually legitimate: a durable Event whose
+/// projection never landed is exactly what a crash leaves, and reconciliation
+/// exists to finish it. But reconciliation starts from the *stored* projection,
+/// so if those bytes were rewritten and resealed in the meantime, applying the
+/// tail builds an admitted revision on top of wording nobody admitted — and then
+/// saves it, resealing the unauthorized semantics into a newer revision and
+/// destroying the very bytes `repair` would have compared against.
+///
+/// The prefix check is what distinguishes the two: it compares only Events up to
+/// the projection's own revision, so a legitimate unprojected tail is still
+/// recoverable and only the predecessor it would be applied to is judged.
+#[test]
+fn a_crash_tail_is_not_applied_over_a_projection_history_did_not_produce() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "tail over divergence");
+    admit(&root, payload(Act::Add, &id, "the admitted wording"));
+
+    // A durable rev-3 Event whose projection never landed: the ordinary crash.
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "admitted but not projected"))
+        .expect("prepare");
+    let mut action = prepared.candidate.payload.action.clone();
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = "2026-09-03T00:00:00Z".to_owned();
+    }
+    let crashed = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        action,
+        3,
+        engr::model::EventAdmission::human("2026-09-03T00:00:00Z", prepared.candidate.code()),
+    )
+    .expect("a durable Event whose projection never landed");
+    append_admitted_raw(&root, &id, &crashed);
+
+    // And then the rev-2 projection is rewritten and resealed, which every seal
+    // still accepts.
+    let stored = store::load_object(&root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&stored, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    write_raw(&store::object_path(&root, &id), &resealed.object).expect("put it on disk");
+    let before = std::fs::read(store::object_path(&root, &id)).expect("bytes");
+
+    // Nothing applies the tail on top of that.
+    let error = ops::reconcile(&root, &id).expect_err("reconciliation must refuse");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error
+            .message
+            .contains("not what its admitted history produced"),
+        "{error}"
+    );
+    gate::prepare(&root, payload(Act::Add, &id, "an ordinary change"))
+        .expect_err("and so must an ordinary admission");
+    let read = ops::effective(&root, &id).expect("a read surface still diagnoses it");
+    assert_eq!(read.rev, 2, "the tail was not projected over it");
+    assert_eq!(read.sections[0].text, "wording nobody was ever shown");
+    assert_eq!(
+        std::fs::read(store::object_path(&root, &id)).expect("bytes"),
+        before,
+        "and the divergent bytes are still there to compare against"
+    );
+
+    // Repair restores the projection, and the tail is then ordinary recoverable
+    // history again.
+    let repair = gate::prepare_repair(&root, &id).expect("repair prepares");
+    gate::confirm(&root, &format!("CONFIRM {}", repair.candidate.code())).expect("repair");
+    let recovered = ops::reconcile(&root, &id).expect("the tail reconciles once the base is sound");
+    assert_eq!(recovered.sections[0].text, "the admitted wording");
+    assert!(
+        recovered
+            .sections
+            .iter()
+            .any(|section| section.text == "admitted but not projected"),
+        "and the durable Event that was waiting is applied"
+    );
+}

@@ -22,6 +22,24 @@ fn replay(root: &Path, id: &str, require_integrity: bool) -> Result<(Object, boo
                 // predecessor seal failed.
                 return Ok((object, false));
             }
+            // And the same for a projection that seals perfectly and is not what
+            // its own history produced. A recoverable tail applied on top of one
+            // builds admitted authority on wording nobody admitted, and
+            // reconciliation would then *save* the result — resealing the
+            // unauthorized semantics into a newer revision and destroying the
+            // exact bytes `repair` exists to compare against, before anybody
+            // reached a diagnostic.
+            //
+            // The prefix check does not misread a legitimate crash tail as
+            // divergence: it compares only Events up to the projection's own
+            // revision, which is precisely the predecessor the tail would be
+            // applied to.
+            if let Some(fault) = history_fault_with(&events, &object) {
+                if require_integrity {
+                    return Err(Error::new(EXIT_INVARIANT, fault.message(id)));
+                }
+                return Ok((object, false));
+            }
             object
         }
         Err(error) if error.code == EXIT_NOT_FOUND => {

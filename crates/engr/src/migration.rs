@@ -322,20 +322,15 @@ fn capture(source: &mut BTreeMap<String, String>, root: &Path, path: &Path) -> R
     Ok(text)
 }
 
-/// Whether one predecessor source file is there, without following a link.
+/// Whether one predecessor source file is there, on the shared three-way terms.
 ///
 /// `exists()` reports a dangling link as absence, and absence is a legitimate
 /// predecessor shape — the released build's own reader returned an empty history
 /// for a missing stream. So a redirected history would have migrated an Object
-/// as though it had none, silently dropping the record it points at. Three
-/// answers, and the link is refused rather than resolved.
+/// as though it had none, silently dropping the record it points at, and a
+/// directory where a resource belongs would have done the same.
 fn source_exists(path: &Path) -> Result<bool> {
-    store::contained(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(tool_error(path.display(), error)),
-    }
+    store::resource_present(path)
 }
 
 fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
@@ -416,11 +411,12 @@ fn predecessor_ids(root: &Path) -> Result<Vec<String>> {
         (store::objects_dir(root), ".json"),
         (predecessor_events_dir(root), ".jsonl"),
     ] {
-        // The source tree is established the same way the destination is: a
-        // redirected resource directory would enumerate identities from another
-        // tree, and every one of them would then be migrated into this record.
-        store::contained(&dir)?;
-        if !dir.is_dir() {
+        // The source tree is established the same way the destination is, and on
+        // the same three-way terms: a redirected resource directory would
+        // enumerate identities from another tree, and one of the wrong shape
+        // would make a predecessor this build must refuse look like a
+        // predecessor with nothing in it to migrate.
+        if !store::namespace(&dir)? {
             continue;
         }
         for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
@@ -869,15 +865,21 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
     // not need to be, because every staged byte is checked back against the
     // digest the confirmed subject pins before any of it is published.
     if let Some(ready) = confirmed_destination(root, &challenge.id, &subject)? {
-        // The barrier is the transition between the two durable states this
-        // resume can find itself in. If it is not yet raised, this process is
-        // the first one back after an interruption that left the predecessor
-        // readable — so the released build may have written in that window, and
-        // publishing would discard it. Establish that it did not, then raise the
-        // barrier before anything is published.
-        if !predecessor_locked_out(root)? {
+        // Until publication has demonstrably begun, this resume may be the first
+        // process back after an interruption that left the predecessor readable
+        // — so a released build may have written in that window, and publishing
+        // would discard it. Establish that it did not, then raise the barrier.
+        //
+        // The condition is what *publication* left, not what the bootstrap says.
+        // A barrier is a marker: it states that the predecessor is shut out now,
+        // and cannot state that the source was checked before it went up. Using
+        // it as the skip condition meant a forged, stale or simply absent
+        // bootstrap was enough to skip the comparison entirely.
+        if !published_yet(root, &ready)? {
             check_source_unmoved(root, &subject, &challenge.id)?;
             lock_out_predecessor(root, &challenge.id)?;
+        } else {
+            check_barrier_binds(root, &challenge.id)?;
         }
         let sections = subject
             .objects
@@ -982,21 +984,25 @@ fn bootstrap_path(root: &Path) -> PathBuf {
     store::engr_dir(root).join("format.json")
 }
 
-/// Whether the released build can still read this workspace as its own.
+/// What the bootstrap file says this workspace is.
 ///
-/// Three durable states and only three: the predecessor's bootstrap is there
-/// (it can), this transaction's barrier is there (it cannot), or the file is
-/// gone because publication has already removed it (it cannot). Anything else
-/// is a bootstrap nothing here wrote, in the middle of a transaction, and is
-/// refused rather than guessed at.
-fn predecessor_locked_out(root: &Path) -> Result<bool> {
+/// Three durable states and only three: the predecessor's own bootstrap (the
+/// released build may write), this generation's barrier (it may not), or gone
+/// because publication removed it (it may not). Anything else is a bootstrap
+/// nothing here wrote, in the middle of a transaction, and is refused rather
+/// than guessed at.
+enum Bootstrap {
+    Predecessor,
+    Barrier { migration: String, version: u32 },
+    Gone,
+}
+
+fn bootstrap_state(root: &Path) -> Result<Bootstrap> {
     let path = bootstrap_path(root);
     store::contained(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        // Publication removes the bootstrap on its way past, so absence is the
-        // third state and it is on the far side of the barrier, not before it.
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Bootstrap::Gone),
         Err(error) => return Err(tool_error(path.display(), error)),
     };
     // Switched on the declared format rather than on which struct happens to
@@ -1009,12 +1015,15 @@ fn predecessor_locked_out(root: &Path) -> Result<bool> {
         Some(crate::predecessor::WORKSPACE_FORMAT) => {
             serde_json::from_value::<crate::predecessor::Format>(value)
                 .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-            Ok(false)
+            Ok(Bootstrap::Predecessor)
         }
         Some(BARRIER_FORMAT) => {
-            serde_json::from_value::<Barrier>(value)
+            let barrier: Barrier = serde_json::from_value(value)
                 .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-            Ok(true)
+            Ok(Bootstrap::Barrier {
+                migration: barrier.migration,
+                version: barrier.version,
+            })
         }
         _ => Err(Error::new(
             EXIT_SCHEMA,
@@ -1026,8 +1035,45 @@ fn predecessor_locked_out(root: &Path) -> Result<bool> {
     }
 }
 
+/// Whether the released build is shut out of its own workspace.
+///
+/// The question withdrawal asks, because withdrawing past this point would leave
+/// a workspace neither build can read. It is **not** the question the resume
+/// asks: see [`published_yet`].
+fn predecessor_locked_out(root: &Path) -> Result<bool> {
+    Ok(!matches!(bootstrap_state(root)?, Bootstrap::Predecessor))
+}
+
+/// Hold the barrier to the transaction it claims to belong to.
+///
+/// A barrier is a marker, not authority. It says the predecessor is shut out; it
+/// cannot say *which* transaction shut it out unless it is bound to one, and an
+/// unbound marker is one any earlier, later or fabricated migration could have
+/// left. So a resume requires the barrier to name its own Challenge and the
+/// generation it is on its way to, and refuses one that names something else
+/// rather than treating it as this transaction's.
+fn check_barrier_binds(root: &Path, challenge: &str) -> Result<()> {
+    if let Bootstrap::Barrier { migration, version } = bootstrap_state(root)? {
+        ensure!(
+            migration == challenge,
+            EXIT_INVARIANT,
+            "{} is the barrier of migration {migration}, and this is migration {challenge}",
+            bootstrap_path(root).display()
+        );
+        ensure!(
+            version == crate::WORKSPACE_GENERATION,
+            EXIT_INVARIANT,
+            "{} is a barrier on the way to generation {version}, and this build publishes generation {}",
+            bootstrap_path(root).display(),
+            crate::WORKSPACE_GENERATION
+        );
+    }
+    Ok(())
+}
+
 /// Raise the barrier, durably, before anything is published.
 fn lock_out_predecessor(root: &Path, challenge: &str) -> Result<()> {
+    check_barrier_binds(root, challenge)?;
     if predecessor_locked_out(root)? {
         return Ok(());
     }
@@ -1041,21 +1087,90 @@ fn lock_out_predecessor(root: &Path, challenge: &str) -> Result<()> {
     )
 }
 
+/// Whether publication has demonstrably begun, from what publication itself
+/// leaves behind.
+///
+/// **Not from the barrier, and not from any marker this build writes.** The
+/// barrier says the predecessor is shut out *now*; it cannot say that the source
+/// was checked before it went up, and treating it as though it could is what let
+/// a workspace with a forged, stale or simply absent bootstrap skip the one
+/// comparison that protects intervening predecessor state. A marker in the local
+/// stage would be no better: this repository already treats self-consistent
+/// persisted bytes and local staging material as claims rather than proof.
+///
+/// What publication leaves is different in kind, because it is the destination
+/// itself. The first thing it writes is an Event stream under
+/// `eventstore/objects/`, a path the released generation never had — the
+/// preflight refuses a source workspace that carries one — so its presence
+/// cannot predate this transaction, and it means the source is already being
+/// overwritten and there is nothing left to compare.
+/// **One witness, and it is the destination itself.** Publication writes the
+/// Event streams first, each one complete, under `eventstore/objects/` — a path
+/// the released generation never had, and one the preflight refuses in a source
+/// workspace, so it cannot predate this transaction. The bytes must be exactly
+/// what this transaction staged for that Object.
+///
+/// Everything weaker was rejected on purpose. "The bootstrap is gone" and "the
+/// predecessor's history directory is gone" are things a `rm` can do as easily
+/// as a publication, so either would have let a deletion buy the skip; and every
+/// one of them is redundant against a real publication anyway, because the
+/// streams are written before any of it. Requiring the *staged* bytes closes the
+/// last of it: a file forged at that path would have to be the confirmed content,
+/// which is what the resume was going to publish regardless.
+fn published_yet(root: &Path, ready: &[(String, String, String)]) -> Result<bool> {
+    for (id, _, event) in ready {
+        let path = store::events_path(root, id);
+        if !store::resource_present(&path)? {
+            continue;
+        }
+        let published =
+            fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+        if &published == event {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Establish that the predecessor is still the one the human confirmed.
 ///
-/// Asked when a resumed transaction finds a staged destination with the barrier
-/// not yet raised, which is the one window a released writer could have used:
-/// the destination is durable, so the resume path would otherwise publish
-/// straight over whatever arrived in the meantime.
+/// Asked by every resume that reaches a staged destination before publication
+/// has begun — which is the whole window a released writer could have used,
+/// however the bootstrap looks by the time anybody comes back. The destination
+/// is durable at that point, so the resume would otherwise publish straight over
+/// whatever arrived.
 ///
 /// The comparison is the whole captured source map, not a sample of it, so a
 /// file that was edited, one that vanished and one that is *new* are all the
 /// same finding — and a released build admitting a new Object is exactly the
-/// case that leaves legacy-shaped bytes behind after publication removes the
-/// history they belong to.
+/// case that leaves previous-generation bytes behind after publication removes
+/// the history they belong to.
+///
+/// The bootstrap is the one intentional exception, because this transaction may
+/// have replaced it with its own barrier; it is checked as that, bound to this
+/// Challenge, rather than skipped.
 fn check_source_unmoved(root: &Path, subject: &MigrationSubject, challenge: &str) -> Result<()> {
+    check_barrier_binds(root, challenge)?;
+    let bootstrap = relative_to_engr(root, &bootstrap_path(root))?;
     let mut seen = BTreeMap::new();
-    capture(&mut seen, root, &bootstrap_path(root))?;
+    match bootstrap_state(root)? {
+        // Untouched: it must be exactly the bytes the plan was derived from.
+        Bootstrap::Predecessor => {
+            capture(&mut seen, root, &bootstrap_path(root))?;
+        }
+        // Replaced by this transaction's own barrier, which `check_barrier_binds`
+        // has just held to this Challenge. The pinned entry stands in for it, so
+        // the rest of the map still compares exactly.
+        Bootstrap::Barrier { .. } | Bootstrap::Gone => {
+            let pinned = subject.source.get(&bootstrap).ok_or_else(|| {
+                Error::new(
+                    EXIT_INVARIANT,
+                    format!("the confirmed migration pins no {bootstrap}"),
+                )
+            })?;
+            seen.insert(bootstrap.clone(), pinned.clone());
+        }
+    }
     for id in predecessor_ids(root)? {
         let object_path = store::object_path(root, &id);
         if source_exists(&object_path)? {

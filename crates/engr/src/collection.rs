@@ -375,8 +375,7 @@ pub fn check_target(what: &str, reference: &str) -> Result<()> {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
-    store::contained(&dir)?;
-    if !dir.is_dir() {
+    if !store::namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
@@ -415,7 +414,11 @@ fn check_canonical_members(path: &Path, collection: &Collection) -> Result<()> {
 
 pub fn load(root: &Path, id: &str) -> Result<Collection> {
     let path = path(root, id);
-    ensure!(path.exists(), EXIT_NOT_FOUND, "no collection {id}");
+    ensure!(
+        store::resource_present(&path)?,
+        EXIT_NOT_FOUND,
+        "no collection {id}"
+    );
     let collection: Collection = store::read_resource(root, &path)?;
     collection.validate()?;
     // Current generation only: a predecessor workspace kept whatever order its

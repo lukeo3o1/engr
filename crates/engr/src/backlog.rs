@@ -591,8 +591,7 @@ fn now() -> String {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
-    store::contained(&dir)?;
-    if !dir.is_dir() {
+    if !store::namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
@@ -700,7 +699,7 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     if prefix.len() == 26 {
         if let Ok(id) = crate::reference::decode_uuid(prefix) {
             let id = id.to_string();
-            if item_path(root, &id).exists() {
+            if store::resource_present(&item_path(root, &id))? {
                 return Ok(id);
             }
         }

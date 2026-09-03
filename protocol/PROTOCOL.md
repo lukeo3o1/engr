@@ -80,7 +80,19 @@ history a reviewer reads is not the state the tool is using and the record can
 sit outside the repository entirely. Reads and writes of the resource tree MUST
 refuse it rather than follow it. How somebody arrived at the workspace is a
 different question and is not restricted — a repository reached through a link
-is ordinary.
+is ordinary. The staging entry a publication writes through is part of that
+path, not a private detail: its name is derived from the resource's, so it is as
+predictable as the resource, and a link planted there is followed by an ordinary
+create and then renamed into the canonical path.
+
+**Every probe of that tree has three answers, not two.** "Is it there" asked as
+a boolean collapses a wrong-shaped or unreachable entry into absence, and absence
+is the answer that lets work continue: a resource directory that is a regular
+file becomes a domain with nothing in it, a redirected resource becomes a
+resource that was never written, and a sidecar nobody can establish becomes a
+subject safe to delete. Only established absence — the entry is genuinely not
+there — may be read as absence; a wrong shape, a link on the way, and any other
+failure to establish it MUST fail closed.
 
 There is no public writer for a persisted resource, and that is a contract. A
 raw serializer, or an Object save that validates shape, is not an admission
@@ -182,12 +194,22 @@ integrity refuses ordinary mutation, so that unrelated work cannot reseal an
 out-of-band edit into valid authority; `repair` is how it comes back.
 
 ```text
-integrity verification fails
+the stored projection is damaged
   -> ordinary Human and Agent mutation rejected
   -> repair proposed through the Human Gate, never admitted by an Agent
   -> the restored state is exactly what admitted history derives
   -> only then are new seals written
 ```
+
+**Damaged is two states, and `repair` MUST accept both.** A failed seal is one.
+The other is a projection that seals perfectly and is not what admitted history
+produced — the resealed out-of-band edit below — and it is the state every trust
+surface reports and directs a reader here to fix. Eligibility on integrity alone
+answers that state with "there is nothing to repair", which leaves the one fault
+a reader can see with no supported way to undo it, and hand-editing the file is
+what put the record there. Unreplayable history stays a refusal: repair restores
+what history derives, so where history derives nothing there is nothing to
+restore *from*.
 
 Integrity alone does not close that door, and a conforming implementation MUST
 close it. Seals are recomputed from the bytes on disk, so an out-of-band edit
@@ -205,6 +227,16 @@ recovery buffer working as intended, and reconciliation applies it. Divergence
 is the other direction: a projection asserting something no admitted Event ever
 said. Verification MUST report it, and `repair` — never an ordinary mutation —
 is the one path that reconstructs a divergent projection.
+
+The two can hold at once, and that case is the one that matters most:
+**reconciliation MUST establish history-consistency before it applies or saves a
+recoverable tail.** Reconciliation starts from the stored projection, so
+applying a durable Event on top of a divergent one builds an admitted revision
+over wording nobody admitted — and then persists it, resealing the unauthorized
+semantics into a newer revision and destroying the exact bytes `repair` would
+have restored from. The prefix rule is what keeps that from misreading an
+ordinary crash tail: only Events up to the projection's own revision are
+compared, which is precisely the predecessor the tail would be applied to.
 
 Replaying it is a no-op, and that is what makes it safe to record: history
 already holds the projection being restored, so a repair states a fact about the
@@ -2849,11 +2881,32 @@ destination staged and verified
 ```
 
 One window remains, between staging the destination and raising the barrier, and
-a resume that finds a staged destination with the barrier not yet raised MUST
+a resume that reaches a staged destination **before publication has begun** MUST
 establish that the predecessor did not move — the confirmed subject pins the
 digest of every source file it was derived from, so this is a comparison rather
-than a judgement. Nothing has been published at that point, so the transaction
-stays withdrawable there and only becomes forward-only once the barrier is up.
+than a judgement. The barrier itself is the one intentional exception to that
+map, and it is checked as a barrier bound to *this* transaction rather than
+skipped.
+
+**The barrier MUST NOT be what decides that publication has begun.** It is a
+marker: it says the predecessor is shut out now, and it cannot say that anything
+was established before it was written. A resume that skipped the source
+comparison whenever the bootstrap merely looked shut would accept a forged
+barrier, another migration's barrier, or a deleted bootstrap as proof of a check
+nobody ran. Every marker has that defect, including one an implementation writes
+into its own staging area — this protocol already treats self-consistent
+persisted bytes and local staging material as claims rather than proof.
+
+What may decide it is the **destination itself**, because publication is the
+only thing that can produce it: the first Event stream it publishes, holding
+exactly the bytes this transaction staged for that Object, under a path the
+predecessor generation never had. A barrier is additionally bound to the
+Challenge it belongs to and the generation it is on the way to, and one that
+names anything else is refused rather than adopted.
+
+Nothing has been published while that comparison is being made, so the
+transaction stays withdrawable there and only becomes forward-only once the
+predecessor is shut out.
 
 Answering the migration's own code is the one thing that must stay reachable
 while the stage exists, because resolving the workspace *is* a confirmation. So

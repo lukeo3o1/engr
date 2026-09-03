@@ -1001,10 +1001,17 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
             let stored = store::load_object(&root, &id);
-            let object = if stored
-                .as_ref()
-                .is_ok_and(|stored| engr::integrity::check_stored_object_integrity(stored).is_ok())
-            {
+            // Reconciliation is only for a projection an admission could build
+            // on. A seal that verifies is half of that; the other half is that
+            // admitted history produced these bytes, because applying a tail
+            // over ones it did not would reseal wording nobody admitted and
+            // overwrite the evidence. A divergent Object is still *shown* —
+            // diagnosing it is the whole point of the screen — from the bytes on
+            // disk, and the command still fails at the end.
+            let object = if stored.as_ref().is_ok_and(|stored| {
+                engr::integrity::check_stored_object_integrity(stored).is_ok()
+                    && ops::history_fault(&root, stored).is_ok_and(|fault| fault.is_none())
+            }) {
                 // Reconciliation is a write and shares the same lock as
                 // admission. The integrity check is repeated inside the lock by
                 // `reconcile`; this first check only decides whether show may
@@ -2122,17 +2129,29 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
             )
         }
     };
-    // A pending repair candidate rendered again after the record already
-    // verifies — someone repaired it another way, or the edit was reverted.
-    // Say so rather than showing an empty comparison.
-    if engr::integrity::check_stored_object_integrity(&stored).is_ok() {
-        return "Integrity  the stored record verifies again, so there is nothing left to repair\n"
+    // Which of the two damaged states this is, because they read completely
+    // differently to a person: a failed seal says the bytes were changed and not
+    // resealed, while a projection that seals perfectly and is not what history
+    // produced says somebody rewrote it *and* covered their tracks — the seal
+    // proves nothing there, and the comparison below is the whole evidence.
+    let sealed = engr::integrity::check_stored_object_integrity(&stored).is_ok();
+    let divergent = matches!(
+        engr::ops::history_fault(root, &stored),
+        Ok(Some(engr::ops::HistoryFault::Divergent(_)))
+    );
+    // A pending repair candidate rendered again after the record is sound —
+    // someone repaired it another way, or the edit was reverted. Say so rather
+    // than showing an empty comparison.
+    if sealed && !divergent {
+        return "Integrity  the stored record verifies and is what its admitted history produced, so there is nothing left to repair\n"
             .to_owned();
     }
 
-    let mut out = String::from(
-        "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n",
-    );
+    let mut out = String::from(if sealed {
+        "Integrity  the stored record verifies, and is not what its admitted history produced\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n"
+    } else {
+        "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n"
+    });
     let differences = match view::repair_differences(&stored, &provable) {
         Ok(differences) => differences,
         Err(error) => {
@@ -2142,12 +2161,12 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
             )
         }
     };
-    // Integrity failed, so something differs. Nothing listed would mean the
-    // comparison missed it, and saying so is better than an empty screen that
-    // reads like agreement.
+    // Something is wrong with the stored record, so something differs. Nothing
+    // listed would mean the comparison missed it, and saying so is better than
+    // an empty screen that reads like agreement.
     if differences.is_empty() {
         out.push_str(
-            "  integrity failed but no persisted member differs; do not confirm this without\n  looking at the file, because something is wrong with this comparison\n\n",
+            "  the record is damaged but no persisted member differs; do not confirm this\n  without looking at the file, because something is wrong with this comparison\n\n",
         );
         return out;
     }

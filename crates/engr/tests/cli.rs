@@ -6218,3 +6218,116 @@ fn shell_words(line: &str) -> Option<Vec<String>> {
     }
     Some(words)
 }
+
+/// A rewritten-and-resealed projection is detected, shown, and repaired.
+///
+/// Detection without recovery is half a feature: every trust surface now reports
+/// this state and tells the reader to run `engr repair`, so `repair` refusing it
+/// with "there is nothing to repair" left the one thing they could see with no
+/// supported way to undo it — and hand-editing the file is what put the record
+/// there in the first place.
+///
+/// The whole path, on the command line an operator actually uses: the edit is
+/// invisible to every seal, `show` and `verify` name it as divergence, the
+/// repair screen shows what the stored bytes say against what history proves,
+/// and confirming it restores the admitted wording.
+#[test]
+fn a_resealed_projection_is_repaired_back_to_what_history_proves() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "recoverable"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "the wording that was admitted",
+        ],
+    );
+    confirm(root, &added);
+
+    let object = store::load_object(root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(root, &resealed.object).expect("put it on disk");
+
+    // Every seal passes, which is what makes this the state that needed a
+    // recovery path of its own.
+    engr::integrity::check_stored_object_integrity(&store::load_object(root, &id).expect("load"))
+        .expect("the seals verify");
+    let shown = run_engr(root, &["show", &id, "--format", "json"]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&shown.stdout).expect("json")["integrity"],
+        "divergent"
+    );
+    assert!(!run_engr(root, &["verify", &id]).status.success());
+
+    // The repair screen is the comparison, and it says which damage this is.
+    let screen = run_engr(root, &["repair", &id]);
+    assert!(
+        screen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&screen.stderr)
+    );
+    let text = String::from_utf8_lossy(&screen.stdout).to_string();
+    assert!(
+        text.contains("verifies, and is not what its admitted history produced"),
+        "{text}"
+    );
+    assert!(text.contains("wording nobody was ever shown"), "{text}");
+    assert!(text.contains("the wording that was admitted"), "{text}");
+
+    let code = text
+        .split_whitespace()
+        .last()
+        .expect("the confirmation code")
+        .to_owned();
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        confirmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+
+    let restored = store::load_object(root, &id).expect("restored");
+    assert_eq!(restored.sections[0].text, "the wording that was admitted");
+    assert_eq!(restored.rev, 3, "the repair is itself an admitted Event");
+    assert!(run_engr(root, &["verify", &id]).status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &run_engr(root, &["show", &id, "--format", "json"]).stdout
+        )
+        .expect("json")["integrity"],
+        "ok"
+    );
+
+    // And history that cannot be replayed is still refused, because there is
+    // nothing to restore *from*.
+    let events = store::events_path(root, &id);
+    let stream = std::fs::read_to_string(&events).expect("events");
+    let truncated: String = stream
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&events, truncated).expect("write");
+    let refused = run_engr(root, &["repair", &id]);
+    assert!(
+        !refused.status.success(),
+        "history that cannot rebuild the Object is not repairable"
+    );
+    std::fs::write(&events, stream).expect("restore");
+}

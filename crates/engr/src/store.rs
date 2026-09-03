@@ -172,44 +172,74 @@ pub(crate) fn contained(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a resource namespace is there, on three-way terms.
+///
+/// **`is_dir()` gives two answers where there are three, and the missing one is
+/// the dangerous one.** It follows links and reports every other kind of entry —
+/// a dangling link, a regular file, a device, a directory nobody may stat — as
+/// though nothing were there at all. Every enumerator in this workspace then
+/// turns that into an empty resource set: a `.engr/objects` that is a regular
+/// file becomes a workspace with no Objects, which is a far worse answer than a
+/// refusal, and in a migration source it becomes a predecessor with nothing to
+/// migrate rather than one this build must not touch.
+///
+/// So: only established absence is absence. A wrong shape, a link anywhere on
+/// the way, and any other stat failure all fail closed.
+pub(crate) fn namespace(path: &Path) -> Result<bool> {
+    contained(path)?;
+    let listed = match fs::symlink_metadata(path) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        // Not knowing is not absence.
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    ensure!(
+        listed.is_dir(),
+        EXIT_SCHEMA,
+        "{}: exists but is not a directory, so this namespace can be neither read nor called empty",
+        path.display()
+    );
+    Ok(true)
+}
+
+/// Whether one persisted resource file is there, on the same three-way terms.
+///
+/// `exists()` follows links, so a redirected resource whose target is gone
+/// reported as a plain absence — and absence is a legitimate answer for most of
+/// these paths, so the redirection disappeared into an ordinary "not found"
+/// instead of being refused as what it is.
+pub(crate) fn resource_present(path: &Path) -> Result<bool> {
+    contained(path)?;
+    let listed = match fs::symlink_metadata(path) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    ensure!(
+        listed.is_file(),
+        EXIT_SCHEMA,
+        "{}: exists but is not a regular file, so it is neither a resource nor absent",
+        path.display()
+    );
+    Ok(true)
+}
+
 /// What a directory says about being a workspace root.
 ///
-/// Three answers, because `is_dir()` gives two and the missing one is the
-/// dangerous one. `is_dir()` follows links and reports every other kind of
-/// entry — a dangling link, a regular file, a device, a directory nobody may
-/// stat — as though nothing were there at all. In a walk that ascends on
-/// "nothing there", that silently carries the caller past the workspace they are
-/// standing in and into an ancestor's, where their next command lands on
-/// somebody else's record. Only established absence may ascend.
+/// The same three answers [`namespace`] gives, named for the walk that consumes
+/// them: only established absence may ascend, because ascending past the
+/// workspace somebody is standing in lands their next command on an ancestor's
+/// record.
 enum Here {
     Workspace,
     Absent,
 }
 
 fn workspace_here(root: &Path) -> Result<Here> {
-    let dir = engr_dir(root);
-    let listed = match fs::symlink_metadata(&dir) {
-        Ok(listed) => listed,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Here::Absent),
-        // Not knowing is not absence.
-        Err(error) => return Err(tool_error(dir.display(), error)),
-    };
-    // A redirected `.engr` is where the workspace is, so this refuses rather
-    // than walking past it: what is wrong is how the workspace was reached, and
-    // continuing would operate on a different one.
-    ensure!(
-        !listed.file_type().is_symlink(),
-        EXIT_SCHEMA,
-        "{}: something on the way to this resource is a link to somewhere else, so what engr would read is not what this workspace holds",
-        dir.display()
-    );
-    ensure!(
-        listed.is_dir(),
-        EXIT_SCHEMA,
-        "{}: exists but is not a directory, so this is not a workspace and not an empty parent either",
-        dir.display()
-    );
-    Ok(Here::Workspace)
+    match namespace(&engr_dir(root))? {
+        true => Ok(Here::Workspace),
+        false => Ok(Here::Absent),
+    }
 }
 
 /// Walk up from `start` looking for a workspace, so the tool works from any
@@ -896,10 +926,10 @@ pub(crate) fn save_object(root: &Path, object: &Object) -> Result<()> {
 pub fn object_ids(root: &Path) -> Result<Vec<String>> {
     let dir = objects_dir(root);
     // Enumeration follows links too, so a redirected directory would list
-    // identities from another tree and every load of one would then be refused.
-    // Said once, here, rather than once per identity.
-    contained(&dir)?;
-    if !dir.is_dir() {
+    // identities from another tree and every load of one would then be refused;
+    // and a namespace of the wrong shape is not an empty one. Said once, here,
+    // rather than once per identity.
+    if !namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut ids = Vec::new();
@@ -916,8 +946,7 @@ pub fn object_ids(root: &Path) -> Result<Vec<String>> {
 
 pub(crate) fn event_ids(root: &Path) -> Result<Vec<String>> {
     let dir = eventstore_dir(root);
-    contained(&dir)?;
-    if !dir.is_dir() {
+    if !namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut ids = Vec::new();
@@ -1311,13 +1340,12 @@ fn owning_object(root: &Path, event: &Event) -> Result<String> {
 
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
     let path = events_path(root, id);
-    // Before `exists()`, which follows links: a dangling stream link would
-    // otherwise be reported as a missing history rather than as the redirection
-    // it is, and the two have different answers.
-    contained(&path)?;
-    if !path.exists() {
+    // Three-way, and before anything follows a link: a dangling stream link
+    // reported as a missing history is a redirection read as an absence, and
+    // the two have different answers.
+    if !resource_present(&path)? {
         ensure!(
-            !object_path(root, id).exists(),
+            !resource_present(&object_path(root, id))?,
             EXIT_SCHEMA,
             "{} exists but its append-only Event history is missing",
             object_path(root, id).display()

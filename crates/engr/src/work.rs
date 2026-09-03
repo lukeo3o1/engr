@@ -186,8 +186,15 @@ pub fn path(root: &Path, subject: &Subject) -> PathBuf {
 /// establish it there would leave execution memory behind for a subject that no
 /// longer exists — the orphan the guard exists to prevent. Not knowing is not
 /// the same as no, and only `NotFound` is no.
+///
+/// The containment boundary comes first for the same reason, and it was the
+/// third version's flaw: stat'ing the final path alone answers about whatever
+/// the path leads to, so an intermediate `work/…` link whose target is missing
+/// answered `NotFound` — established absence, through a redirection nobody
+/// established at all — and the destructive consume then went ahead.
 pub fn exists(root: &Path, subject: &Subject) -> Result<bool> {
     let path = path(root, subject);
+    store::contained(&path)?;
     match std::fs::symlink_metadata(&path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -548,8 +555,7 @@ pub fn ids(root: &Path) -> Result<Vec<Subject>> {
     let mut found = Vec::new();
     for (folder, make) in SUBJECTS {
         let dir = root_dir(root).join(folder);
-        store::contained(&dir)?;
-        if !dir.is_dir() {
+        if !store::namespace(&dir)? {
             continue;
         }
         let mut here = Vec::new();

@@ -2735,17 +2735,27 @@ fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
         "no route appended anything"
     );
 
-    // The stored bytes still verify, so this is not the damage `repair` exists
-    // for: the honest route is the ordinary one, once the projection is the
-    // admitted one again.
-    let refused = gate::prepare_repair(&root, &id)
-        .expect_err("repair is for a projection whose seals failed, and these verify");
-    assert_eq!(refused.code, engr::EXIT_INVARIANT);
-    assert!(refused.message.contains("nothing to repair"), "{refused}");
-    save_raw(&root, &ops::provable(&root, &id).expect("provable")).expect("restore");
+    // And `repair` is the way back, which is the half that makes detection worth
+    // anything. The seals verify here, so eligibility cannot be integrity alone:
+    // a state every trust surface reports and no supported path can undo is a
+    // state that leaves hand-editing as the only answer, which is what put the
+    // record here.
+    let prepared = gate::prepare_repair(&root, &id).expect("a divergent projection is repairable");
+    let repaired = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("and the repair is confirmable");
+    assert_eq!(
+        repaired.object.sections[0].text, "the confirmed wording",
+        "restored to what history proves, not to what the bytes claimed"
+    );
     assert!(
         ops::verify(&root, &id).expect("verify").passed(),
         "restored authority verifies again"
+    );
+    assert!(
+        ops::history_fault(&root, &repaired.object)
+            .expect("fault")
+            .is_none(),
+        "and is what its admitted history produced"
     );
     admit(&root, payload(Act::Add, &id, "and ordinary work continues"));
 }

@@ -1072,6 +1072,32 @@ fn a_complete_history_still_refuses_a_projection_it_does_not_derive() {
 /// reads as a sequence of moments rather than a sequence of function pointers.
 type Damage = fn(&Path);
 
+/// One way of putting a bootstrap in place that this transaction did not earn.
+type Forge = fn(&Path, &str);
+
+/// The first phase of publication, done the way publication does it.
+///
+/// Every staged Event stream, copied verbatim into the workspace. A crash later
+/// in the sequence always has these behind it, so a simulated crash that skips
+/// them is describing a state the code never produces.
+fn publish_staged_streams(root: &Path) {
+    let staged = store::local_dir(root)
+        .join("migration")
+        .join("destination")
+        .join("eventstore");
+    for entry in std::fs::read_dir(&staged).expect("staged streams") {
+        let entry = entry.expect("entry");
+        let id = entry
+            .file_name()
+            .to_string_lossy()
+            .trim_end_matches(".jsonl")
+            .to_owned();
+        let path = store::events_path(root, &id);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        write(&path, &read(&entry.path()));
+    }
+}
+
 /// Just the Object projections out of a workspace fingerprint.
 ///
 /// The bootstrap Events are deliberately excluded: each run mints a fresh Event
@@ -1119,6 +1145,12 @@ fn a_crash_at_any_publication_step_is_resumable() {
     };
 
     let objects = [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION];
+    // Each step is a **prefix of the real publication order**, because that is
+    // what a crash can actually leave: every Event stream first, then every
+    // Object, then the predecessor's own directories, then its bootstrap. Steps
+    // that skipped ahead — an overwritten Object with no stream beside it —
+    // described a workspace no crash can produce, and a resume is entitled to
+    // read that as a source that moved rather than as a publication in progress.
     let steps: Vec<(&str, Damage)> = vec![
         ("nothing published", |_root| {}),
         ("the first stream landed", |root| {
@@ -1127,17 +1159,20 @@ fn a_crash_at_any_publication_step_is_resumable() {
             write(&path, "a partial write\n");
         }),
         ("the first Object was overwritten", |root| {
+            publish_staged_streams(root);
             write(
                 &store::object_path(root, AUTHORITY),
                 "no longer a predecessor\n",
             );
         }),
         ("every Object was overwritten", |root| {
+            publish_staged_streams(root);
             for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
                 write(&store::object_path(root, id), "no longer a predecessor\n");
             }
         }),
         ("the predecessor's own directories are gone", |root| {
+            publish_staged_streams(root);
             for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT, PROJECTION] {
                 write(&store::object_path(root, id), "no longer a predecessor\n");
             }
@@ -2437,4 +2472,117 @@ fn rename_as_the_released_build_would(root: &Path, id: &str, title: &str) {
             serde_json::to_string_pretty(&projection).expect("json")
         ),
     );
+}
+
+/// A barrier is a marker, not proof that the source was checked before it went
+/// up.
+///
+/// It says the predecessor is shut out *now*. It cannot say that anything was
+/// established before it was written, so a resume that skipped the source
+/// comparison whenever the bootstrap merely looked shut had a hole the shape of
+/// the whole finding: interrupt before the barrier, let the predecessor write,
+/// then put any barrier-shaped bootstrap in place — or simply delete it — and
+/// the intervening state is published over.
+///
+/// What decides now is what publication itself leaves behind, and none of it can
+/// be written by the released build or forged by editing one file.
+#[test]
+fn a_barrier_nobody_earned_does_not_skip_the_source_check() {
+    let forgeries: Vec<(&str, Forge)> = vec![
+        ("a forged barrier", |root: &Path, _challenge: &str| {
+            write(
+                    &store::engr_dir(root).join("format.json"),
+                    "{\"format\":\"engr-migration-in-progress\",\"migration\":\"ABC234\",\"version\":1}",
+                );
+        }),
+        (
+            "a barrier naming this very migration",
+            |root: &Path, challenge: &str| {
+                write(
+                    &store::engr_dir(root).join("format.json"),
+                    &format!(
+                        "{{\"format\":\"engr-migration-in-progress\",\"migration\":\"{challenge}\",\"version\":1}}"
+                    ),
+                );
+            },
+        ),
+        ("no bootstrap at all", |root: &Path, _challenge: &str| {
+            std::fs::remove_file(store::engr_dir(root).join("format.json")).expect("remove");
+        }),
+    ];
+    for (what, forge) in forgeries {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_at(&root, "barrier", &proposed.challenge);
+        rename_as_the_released_build_would(&root, AUTHORITY, "admitted by the old build");
+        forge(&root, &proposed.challenge);
+
+        let error = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect_err(&format!("{what}: the resume must not publish over it"));
+        // Either refusal is the right one — a barrier that names another
+        // transaction is caught for that before the comparison is reached — and
+        // what matters is that no forged bootstrap buys a skip.
+        assert!(
+            error.message.contains("moved after migration")
+                || error.message.contains("is the barrier of migration"),
+            "{what}: {}",
+            error.message
+        );
+        assert!(
+            !store::version_path(&root).exists(),
+            "{what}: nothing was published"
+        );
+        assert_eq!(
+            predecessor_object(&root, AUTHORITY)["title"],
+            "admitted by the old build",
+            "{what}: and what the old build wrote is still there"
+        );
+    }
+}
+
+/// A barrier that names another transaction is not this transaction's.
+///
+/// The members exist to say which migration shut the predecessor out and which
+/// generation it is on the way to. A resume that read the file for its *shape*
+/// alone would accept the barrier of an older, abandoned or fabricated
+/// migration as evidence about this one.
+#[test]
+fn a_barrier_is_held_to_the_migration_and_generation_it_names() {
+    for (what, bootstrap, expected) in [
+        (
+            "another migration's barrier",
+            "{\"format\":\"engr-migration-in-progress\",\"migration\":\"ZZZ999\",\"version\":1}",
+            "is the barrier of migration ZZZ999",
+        ),
+        (
+            "a barrier on the way to another generation",
+            "{\"format\":\"engr-migration-in-progress\",\"migration\":\"REPLACE\",\"version\":9}",
+            "on the way to generation 9",
+        ),
+        (
+            "a bootstrap nothing here wrote",
+            "{\"format\":\"engr-something-else\",\"version\":1}",
+            "neither the released predecessor bootstrap nor a migration barrier",
+        ),
+    ] {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_at(&root, "barrier", &proposed.challenge);
+        write(
+            &store::engr_dir(&root).join("format.json"),
+            &bootstrap.replace("REPLACE", &proposed.challenge),
+        );
+
+        let error = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect_err(&format!("{what}: this is not this transaction's barrier"));
+        assert!(
+            error.message.contains(expected),
+            "{what}: {}",
+            error.message
+        );
+        assert!(
+            !store::version_path(&root).exists(),
+            "{what}: nothing was published"
+        );
+    }
 }
