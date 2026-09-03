@@ -957,6 +957,19 @@ it, so every reader sees the complete old stream or the complete new one, never
 a prefix of either. This is why the delimiter requirement above is a read-path
 rule and not a courtesy.
 
+**And the name must be as durable as the bytes.** One admission publishes two
+resources in two directories — the Event stream, then the Object — and the whole
+recovery model rests on their order: history ahead of the projection is the
+crash this design expects and reconciles, while the projection ahead of history
+is the direction nothing can recover. Flushing a file says nothing about the
+durability of the directory entry that reaches it, so without flushing the
+containing directory after each rename those two publications have no
+established order across a power failure at all, and the caller has already been
+told the admission succeeded. Every phase boundary in a workspace is a name — a
+published resource, a staged migration, the generation marker — so a
+platform that can make a name durable MUST do so before reporting success, and
+one that cannot MUST say so rather than imply a guarantee it does not keep.
+
 `rev` starts at 1. Revision zero is the Object before any Event; the first
 admitted Event advances it to 1, and no writer emits zero. Adjacency alone
 cannot refuse it, because a `0, 1, 2 …` log is perfectly contiguous, so the
@@ -2952,6 +2965,16 @@ generation refuses the workspace instead of reading it under its own rules.
 This is distinct from a digest contract's own version, which identifies a
 deterministic calculation and changes when *that* calculation changes. A Rule
 does **not** carry a schema version of its own; the workspace answers for it.
+
+**The marker is written last, and that is true of creation as well as
+migration.** Its presence is the whole statement that a workspace is this
+generation, and nothing afterwards re-checks the layout it certifies — so
+writing it before the layout is complete means an interruption leaves an
+*active* workspace that is missing part of itself. The `/local/` ignore line is
+the part that shows why this is not tidiness: a live Challenge's filename is its
+code, and that line is what keeps `git add -A` from handing the code to everyone
+with repository access. A workspace that activated without it is one where the
+Human Gate's own secret is Git-trackable, and no later command can tell.
 
 A prepared Rule Review attestation does not survive a migration that changes Rule
 interpretation. It named a subject computed under the old semantics, so it is

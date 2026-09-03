@@ -1069,7 +1069,11 @@ pub fn notes_for(root: &Path, candidate: &Candidate) -> Vec<Note> {
 /// a non-problem is how people learn to skip the notes.
 fn object_with_title(root: &Path, title: &str, excluding: &str) -> Option<String> {
     let needle = title.trim().to_lowercase();
-    store::object_ids(root)
+    // The same identity set every other whole-workspace question uses: an Object
+    // whose projection is missing after a crash still holds its title, and a
+    // note that missed it would be quietly wrong in exactly the state a reader
+    // is least able to check.
+    ops::object_ids(root)
         .ok()?
         .iter()
         .filter(|id| id.as_str() != excluding)
@@ -1868,7 +1872,14 @@ fn check_consumed_sections_are_unreferenced(root: &Path, payload: &Payload) -> R
     };
     let consumed = merge.consumed();
     let participants = merge.participants();
-    for id in store::object_ids(root)? {
+    // Every Object this workspace holds, which is not the same set as every
+    // Object file it holds. A crash between the durable Event and the saved
+    // projection leaves a real, admitted, reconstructible Object with no file —
+    // the exact window `ops::object_ids` exists for — and a scan that missed one
+    // would let this merge consume a Section that Object explicitly stands on.
+    // Section ids are never reused, so the reference it is left holding can
+    // never be made good.
+    for id in ops::object_ids(root)? {
         let object = ops::effective(root, &id)?;
         ops::sound(root, &object, None)?;
         for section in &object.sections {

@@ -774,7 +774,10 @@ fn stage(root: &Path, manifest: &Manifest) -> Result<()> {
     }
     fs::create_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
     store::write_json(&temp.join(MANIFEST), manifest)?;
-    fs::rename(&temp, &final_dir).map_err(|error| tool_error(final_dir.display(), error))
+    // Durable, because this name is a phase boundary: a staged plan that a power
+    // failure can lose after the caller was told it exists is not a plan anybody
+    // can answer.
+    store::rename_durably(&temp, &final_dir)
 }
 
 /// What a confirmed migration did.
@@ -1479,7 +1482,8 @@ fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Resul
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|error| tool_error(dir.display(), error))?;
     }
-    fs::rename(&temp, &dir).map_err(|error| tool_error(dir.display(), error))
+    // The same, and more so: this is the only copy of what was confirmed.
+    store::rename_durably(&temp, &dir)
 }
 
 /// Read back a staged destination, holding it to what the human confirmed.
@@ -1792,10 +1796,16 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
 /// the file being rewritten: an ignore file is a person's, not engr's.
 fn ensure_local_ignored(root: &Path) -> Result<()> {
     let path = store::engr_dir(root).join(".gitignore");
-    let mut text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(tool_error(path.display(), error)),
+    // Through the containment boundary and the atomic publisher, like every
+    // other file in this tree. It reached neither: a direct read and a direct
+    // write, on a path the preflight never pins — `.gitignore` is not an Object
+    // or an Event — so a predecessor whose `.engr/.gitignore` is a link carried
+    // that link into a *confirmed* publication step, and engr wrote `/local/`
+    // through it to a file outside the workspace.
+    let mut text = if store::resource_present(&path)? {
+        fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?
+    } else {
+        String::new()
     };
     if text.lines().any(|line| line.trim() == "/local/") {
         return Ok(());
@@ -1804,7 +1814,7 @@ fn ensure_local_ignored(root: &Path) -> Result<()> {
         text.push('\n');
     }
     text.push_str("/local/\n");
-    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
+    store::write_text(&path, &text)
 }
 
 #[cfg(test)]

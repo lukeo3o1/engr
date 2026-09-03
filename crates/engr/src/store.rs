@@ -330,9 +330,21 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     for path in layout {
         fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
     }
-    write_text(&version_path(root), crate::WORKSPACE_VERSION_FILE)?;
+    // **The generation marker is written last, and that is the whole ordering.**
+    // Its presence is what makes a workspace current — `require_current` asks
+    // nothing else — so writing it before the layout is complete means a failure
+    // or a crash in the remaining window leaves an *active* workspace that is
+    // missing part of itself, and nothing afterwards repairs or refuses it.
+    //
+    // The ignore line is the one that matters here rather than a tidiness: a
+    // live Challenge's filename **is** its code, and `/local/` is what keeps
+    // `git add -A` from handing that code to everyone with repository access.
+    // A workspace that activated without it is one where the Human Gate's own
+    // secret is Git-trackable, which is not a state a later command can detect
+    // as wrong. Migration activates the same way, for the same reason.
     let ignore = dir.join(".gitignore");
-    fs::write(&ignore, GITIGNORE).map_err(|error| tool_error(ignore.display(), error))?;
+    write_text(&ignore, GITIGNORE)?;
+    write_text(&version_path(root), crate::WORKSPACE_VERSION_FILE)?;
     Ok(dir)
 }
 
@@ -757,6 +769,42 @@ pub(crate) fn read_resource<T: DeserializeOwned + Serialize>(
     }
 }
 
+/// Rename, and make the name itself durable before saying so.
+///
+/// `rename` is atomic for a reader and says nothing to a power failure: the
+/// directory entry it creates lives in the containing directory's own metadata,
+/// and only that directory's `fsync` puts it on the device. Every phase boundary
+/// in this workspace is a name — a published resource, the staged destination,
+/// the generation marker — so a boundary that is not durable is not a boundary.
+///
+/// Both directories are flushed for a cross-directory rename, because the entry
+/// disappears from one and appears in the other and neither half is the whole
+/// fact.
+///
+/// Windows has no equivalent to opening a directory and flushing it, and no
+/// stable std API for the same guarantee; there this is the rename alone, which
+/// is what every other tool on that platform relies on. Saying so is better than
+/// a portability claim the code cannot keep.
+pub(crate) fn rename_durably(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to).map_err(|error| tool_error(to.display(), error))?;
+    for directory in [from.parent(), to.parent()].into_iter().flatten() {
+        sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| tool_error(path.display(), error))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Write via a temporary file and rename, so a reader never sees half a file.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = crate::proof::canonical_bytes(value, &path.display().to_string())?;
@@ -785,9 +833,18 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
 /// The flush is what makes the ordering durable rather than merely visible:
 /// without it the rename can reach the device before the bytes it names do, and
 /// a crash in that window leaves the destination pointing at whatever the
-/// filesystem had. The containing directory is not flushed — that is
-/// POSIX-specific and unavailable on one of the supported platforms, so
-/// relying on it would make durability mean different things per target.
+/// filesystem had. **The directory entry is flushed too**, and that is not a
+/// generic nicety: `fsync` on a file says nothing about the durability of the
+/// name that reaches it, so a completed rename can be lost by a power failure
+/// while the bytes it published survive under no name at all.
+///
+/// One admission publishes two resources in two directories — the Event stream,
+/// then the Object — and the whole recovery model rests on their order. History
+/// ahead of the projection is the crash this design expects and reconciles;
+/// the projection ahead of history is the direction nothing can recover, and
+/// without a durable directory entry those two renames had no established order
+/// across a power failure at all. The caller had already been told the admission
+/// succeeded.
 ///
 /// **The staging entry is part of the resource path, not a private detail.**
 /// Its name is `<resource>.tmp` and therefore entirely predictable, so checking
@@ -833,8 +890,7 @@ fn publish(path: &Path, text: &str) -> Result<()> {
     file.sync_all()
         .map_err(|error| tool_error(temporary.display(), error))?;
     drop(file);
-    fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
-    Ok(())
+    rename_durably(&temporary, path)
 }
 
 /// Load a current Object.
@@ -1320,7 +1376,11 @@ fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> 
 /// could disagree with the stream, this asks the seal: the digest binds exactly
 /// one Object id, so at most one workspace Object can answer for it.
 fn owning_object(root: &Path, event: &Event) -> Result<String> {
-    for id in object_ids(root)? {
+    // Every Object the workspace holds, projection or history: an Event whose
+    // stream exists and whose projection was lost to a crash still belongs to
+    // that Object, and a listing of files alone would answer that its own stream
+    // seals against nothing.
+    for id in crate::ops::object_ids(root)? {
         let agrees = crate::digest::EVENT
             .recheck(&event.digest, |version| event.digest_under(&id, version))
             .map(|attested| attested.agrees())

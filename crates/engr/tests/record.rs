@@ -1491,3 +1491,98 @@ fn a_crash_tail_is_not_applied_over_a_projection_history_did_not_produce() {
         "and the durable Event that was waiting is applied"
     );
 }
+
+/// A merge cannot consume a Section an EventStore-established Object stands on.
+///
+/// The guard walked the Object *files*, and that is not the set of Objects this
+/// workspace holds. The supported crash window — the Event is durable, the
+/// projection never landed — leaves a real admitted Object with no file, which
+/// `ops::effective` reconstructs and every read surface shows. A scan of files
+/// alone never asks about it, so the merge consumed a Section it explicitly
+/// depends on, and Section ids are never reused: the reference it is left
+/// holding can never be made good again.
+#[test]
+fn a_merge_cannot_consume_a_section_an_unprojected_object_depends_on() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    admit(&root, payload(Act::Add, &target, "first"));
+    admit(&root, payload(Act::Add, &target, "second"));
+    let commit = commit_all(&root, "record the target");
+
+    // A referrer whose projection is then lost the way a crash loses it: the
+    // Event is durable, the Object file is not.
+    let source = new_object(&root, "the referrer");
+    let mut with_ref = payload(Act::Add, &source, "stands on §2");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 2, &commit)]);
+    admit(&root, with_ref);
+    std::fs::remove_file(store::object_path(&root, &source)).expect("lose the projection");
+    assert_eq!(
+        ops::effective(&root, &source)
+            .expect("history still establishes it")
+            .sections
+            .len(),
+        1,
+        "the Object is still there; only its file is gone"
+    );
+
+    let error = gate::prepare(
+        &root,
+        common::merge(&target, 1, vec![2], common::wording("folded together")),
+    )
+    .expect_err("§2 is depended on by an Object this workspace holds");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("this merge would consume"),
+        "{error}"
+    );
+
+    // With the projection back, the same merge is still refused — the guard was
+    // about the dependency, not about the file.
+    ops::reconcile(&root, &source).expect("the projection is recoverable");
+    gate::prepare(
+        &root,
+        common::merge(&target, 1, vec![2], common::wording("folded together")),
+    )
+    .expect_err("and it stays refused once the projection is back");
+}
+
+/// A workspace is current only once it is whole.
+///
+/// `VERSION` is the entire statement that a workspace is this generation —
+/// `require_current` asks nothing else — so writing it before the layout is
+/// complete makes a failure in the remaining window leave an *active* workspace
+/// missing part of itself, with nothing afterwards to detect or repair it. The
+/// part that was last is the one that matters: a live Challenge's filename is
+/// its code, and `/local/` is what keeps `git add -A` from publishing it.
+#[test]
+fn a_workspace_is_not_current_until_its_ignore_line_exists() {
+    // Fully qualified: the `TempDir` import is unix-only, because the link tests
+    // are, and this one runs everywhere.
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    store::init(&root).expect("init");
+
+    let ignore = store::engr_dir(&root).join(".gitignore");
+    let version = store::version_path(&root);
+    assert!(ignore.is_file(), "the ignore line is written");
+    assert!(
+        std::fs::read_to_string(&ignore)
+            .expect("ignore")
+            .lines()
+            .any(|line| line.trim() == "/local/"),
+        "and it is the line that keeps live challenge codes out of git"
+    );
+    // Ordering, established from the filesystem rather than from reading the
+    // code: the marker that activates the workspace is not older than the
+    // invariant it certifies.
+    let ignored_at = std::fs::metadata(&ignore)
+        .and_then(|held| held.modified())
+        .expect("ignore mtime");
+    let activated_at = std::fs::metadata(&version)
+        .and_then(|held| held.modified())
+        .expect("version mtime");
+    assert!(
+        ignored_at <= activated_at,
+        "the generation marker must be written last: ignore {ignored_at:?}, VERSION {activated_at:?}"
+    );
+}

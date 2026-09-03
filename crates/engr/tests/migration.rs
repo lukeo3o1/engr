@@ -2586,3 +2586,60 @@ fn a_barrier_is_held_to_the_migration_and_generation_it_names() {
         );
     }
 }
+
+/// The ignore line a migration publishes is written to the workspace, not
+/// through a link out of it.
+///
+/// `.engr/.gitignore` is neither an Object nor a history, so the preflight does
+/// not pin it and the source-unmoved comparison never looks at it — which is
+/// exactly how a link there reached a *confirmed* publication step, where the
+/// line that keeps live challenge codes out of git was written through it into a
+/// file outside the workspace entirely.
+///
+/// The refusal happens inside publication, so the transaction is left
+/// unactivated rather than half-lying: remove the link, answer again, and it
+/// completes.
+#[test]
+#[cfg(unix)]
+fn the_published_ignore_line_is_not_written_through_a_link() {
+    let (_temp, root) = released();
+    let outside = TempDir::new().expect("outside");
+    let elsewhere = outside.path().join("captured-gitignore");
+    let ignore = store::engr_dir(&root).join(".gitignore");
+    // A redirection of a file that is really there, which is how one arrives.
+    std::fs::rename(&ignore, &elsewhere).expect("move the predecessor's own out");
+    std::os::unix::fs::symlink(&elsewhere, &ignore).expect("symlink");
+    let before = read(&elsewhere);
+
+    let proposed = engr::migration::prepare(&root).expect("the plan does not pin .gitignore");
+    let error = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect_err("publishing through a link is refused");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("link to somewhere else"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        read(&elsewhere),
+        before,
+        "nothing outside the workspace was written"
+    );
+    assert!(
+        !store::version_path(&root).exists(),
+        "and the workspace is not activated while a published step is refused"
+    );
+
+    // Remove the redirection and the same confirmation finishes.
+    std::fs::remove_file(&ignore).expect("remove the link");
+    std::fs::rename(&elsewhere, &ignore).expect("put the predecessor's own back");
+    match engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge)).expect("resume") {
+        engr::Confirmed::Migration(report) => assert_eq!(report.objects.len(), 4),
+        engr::Confirmed::Object(_) => panic!("a migration subject"),
+    }
+    assert!(read(&ignore).lines().any(|line| line.trim() == "/local/"));
+    assert_eq!(
+        store::validate_format(&root).expect("current"),
+        WorkspaceFormat::Current
+    );
+}
