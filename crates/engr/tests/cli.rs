@@ -5908,3 +5908,63 @@ fn verify_fails_a_projection_that_admitted_history_never_produced() {
         "and so is every Section seal: {shown}"
     );
 }
+
+/// `show` does not print `ok` over a record nothing admitted.
+///
+/// `verify` is where the deep question is answered, and a listing is entitled to
+/// send a reader there. The single-object screen is not: it is what an agent
+/// reads immediately before acting, and its integrity line came from the seals
+/// alone — which say `ok` about a resealed out-of-band edit, because seals are
+/// recomputed from whatever the bytes now say.
+#[test]
+fn show_says_a_divergent_projection_is_not_ok() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "read before acting"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "the wording that was admitted",
+        ],
+    );
+    confirm(root, &added);
+    let sound: serde_json::Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(sound["integrity"], "ok");
+
+    let object = store::load_object(root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(root, &resealed.object).expect("put it on disk");
+
+    let shown = run_engr(root, &["show", &id]);
+    assert!(shown.status.success(), "the screen still renders");
+    let text = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(
+        text.contains("not what its admitted history produced"),
+        "{text}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(
+        json["integrity"], "divergent",
+        "the seals verify, so this is not `tampered` — and it is certainly not `ok`"
+    );
+}
