@@ -234,6 +234,7 @@ fn now() -> String {
 /// about some unrelated code.
 pub fn pending_codes(root: &Path) -> Result<Vec<String>> {
     let dir = store::challenges_dir(root);
+    store::contained(&dir)?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -575,6 +576,9 @@ pub fn preview_event(payload: &Payload, rev: u64) -> Result<Event> {
 /// whether that frozen question is still actionable, which is exactly the split
 /// the amendment draws.
 pub fn check_rule_material(root: &Path, candidate: &Candidate) -> Result<()> {
+    if !carries_rule_review(&candidate.payload.action) {
+        return Ok(());
+    }
     let before = ops::effective(root, candidate.object()).or_else(|error| match error.code {
         EXIT_NOT_FOUND => Object::new(candidate.object().to_owned(), String::new()),
         _ => Err(error),
@@ -587,6 +591,24 @@ pub fn check_rule_material(root: &Path, candidate: &Candidate) -> Result<()> {
     let mutation = crate::proof::object_review_mutation(&before, &after, &candidate.payload)?;
     let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
     check_frozen_review_against(&live, candidate)
+}
+
+/// Whether a Rule Review is part of the question this action asks.
+///
+/// One shared action-level policy, because the alternative is two: `repair`
+/// deliberately mints a Challenge with no review — it restores exactly what
+/// admitted history derives, so the projection either side is identical and
+/// there is no proposed semantics for a Rule to judge — and every surface that
+/// interprets a frozen `review: None` has to mean the same thing by it.
+///
+/// Without this the universal freshness check read "no frozen review" as "no
+/// Object Rule may apply", and a project with any applicable Object Rule could
+/// prepare a repair it could never confirm: the one route back from an
+/// integrity-invalid Object closed by the mere existence of project policy.
+/// A Rule edited after such a Challenge was prepared cannot stale it either,
+/// because the Rule was never part of that question.
+fn carries_rule_review(action: &Action) -> bool {
+    !matches!(action, Action::ObjectRepaired {})
 }
 
 /// The frozen review against the Rules as they stand now.
@@ -737,12 +759,25 @@ fn admitted_at(mut action: Action, at: &str) -> Action {
     action
 }
 
-/// Classify a Challenge from the same effective projection and durable Event
-/// evidence used by confirmation. Read surfaces and admission must agree about
-/// whether a code is still actionable.
+/// Classify a Challenge from the same projection and durable Event evidence
+/// used by confirmation. Read surfaces and admission must agree about whether a
+/// code is still actionable.
+///
+/// **Which projection is the action's to choose.** Ordinary mutation is
+/// measured against the effective current Object, because that is what it will
+/// build on. Repair is measured against admitted history, because that is what
+/// it will restore — and the stored `rev` is part of the material repair exists
+/// to distrust. Reading it here would let the corruption itself decide: an
+/// out-of-band edit that moved `rev` would report the one recovery action as
+/// `Stale` before confirmation ever reached the repair-specific history path,
+/// and cleanup would then treat a legitimate repair Challenge as dead.
 pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateState> {
     let id = candidate.object();
-    match ops::effective(root, id) {
+    let projection = match candidate.payload.action {
+        Action::ObjectRepaired {} => ops::provable(root, id),
+        _ => ops::effective(root, id),
+    };
+    match projection {
         Ok(object) => {
             if object.rev > candidate.expected_rev() {
                 let applied_rev = candidate.expected_rev().checked_add(1).ok_or_else(|| {
@@ -771,6 +806,74 @@ pub fn candidate_state(root: &Path, candidate: &Candidate) -> Result<CandidateSt
             }
         }
         Err(error) => Err(error),
+    }
+}
+
+/// What an outstanding Challenge's surface may offer a person.
+///
+/// The order is the whole point: [`CandidateState`] decides first, and Rule
+/// freshness is asked only where a new admission is still on the table. Asking
+/// freshness first produced two contradictory screens. A **stale** Challenge
+/// whose Rules had not moved printed the exact confirmation instruction with
+/// "this candidate is dead" underneath it. An **already-applied** one was the
+/// inverse: its frozen review no longer matched a live rebinding against the
+/// post-application Object, so the screen said nothing here can be confirmed
+/// while the next line — and `confirm` itself — correctly said to retype the
+/// code to finish cleanup. Current Rules do not get to reinterpret an admission
+/// that is already durable.
+#[derive(Debug)]
+pub enum Answerable {
+    /// Pending, the predecessor is one an admission may build on, and the Rule
+    /// material has not moved. The one state that may offer the code.
+    Confirm,
+    /// Pending, but the question can no longer be answered as it was asked.
+    Unanswerable(String),
+    /// The admission is already durable; the same code finishes cleanup.
+    Cleanup,
+    /// The Object moved past the revision this Challenge pinned.
+    Dead { current_rev: u64 },
+}
+
+/// Decide what one Challenge's surface may offer, in the order the states
+/// actually depend on each other.
+pub fn answerable(root: &Path, candidate: &Candidate) -> Result<Answerable> {
+    match candidate_state(root, candidate)? {
+        CandidateState::AlreadyApplied(_) => Ok(Answerable::Cleanup),
+        CandidateState::Stale { current_rev } => Ok(Answerable::Dead { current_rev }),
+        CandidateState::Pending => {
+            // The predecessor confirmation will actually build on, asked the way
+            // confirmation asks it. An integrity-invalid or history-divergent
+            // stored Object is refused there, so a screen rendered from
+            // diagnostic material alone would offer a code that cannot be spent.
+            if let Err(error) = confirmable_predecessor(root, candidate) {
+                return Ok(Answerable::Unanswerable(error.message));
+            }
+            if let Err(error) = check_rule_material(root, candidate) {
+                return Ok(Answerable::Unanswerable(error.message));
+            }
+            Ok(Answerable::Confirm)
+        }
+    }
+}
+
+/// Whether the predecessor this Challenge names is one its own confirmation
+/// would accept.
+///
+/// Two questions, one per admission class, and each surface must ask the one
+/// its action will ask. Repair rebuilds from admitted history and requires
+/// nothing of the stored bytes; every other action requires a predecessor that
+/// seals correctly *and* is what admitted history produced.
+fn confirmable_predecessor(root: &Path, candidate: &Candidate) -> Result<()> {
+    let id = candidate.object();
+    match candidate.payload.action {
+        Action::ObjectRepaired {} => ops::provable(root, id).map(|_| ()),
+        _ => match ops::admission_predecessor(root, id) {
+            Ok(_) => Ok(()),
+            // No Object yet. `candidate_state` has already established that this
+            // is the creation-shaped Pending it belongs to.
+            Err(error) if error.code == EXIT_NOT_FOUND => Ok(()),
+            Err(error) => Err(error),
+        },
     }
 }
 
@@ -1355,7 +1458,7 @@ fn prepare_locked(
     // Normalised here, before the code is minted, so the human confirms the
     // exact string that will be stored.
     trim_title(&mut payload);
-    let object = match ops::reconcile_locked(root, &payload.object) {
+    let object = match ops::admission_predecessor(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
@@ -1533,7 +1636,7 @@ fn admit_agent_locked(
     validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
     trim_title(&mut payload);
-    let stored = match ops::reconcile_locked(root, &payload.object) {
+    let stored = match ops::admission_predecessor(root, &payload.object) {
         Ok(object) => Some(object),
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
@@ -1889,9 +1992,19 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
 
     let candidate = find(root, code)?;
     let id = candidate.object().to_owned();
-    validate_persisted_payload(root, &candidate.payload)?;
 
+    // Classified before anything live is validated. What remains to be done is
+    // the first question, and for one state the answer is "nothing": a Challenge
+    // left by the documented crash window has a durable Event and a saved
+    // projection already, so the only operation left is removing the spent file.
     let object = match candidate_state(root, &candidate)? {
+        // Cleanup, and it must not depend on material that mattered only before
+        // admission. `validate_persisted_payload` resolves `based_on` and Ref
+        // commits against the live repository, so running it first made the
+        // retry fail whenever those commits had since become unreachable — a
+        // prune, a rewritten branch, a garbage collection — and left the spent
+        // Challenge on disk permanently, with nothing left to admit and no way
+        // to say so.
         CandidateState::AlreadyApplied(applied) => {
             let object = ops::reconcile_locked(root, &id)?;
             discard_locked(root, code)?;
@@ -1918,12 +2031,15 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         {
             ops::provable(root, &id)?
         }
-        CandidateState::Pending => match ops::reconcile_locked(root, &id) {
+        CandidateState::Pending => match ops::admission_predecessor(root, &id) {
             Ok(object) => object,
             Err(error) if error.code == EXIT_NOT_FOUND => Object::new(id.clone(), String::new())?,
             Err(error) => return Err(error),
         },
     };
+    // Only now, with a real admission still to make: this resolves live
+    // repository material, and a confirmed payload must already be canonical.
+    validate_persisted_payload(root, &candidate.payload)?;
     crate::confirmation::classify_retry(
         &candidate.expected_rev(),
         &object.rev,
@@ -1963,10 +2079,13 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
 
     // The Rule material is rebound from live state, so a Challenge whose review
     // no longer names the review its mutation would get is refused rather than
-    // admitted against a policy that has since moved.
-    let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
-    let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
-    check_frozen_review_against(&live, &candidate)?;
+    // admitted against a policy that has since moved. Skipped for the one action
+    // no Rule judges, on the same shared policy the pending surface uses.
+    if carries_rule_review(&candidate.payload.action) {
+        let mutation = crate::proof::object_review_mutation(&before, &object, &candidate.payload)?;
+        let live = crate::rules::bind_object(root, &mutation, candidate.expected_rev())?;
+        check_frozen_review_against(&live, &candidate)?;
+    }
     // After the projection, because the acyclic walk has to see the section this
     // Event is adding: the relation being admitted is part of the graph it must
     // not close.

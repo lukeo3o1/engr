@@ -1024,3 +1024,148 @@ fn a_durable_event_states_one_admission_instant() {
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
     }
 }
+
+/// Repair carries no Rule Review, so project policy cannot close the one route
+/// back from an integrity-invalid Object.
+///
+/// A repair restores exactly what admitted history derives: the projection is
+/// identical either side, so there is no proposed semantics for a Rule to
+/// judge, and `prepare_repair` deliberately freezes `review: None`. The
+/// universal freshness check read that as "no Object Rule may apply", so a
+/// workspace with any applicable Object Rule could prepare a repair and never
+/// confirm it — the recovery contract defeated by the existence of policy,
+/// unless an operator temporarily deleted their own rules.
+#[test]
+fn a_repair_is_confirmable_in_a_workspace_governed_by_an_object_rule() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681860";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "the wording that was actually admitted"));
+    let admitted = store::load_object(root, id).expect("admitted");
+
+    // Valid history first, then the policy, then the damage.
+    object_rule(root);
+    tamper(root, id);
+    integrity::check_stored_object_integrity(&store::load_object(root, id).expect("load"))
+        .expect_err("the fixture must really break integrity");
+
+    let prepared = gate::prepare_repair(root, id).expect("repair prepares");
+    assert!(
+        prepared.candidate.subject.review.is_none(),
+        "a repair proposes no semantics for a Rule to judge"
+    );
+    gate::check_rule_material(root, &prepared.candidate)
+        .expect("and no live Rule makes that question unanswerable");
+    assert!(
+        matches!(
+            gate::answerable(root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "so the screen offers the code"
+    );
+
+    // A Rule edited while the question was outstanding cannot stale it either:
+    // the Rule was never part of what was asked.
+    std::fs::write(
+        rules::dir(root).join("object-policy.md"),
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation, restated.\n",
+    )
+    .expect("rewrite the rule");
+    assert!(
+        matches!(
+            gate::answerable(root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "a Rule that was never part of the question cannot stale it"
+    );
+
+    let repaired = gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("the repair is confirmable");
+    assert_eq!(
+        repaired.object.sections[0].text, admitted.sections[0].text,
+        "restored to what history proves"
+    );
+    assert!(
+        repaired.event.metadata.admitted.review.is_none(),
+        "and history records no review, because none was run"
+    );
+    integrity::check_stored_object_integrity(&repaired.object).expect("repair reseals");
+
+    // The exemption is narrow: an ordinary mutation in the same workspace still
+    // has to carry its review.
+    let error = gate::prepare(root, add(id, "an ordinary change"))
+        .expect_err("ordinary mutations are still governed");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(
+        error.message.contains("governed by object-policy"),
+        "{error}"
+    );
+}
+
+/// Finishing the cleanup of an admission that already happened is not
+/// reinterpreted by current Rules.
+///
+/// The documented crash window leaves a durable Event, a saved projection and a
+/// Challenge file. For a reviewed mutation, rebinding the frozen review against
+/// the *post-application* Object no longer reproduces it — the mutation being
+/// reviewed has already been applied — so a surface that asked Rule freshness
+/// before the Challenge's own state called the retry unanswerable, while the
+/// next line and `confirm` itself both correctly said to retype the code.
+#[test]
+fn cleanup_of_a_reviewed_admission_is_not_reinterpreted_by_live_rules() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681861";
+    admit_human(root, creation(id));
+    object_rule(root);
+
+    let payload = add(id, "wording a governed mutation admitted");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Passed,
+        None,
+    );
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the governed mutation");
+    let code = prepared.candidate.code().to_owned();
+    assert!(
+        prepared.candidate.subject.review.is_some(),
+        "the Challenge froze a review"
+    );
+    let admitted = gate::confirm(root, &format!("CONFIRM {code}")).expect("confirm");
+    assert_eq!(admitted.object.rev, 2);
+
+    // The crash: everything durable landed, the Challenge was never removed.
+    std::fs::write(
+        store::challenge_path(root, &code).expect("path"),
+        proof::canonical_bytes(&prepared.candidate.challenge, "challenge").expect("canonical"),
+    )
+    .expect("restore the challenge a deletion crash would have left");
+
+    // Rule freshness alone says this is unanswerable, and it is not wrong about
+    // its own question: the frozen review does not describe a mutation against
+    // the Object as it now stands. It is the wrong question to ask.
+    gate::check_rule_material(root, &prepared.candidate)
+        .expect_err("a live rebinding cannot reproduce a review of an applied mutation");
+    match gate::answerable(root, &prepared.candidate).expect("answerable") {
+        gate::Answerable::Cleanup => {}
+        other => panic!("an applied admission is cleanup, not {other:?}"),
+    }
+
+    let again = gate::confirm(root, &format!("CONFIRM {code}")).expect("cleanup finishes");
+    assert_eq!(again.object.rev, 2, "the retry admits nothing");
+    assert_eq!(
+        store::load_events(root, id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert!(
+        gate::pending(root).expect("candidates").is_empty(),
+        "and the spent Challenge is gone"
+    );
+}

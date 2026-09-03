@@ -72,6 +72,16 @@ parsing, so the value no longer re-serializes to the bytes that had two.
 Predecessor generations are read under their own contract, which did not require
 this. Bringing them forward is what migration is for.
 
+A persisted resource is the bytes git tracks **at that path**, so no component
+of the way to one — `.engr` itself included — may be a link. A link breaks the
+correspondence in a way no digest can see: git records the link, which is its
+target's name, while the tool reads and writes the target's contents, so the
+history a reviewer reads is not the state the tool is using and the record can
+sit outside the repository entirely. Reads and writes of the resource tree MUST
+refuse it rather than follow it. How somebody arrived at the workspace is a
+different question and is not restricted — a repository reached through a link
+is ordinary.
+
 There is no public writer for a persisted resource, and that is a contract. A
 raw serializer, or an Object save that validates shape, is not an admission
 boundary: a self-consistent, correctly resealed Object says nothing about whether
@@ -178,6 +188,23 @@ integrity verification fails
   -> the restored state is exactly what admitted history derives
   -> only then are new seals written
 ```
+
+Integrity alone does not close that door, and a conforming implementation MUST
+close it. Seals are recomputed from the bytes on disk, so an out-of-band edit
+that is *also* resealed verifies perfectly — by hand, by another
+implementation, by a script that meant well. The predecessor of an ordinary
+admission MUST therefore be both intact and **history-consistent**: the value
+its own admitted history produces, up to its own revision. Otherwise an
+unrelated legitimate mutation takes the edited projection as its predecessor,
+appends normally, and saves a projection the complete EventStore never
+produced — and one Event later the unauthorized wording reads as ordinary
+admitted authority.
+
+An Event tail that is durable but not yet projected is not divergence; it is the
+recovery buffer working as intended, and reconciliation applies it. Divergence
+is the other direction: a projection asserting something no admitted Event ever
+said. Verification MUST report it, and `repair` — never an ordinary mutation —
+is the one path that reconstructs a divergent projection.
 
 Replaying it is a no-op, and that is what makes it safe to record: history
 already holds the projection being restored, so a repair states a fact about the
@@ -447,9 +474,15 @@ an alias table is a maintenance surface with no authority behind it.
 A content entry has no id, no state, no refs, no relations and no confirmation of
 its own. Changing one is an ordinary revision of the containing section, which is
 what keeps the section the single unit of authority, hashing, revision and
-reference. Duplicate types are allowed. In the current generation an empty
-`content[]` is stored as `[]` like every other empty sequence: one meaning has
-one persisted shape, and an omitted member and an empty one would be two.
+reference. Duplicate types are allowed. An empty `content[]` is **omitted**,
+like every other empty sequence in an Object or Section: one meaning has one
+persisted shape, and a member written `[]` beside one left out would be two.
+The declared exceptions to omission are an Event's `data` and a Collection's
+`members`; this is not one of them.
+
+`text` is required and MAY be empty only where a non-empty `content[]` carries
+the meaning instead. A section with neither asserts nothing, and that is refused
+wherever a persisted Section is read, not only where one is written.
 
 A body is **literal**. Every byte of it is inside the section hash and none of it
 is normalized — not on the way in and not on the read path. `"x"`, `"x\n"` and
@@ -872,6 +905,24 @@ already erased member order, insignificant whitespace, and any duplicate member
 name it collapsed — and a duplicate is exactly where two conforming JSON stacks
 are permitted to disagree about what a file says. An EventStore arrives through
 a git merge, a hand edit or a copy as readily as through a supported append.
+
+The framing is exact in both directions. **Every line is a record and every
+record is terminated**: a blank or whitespace-only line is refused rather than
+skipped, and a non-empty stream ends with the delimiter after its last record.
+Skipping blanks would give a current stream a second spelling the writer never
+emits, and it reads past the first sign of framing damage — a truncated write, a
+partial copy, a bad merge.
+
+Append-only is the semantics, not the write. A real appending write has a third
+state, and it is durable damage: an unlocked reader can observe the file
+mid-write, and a crash between a record's bytes and its delimiter leaves a
+complete JSON object with nothing after it, so the *next* append concatenates
+onto that line and two records become one forever — in a file that is never
+rewritten. A conforming implementation therefore **publishes an Event stream the
+way it publishes every other resource**: staged beside the file and renamed over
+it, so every reader sees the complete old stream or the complete new one, never
+a prefix of either. This is why the delimiter requirement above is a read-path
+rule and not a courtesy.
 
 `rev` starts at 1. Revision zero is the Object before any Event; the first
 admitted Event advances it to 1, and no writer emits zero. Adjacency alone
@@ -2319,7 +2370,28 @@ rationale, which is not a thing anybody wrote. Durable human rationale, if it is
 ever wanted, is its own design rather than a reinterpretation of this one.
 
 Live rules still decide whether the code is **stale**. They do not decide what
-is displayed. Escalation outranks
+is displayed, and they do not decide whether the code is answerable at all —
+that is the Challenge's own state, and it is asked first. Only a Challenge whose
+pinned revision is still current and whose predecessor an admission may build on
+may offer the confirmation instruction. One whose Object has moved offers none.
+One whose admission is already durable offers the idempotent cleanup retry and
+is **not** subjected to live Rule material, because current Rules do not
+reinterpret an admission that already happened. Asking Rule freshness first
+produces two contradictory screens — an instruction to confirm above a notice
+that nothing can be, and a notice that nothing can be confirmed above the
+instruction to retype the code.
+
+`repair` carries **no Rule Review**, and every surface MUST mean the same thing
+by that. It restores exactly what admitted history derives, so the projection is
+identical either side and there is no proposed semantics for a Rule to judge. A
+frozen `review: None` on a repair therefore does not assert that no Object Rule
+applies, a Rule edited after such a Challenge was prepared cannot stale it, and
+its state is measured against admitted history rather than against the stored
+`rev` the corruption may itself have moved. Reading `review: None` as "no Rule
+may apply" closed the one route back from an integrity-invalid Object in every
+workspace that had any Object policy at all.
+
+Escalation outranks
 refusal among exhausted rules, because a rule naming a human is asking for a
 decision rather than for the attempt to be discarded — and a human can still
 decide to refuse. A rule that asks for a human but is not exhausted escalates

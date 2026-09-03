@@ -1359,3 +1359,58 @@ fn a_corrupt_sidecar_still_holds_the_subject_in_place() {
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(engr::backlog::load(&root, &item).is_ok());
 }
+
+/// Not being able to establish absence is not absence.
+///
+/// Absence is what lets the final Backlog Section be consumed, which removes the
+/// item — so a sidecar that may still be there must stop it. `exists` answered
+/// this with `is_ok()`, which reads a permission failure, an I/O error or a path
+/// that is not a directory as "no sidecar", and the guard then let the subject
+/// be removed with its execution memory possibly still on disk. It is the same
+/// fail-open shape the migration floor already refuses.
+///
+/// Unix-only because the fault has to be a stat failure that is *not*
+/// `NotFound`: a regular file where the sidecar directory belongs gives
+/// `ENOTDIR` there, while Windows reports the same shape as absence.
+#[test]
+#[cfg(unix)]
+fn work_that_cannot_be_established_blocks_resolving_the_last_point() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "unresolved topic", "the only point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("sidecar");
+    let subject = bl(&item);
+    assert!(work::exists(&root, &subject).expect("stat"), "it is there");
+
+    // The answer becomes unknowable: the directory the sidecar lives in is
+    // replaced by a regular file, so stat fails with something that is not
+    // absence.
+    let dir = work::root_dir(&root).join("backlog");
+    std::fs::remove_dir_all(&dir).expect("remove the directory");
+    std::fs::write(&dir, "").expect("a file where the directory belongs");
+    let error = work::exists(&root, &subject).expect_err("not knowing is not no");
+    assert_ne!(error.code, 0);
+
+    let refused =
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect_err("the last point cannot be resolved while a sidecar may still exist");
+    assert_ne!(refused.code, 0);
+    // And the item is still there: a refusal that had already removed it would
+    // be worse than the fail-open it replaced.
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("the item survives")
+            .sections
+            .len(),
+        1
+    );
+
+    // With the directory back, absence is establishable again and the ordinary
+    // rule applies: discard the memory, then resolve.
+    std::fs::remove_file(&dir).expect("remove the file");
+    std::fs::create_dir_all(&dir).expect("restore the directory");
+    assert!(!work::exists(&root, &subject).expect("stat"), "it is gone");
+    assert!(
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect("the last point resolves")
+    );
+}

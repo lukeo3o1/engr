@@ -178,8 +178,21 @@ pub fn path(root: &Path, subject: &Subject) -> PathBuf {
 /// Every "is there one" in this module goes through here, so a sidecar cannot be
 /// absent to one caller and present to another — which is what `exists()` and
 /// `symlink_metadata` would otherwise disagree about for a broken link.
-pub fn exists(root: &Path, subject: &Subject) -> bool {
-    std::fs::symlink_metadata(path(root, subject)).is_ok()
+///
+/// **Three answers, not two.** `is_ok()` was the second version of this
+/// question and kept the first one's flaw: it reads `PermissionDenied`, `EIO`
+/// and every other stat failure as absence. Absence is what lets the final
+/// Backlog Section be consumed and its parent item removed, so failing to
+/// establish it there would leave execution memory behind for a subject that no
+/// longer exists — the orphan the guard exists to prevent. Not knowing is not
+/// the same as no, and only `NotFound` is no.
+pub fn exists(root: &Path, subject: &Subject) -> Result<bool> {
+    let path = path(root, subject);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(tool_error(path.display(), error)),
+    }
 }
 
 /// Whether agents may keep going on their own.
@@ -535,6 +548,7 @@ pub fn ids(root: &Path) -> Result<Vec<Subject>> {
     let mut found = Vec::new();
     for (folder, make) in SUBJECTS {
         let dir = root_dir(root).join(folder);
+        store::contained(&dir)?;
         if !dir.is_dir() {
             continue;
         }
@@ -555,7 +569,7 @@ pub fn ids(root: &Path) -> Result<Vec<Subject>> {
 pub fn load(root: &Path, subject: &Subject) -> Result<Work> {
     let path = path(root, subject);
     ensure!(
-        exists(root, subject),
+        exists(root, subject)?,
         EXIT_NOT_FOUND,
         "no work recorded for {} {}",
         subject.noun(),
@@ -632,7 +646,7 @@ fn check_canonical_work(path: &Path, work: &Work) -> Result<()> {
 /// Absence means only that engr holds no operational memory for this subject —
 /// the ordinary state of most subjects, and never an error.
 pub fn find(root: &Path, subject: &Subject) -> Result<Option<Work>> {
-    if !exists(root, subject) {
+    if !exists(root, subject)? {
         return Ok(None);
     }
     load(root, subject).map(Some)
@@ -740,7 +754,7 @@ pub fn start(
     locked(root, attempt, || {
         require_subject(root, subject)?;
         ensure!(
-            !exists(root, subject),
+            !exists(root, subject)?,
             EXIT_INVARIANT,
             "{} {subject} already has work recorded; change it rather than starting again",
             subject.noun()

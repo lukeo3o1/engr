@@ -362,6 +362,7 @@ pub fn check_target(what: &str, reference: &str) -> Result<()> {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
+    store::contained(&dir)?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }

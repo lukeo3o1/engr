@@ -2036,6 +2036,22 @@ fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Resul
     write_raw(&engr::store::object_path(root, &object.id), object)
 }
 
+/// Put a whole Event stream on disk from outside, as its canonical records.
+///
+/// One record per line and every record terminated, because that is the framing
+/// the read path requires — a fixture written any other way would be refused
+/// for its framing rather than for whatever it was written to test.
+fn write_raw_events(root: &std::path::Path, id: &str, events: &[engr::model::Event]) {
+    let path = store::events_path(root, id);
+    std::fs::create_dir_all(path.parent().expect("eventstore")).expect("eventstore directory");
+    let mut text = String::new();
+    for event in events {
+        text.push_str(&engr::proof::canonical_bytes(event, "test fixture").expect("canonical"));
+        text.push('\n');
+    }
+    std::fs::write(&path, text).expect("write the stream");
+}
+
 /// A persisted Event record *is* its canonical bytes, not merely a value that
 /// parses to the right thing.
 ///
@@ -2180,43 +2196,87 @@ fn a_historical_object_must_be_jcs() {
 /// nowhere in the payload — the reducer allocates them — so a per-payload check
 /// passes and a person would be holding a code for a mutation that can never be
 /// admitted.
+///
+/// The fixture is a **migration bootstrap**, which is the only admitted history
+/// that can put a section counter at the ceiling in one Event. It used to be a
+/// hand-edited projection, and that is now refused one step earlier and for a
+/// better reason — see
+/// [`a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor`]. The
+/// revision ceiling has no such history at all: reaching it would take 2^53
+/// admitted Events, so the only way to see one is a divergent projection, and
+/// the second half of this test pins that refusal instead.
 #[test]
 fn preparation_refuses_a_transition_no_identity_can_carry() {
     let (_dir, root) = workspace();
     let ceiling = engr::proof::MAX_SAFE_INTEGER;
 
-    let set_rev: fn(&mut engr::model::Object, u64) = |object, value| object.rev = value;
-    let set_counter: fn(&mut engr::model::Object, u64) =
-        |object, value| object.next_section_id = value;
-    for (what, at_ceiling) in [
-        ("the revision", set_rev),
-        ("the section counter", set_counter),
-    ] {
-        let id = new_object(&root, "at the ceiling");
-        let object = store::load_object(&root, &id).expect("object");
-        let resealed = engr::integrity::mutate(&object, |object| {
-            at_ceiling(object, ceiling);
-            Ok(())
-        })
-        .expect("reseal at the ceiling");
-        save_raw(&root, &resealed.object).expect("put it on disk");
+    let id = engr::model::new_id();
+    let bootstrap = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        engr::model::Action::ObjectMigrated {
+            snapshot: Box::new(engr::model::Snapshot {
+                title: "at the ceiling".to_owned(),
+                object_type: None,
+                state: State::Open,
+                next_section_id: ceiling,
+                sections: Vec::new(),
+            }),
+        },
+        1,
+        EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a migration bootstrap at the ceiling is a valid record");
+    write_raw_events(&root, &id, std::slice::from_ref(&bootstrap));
+    let mut migrated = engr::model::Object::new(id.clone(), String::new()).expect("object");
+    migrated.rev = 0;
+    migrated.reseal().expect("seal");
+    engr::model::project(&mut migrated, &bootstrap).expect("bootstrap projects");
+    migrated.reseal().expect("reseal the projection");
+    save_raw(&root, &migrated).expect("put the migrated projection on disk");
+    // The fixture is coherent authority: the projection is what its own history
+    // produced, so nothing below is refused for being out of band.
+    assert!(
+        ops::verify(&root, &id).expect("verify").passed(),
+        "the migrated fixture must be valid stored authority"
+    );
 
-        let events = std::fs::read(store::events_path(&root, &id)).expect("events");
-        let error = gate::prepare(&root, payload(Act::Add, &id, "one more"))
-            .err()
-            .unwrap_or_else(|| panic!("{what}: this must be refused"));
-        assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
-        assert!(error.message.contains("safe integer"), "{what}: {error}");
-        assert!(
-            gate::pending(&root).expect("candidates").is_empty(),
-            "{what}: no candidate was minted"
-        );
-        assert_eq!(
-            std::fs::read(store::events_path(&root, &id)).expect("events"),
-            events,
-            "{what}: and nothing durable moved"
-        );
-    }
+    let events = std::fs::read(store::events_path(&root, &id)).expect("events");
+    let error = gate::prepare(&root, payload(Act::Add, &id, "one more"))
+        .expect_err("the section counter cannot advance past the ceiling");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(error.message.contains("safe integer"), "{error}");
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "no candidate was minted"
+    );
+    assert_eq!(
+        std::fs::read(store::events_path(&root, &id)).expect("events"),
+        events,
+        "and nothing durable moved"
+    );
+
+    // A revision at the ceiling can only be a projection nothing admitted, and
+    // that is what it is refused as.
+    let other = new_object(&root, "at the ceiling");
+    let object = store::load_object(&root, &other).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.rev = ceiling;
+        Ok(())
+    })
+    .expect("reseal at the ceiling");
+    save_raw(&root, &resealed.object).expect("put it on disk");
+    let error = gate::prepare(&root, payload(Act::Add, &other, "one more"))
+        .expect_err("a revision no history produced is not a predecessor");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("its revision is not what"),
+        "{error}"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "no candidate was minted"
+    );
 }
 
 /// Two Challenges can name the same transition and are still two questions.
@@ -2564,5 +2624,276 @@ fn a_section_is_admitted_when_it_is_admitted_and_not_when_it_was_proposed() {
     assert_eq!(
         again.object.sections[0].admitted, stamped,
         "and reports the instant the record actually holds"
+    );
+}
+
+/// A resealed out-of-band edit cannot become the predecessor of an admission.
+///
+/// Integrity alone does not close this. Seals are recomputed from the bytes on
+/// disk, so wording changed outside an admission path and then resealed
+/// verifies perfectly — and the projection would then be the predecessor of an
+/// unrelated legitimate mutation, which appends normally and saves a state the
+/// complete EventStore never produced. One Event later the unauthorized wording
+/// reads as ordinary admitted authority, with a durable record standing behind
+/// it.
+///
+/// Every route to that state is asked the same question.
+#[test]
+fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "laundering");
+    admit(&root, payload(Act::Add, &id, "the confirmed wording"));
+    // Prepared *before* the edit, so the confirm path is asked about a
+    // predecessor that moved underneath a question a person is holding.
+    let held = gate::prepare(&root, payload(Act::Add, &id, "an unrelated addition"))
+        .expect("prepare against sound authority");
+
+    let object = store::load_object(&root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(&root, &resealed.object).expect("put it on disk");
+
+    // The seals pass. That is the whole difficulty: nothing about the bytes is
+    // damaged, and only admitted history establishes that they were admitted.
+    let stored = store::load_object(&root, &id).expect("it loads");
+    engr::integrity::check_stored_object_integrity(&stored).expect("and it verifies");
+    assert_eq!(stored.sections[0].text, "wording nobody was ever shown");
+
+    let divergent = |what: &str, error: Option<engr::Error>| {
+        let error = error.unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}");
+        assert!(
+            error
+                .message
+                .contains("not what its admitted history produced"),
+            "{what}: {error}"
+        );
+        assert!(error.message.contains("engr repair"), "{what}: {error}");
+    };
+    divergent(
+        "preparing a Human mutation",
+        gate::prepare(&root, payload(Act::Add, &id, "more")).err(),
+    );
+    divergent(
+        "admitting an Agent mutation",
+        gate::admit_agent(
+            &root,
+            common::agent_payload(Act::Add, &id, content("more")),
+            None,
+        )
+        .err(),
+    );
+    divergent(
+        "confirming a question prepared beforehand",
+        gate::confirm(&root, &format!("CONFIRM {}", held.candidate.code())).err(),
+    );
+    // And the pending surface says so rather than offering the code.
+    match gate::answerable(&root, &held.candidate).expect("answerable") {
+        gate::Answerable::Unanswerable(reason) => assert!(
+            reason.contains("not what its admitted history produced"),
+            "{reason}"
+        ),
+        other => panic!("a divergent predecessor is not answerable: {other:?}"),
+    }
+    // The durable boundary asks it too, whatever route reaches it. This is the
+    // step that would make the edit durable — by writing a record that stands
+    // behind it — so the property belongs to the boundary and not only to the
+    // three ways in.
+    divergent(
+        "the durable append boundary",
+        store::check_appendable(
+            &root,
+            &unadmitted_human_event(&id, payload(Act::Add, &id, "more"), 3),
+        )
+        .err(),
+    );
+
+    // Verification reports it, and reports it as itself: the seals are sound, so
+    // this is not a tampering finding.
+    let report = ops::verify(&root, &id).expect("verify");
+    assert!(!report.passed(), "a divergent projection is not a PASS");
+    assert!(!report.object_tampered, "the seals verify");
+    assert!(report.tampered.is_empty(), "and so does every Section seal");
+    let divergence = report
+        .divergent_history
+        .as_deref()
+        .expect("verification names the divergence");
+    assert!(
+        divergence.contains("not what its admitted history produced"),
+        "{divergence}"
+    );
+
+    // Nothing durable moved while all of that was refused.
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "no route appended anything"
+    );
+
+    // The stored bytes still verify, so this is not the damage `repair` exists
+    // for: the honest route is the ordinary one, once the projection is the
+    // admitted one again.
+    let refused = gate::prepare_repair(&root, &id)
+        .expect_err("repair is for a projection whose seals failed, and these verify");
+    assert_eq!(refused.code, engr::EXIT_INVARIANT);
+    assert!(refused.message.contains("nothing to repair"), "{refused}");
+    save_raw(&root, &ops::provable(&root, &id).expect("provable")).expect("restore");
+    assert!(
+        ops::verify(&root, &id).expect("verify").passed(),
+        "restored authority verifies again"
+    );
+    admit(&root, payload(Act::Add, &id, "and ordinary work continues"));
+}
+
+/// A repair is classified from admitted history, not from the bytes it
+/// distrusts.
+///
+/// `prepare_repair` already derives its `expected_rev` from provable history.
+/// Classification used to read the stored projection instead, so corruption
+/// that moved `rev` made the one recovery action `Stale` before confirmation
+/// could reach the repair-specific path — and cleanup would then discard a
+/// legitimate repair Challenge as dead.
+#[test]
+fn a_repair_is_classified_from_history_when_the_stored_revision_is_corrupt() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "corrupt revision");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+
+    // A schema-valid, integrity-invalid stored projection whose revision itself
+    // is wrong: the seal is left alone, so this is corruption rather than a
+    // resealed edit.
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["rev"] = serde_json::json!(9);
+    write_raw(&path, &value).expect("write");
+    store::load_object(&root, &id).expect("it still parses");
+
+    let prepared = gate::prepare_repair(&root, &id).expect("repair is proposable");
+    assert_eq!(
+        prepared.candidate.expected_rev(),
+        2,
+        "the predecessor is the provable revision, not the stored one"
+    );
+    assert!(
+        matches!(
+            gate::candidate_state(&root, &prepared.candidate).expect("state"),
+            gate::CandidateState::Pending
+        ),
+        "a repair is pending, not stale"
+    );
+    assert!(
+        gate::is_live(&root, &prepared.candidate),
+        "so cleanup must not treat it as spent"
+    );
+    assert!(
+        matches!(
+            gate::answerable(&root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "and the screen offers the code"
+    );
+
+    let admitted = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("the repair is confirmable");
+    assert_eq!(admitted.object.rev, 3);
+    assert_eq!(admitted.object.sections[0].text, "admitted wording");
+    assert!(ops::verify(&root, &id).expect("verify").passed());
+}
+
+/// An integrity-invalid ordinary predecessor makes its pending question
+/// unanswerable, and the screen says so.
+///
+/// Ordinary confirmation refuses it — correctly, or unrelated work would launder
+/// an out-of-band edit into valid authority. The surface used to be rendered
+/// from diagnostic material and a Rule check alone, so it offered a code that
+/// could not be spent.
+#[test]
+fn an_ordinary_question_over_corrupt_authority_is_unanswerable() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "corrupt authority");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+    let held = gate::prepare(&root, payload(Act::Add, &id, "an addition"))
+        .expect("prepare against sound authority");
+
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["sections"][0]["text"] = serde_json::json!("edited without resealing");
+    write_raw(&path, &value).expect("write");
+
+    match gate::answerable(&root, &held.candidate).expect("answerable") {
+        // The seal failure itself, named — not a Rule verdict, and not a
+        // confirmation instruction.
+        gate::Answerable::Unanswerable(reason) => {
+            assert!(reason.contains("seal"), "{reason}");
+        }
+        other => panic!("corrupt authority is not answerable: {other:?}"),
+    }
+    let error = gate::confirm(&root, &format!("CONFIRM {}", held.candidate.code()))
+        .expect_err("and confirmation refuses it too");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+}
+
+/// Cleaning up a spent Challenge does not depend on material that mattered only
+/// before admission.
+///
+/// The documented crash window leaves a durable Event, a saved projection and a
+/// Challenge file. The only operation left is removing the file — but live
+/// payload validation used to run first, resolving `based_on` and reference
+/// commits against the repository. If those commits stopped resolving in the
+/// meantime, the retry failed and the spent Challenge stayed on disk with
+/// nothing left to admit and no way to say so.
+#[test]
+fn an_applied_challenge_is_cleaned_up_even_when_its_basis_is_gone() {
+    let (_dir, root) = workspace();
+    let commit = commit_all(&root, "a basis to pin");
+    let id = new_object(&root, "spent challenge");
+    let mut proposal = payload(Act::Add, &id, "wording pinned to a commit");
+    proposal
+        .action
+        .value_mut()
+        .expect("a section value")
+        .content
+        .based_on = Some(BasedOn::new(commit.clone()));
+    let prepared = gate::prepare(&root, proposal).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let admitted = common::admitted_code(&root, &code);
+    assert_eq!(admitted.object.rev, 2);
+
+    // The crash: the record and the projection are durable, the Challenge was
+    // never removed.
+    write_raw(
+        &store::challenge_path(&root, &code).expect("path"),
+        &prepared.candidate.challenge,
+    )
+    .expect("restore the challenge a deletion crash would have left");
+
+    // And the repository moves on in a way that makes the pinned commit
+    // unresolvable — a prune, a rewritten branch, a fresh shallow clone.
+    // Reproduced here by replacing the repository entirely.
+    std::fs::remove_dir_all(root.join(".git")).expect("drop the repository");
+    commit_all(&root, "a different history");
+    assert!(
+        engr::git::resolve(&root, &commit).is_none(),
+        "the pinned commit must no longer resolve"
+    );
+
+    // Nothing is left to admit, so nothing about the mutation is revalidated.
+    match gate::answerable(&root, &prepared.candidate).expect("answerable") {
+        gate::Answerable::Cleanup => {}
+        other => panic!("an applied admission is cleanup, not {other:?}"),
+    }
+    let again = gate::confirm(&root, &format!("CONFIRM {code}")).expect("cleanup finishes");
+    assert_eq!(again.object.rev, 2, "the retry admits nothing");
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and the spent Challenge is gone"
     );
 }

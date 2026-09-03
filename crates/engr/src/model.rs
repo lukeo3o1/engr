@@ -135,6 +135,21 @@ impl Content {
     }
 
     fn validate(&self) -> Result<()> {
+        // A section says something. `text` is required and may be empty only
+        // where non-empty literal content carries the meaning instead — a
+        // section with neither asserts nothing, and every surface that reads one
+        // would be presenting a blank as admitted knowledge.
+        //
+        // Here rather than only at the mutation boundary, because this is the
+        // boundary both persisted shapes pass through: a stored Object's
+        // Sections and an Event's `SectionValue` are the same value, and a rule
+        // only the write path applies is a rule one hand-edit away from being
+        // untrue of the record.
+        ensure!(
+            !self.text.is_empty() || !self.content.is_empty(),
+            EXIT_SCHEMA,
+            "a section's text is empty and it carries no content, so it asserts nothing"
+        );
         // Empty is not a header. An optional member whose absence and whose
         // empty value mean the same thing is one member with two spellings,
         // and #66's omission rule says absence is written by omitting it.
@@ -1077,15 +1092,19 @@ impl Payload {
     pub fn validate(&self) -> Result<()> {
         validate_object_id(&self.object)?;
         if let Some(value) = self.action.value() {
-            value.validate()?;
-            // Text may be empty only when there is non-empty literal content to
-            // carry the meaning instead. Blank is not a section.
+            // Before the schema check, not after it, so a caller who typed
+            // nothing is answered as a caller. The stricter half of this rule
+            // lives in `Content::validate`, which refuses an empty `text` beside
+            // empty content wherever a persisted Section is read; this one also
+            // refuses wording that is only whitespace, which is a mistake at the
+            // keyboard rather than a shape the record forbids.
             ensure!(
                 !value.content.text.trim().is_empty() || !value.content.content.is_empty(),
                 EXIT_USAGE,
                 "{} requires text, or literal content to stand in its place",
                 self.action.event_type()
             );
+            value.validate()?;
         }
         if let Some(title) = self.action.title() {
             ensure!(

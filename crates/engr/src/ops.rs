@@ -1,6 +1,6 @@
 //! Maintenance: crash reconciliation and verify.
 
-use crate::model::{project, replay_recoverable_tail, Action, Object, Section};
+use crate::model::{project, replay_recoverable_tail, Action, Event, Object, Section};
 use crate::{ensure, git, store, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA};
 use std::path::Path;
 
@@ -122,27 +122,45 @@ pub fn sound(root: &Path, object: &Object, section: Option<u64>) -> Result<()> {
 /// which is a reason to refuse the claim rather than to wave it through.
 fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
     let events = store::load_events(root, &object.id)?;
-    let (admitted, _) = crate::model::replay_recoverable_tail(
-        Object::new(object.id.clone(), String::new())?,
-        &events,
-    )
-    .map_err(|error| {
+    let admitted = rebuilt(&object.id, &events)?;
+    if let Some(what) = disagreement(&admitted, object) {
+        return Err(Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "{}: its {what} is not what was admitted; it was changed outside an admission path",
+                object.id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The projection admitted history produces, rebuilt from rev 0.
+fn rebuilt(id: &str, events: &[Event]) -> Result<Object> {
+    let empty = Object::new(id.to_owned(), String::new())?;
+    let (admitted, _) = replay_recoverable_tail(empty, events).map_err(|error| {
         Error::new(
             EXIT_INVARIANT,
             format!(
-                "{}: its history cannot be rebuilt, so there is nothing to check it against: {}",
-                object.id, error.message
+                "{id}: its history cannot be rebuilt, so there is nothing to check it against: {}",
+                error.message
             ),
         )
     })?;
-    // The whole aggregate, not a sample of it. Naming five scalars would leave
-    // the rest unexamined, and the gap that hides in is not hypothetical: the
-    // seal loop above walks the Sections the *projection* holds, so one deleted
-    // outside an admission path is never visited, every remaining seal passes, and the
-    // counters do not move — gaps below `next_section_id` are what legitimate
-    // admitted deletion looks like. Comparing what the history rebuilt is the
-    // only form of this check that covers what was not looked at.
-    for (what, agrees) in [
+    Ok(admitted)
+}
+
+/// The first fact a projection and its own admitted history disagree about.
+///
+/// The whole aggregate, not a sample of it. Naming five scalars would leave the
+/// rest unexamined, and the gap that hides in is not hypothetical: a seal loop
+/// walks the Sections the *projection* holds, so one deleted outside an
+/// admission path is never visited, every remaining seal passes, and the
+/// counters do not move — gaps below `next_section_id` are what legitimate
+/// admitted deletion looks like. Comparing what the history rebuilt is the only
+/// form of this check that covers what was not looked at.
+fn disagreement(admitted: &Object, object: &Object) -> Option<&'static str> {
+    [
         ("title", admitted.title == object.title),
         ("type", admitted.object_type == object.object_type),
         ("state", admitted.state == object.state),
@@ -152,15 +170,71 @@ fn object_level_authority(root: &Path, object: &Object) -> Result<()> {
             admitted.next_section_id == object.next_section_id,
         ),
         ("sections", admitted.sections == object.sections),
-    ] {
-        ensure!(
-            agrees,
+    ]
+    .into_iter()
+    .find_map(|(what, agrees)| (!agrees).then_some(what))
+}
+
+/// Whether this projection is the value its own admitted history produced, as
+/// far as its own revision.
+///
+/// **The prefix, not the whole stream.** An Event that is durable but not yet
+/// projected is a recoverable crash tail, which is a legitimate state and not a
+/// divergence — [`reconcile`] exists to apply it. What this refuses is the other
+/// direction: a projection saying something no admitted Event ever said.
+///
+/// Integrity does not answer this and cannot. A Section edited out of band and
+/// then resealed — by a repair-shaped script, by another implementation, by
+/// hand — satisfies every seal, because the seals are recomputed from whatever
+/// the bytes now say. Only the record of admissions establishes that the bytes
+/// were ever admitted.
+pub fn history_consistent(root: &Path, object: &Object) -> Result<()> {
+    history_consistent_with(&store::load_events(root, &object.id)?, object)
+}
+
+/// The same question, for a caller that is already holding the history.
+///
+/// The durable append boundary has the stream in hand and must not read it a
+/// third time to ask this; everything after the projection's own revision is
+/// filtered out here, so a caller may pass a tail that already includes the
+/// record it is about to write.
+pub(crate) fn history_consistent_with(events: &[Event], object: &Object) -> Result<()> {
+    let admitted: Vec<Event> = events
+        .iter()
+        .filter(|event| event.rev <= object.rev)
+        .cloned()
+        .collect();
+    let admitted = rebuilt(&object.id, &admitted)?;
+    if let Some(what) = disagreement(&admitted, object) {
+        return Err(Error::new(
             EXIT_INVARIANT,
-            "{}: its {what} is not what was admitted; it was changed outside an admission path",
-            object.id
-        );
+            format!(
+                "{}: its {what} is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it",
+                object.id
+            ),
+        ));
     }
     Ok(())
+}
+
+/// The predecessor an ordinary admission is allowed to build on.
+///
+/// Reconciliation alone is not enough, and that gap is the whole reason this
+/// exists. It establishes that the stored bytes seal correctly and that any
+/// durable Event tail has been applied — neither of which says the bytes were
+/// admitted. So an out-of-band semantic edit that was resealed could become the
+/// predecessor of an unrelated legitimate mutation, and that mutation would then
+/// append normally and carry the unauthorized wording forward into a saved
+/// projection the complete EventStore never produced. One Event later it reads
+/// as ordinary admitted authority.
+///
+/// Reconstruction of a divergent projection stays with `repair`, which is the
+/// one path that exists to admit it — visibly, through the Human Gate, as
+/// exactly what history derives.
+pub(crate) fn admission_predecessor(root: &Path, id: &str) -> Result<Object> {
+    let object = reconcile_locked(root, id)?;
+    history_consistent(root, &object)?;
+    Ok(object)
 }
 
 /// Close the window between appending an event and saving the projection.
@@ -334,6 +408,13 @@ pub struct Report {
     pub broken_replacements: Vec<BrokenReplacement>,
     pub unprojected: usize,
     pub projection_missing: bool,
+    /// Why the stored projection is not what its admitted history produced.
+    ///
+    /// Its own finding rather than a flavour of tampering, because the seals
+    /// pass: this is the state a resealed out-of-band edit leaves, and reporting
+    /// it as an integrity failure would say the bytes are damaged when what is
+    /// wrong is that nothing ever admitted them.
+    pub divergent_history: Option<String>,
     pub uncommitted: Option<bool>,
 }
 
@@ -346,6 +427,7 @@ impl Report {
             && self.standing_on_unreadable.is_empty()
             && self.broken_replacements.is_empty()
             && !self.projection_missing
+            && self.divergent_history.is_none()
             && self.unprojected == 0
     }
 }
@@ -380,6 +462,22 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     // is precisely how an unsealed Object with no Sections reported as healthy,
     // because every other field of the report was empty too.
     let object_tampered = crate::integrity::check_object_integrity(object).is_err();
+    // The question no seal answers. Every integrity check recomputes from the
+    // bytes on disk, so wording edited outside an admission path and then
+    // resealed verifies perfectly; what exposes it is that admitted history
+    // never produced it. Reported over the bytes actually persisted, for the
+    // same reason the seals are: an unrepaired projection is the finding.
+    let divergent_history = match &persisted {
+        Some(persisted) => history_consistent(root, persisted).err().map(|error| {
+            // The identity is already the first column of the report.
+            error
+                .message
+                .strip_prefix(&format!("{id}: "))
+                .unwrap_or(&error.message)
+                .to_owned()
+        }),
+        None => None,
+    };
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     let mut standing_on_missing = Vec::new();
@@ -499,6 +597,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             .filter(|event| event.rev > projection_rev)
             .count(),
         projection_missing: persisted.is_none(),
+        divergent_history,
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })
 }

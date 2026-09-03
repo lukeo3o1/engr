@@ -2493,22 +2493,36 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             )),
         }
     }
-    // Whether this question can still be answered, asked the way confirmation
-    // asks it. A screen that printed the instruction anyway would be telling a
-    // person to answer something already refused — and the previous version did
-    // exactly that whenever a Rule changed under the same id, a Rule appeared
-    // where none had applied, or the Rule material stopped loading, because it
-    // compared ids only, only for reviewed Challenges, and discarded errors.
-    match gate::check_rule_material(root, candidate) {
-        Ok(()) => out.push_str(&format!(
+    // What this screen may offer, decided by the Challenge's own state first and
+    // by live Rule material only where a new admission is still on the table.
+    // One statement, in one place: this screen used to print the confirmation
+    // instruction from a Rule check alone and leave the state to a line
+    // underneath it, so a dead Challenge said "type this exactly to confirm"
+    // above "this candidate is dead", and an already-applied one said nothing
+    // here can be confirmed above the instruction to retype the code.
+    let trailer = match gate::answerable(root, candidate) {
+        Ok(gate::Answerable::Confirm) => format!(
             "\nType this exactly to confirm:  CONFIRM {}\n",
             candidate.code()
-        )),
-        Err(error) => out.push_str(&format!(
-            "\nUNANSWERABLE  {}\n              prepare it again; nothing here can be confirmed\n",
+        ),
+        Ok(gate::Answerable::Cleanup) => format!(
+            "\nALREADY APPLIED  this admission is already in the record.\n                 Retype it to finish cleanup:  CONFIRM {}\n",
+            candidate.code()
+        ),
+        Ok(gate::Answerable::Dead { current_rev }) => format!(
+            "\nDEAD          the object moved to revision {current_rev} after this was prepared\n              prepare it again; nothing here can be confirmed\n"
+        ),
+        Ok(gate::Answerable::Unanswerable(reason)) => format!(
+            "\nUNANSWERABLE  {reason}\n              prepare it again; nothing here can be confirmed\n"
+        ),
+        // Not "prepare it again": the state could not be established at all, so
+        // what to do about it is not something this screen knows.
+        Err(error) => format!(
+            "\nUNANSWERABLE  {}\n              this candidate's state cannot be established\n",
             error.message
-        )),
-    }
+        ),
+    };
+    out.push_str(&trailer);
     out
 }
 
@@ -2531,16 +2545,10 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
         Some(code) => {
             let candidate = gate::find(root, code)?;
             let notes = gate::notes_for(root, &candidate);
+            // One trailer, printed by the renderer, which is the only thing that
+            // knows both halves. A second statement here is how the screen came
+            // to contradict itself.
             print!("{}", render_candidate(root, &candidate, &notes));
-            match gate::candidate_state(root, &candidate)? {
-                gate::CandidateState::Pending => {}
-                gate::CandidateState::AlreadyApplied(_) => println!(
-                    "\nThis candidate was already applied. Retry the same confirmation to finish cleanup."
-                ),
-                gate::CandidateState::Stale { .. } => println!(
-                    "\nThis candidate is dead — the object moved after it was prepared. Prepare again."
-                ),
-            }
             Ok(())
         }
         None => {
@@ -2654,6 +2662,12 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
             println!(
                 "          required Object projection is missing; admitted history reconstructs it"
             );
+        }
+        // Said in its own words, because the seals pass. This is what a resealed
+        // out-of-band edit looks like from here: intact bytes that admitted
+        // history never produced.
+        if let Some(divergent) = &report.divergent_history {
+            println!("          {divergent}");
         }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");

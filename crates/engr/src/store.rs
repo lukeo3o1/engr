@@ -119,6 +119,59 @@ pub fn refusal_path(root: &Path) -> PathBuf {
     local_dir(root).join("refused-oversize.json")
 }
 
+/// No persisted resource is reached by following a link.
+///
+/// Every path here is a workspace resource, and a workspace resource is what
+/// git tracks at that path. A link breaks that in a way no digest can see: git
+/// records the link — its target's *name*, as a blob — while engr reads and
+/// writes the target's *bytes*, so `.engr` or any directory or file beneath it
+/// can redirect the whole record outside the repository entirely, and the
+/// history a reviewer reads is then not the state the tool is using. It is the
+/// same provenance split the Rule loader refuses, for the same reason.
+///
+/// Anchored at the `.engr` component and inclusive of it, because a link *there*
+/// is the one that redirects everything: a check that started below it would
+/// have every path pass through the redirection before being examined. Nothing
+/// above the workspace is examined — a repository reached through a link is
+/// ordinary (macOS hands every temporary directory out that way), and the
+/// question is never how somebody arrived at the workspace, only whether the
+/// resources inside it are the ones the workspace holds.
+///
+/// A path that is not inside a `.engr` directory is not this boundary's
+/// business and passes untouched.
+pub(crate) fn contained(path: &Path) -> Result<()> {
+    let mut parts = path.components();
+    let mut cursor = PathBuf::new();
+    // Everything above `.engr`, taken on trust and never stat'ed.
+    for part in parts.by_ref() {
+        cursor.push(part);
+        if part.as_os_str() == DIR {
+            break;
+        }
+    }
+    if cursor.file_name().map(|name| name != DIR).unwrap_or(true) {
+        return Ok(());
+    }
+    for part in std::iter::once(cursor.clone()).chain(parts.map(|part| {
+        cursor.push(part);
+        cursor.clone()
+    })) {
+        match fs::symlink_metadata(&part) {
+            Ok(held) => ensure!(
+                !held.file_type().is_symlink(),
+                EXIT_SCHEMA,
+                "{}: something on the way to this resource is a link to somewhere else, so what engr would read is not what this workspace holds",
+                part.display()
+            ),
+            // Nothing below a path that is not there can be there either, and a
+            // resource yet to be written is the ordinary case for a write.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(tool_error(part.display(), error)),
+        }
+    }
+    Ok(())
+}
+
 /// Walk up from `start` looking for a workspace, so the tool works from any
 /// subdirectory the way git does.
 pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -129,6 +182,7 @@ pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
             "no {DIR} workspace at {}",
             path.display()
         );
+        contained(&engr_dir(path))?;
         return Ok(path.to_path_buf());
     }
     let current =
@@ -136,6 +190,11 @@ pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
     let mut cursor = current.as_path();
     loop {
         if engr_dir(cursor).is_dir() {
+            // Found, and then refused rather than walked past: a redirected
+            // `.engr` is where the workspace is, so continuing up the tree
+            // would silently operate on a different workspace than the one the
+            // caller is standing in.
+            contained(&engr_dir(cursor))?;
             return Ok(cursor.to_path_buf());
         }
         match cursor.parent() {
@@ -562,6 +621,7 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn read_text(path: &Path) -> Result<String> {
+    contained(path)?;
     fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(EXIT_NOT_FOUND, format!("{}: not found", path.display()))
@@ -635,15 +695,8 @@ pub(crate) fn read_resource<T: DeserializeOwned + Serialize>(
 
 /// Write via a temporary file and rename, so a reader never sees half a file.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-    }
     let text = crate::proof::canonical_bytes(value, &path.display().to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, text.as_bytes())
-        .map_err(|error| tool_error(temporary.display(), error))?;
-    fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
-    Ok(())
+    publish(path, &text)
 }
 
 /// Write exact text via a temporary file and rename.
@@ -653,14 +706,42 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// artifact it checked and the artifact it publishes have to be the same value,
 /// not two serializations that ought to agree.
 pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
+    publish(path, text)
+}
+
+/// Publish exact bytes at `path` as one indivisible step.
+///
+/// Written beside the destination, flushed to the device, then renamed over it.
+/// Every persisted file goes through this, so no reader — locked or not — can
+/// observe a resource mid-write, and a crash leaves the complete previous
+/// content rather than a prefix of the next one. #66's reader model has exactly
+/// two states, complete old and complete new; a partial third one is not a
+/// state any read path is defined over.
+///
+/// The flush is what makes the ordering durable rather than merely visible:
+/// without it the rename can reach the device before the bytes it names do, and
+/// a crash in that window leaves the destination pointing at whatever the
+/// filesystem had. The containing directory is not flushed — that is
+/// POSIX-specific and unavailable on one of the supported platforms, so
+/// relying on it would make durability mean different things per target.
+fn publish(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    // Before the directories are created, so a redirected component is refused
+    // rather than materialized behind the link.
+    contained(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, text.as_bytes())
+    let mut file =
+        fs::File::create(&temporary).map_err(|error| tool_error(temporary.display(), error))?;
+    file.write_all(text.as_bytes())
         .map_err(|error| tool_error(temporary.display(), error))?;
+    file.sync_all()
+        .map_err(|error| tool_error(temporary.display(), error))?;
+    drop(file);
     fs::rename(&temporary, path).map_err(|error| tool_error(path.display(), error))?;
     Ok(())
 }
@@ -753,6 +834,10 @@ pub(crate) fn save_object(root: &Path, object: &Object) -> Result<()> {
 
 pub fn object_ids(root: &Path) -> Result<Vec<String>> {
     let dir = objects_dir(root);
+    // Enumeration follows links too, so a redirected directory would list
+    // identities from another tree and every load of one would then be refused.
+    // Said once, here, rather than once per identity.
+    contained(&dir)?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -770,6 +855,7 @@ pub fn object_ids(root: &Path) -> Result<Vec<String>> {
 
 pub(crate) fn event_ids(root: &Path) -> Result<Vec<String>> {
     let dir = eventstore_dir(root);
+    contained(&dir)?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1019,20 +1105,41 @@ pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
 /// The durable append, for a caller already inside [`with_lock`] — which is
 /// every caller, because the only routes here are `confirm`, `admit_agent` and
 /// the migration bootstrap.
+///
+/// **Append-only is the semantics, not the write.** A real `O_APPEND` write to
+/// the canonical stream has three states, and the third one is durable damage:
+/// an unlocked reader can observe the file mid-write, and a crash between the
+/// record's bytes and its delimiter leaves a stream whose last line is a
+/// complete JSON object with no newline after it — which the decoder used to
+/// accept, so the *next* append concatenated onto that line and the two records
+/// became one forever. Nothing recovers from that, because the EventStore is
+/// never rewritten.
+///
+/// So the whole stream is republished through [`publish`] instead: the previous
+/// bytes plus one terminated record, staged beside the file and renamed over it.
+/// Readers see the complete old stream or the complete new one. The cost is
+/// rewriting a file this operation has already read and validated in full, which
+/// is what the continuity and replay checks above do anyway.
 pub(crate) fn append_event_locked(root: &Path, object: &str, event: &Event) -> Result<()> {
     check_appendable_locked(root, event, Some(object))?;
     let path = events_path(root, object);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-    }
     let line = crate::proof::canonical_bytes(event, "Event")?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| tool_error(path.display(), error))?;
-    use std::io::Write;
-    writeln!(file, "{line}").map_err(|error| tool_error(path.display(), error))
+    let held = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    // The decoder refuses an unterminated stream, and `check_appendable_locked`
+    // has already decoded this one — so this cannot fire from a stream that got
+    // here honestly. Asked anyway, because the one thing this function must
+    // never do is turn two records into one.
+    ensure!(
+        held.is_empty() || held.ends_with('\n'),
+        EXIT_SCHEMA,
+        "{}: the last record has no delimiter after it, so appending would join two events into one",
+        path.display()
+    );
+    publish(&path, &format!("{held}{line}\n"))
 }
 
 /// Every check the append performs, and none of the writing.
@@ -1082,6 +1189,22 @@ fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> 
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
     };
+    // And that the projection this record lands on is one an admission may
+    // build on: the value its own admitted history produced, not merely a
+    // correctly sealed one. Asked here as well as at each entry to the gate,
+    // because "this workspace's authority was admitted" is a property of the
+    // durable boundary rather than of the route taken to it — and this is the
+    // step that would make an out-of-band edit durable, by writing a record
+    // that stands behind it.
+    //
+    // `repair` is the exception, and it is the whole recovery contract: it
+    // exists to admit exactly this reconstruction, visibly, through the Human
+    // Gate.
+    if let Some(stored) = &stored {
+        if !matches!(event.action, Action::ObjectRepaired {}) {
+            crate::ops::history_consistent_with(&tail, stored)?;
+        }
+    }
     validate_recoverable_tail(&id, stored, &tail)?;
     // Last, and only for a record that is otherwise sound: a malformed Event
     // should be refused for being malformed, not for failing a proof about a
@@ -1116,6 +1239,10 @@ fn owning_object(root: &Path, event: &Event) -> Result<String> {
 
 pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
     let path = events_path(root, id);
+    // Before `exists()`, which follows links: a dangling stream link would
+    // otherwise be reported as a missing history rather than as the redirection
+    // it is, and the two have different answers.
+    contained(&path)?;
     if !path.exists() {
         ensure!(
             !object_path(root, id).exists(),
@@ -1130,12 +1257,33 @@ pub fn load_events(root: &Path, id: &str) -> Result<Vec<Event>> {
 }
 
 /// Decode the one EventStore text a caller already captured.
+///
+/// **One record per line, every line a record, and every record terminated.**
+/// Blank lines used to be skipped, which gave a current stream a second
+/// spelling — the writer never emits one, so a file carrying them is not the
+/// canonical representation this generation claims to have exactly one of. It
+/// also hid framing damage: a truncated write, a bad merge or a partial copy
+/// shows up first as whitespace where a record belongs, and skipping it is
+/// reading past the evidence. The final delimiter is required for the sharper
+/// version of the same fault — an unterminated last line is a record whose write
+/// did not finish, and accepting it is what would let the next append join two
+/// events into one.
 pub(crate) fn decode_events(path: &Path, id: &str, text: &str) -> Result<Vec<Event>> {
+    ensure!(
+        text.is_empty() || text.ends_with('\n'),
+        EXIT_SCHEMA,
+        "{}: the last event record has no delimiter after it, so this history is truncated",
+        path.display()
+    );
     let mut events: Vec<Event> = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
+        ensure!(
+            !line.trim().is_empty(),
+            EXIT_SCHEMA,
+            "{}:{}: an event stream holds one record per line and no blank ones",
+            path.display(),
+            index + 1
+        );
         let stored: serde_json::Value = serde_json::from_str(line).map_err(|error| {
             Error::new(
                 EXIT_SCHEMA,

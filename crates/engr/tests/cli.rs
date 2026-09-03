@@ -335,9 +335,19 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     let shown = run_engr(root, &["candidate", &retry_code]);
     assert!(shown.status.success());
     let shown_text = String::from_utf8_lossy(&shown.stdout);
-    assert!(shown_text.contains("already applied"));
-    assert!(!shown_text.contains("dead"));
-    assert!(!shown_text.contains("Prepare again"));
+    assert!(shown_text.contains("ALREADY APPLIED"), "{shown_text}");
+    assert!(!shown_text.contains("DEAD"), "{shown_text}");
+    assert!(!shown_text.contains("UNANSWERABLE"), "{shown_text}");
+    // The retry instruction is the code, because retyping it is what finishes
+    // cleanup — and it is the only instruction on the screen.
+    assert!(
+        shown_text.contains(&format!("CONFIRM {retry_code}")),
+        "{shown_text}"
+    );
+    assert!(
+        !shown_text.contains("Type this exactly to confirm"),
+        "an applied admission is not offered again: {shown_text}"
+    );
     let listed = run_engr(root, &["candidate"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("retry"));
 
@@ -379,7 +389,19 @@ fn candidate_display_distinguishes_retryable_from_stale() {
 
     let stale_view = run_engr(root, &["candidate", &stale_code]);
     assert!(stale_view.status.success());
-    assert!(String::from_utf8_lossy(&stale_view.stdout).contains("dead"));
+    let stale_text = String::from_utf8_lossy(&stale_view.stdout).to_string();
+    assert!(stale_text.contains("DEAD"), "{stale_text}");
+    // The screen offers nothing to type. An older `expected_rev` cannot be
+    // confirmed, so an instruction to confirm it is an instruction to answer a
+    // question the gate has already refused.
+    assert!(
+        !stale_text.contains("Type this exactly to confirm"),
+        "{stale_text}"
+    );
+    assert!(
+        !stale_text.contains(&format!("CONFIRM {stale_code}")),
+        "{stale_text}"
+    );
     let stale_list = run_engr(root, &["candidate"]);
     assert!(String::from_utf8_lossy(&stale_list.stdout).contains("stale"));
 }
@@ -2866,25 +2888,33 @@ fn the_oversize_flag_is_refused_until_engr_has_refused_the_proposal() {
     );
 }
 
-/// Give a stored Section bodies a text editor could have put there.
+/// Admit bodies whose endings a terminal cannot show.
 ///
-/// The hash is recomputed, so this is valid persisted authority rather than
-/// corruption — exactly what a workspace written by any build may hold, since
-/// nothing on the read path normalizes a body.
-fn seed_bodies(root: &Path, id: &str, bodies: &[&str]) {
-    let object = store::load_object(root, id).expect("load");
-    let resealed = engr::integrity::mutate(&object, |next| {
-        next.sections[0].content = bodies
-            .iter()
-            .map(|body| engr::semantics::Supplement::new("code.rs", *body))
-            .collect();
-        Ok(())
-    })
-    .expect("reseal seeded bodies");
-    save_raw(root, &resealed.object).expect("save");
+/// Through the gate rather than onto the disk. Resealing a hand-edited
+/// projection used to be the shortest route to this fixture, and it is exactly
+/// what an ordinary admission now refuses to build on — a projection admitted
+/// history never produced. It was never necessary either: nothing normalizes a
+/// body on the way in, so these are ordinary admitted content and any build's
+/// workspace may hold them.
+fn admit_bodies(root: &Path, id: &str, bodies: &[&str]) {
+    let mut args = vec![
+        "prepare",
+        "--object",
+        id,
+        "--revise",
+        "1",
+        "--no-based-on",
+        "--text",
+        "Three excerpts stand behind this assertion.",
+    ];
+    for body in bodies {
+        args.extend(["--content", "code.rs", body]);
+    }
+    let prepared = prepare(root, &args);
+    confirm(root, &prepared);
     assert!(
         run_engr(root, &["verify", id]).status.success(),
-        "the seeded section must be valid stored authority"
+        "the admitted section must be valid stored authority"
     );
 }
 
@@ -2930,9 +2960,9 @@ fn a_body_whose_ending_is_invisible_is_described_where_the_human_reads_it() {
     );
     confirm(root, &added);
 
-    // Now they hold what a previous build, a hand edit, or a body that simply
-    // ended that way would leave behind.
-    seed_bodies(root, &id, &["let x = 1;\n", "let y = 2;   ", "   "]);
+    // Now they hold what a previous build, or a body that simply ended that
+    // way, would leave behind.
+    admit_bodies(root, &id, &["let x = 1;\n", "let y = 2;   ", "   "]);
 
     // Removing all three: the screen has to convey what is being removed.
     let screen = run_engr(
@@ -5750,5 +5780,131 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
     assert!(
         !broken.contains("Type this exactly to confirm"),
         "and the instruction is withheld: {broken}"
+    );
+}
+
+/// The protocol states one persisted shape for an empty `content[]`, and it is
+/// the one the writer emits.
+///
+/// The canonical-omission section says an optional empty array is left out and
+/// names its only two exceptions, an Event's `data` and a Collection's
+/// `members`. The Supplementary Content section then said an empty `content[]`
+/// was stored as `[]` "like every other empty sequence", which is the opposite
+/// rule and not one of the exceptions. `PROTOCOL.md` is normative and is what
+/// `engr protocol` prints, so two conforming implementations could read that and
+/// ship opposite serializations forever.
+#[test]
+fn the_protocol_omits_an_empty_content_array_like_the_writer_does() {
+    // Normalized, because the retired sentence wrapped across a line break and
+    // a grep for it in source order silently finds nothing.
+    let normalized = engr::PROTOCOL
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !normalized.contains("`content[]` is stored as `[]`"),
+        "the contradicting Supplementary Content sentence is back in the protocol"
+    );
+    assert!(
+        normalized.contains("An empty `content[]` is **omitted**"),
+        "the omission rule must be stated where content[] is defined"
+    );
+
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "omission"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "no supplements here",
+        ],
+    );
+    confirm(root, &added);
+
+    let raw: serde_json::Value =
+        store::read_json(&store::object_path(root, &id)).expect("stored object");
+    assert!(
+        !raw["sections"][0]
+            .as_object()
+            .expect("section")
+            .contains_key("content"),
+        "the writer omits an empty content[]: {raw}"
+    );
+}
+
+/// `verify` fails an Object whose bytes no admitted Event produced.
+///
+/// The seals cannot answer this — they are recomputed from whatever the bytes
+/// now say, so an out-of-band edit that was also resealed passes every one of
+/// them. Without this the surface an agent trusts before acting reported PASS
+/// on wording nobody admitted.
+#[test]
+fn verify_fails_a_projection_that_admitted_history_never_produced() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "divergence"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "the wording that was admitted",
+        ],
+    );
+    confirm(root, &added);
+    assert!(
+        run_engr(root, &["verify", &id]).status.success(),
+        "sound authority passes"
+    );
+
+    let object = store::load_object(root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(root, &resealed.object).expect("put it on disk");
+
+    let verified = run_engr(root, &["verify", &id]);
+    assert!(
+        !verified.status.success(),
+        "a resealed out-of-band edit is not a PASS"
+    );
+    let shown = String::from_utf8_lossy(&verified.stdout).to_string();
+    assert!(shown.contains("FAIL"), "{shown}");
+    assert!(
+        shown.contains("not what its admitted history produced"),
+        "{shown}"
+    );
+    // Said as itself: the seals verify, so nothing here is a tampering finding.
+    assert!(
+        !shown.contains("integrity failed"),
+        "the seals are sound: {shown}"
+    );
+    assert!(
+        !shown.contains("does not match its recorded hash"),
+        "and so is every Section seal: {shown}"
     );
 }

@@ -868,3 +868,294 @@ fn append_admitted_raw(root: &Path, object: &str, event: &engr::model::Event) {
     existing.push('\n');
     std::fs::write(&path, existing).expect("write event");
 }
+
+/// An Event stream has one framing, and damage to it is not read past.
+///
+/// A blank line used to be skipped. That gave a current stream a second
+/// spelling the writer never emits, and it read past the first symptom of a
+/// truncated write, a partial copy or a bad merge — whitespace where a record
+/// belongs. The missing final delimiter is the sharper form of the same fault:
+/// a complete JSON object with nothing after it is a record whose write did not
+/// finish, and accepting it is what would let the next append concatenate onto
+/// that line and fuse two events into one, permanently, in a file that is never
+/// rewritten.
+#[test]
+fn a_blank_or_unterminated_event_record_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "one framing");
+    admit(&root, payload(Act::Add, &id, "wording"));
+    let path = store::events_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("events");
+    assert_eq!(original.lines().count(), 2, "two admitted records");
+    assert!(
+        original.ends_with('\n'),
+        "the writer terminates every record"
+    );
+
+    for (what, rewritten) in [
+        (
+            "a blank line before the first record",
+            format!("\n{original}"),
+        ),
+        (
+            "a blank line between records",
+            original.replacen('\n', "\n\n", 1),
+        ),
+        ("a blank line after the last", format!("{original}\n")),
+        ("a whitespace-only line", format!("{original}   \n")),
+    ] {
+        std::fs::write(&path, &rewritten).expect("write");
+        let error = store::load_events(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains("no blank ones"), "{what}: {error}");
+    }
+
+    std::fs::write(&path, original.trim_end_matches('\n')).expect("write");
+    let error = store::load_events(&root, &id)
+        .expect_err("an unterminated last record is a truncated history");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("delimiter"), "{error}");
+
+    // And nothing can be appended onto it. This is the case that matters most:
+    // the refusal has to happen before the write, or the damage becomes durable.
+    let error = gate::prepare(&root, payload(Act::Add, &id, "another"))
+        .expect_err("a truncated stream cannot be built on");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("delimiter"), "{error}");
+
+    std::fs::write(&path, &original).expect("restore");
+    assert_eq!(
+        store::load_events(&root, &id)
+            .expect("and it reads back")
+            .len(),
+        2
+    );
+}
+
+/// Every Event stream is published whole, so an unlocked reader never sees a
+/// prefix of one.
+///
+/// The append is a republish through the same temporary-file-and-rename path
+/// every other resource uses, which is what makes the two visible states
+/// complete-old and complete-new. A genuinely appending write has a third
+/// state, and this is the surface that would show it: `load_events` decodes
+/// against the exact record bytes, so a partially written record cannot be read
+/// as a valid one.
+///
+/// The unlocked reader below is a smoke test and cannot be more than that — a
+/// torn read is a race, and a race that does not happen proves nothing. What is
+/// checked deterministically is the mechanism: on a platform with inode
+/// identity, a published stream is a *different file* each time, which an
+/// in-place append can never be.
+#[test]
+fn an_event_stream_is_never_visible_half_written() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "whole or nothing");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path = store::events_path(&root, &id);
+        let before = std::fs::metadata(&path).expect("stream").ino();
+        admit(&root, payload(Act::Add, &id, "published, not appended to"));
+        let after = std::fs::metadata(&path).expect("stream").ino();
+        assert_ne!(
+            before, after,
+            "an Event stream is staged and renamed into place, never written in place"
+        );
+    }
+    let writing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader = std::thread::spawn({
+        let root = root.clone();
+        let id = id.clone();
+        let writing = std::sync::Arc::clone(&writing);
+        move || {
+            let mut reads = 0;
+            while writing.load(std::sync::atomic::Ordering::Relaxed) {
+                // No lock: this is the unprotected reader the publication has to
+                // be safe for.
+                match store::load_events(&root, &id) {
+                    Ok(events) => {
+                        reads += 1;
+                        for (index, event) in events.iter().enumerate() {
+                            assert_eq!(
+                                event.rev,
+                                index as u64 + 1,
+                                "a visible stream is contiguous from 1"
+                            );
+                        }
+                    }
+                    Err(error) => panic!("a reader saw a stream it could not decode: {error}"),
+                }
+            }
+            reads
+        }
+    });
+    for revision in 0..12 {
+        admit(
+            &root,
+            payload(Act::Add, &id, &format!("wording {revision}")),
+        );
+    }
+    writing.store(false, std::sync::atomic::Ordering::Relaxed);
+    let reads = reader.join().expect("the reader must not have panicked");
+    assert!(reads > 0, "the reader has to have read something");
+    // No staging file survives a completed publication.
+    let staged = store::events_path(&root, &id).with_extension("jsonl.tmp");
+    assert!(!staged.exists(), "{} was left behind", staged.display());
+}
+
+/// A Section that asserts nothing is refused wherever a persisted one is read.
+///
+/// `text` is required and may be empty only beside non-empty literal content.
+/// The rule used to live only at the mutation boundary, so a stored Object whose
+/// Section was blanked out and resealed loaded cleanly — valid seals, a shape
+/// the contract forbids — and every read surface then presented a blank as
+/// admitted knowledge.
+#[test]
+fn a_section_that_asserts_nothing_is_refused_on_the_read_path() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "blank");
+    admit(&root, payload(Act::Add, &id, "wording"));
+
+    // The stored Object, held to the shape boundary rather than to a seal: this
+    // is refused for what it says, not for whether it was tampered with.
+    let path = store::object_path(&root, &id);
+    let original = std::fs::read_to_string(&path).expect("object bytes");
+    tamper(&root, &id, |value| {
+        value["sections"][0]["text"] = Value::String(String::new());
+    });
+    let error =
+        store::load_object(&root, &id).expect_err("an empty text with no content is not a Section");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("asserts nothing"), "{error}");
+    std::fs::write(&path, &original).expect("restore");
+    store::load_object(&root, &id).expect("and it reads back");
+
+    // And the Event that would carry the same value, whose seal is correct — so
+    // the refusal cannot be the seal.
+    let blank = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        engr::model::Action::SectionCreated {
+            // The Section and the Event state one admission instant, which the
+            // durable boundary requires — so a fixture that disagreed about that
+            // would be refused for the wrong reason.
+            value: engr::model::SectionValue::new(
+                engr::semantics::Admitted::new(
+                    engr::semantics::Admission::Human,
+                    "2026-08-23T00:00:00Z",
+                ),
+                Content::default(),
+            ),
+            becomes: None,
+        },
+        3,
+        engr::model::EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a sealed record, whatever it says");
+    let events = std::fs::read_to_string(store::events_path(&root, &id)).expect("events");
+    append_admitted_raw(&root, &id, &blank);
+    let error = store::load_events(&root, &id)
+        .expect_err("an Event cannot carry a Section value the contract forbids");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(error.message.contains("text"), "{error}");
+    std::fs::write(store::events_path(&root, &id), &events).expect("restore");
+    store::load_events(&root, &id).expect("and it reads back");
+}
+
+/// A persisted resource is the bytes git tracks **at that path**.
+///
+/// A link breaks that in a way no digest can see: git records the link — its
+/// target's name, as a blob — while engr reads and writes the target's
+/// contents. So `.engr`, a resource directory, or one resource file can
+/// redirect the record outside the repository entirely, and the history a
+/// reviewer reads is then not the state the tool is using. Refused rather than
+/// followed, at every component, exactly as the Rule loader already refuses it
+/// for policy.
+#[test]
+#[cfg(unix)]
+fn nothing_on_the_way_to_a_resource_may_be_a_link() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "contained");
+    admit(&root, payload(Act::Add, &id, "wording"));
+    let link_refused = |what: &str, error: Option<engr::Error>| {
+        let error = error.unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(
+            error.message.contains("link to somewhere else"),
+            "{what}: {error}"
+        );
+    };
+
+    // One resource file, redirected. The bytes behind it are perfectly valid —
+    // that is the point: what is wrong is how they were reached.
+    let path = store::object_path(&root, &id);
+    let outside = root.join("outside-object.json");
+    std::fs::rename(&path, &outside).expect("move the object out");
+    std::os::unix::fs::symlink(&outside, &path).expect("symlink");
+    link_refused(
+        "a redirected object file",
+        store::load_object(&root, &id).err(),
+    );
+    link_refused(
+        "and every read surface through it",
+        ops::effective(&root, &id).err(),
+    );
+    std::fs::remove_file(&path).expect("remove the link");
+    std::fs::rename(&outside, &path).expect("put it back");
+    store::load_object(&root, &id).expect("and it reads again");
+
+    // A directory in the middle of the way.
+    for (what, dir) in [
+        ("objects", store::objects_dir(&root)),
+        ("eventstore", store::eventstore_dir(&root)),
+    ] {
+        let moved = root.join(format!("outside-{what}"));
+        std::fs::rename(&dir, &moved).expect("move");
+        std::os::unix::fs::symlink(&moved, &dir).expect("symlink");
+        // Reading the Object touches both trees, so one call covers whichever
+        // component is redirected; enumeration and the write that would land in
+        // it are asked separately.
+        link_refused(
+            &format!("reading through {what}"),
+            ops::effective(&root, &id).err(),
+        );
+        link_refused(
+            &format!("enumerating through {what}"),
+            ops::object_ids(&root).err(),
+        );
+        link_refused(
+            &format!("writing through {what}"),
+            gate::prepare(&root, payload(Act::Add, &id, "more")).err(),
+        );
+        std::fs::remove_file(&dir).expect("remove the link");
+        std::fs::rename(&moved, &dir).expect("put it back");
+    }
+    admit(&root, payload(Act::Add, &id, "and writing works again"));
+
+    // And `.engr` itself, which is the link that would redirect everything.
+    let engr_dir = store::engr_dir(&root);
+    let moved = root.join("outside-engr");
+    std::fs::rename(&engr_dir, &moved).expect("move the workspace");
+    std::os::unix::fs::symlink(&moved, &engr_dir).expect("symlink");
+    assert!(
+        store::objects_dir(&root)
+            .join(format!("{id}.json"))
+            .is_file(),
+        "everything behind the link is intact"
+    );
+    link_refused(
+        "a redirected workspace",
+        store::find_root(Some(root.as_path())).err(),
+    );
+    link_refused("a read through it", store::load_object(&root, &id).err());
+    std::fs::remove_file(&engr_dir).expect("remove the link");
+    std::fs::rename(&moved, &engr_dir).expect("put it back");
+    assert_eq!(
+        store::find_root(Some(root.as_path())).expect("restored"),
+        root,
+        "the refusal is about the link, not about the workspace"
+    );
+}

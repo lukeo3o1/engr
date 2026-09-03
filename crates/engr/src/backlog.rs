@@ -293,6 +293,25 @@ impl Section {
             "§{}: a backlog section needs text",
             self.id
         );
+        // The same two navigation and Supplement shapes an Object Section
+        // carries, held to the same rules on the way out. Both were missing
+        // here, and the stored side is exactly where they matter: this file is
+        // hand-editable by design, so a header written empty or a content entry
+        // with an invalid type or an empty body loaded cleanly and then rendered
+        // as a point somebody wrote.
+        if let Some(header) = &self.header {
+            ensure!(
+                !header.is_empty(),
+                EXIT_SCHEMA,
+                "§{}: a section with no header omits the member rather than carrying an empty one",
+                self.id
+            );
+        }
+        for entry in &self.content {
+            entry
+                .validate()
+                .map_err(|error| Error::new(error.code, format!("§{}: {error}", self.id)))?;
+        }
         ensure!(
             time::OffsetDateTime::parse(
                 &self.updated_at,
@@ -572,6 +591,7 @@ fn now() -> String {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
+    store::contained(&dir)?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1788,7 +1808,7 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
 fn require_no_work(root: &Path, id: &str) -> Result<()> {
     let subject = crate::work::Subject::Backlog(id.to_owned());
     ensure!(
-        !crate::work::exists(root, &subject),
+        !crate::work::exists(root, &subject)?,
         EXIT_INVARIANT,
         "this was the last unresolved point, so resolving it removes the item — but it still \
          has execution memory, which cannot outlive what it belongs to. Discard it with \

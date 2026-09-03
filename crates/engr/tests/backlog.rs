@@ -2870,3 +2870,75 @@ fn recording_a_produced_outcome_is_activity_and_the_protocol_agrees() {
         "and must not still carry the reading that was withdrawn"
     );
 }
+
+/// A stored Backlog Section is held to everything its writer enforces.
+///
+/// Backlog is hand-editable by design and has no seal, so loading is the only
+/// boundary there is. Two shapes it shares with an Object Section were checked
+/// on the way in and not on the way out: a `header` written empty — which the
+/// omission rule says is absence spelled a second way — and a `content[]` entry
+/// with an invalid type or an empty body. Both loaded cleanly and were then
+/// rendered as a point somebody wrote.
+#[test]
+fn stored_backlog_sections_are_held_to_the_writers_navigation_and_content_rules() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "stored shapes", "unresolved");
+    let path = backlog::item_path(&root, &id);
+    let original: serde_json::Value = store::read_json(&path).expect("item");
+
+    for (what, edit, expected) in [
+        (
+            "an empty header",
+            serde_json::json!(""),
+            "omits the member rather than carrying an empty one",
+        ),
+        (
+            "a header of only whitespace is still a header",
+            serde_json::json!("   "),
+            "",
+        ),
+    ] {
+        let mut edited = original.clone();
+        edited["sections"][0]["header"] = edit;
+        write_raw(&path, &edited).expect("write");
+        let outcome = backlog::load(&root, &id);
+        if expected.is_empty() {
+            outcome.expect(what);
+        } else {
+            let error = outcome.err().unwrap_or_else(|| panic!("{what}: refused"));
+            assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+            assert!(error.message.contains(expected), "{what}: {error}");
+        }
+    }
+
+    for (what, entry, expected) in [
+        (
+            "an unknown content prefix",
+            serde_json::json!({ "type": "text.md", "body": "prose" }),
+            "must begin with code. or data.",
+        ),
+        (
+            "a tag that is not a tag",
+            serde_json::json!({ "type": "code.NOT-A-TAG", "body": "x" }),
+            "content type",
+        ),
+        (
+            "an empty body",
+            serde_json::json!({ "type": "code.rs", "body": "" }),
+            "a body cannot be empty",
+        ),
+    ] {
+        let mut edited = original.clone();
+        edited["sections"][0]["content"] = serde_json::json!([entry]);
+        write_raw(&path, &edited).expect("write");
+        let error = backlog::load(&root, &id)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains(expected), "{what}: {error}");
+        assert!(error.message.contains("§1"), "{what}: {error}");
+    }
+
+    write_raw(&path, &original).expect("restore");
+    backlog::load(&root, &id).expect("and it reads back");
+}
