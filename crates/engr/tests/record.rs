@@ -9,6 +9,7 @@ use engr::model::{Content, Payload};
 use engr::{gate, integrity, ops, store, view};
 use serde_json::Value;
 use std::path::Path;
+use tempfile::TempDir;
 
 fn commit_all(root: &Path, message: &str) -> String {
     for args in [
@@ -1158,4 +1159,131 @@ fn nothing_on_the_way_to_a_resource_may_be_a_link() {
         root,
         "the refusal is about the link, not about the workspace"
     );
+}
+
+/// The staging entry a publication writes through is part of the resource path.
+///
+/// Its name is `<resource>.tmp` and therefore entirely predictable, so checking
+/// only the destination left the boundary bypassable: a link planted at the
+/// staging name was followed by an ordinary create — engr wrote the outside
+/// target — and the rename then moved *the link itself* into the canonical
+/// resource path. Every resource that publishes went through that door.
+#[test]
+#[cfg(unix)]
+fn a_link_planted_at_the_staging_name_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "staged publication");
+    let outside = TempDir::new().expect("outside");
+
+    for (what, resource) in [
+        ("the Object", store::object_path(&root, &id)),
+        ("its Event stream", store::events_path(&root, &id)),
+    ] {
+        let target = outside.path().join("captured");
+        std::fs::write(&target, "not this workspace's bytes\n").expect("outside file");
+        let staged = std::path::PathBuf::from({
+            let mut name = resource.clone().into_os_string();
+            name.push(".tmp");
+            name
+        });
+        std::os::unix::fs::symlink(&target, &staged).expect("plant the link");
+
+        let error = gate::prepare(&root, payload(Act::Add, &id, "wording"))
+            .and_then(|prepared| {
+                gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+            })
+            .expect_err(&format!(
+                "{what}: publishing through a link must be refused"
+            ));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+        assert!(
+            error.message.contains("link to somewhere else"),
+            "{what}: {error}"
+        );
+        // The outside file is untouched, and the link is still a link rather
+        // than having been renamed into the record.
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("outside file"),
+            "not this workspace's bytes\n",
+            "{what}: the target was written through"
+        );
+        assert!(
+            std::fs::symlink_metadata(&staged)
+                .expect("the link")
+                .file_type()
+                .is_symlink(),
+            "{what}: the link was consumed"
+        );
+        std::fs::remove_file(&staged).expect("remove the link");
+        std::fs::remove_file(&target).expect("remove the target");
+    }
+
+    // And with the staging names clear, the same mutation lands.
+    admit(&root, payload(Act::Add, &id, "wording"));
+    assert!(ops::verify(&root, &id).expect("verify").passed());
+}
+
+/// A crashed publication leaves a staging file, and that must not wedge the
+/// workspace.
+///
+/// The exclusive create is what refuses a planted link; a leftover regular file
+/// from a crash between the create and the rename is the one thing that can
+/// legitimately be there, and it is removed rather than treated as an attack.
+#[test]
+fn a_leftover_staging_file_from_a_crash_does_not_wedge_the_workspace() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "crashed publication");
+    for resource in [
+        store::object_path(&root, &id),
+        store::events_path(&root, &id),
+    ] {
+        let mut name = resource.into_os_string();
+        name.push(".tmp");
+        std::fs::write(std::path::PathBuf::from(name), "half a write").expect("leftover");
+    }
+    admit(&root, payload(Act::Add, &id, "wording admitted afterwards"));
+    assert!(ops::verify(&root, &id).expect("verify").passed());
+}
+
+/// Discovery ascends only on established absence.
+///
+/// `is_dir()` gives two answers where there are three, and reports a dangling
+/// link, a regular file or an unreadable entry as though nothing were there. In
+/// a walk that ascends on "nothing there", that carries the caller past the
+/// workspace they are standing in and into an ancestor's — where the next
+/// command lands on somebody else's record.
+#[test]
+#[cfg(unix)]
+fn discovery_does_not_walk_past_an_engr_it_cannot_establish() {
+    let outer = TempDir::new().expect("temp dir");
+    let ancestor = outer.path().to_path_buf();
+    store::init(&ancestor).expect("the ancestor workspace");
+    let nested = ancestor.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested directory");
+
+    // Nothing here: the walk finds the ancestor, which is the whole point of
+    // walking up.
+    assert_eq!(
+        store::find_root(Some(nested.as_path()))
+            .expect_err("not a workspace")
+            .code,
+        engr::EXIT_NOT_FOUND
+    );
+
+    for (what, plant) in [
+        ("a dangling link", 0),
+        ("a regular file", 1),
+        ("a live link to the ancestor's own workspace", 2),
+    ] {
+        let here = store::engr_dir(&nested);
+        match plant {
+            0 => std::os::unix::fs::symlink(nested.join("nowhere"), &here).expect("symlink"),
+            1 => std::fs::write(&here, "not a directory").expect("file"),
+            _ => std::os::unix::fs::symlink(store::engr_dir(&ancestor), &here).expect("symlink"),
+        }
+        let error = store::find_root(Some(nested.as_path()))
+            .expect_err(&format!("{what}: this must not read as absence"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+        std::fs::remove_file(&here).expect("remove");
+    }
 }

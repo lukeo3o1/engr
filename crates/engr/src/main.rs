@@ -255,13 +255,13 @@ enum Backlog {
 /// under one lock still leaves the interval between what the agent reviewed and
 /// what gets applied wide open — a concurrent edit in that interval lands
 /// underneath a mutation nobody reviewed against it. The value is printed by
-/// `backlog show --json` beside the thing it describes.
+/// `backlog show --format json` beside the thing it describes.
 #[derive(Args, Clone)]
 struct ReviewArg {
     /// Which attempt of this review sequence this is, counted from 1
     #[arg(long, default_value_t = 1, value_name = "N")]
     attempt: u32,
-    /// The `expect` value from `backlog show --json` for what you read.
+    /// The `expect` value from `backlog show --format json` for what you read.
     /// Repeat once per point for a merge
     #[arg(long = "expect", value_name = "TOKEN")]
     expect: Vec<String>,
@@ -305,7 +305,7 @@ impl ReviewArg {
         ensure!(
             !self.expect.is_empty(),
             engr::EXIT_USAGE,
-            "this needs --expect: run `engr backlog show <item> --json`, read the point, and pass its expect value back"
+            "this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back"
         );
         ensure!(
             self.expect.iter().all(|token| token.len() == 64
@@ -1027,12 +1027,20 @@ fn run(cli: Cli) -> Result<()> {
             // Same rule as `verify`: in a current workspace a missing aggregate
             // seal is a failure, not an absence of anything to check.
             let object_forged = engr::integrity::check_object_integrity(&object).is_err();
-            if forged > 0 || object_forged {
+            // And the same rule for the fault no seal can see. The screen says
+            // this Object is not what its history produced; exiting 0 underneath
+            // that would tell a script the opposite of what the reader was told,
+            // and `verify` already fails the same Object.
+            let history = ops::history_fault(&root, &object)?;
+            if forged > 0 || object_forged || history.is_some() {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    format!(
-                        "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
-                    ),
+                    match &history {
+                        Some(fault) => fault.message(&object.id),
+                        None => format!(
+                            "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
+                        ),
+                    },
                 ));
             }
             Ok(())
@@ -2663,11 +2671,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 "          required Object projection is missing; admitted history reconstructs it"
             );
         }
-        // Said in its own words, because the seals pass. This is what a resealed
-        // out-of-band edit looks like from here: intact bytes that admitted
-        // history never produced.
-        if let Some(divergent) = &report.divergent_history {
-            println!("          {divergent}");
+        // Said in its own words, because the seals pass — and said as whichever
+        // of the two faults it is. A resealed out-of-band edit leaves intact
+        // bytes that admitted history never produced, and `repair` restores
+        // them; history that cannot be replayed at all is damage to the
+        // EventStore, where there is nothing to restore *from*.
+        match &report.history {
+            Some(ops::HistoryFault::Divergent(what)) => println!(
+                "          its {what} is not what its admitted history produced; it was changed outside an admission path"
+            ),
+            Some(ops::HistoryFault::Unreplayable(why)) => println!(
+                "          its admitted history cannot be replayed, so there is nothing to check it against: {why}"
+            ),
+            None => {}
         }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");

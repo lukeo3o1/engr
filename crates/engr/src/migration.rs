@@ -305,13 +305,37 @@ struct Manifest {
 /// The capture and the validation see the same bytes because they are the same
 /// bytes: the read happens once, and everything downstream works from the text
 /// it returned.
+///
+/// The source tree is held to the same no-link containment as the destination.
+/// A migration establishes what the released workspace *persisted*, and a link
+/// is a path that denotes another path: git records the link, the read returns
+/// the target's contents, and the migrated record would then be built from bytes
+/// the predecessor repository never tracked. The digest kept here is evidence
+/// about the file at this path, so this must be that file.
 fn capture(source: &mut BTreeMap<String, String>, root: &Path, path: &Path) -> Result<String> {
+    store::contained(path)?;
     let text = fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?;
     source.insert(
         relative_to_engr(root, path)?,
         crate::digest::SOURCE.emit(sha256_of(&text))?.to_string(),
     );
     Ok(text)
+}
+
+/// Whether one predecessor source file is there, without following a link.
+///
+/// `exists()` reports a dangling link as absence, and absence is a legitimate
+/// predecessor shape — the released build's own reader returned an empty history
+/// for a missing stream. So a redirected history would have migrated an Object
+/// as though it had none, silently dropping the record it points at. Three
+/// answers, and the link is refused rather than resolved.
+fn source_exists(path: &Path) -> Result<bool> {
+    store::contained(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(tool_error(path.display(), error)),
+    }
 }
 
 fn relative_to_engr(root: &Path, path: &Path) -> Result<String> {
@@ -392,6 +416,10 @@ fn predecessor_ids(root: &Path) -> Result<Vec<String>> {
         (store::objects_dir(root), ".json"),
         (predecessor_events_dir(root), ".jsonl"),
     ] {
+        // The source tree is established the same way the destination is: a
+        // redirected resource directory would enumerate identities from another
+        // tree, and every one of them would then be migrated into this record.
+        store::contained(&dir)?;
         if !dir.is_dir() {
             continue;
         }
@@ -527,7 +555,7 @@ fn preflight(root: &Path) -> Result<(MigrationSubject, Vec<crate::predecessor::O
         crate::model::validate_object_id(&id)?;
         let object_path = store::object_path(root, &id);
         let events_path = predecessor_events_dir(root).join(format!("{id}.jsonl"));
-        let stored = if object_path.exists() {
+        let stored = if source_exists(&object_path)? {
             Some(capture(&mut source, root, &object_path)?)
         } else {
             None
@@ -537,7 +565,7 @@ fn preflight(root: &Path) -> Result<(MigrationSubject, Vec<crate::predecessor::O
         // history was pruned away entirely is still a workspace it called
         // sound. What must exist is one of the two, and `effective_state`
         // decides which of them is authority.
-        let history = if events_path.exists() {
+        let history = if source_exists(&events_path)? {
             capture(&mut source, root, &events_path)?
         } else {
             ensure!(
@@ -841,6 +869,16 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
     // not need to be, because every staged byte is checked back against the
     // digest the confirmed subject pins before any of it is published.
     if let Some(ready) = confirmed_destination(root, &challenge.id, &subject)? {
+        // The barrier is the transition between the two durable states this
+        // resume can find itself in. If it is not yet raised, this process is
+        // the first one back after an interruption that left the predecessor
+        // readable — so the released build may have written in that window, and
+        // publishing would discard it. Establish that it did not, then raise the
+        // barrier before anything is published.
+        if !predecessor_locked_out(root)? {
+            check_source_unmoved(root, &subject, &challenge.id)?;
+            lock_out_predecessor(root, &challenge.id)?;
+        }
         let sections = subject
             .objects
             .iter()
@@ -904,8 +942,135 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
             "the destination was staged and cannot be read back".to_owned(),
         )
     })?;
+    stop_for_test(Stage::BeforeBarrier, &challenge.id)?;
+    lock_out_predecessor(root, &challenge.id)?;
     stop_for_test(Stage::AfterDestination, &challenge.id)?;
     finish(root, challenge, ready, sections)
+}
+
+/// The bootstrap a confirmed migration leaves where the predecessor's was.
+///
+/// **The lock is not enough, and cannot be.** `.engr/lock` is an OS lock held by
+/// one process: the moment this one exits — crash, kill, power loss — it is
+/// free, and the released build is entitled to a workspace whose `format.json`
+/// still says it is a version 1 workspace. It would then admit predecessor state
+/// legitimately, in the window between a confirmed staged destination and
+/// activation, and resuming publishes over it: the new writes are discarded, or
+/// worse, a newly created predecessor Object survives as legacy-shaped bytes
+/// while its history directory is removed underneath it.
+///
+/// So the lockout has to be durable and it has to be visible *to the predecessor
+/// build*, which reads exactly one thing before deciding it may write: this
+/// file. A bootstrap it cannot recognize is a workspace it refuses. The format
+/// string is what carries that rather than the version, because a build that
+/// accepted an unknown format string would be broken in a way no version number
+/// could rescue.
+const BARRIER_FORMAT: &str = "engr-migration-in-progress";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Barrier {
+    format: String,
+    /// The destination generation this workspace is on its way to.
+    version: u32,
+    /// Which confirmed migration is in flight, so the state names its own
+    /// transaction rather than being an anonymous marker.
+    migration: String,
+}
+
+fn bootstrap_path(root: &Path) -> PathBuf {
+    store::engr_dir(root).join("format.json")
+}
+
+/// Whether the released build can still read this workspace as its own.
+///
+/// Three durable states and only three: the predecessor's bootstrap is there
+/// (it can), this transaction's barrier is there (it cannot), or the file is
+/// gone because publication has already removed it (it cannot). Anything else
+/// is a bootstrap nothing here wrote, in the middle of a transaction, and is
+/// refused rather than guessed at.
+fn predecessor_locked_out(root: &Path) -> Result<bool> {
+    let path = bootstrap_path(root);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Publication removes the bootstrap on its way past, so absence is the
+        // third state and it is on the far side of the barrier, not before it.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(tool_error(path.display(), error)),
+    };
+    // Switched on the declared format rather than on which struct happens to
+    // deserialize, so this does not quietly depend on one of them refusing
+    // unknown members.
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+    let declared = value.get("format").and_then(serde_json::Value::as_str);
+    match declared {
+        Some(crate::predecessor::WORKSPACE_FORMAT) => {
+            serde_json::from_value::<crate::predecessor::Format>(value)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+            Ok(false)
+        }
+        Some(BARRIER_FORMAT) => {
+            serde_json::from_value::<Barrier>(value)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
+            Ok(true)
+        }
+        _ => Err(Error::new(
+            EXIT_SCHEMA,
+            format!(
+                "{} is neither the released predecessor bootstrap nor a migration barrier",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// Raise the barrier, durably, before anything is published.
+fn lock_out_predecessor(root: &Path, challenge: &str) -> Result<()> {
+    if predecessor_locked_out(root)? {
+        return Ok(());
+    }
+    store::write_json(
+        &bootstrap_path(root),
+        &Barrier {
+            format: BARRIER_FORMAT.to_owned(),
+            version: crate::WORKSPACE_GENERATION,
+            migration: challenge.to_owned(),
+        },
+    )
+}
+
+/// Establish that the predecessor is still the one the human confirmed.
+///
+/// Asked when a resumed transaction finds a staged destination with the barrier
+/// not yet raised, which is the one window a released writer could have used:
+/// the destination is durable, so the resume path would otherwise publish
+/// straight over whatever arrived in the meantime.
+///
+/// The comparison is the whole captured source map, not a sample of it, so a
+/// file that was edited, one that vanished and one that is *new* are all the
+/// same finding — and a released build admitting a new Object is exactly the
+/// case that leaves legacy-shaped bytes behind after publication removes the
+/// history they belong to.
+fn check_source_unmoved(root: &Path, subject: &MigrationSubject, challenge: &str) -> Result<()> {
+    let mut seen = BTreeMap::new();
+    capture(&mut seen, root, &bootstrap_path(root))?;
+    for id in predecessor_ids(root)? {
+        let object_path = store::object_path(root, &id);
+        if source_exists(&object_path)? {
+            capture(&mut seen, root, &object_path)?;
+        }
+        let events_path = predecessor_events_dir(root).join(format!("{id}.jsonl"));
+        if source_exists(&events_path)? {
+            capture(&mut seen, root, &events_path)?;
+        }
+    }
+    ensure!(
+        seen == subject.source,
+        EXIT_INVARIANT,
+        "the predecessor workspace moved after migration {challenge} was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm \"CONFIRM {challenge} no\"` — and prepare it again over the workspace as it now stands"
+    );
+    Ok(())
 }
 
 /// The points in the confirmed transaction a crash can land between.
@@ -917,7 +1082,11 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
 /// nothing checks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    /// Destination staged and verified; nothing published.
+    /// Destination staged and verified; the predecessor can still read its own
+    /// workspace, so this is the one window a released writer could use.
+    BeforeBarrier,
+    /// Destination staged and verified, predecessor locked out; nothing
+    /// published.
     AfterDestination,
     /// Every destination byte published; `VERSION` not yet written.
     BeforeVersion,
@@ -928,6 +1097,7 @@ enum Stage {
 impl Stage {
     fn as_str(self) -> &'static str {
         match self {
+            Stage::BeforeBarrier => "barrier",
             Stage::AfterDestination => "destination",
             Stage::BeforeVersion => "version",
             Stage::BeforeChallenge => "challenge",
@@ -1028,8 +1198,14 @@ pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
     // that is exactly the case where the guard cannot be reached by
     // interpreting the Challenge — so it is asked of the transaction state
     // instead, which needs no interpretation at all.
+    // Keyed on the barrier rather than on the staged directory, because the
+    // barrier is what "publication may have begun" actually means. Before it is
+    // raised nothing has been published and the predecessor is intact, so
+    // withdrawal is the recovery a resume needs when it finds the source moved;
+    // after it, this stage is the only copy of what was confirmed and the
+    // transaction can only go forward.
     ensure!(
-        !(mine && destination_dir(root).exists()),
+        !(mine && destination_dir(root).exists() && predecessor_locked_out(root)?),
         EXIT_INVARIANT,
         "migration {code} was already confirmed and is part-published; {} holds the only copy of what was confirmed, so it can only be finished — `engr confirm CONFIRM {code}`",
         stage_dir(root).display()

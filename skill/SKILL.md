@@ -263,9 +263,24 @@ Objects are addressed by unique id prefix, like a git commit. A uuidv7 prefix is
 a timestamp, so objects created close together need more characters; engr widens
 the abbreviation for you.
 
-## When a section is marked
+## When an object or a section is marked
 
-`show` marks six things, and tells you what to do about each:
+`show` answers two questions, and the first one is about the object as a whole.
+Its `integrity` has four states, and three of them mean stop:
+
+| `integrity` | What happened |
+| --- | --- |
+| `ok` | The seals verify and the projection is what its own admitted history produced |
+| `tampered` | The stored bytes do not match their own seal |
+| `divergent` | They match it, and **no admitted Event produced them** — something rewrote and resealed the record. `engr repair` restores what history proves |
+| `unreplayable` | The admitted history cannot be replayed at all, so nothing can check the projection. This is damage to the EventStore, and `repair` is *not* the answer — there is nothing to restore from |
+
+`divergent` is the one no seal can find, which is why it is worth knowing about:
+a hash recomputed over edited bytes verifies perfectly, and only the record of
+admissions shows that nobody admitted them. `engr show` and `engr verify` both
+fail on all three.
+
+Then, per section, `show` marks seven things and tells you what to do about each:
 
 | Marking | What happened |
 | --- | --- |
@@ -278,7 +293,8 @@ the abbreviation for you.
 | `refs moved` / `stale_refs` | One or more selected dependency fields moved through an admission path |
 
 The first five are a different kind of problem from the last two, and they are
-not something to work around. **Stop and tell the human.** Either someone edited
+not something to work around — as is any object `integrity` other than `ok`.
+**Stop and tell the human.** Either someone edited
 the stored file directly rather than going through the gate, or authority this
 wording rests on — or the replacement it points forward to — has vanished. So
 either nothing about that wording was agreed to by anyone, or what was agreed
@@ -305,7 +321,7 @@ head across sessions. It goes in the backlog, which needs no confirmation:
 ```bash
 engr backlog ls                          # what is still unresolved
 engr backlog show <id>                   # points, subjects, outcomes so far
-engr backlog new --topic "..." --text "the unresolved point"
+engr backlog new --title "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
 engr backlog merge <id> --into 2 --section 5 --text "one point after all"
@@ -483,7 +499,7 @@ Backlog is what is not decided. Work is what is being done on one Object.
 ```bash
 engr collection ls                       # plans, and how many members need attention
 engr collection show <id>                # the plan, its schedule, its members in order
-engr collection new --name "Q3 authentication" \
+engr collection new q3-auth --title "Q3 authentication" \
                     --description "..." --start 2026-07-01 --end 2026-09-30
 engr collection add <id> --target engr:obj:<object> --order 10 \
                          --priority high --reason "Blocks the rest of this plan"

@@ -5954,17 +5954,267 @@ fn show_says_a_divergent_projection_is_not_ok() {
     save_raw(root, &resealed.object).expect("put it on disk");
 
     let shown = run_engr(root, &["show", &id]);
-    assert!(shown.status.success(), "the screen still renders");
     let text = String::from_utf8_lossy(&shown.stdout).to_string();
     assert!(
         text.contains("not what its admitted history produced"),
         "{text}"
     );
-    let json: serde_json::Value =
-        serde_json::from_slice(&run_engr(root, &["show", &id, "--format", "json"]).stdout)
-            .expect("json");
+    // The screen renders in full *and* the command fails. Printing that an
+    // Object is not what its history produced and then exiting 0 tells a script
+    // the opposite of what the reader was told, and `verify` fails this same
+    // Object — one workspace state with two verdicts is the defect, whichever
+    // way round it falls.
+    assert_eq!(
+        shown.status.code(),
+        Some(engr::EXIT_INVARIANT),
+        "show asserts about one object: {text}"
+    );
+    let divergent = run_engr(root, &["show", &id, "--format", "json"]);
+    assert_eq!(divergent.status.code(), Some(engr::EXIT_INVARIANT));
+    let json: serde_json::Value = serde_json::from_slice(&divergent.stdout).expect("json");
     assert_eq!(
         json["integrity"], "divergent",
         "the seals verify, so this is not `tampered` — and it is certainly not `ok`"
     );
+    assert!(
+        !run_engr(root, &["verify", &id]).status.success(),
+        "and verify agrees with the screen"
+    );
+}
+
+/// History that cannot be replayed is not the same fault as a projection that
+/// was edited, and the surfaces must not say it is.
+///
+/// Divergence means the seals are valid and admitted history produced something
+/// else — `repair` restores it. This is the other one: the EventStore itself
+/// cannot be replayed, so there is nothing to restore *from* and `repair` is not
+/// the answer. Both fail; a reader sent to the wrong one wastes the only move
+/// they have.
+#[test]
+fn history_that_cannot_be_replayed_is_reported_as_itself() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "unreplayable"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "the wording that was admitted",
+        ],
+    );
+    confirm(root, &added);
+
+    // A record that is individually well shaped, correctly sealed for this
+    // Object and contiguous — and impossible at its revision: it revises a
+    // Section that will not exist until the Event before it, which it replaces.
+    // Framing, seal and continuity checks all pass, so this reaches the read
+    // surfaces; only replay can find it.
+    let events = store::load_events(root, &id).expect("events");
+    let impossible = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        engr::model::Action::SectionUpdated {
+            section: 9,
+            value: engr::model::SectionValue::new(
+                engr::semantics::Admitted::new(
+                    engr::semantics::Admission::Human,
+                    "2026-08-23T00:00:00Z",
+                ),
+                Content {
+                    text: "a revision of a section that never existed".to_owned(),
+                    ..Content::default()
+                },
+            ),
+            becomes: None,
+        },
+        2,
+        engr::model::EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a sealed, contiguous record");
+    let mut stream = engr::proof::canonical_bytes(&events[0], "Event").expect("canonical");
+    stream.push('\n');
+    stream.push_str(&engr::proof::canonical_bytes(&impossible, "Event").expect("canonical"));
+    stream.push('\n');
+    std::fs::write(store::events_path(root, &id), stream).expect("write the stream");
+
+    let shown = run_engr(root, &["show", &id, "--format", "json"]);
+    assert_eq!(shown.status.code(), Some(engr::EXIT_INVARIANT));
+    let json: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(
+        json["integrity"], "unreplayable",
+        "the EventStore is what is damaged, not the projection"
+    );
+    let human = String::from_utf8_lossy(&run_engr(root, &["show", &id]).stdout).to_string();
+    assert!(human.contains("cannot be replayed"), "{human}");
+    assert!(
+        !human.contains("engr repair"),
+        "there is nothing to restore from, so do not send anybody to repair: {human}"
+    );
+
+    let verified = run_engr(root, &["verify", &id]);
+    assert!(!verified.status.success());
+    let report = String::from_utf8_lossy(&verified.stdout).to_string();
+    assert!(report.contains("cannot be replayed"), "{report}");
+}
+
+/// Every command the documentation shows is one this binary accepts.
+///
+/// README and the Skill are the API contract for the two audiences that never
+/// read the source: a person deciding whether to adopt engr, and an agent being
+/// told how to use it. A command that no longer parses is not a typo there — it
+/// is an instruction to do something impossible, and the agent following it
+/// cannot tell the difference between "engr refused" and "engr does not work".
+/// The storage rewrite left several: `backlog new --topic`, `backlog rm`, and
+/// `collection new --name` for what is now a positional id plus `--title`.
+///
+/// Parsing, not execution: the examples are written with `<id>` placeholders, so
+/// what can be checked mechanically is that the subcommand exists, the flags are
+/// its flags, and nothing required is missing. Every one of the stale examples
+/// failed exactly there.
+#[test]
+fn every_documented_command_is_one_the_cli_accepts() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root")
+        .to_path_buf();
+    let mut checked = 0usize;
+    for document in ["README.md", "skill/SKILL.md"] {
+        let text = std::fs::read_to_string(repository.join(document))
+            .unwrap_or_else(|error| panic!("{document}: {error}"));
+        for command in documented_commands(&text) {
+            let empty = TempDir::new().expect("temp dir");
+            let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+                .current_dir(empty.path())
+                .args(&command)
+                .output()
+                .expect("run engr");
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // Whatever it does about a workspace that is not there, it must not
+            // fail to understand its own documented arguments.
+            for parse_error in [
+                "unexpected argument",
+                "unrecognized subcommand",
+                "invalid subcommand",
+                "required arguments were not provided",
+                "wasn't expected",
+            ] {
+                assert!(
+                    !stderr.contains(parse_error),
+                    "{document} shows `engr {}`, which this binary does not accept:\n{stderr}",
+                    command.join(" ")
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 30,
+        "only {checked} documented commands were found; the extraction has stopped working"
+    );
+}
+
+/// Every `engr …` invocation inside a fenced block, as argument vectors.
+///
+/// Deliberately literal about what it takes: fenced blocks only, lines that
+/// begin with `engr `, continuation lines joined on a trailing backslash, and
+/// trailing `# …` comments dropped. Prose mentions of a command are left alone —
+/// they are sentences, not instructions somebody can run.
+fn documented_commands(text: &str) -> Vec<Vec<String>> {
+    let mut found = Vec::new();
+    let mut fenced = false;
+    let mut pending = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            pending.clear();
+            continue;
+        }
+        if !fenced {
+            continue;
+        }
+        let line = line.trim();
+        if pending.is_empty() && !line.starts_with("engr ") {
+            continue;
+        }
+        let (line, continues) = match line.strip_suffix('\\') {
+            Some(head) => (head.trim_end(), true),
+            None => (line, false),
+        };
+        if !pending.is_empty() {
+            pending.push(' ');
+        }
+        pending.push_str(line);
+        if continues {
+            continue;
+        }
+        let command = std::mem::take(&mut pending);
+        // `engr -- --help` is shown as a cargo-style invocation, and a comment
+        // is not an argument.
+        let command = command.split('#').next().unwrap_or_default().trim();
+        let Some(mut arguments) = shell_words(command) else {
+            continue;
+        };
+        // A documented pipeline is one engr command and then somebody else's:
+        // `engr ls --sections | grep <term>` is an example of composing with
+        // grep, and the part this can check is the part before the pipe.
+        if let Some(handoff) = arguments
+            .iter()
+            .position(|word| matches!(word.as_str(), "|" | ">" | ">>" | "&&" | ";"))
+        {
+            arguments.truncate(handoff);
+        }
+        if arguments.first().map(String::as_str) != Some("engr") || arguments.len() < 2 {
+            continue;
+        }
+        found.push(arguments[1..].to_vec());
+    }
+    found
+}
+
+/// Split one documented command the way a shell would, for the two quoting
+/// forms the documentation actually uses.
+///
+/// `None` for anything with an unterminated quote, which is a line that was
+/// never a runnable command in the first place.
+fn shell_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for character in line.chars() {
+        match (quote, character) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, c @ ('"' | '\'')) => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started || !word.is_empty() {
+        words.push(word);
+    }
+    Some(words)
 }

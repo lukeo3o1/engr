@@ -894,11 +894,12 @@ The response must be exactly `CONFIRM <code>`.
 
 On confirmation, engr appends a Human Event, projects it into the sections,
 reseals the changed Sections and Object, and clears the Challenge. Agent
-admission appends an Agent Event carrying its ReviewDigest and projects it in
-the same locked operation. Projection is immediate: the sections are the
-authority, so they may not lag the log.
+admission appends an Agent Event carrying its review provenance — `outcome`,
+`result` and `attempts`, and no digest; see [Project rules](#project-rules) —
+and projects it in the same locked operation. Projection is immediate: the
+sections are the authority, so they may not lag the log.
 
-Each persisted Event-v2 record is schema-exact **and is the RFC 8785 (JCS) bytes
+Each persisted Event record is schema-exact **and is the RFC 8785 (JCS) bytes
 of the value it carries**, one record per line. That is checked on the read path
 against the raw record text, not against the value it parses to: parsing has
 already erased member order, insignificant whitespace, and any duplicate member
@@ -939,10 +940,21 @@ boundary MUST therefore prove admission, under the same lock the write lands in:
   appends before it discards, so the file is still there, and the code is the one
   value a caller cannot invent. The named Challenge's frozen subject, the applied
   revision and the exact payload must all correspond.
-- an Agent Event by **recomputing** its ReviewDigest against the live applicable
-  Rule set for exactly this mutation. A semantic Agent mutation with no
-  applicable usable Object Rule is refused; a title action is the sole
+- an Agent Event by **rebinding** the live applicable Rule set for exactly this
+  mutation and requiring the record's claim about review to be one that could
+  have happened: a record naming a passing review where no Rule governs the
+  mutation describes a review nothing could have run. A semantic Agent mutation
+  with no applicable usable Object Rule is refused; a title action is the sole
   non-authoritative exception.
+
+  It is a **narrowing** from recomputing a stored ReviewDigest, and a deliberate
+  one. History keeps `{outcome, result, attempts}` and not the digest, because
+  the digest binds Rule artifacts that will have moved and is checkable only
+  while the Challenge and those exact artifacts still stand — see
+  [Project rules](#project-rules). What it cost is catching a record that named
+  a review of some *other* mutation; what stands in the way of that is that
+  there is no public append at all, and that Agent admission verifies the
+  attestation against the live binding before it builds anything.
 
 The proof runs after the shape checks, so a malformed record is still refused for
 being malformed rather than for failing a proof about a shape nothing could admit
@@ -1105,12 +1117,34 @@ this is a repository, and `confirm` says when an object has uncommitted changes.
 ## Verify
 
 `verify` recomputes each Section seal and Object aggregate from what is stored,
-then checks the current and historical sides of every dependency.
+then checks the current and historical sides of every dependency, and last asks
+the question no seal can answer: whether the projection is the value its own
+admitted history produced.
 
-It catches a section edited without recomputing the hash. It **cannot** catch an
-edit that recomputes the hash too. Append-only admitted Events preserve audit
-evidence, and committed git history provides an additional tamper anchor, which
-is why `verify` also reports an uncommitted object.
+A seal catches a section edited without recomputing the hash. It **cannot**
+catch an edit that recomputes the hash too — that is what admitted history is
+for, and the two faults it exposes are different and MUST be reported as
+different things:
+
+```text
+tampered      the bytes do not match their own seal
+divergent     they match it, and no admitted Event produced them  -> repair
+unreplayable  admitted history cannot be replayed at all          -> the EventStore is damaged
+```
+
+`repair` restores a divergent projection, because history holds what it should
+say. It is not the answer to unreplayable history, where there is nothing to
+restore *from*, and a surface that reported the second as the first would send a
+reader to a path that refuses.
+
+`show` reports all three for the one Object it is about, and **fails** when it
+reports any of them: a screen that says an Object is not what its history
+produced and then exits 0 tells a script the opposite of what it told the
+reader. `ls` surveys and keeps exiting 0 — it would have to replay every
+Object's history to answer, and it already sends a reader to `verify`.
+
+Committed git history provides an additional tamper anchor, which is why
+`verify` also reports an uncommitted object.
 
 Do not read `verify` as proof that the recorded admitting actor really performed
 the path. It proves internal consistency. Human admission in particular is a
@@ -1910,14 +1944,21 @@ collections: a plan groups work, and v0 has no hierarchy.
 
 ```text
 the same target MUST NOT appear twice in one collection
-non-null order values MUST be unique within one collection
+a persisted order MUST be > 0, and MUST be unique within one collection
+absent means unranked; 0 at the input boundary clears a rank and is omitted
+a negative order is invalid, on the way in and on the way out
 ```
 
-Both are structural, and neither makes a collection authoritative. A rank that
-two members shared would be a sequence with a tie it cannot break; unranked
-members may of course share their absence, and a partly ordered plan is the
-normal state of a plan. Array position is **not** an ordering — a reader sorts
-by `order` and leaves the rest explicitly unranked.
+These are structural, and none makes a collection authoritative. A rank that two
+members shared would be a sequence with a tie it cannot break; unranked members
+may of course share their absence, and a partly ordered plan is the normal state
+of a plan. Array position is **not** an ordering — a reader sorts by `order` and
+leaves the rest explicitly unranked.
+
+Unranked has exactly one spelling, which is why a stored `0` is refused rather
+than accepted as a synonym for it, and a negative is refused because it is not a
+rank at all: it would sort ahead of every real one and quietly make itself
+first.
 
 A member whose target is later consumed or removed MUST NOT be silently
 retargeted. Backlog resolution is not one-to-one: a point can be settled by two
@@ -2786,6 +2827,33 @@ damaged.
 
 If the process dies during publication, reads stay unavailable until `engr
 migrate` resumes and completes the transaction. That is the intended cost.
+
+**The predecessor build must be locked out durably, and a lock cannot do it.**
+The predecessor's writer lock is held by a process, so the moment a confirmed
+migration is interrupted it is free — and a workspace whose bootstrap still
+declares the predecessor generation is one the predecessor build is *entitled* to
+write to. It would admit predecessor state legitimately, and the resume would
+publish straight over it: the new writes discarded, or a newly created
+predecessor Object left standing as previous-generation bytes after the history
+it belongs to was removed.
+
+So a confirmed migration MUST leave a durable marker the **predecessor** reads
+before it decides it may write — its own bootstrap file, replaced by one that
+generation cannot accept — and MUST leave it before the first published byte:
+
+```text
+destination staged and verified
+  -> predecessor bootstrap replaced by the migration barrier   (durable lockout)
+  -> publication
+  -> VERSION
+```
+
+One window remains, between staging the destination and raising the barrier, and
+a resume that finds a staged destination with the barrier not yet raised MUST
+establish that the predecessor did not move — the confirmed subject pins the
+digest of every source file it was derived from, so this is a comparison rather
+than a judgement. Nothing has been published at that point, so the transaction
+stays withdrawable there and only becomes forward-only once the barrier is up.
 
 Answering the migration's own code is the one thing that must stay reachable
 while the stage exists, because resolving the workspace *is* a confirmation. So

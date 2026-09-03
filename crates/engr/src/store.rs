@@ -172,29 +172,63 @@ pub(crate) fn contained(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What a directory says about being a workspace root.
+///
+/// Three answers, because `is_dir()` gives two and the missing one is the
+/// dangerous one. `is_dir()` follows links and reports every other kind of
+/// entry — a dangling link, a regular file, a device, a directory nobody may
+/// stat — as though nothing were there at all. In a walk that ascends on
+/// "nothing there", that silently carries the caller past the workspace they are
+/// standing in and into an ancestor's, where their next command lands on
+/// somebody else's record. Only established absence may ascend.
+enum Here {
+    Workspace,
+    Absent,
+}
+
+fn workspace_here(root: &Path) -> Result<Here> {
+    let dir = engr_dir(root);
+    let listed = match fs::symlink_metadata(&dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Here::Absent),
+        // Not knowing is not absence.
+        Err(error) => return Err(tool_error(dir.display(), error)),
+    };
+    // A redirected `.engr` is where the workspace is, so this refuses rather
+    // than walking past it: what is wrong is how the workspace was reached, and
+    // continuing would operate on a different one.
+    ensure!(
+        !listed.file_type().is_symlink(),
+        EXIT_SCHEMA,
+        "{}: something on the way to this resource is a link to somewhere else, so what engr would read is not what this workspace holds",
+        dir.display()
+    );
+    ensure!(
+        listed.is_dir(),
+        EXIT_SCHEMA,
+        "{}: exists but is not a directory, so this is not a workspace and not an empty parent either",
+        dir.display()
+    );
+    Ok(Here::Workspace)
+}
+
 /// Walk up from `start` looking for a workspace, so the tool works from any
 /// subdirectory the way git does.
 pub fn find_root(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
-        ensure!(
-            engr_dir(path).is_dir(),
-            EXIT_NOT_FOUND,
-            "no {DIR} workspace at {}",
-            path.display()
-        );
-        contained(&engr_dir(path))?;
-        return Ok(path.to_path_buf());
+        return match workspace_here(path)? {
+            Here::Workspace => Ok(path.to_path_buf()),
+            Here::Absent => Err(Error::new(
+                EXIT_NOT_FOUND,
+                format!("no {DIR} workspace at {}", path.display()),
+            )),
+        };
     }
     let current =
         std::env::current_dir().map_err(|error| tool_error("current directory", error))?;
     let mut cursor = current.as_path();
     loop {
-        if engr_dir(cursor).is_dir() {
-            // Found, and then refused rather than walked past: a redirected
-            // `.engr` is where the workspace is, so continuing up the tree
-            // would silently operate on a different workspace than the one the
-            // caller is standing in.
-            contained(&engr_dir(cursor))?;
+        if let Here::Workspace = workspace_here(cursor)? {
             return Ok(cursor.to_path_buf());
         }
         match cursor.parent() {
@@ -724,6 +758,16 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
 /// filesystem had. The containing directory is not flushed — that is
 /// POSIX-specific and unavailable on one of the supported platforms, so
 /// relying on it would make durability mean different things per target.
+///
+/// **The staging entry is part of the resource path, not a private detail.**
+/// Its name is `<resource>.tmp` and therefore entirely predictable, so checking
+/// only the destination left the whole boundary bypassable: a link planted at
+/// the staging name is followed by an ordinary create, engr writes the outside
+/// target, and the rename then moves *the link itself* into the canonical
+/// resource path. Every resource that publishes — Objects and Event streams
+/// included — went through that door. It is closed twice: the same no-link
+/// containment the destination gets, and then an exclusive create, which is what
+/// closes the window between asking and opening.
 fn publish(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
     // Before the directories are created, so a redirected component is refused
@@ -735,8 +779,25 @@ fn publish(path: &Path, text: &str) -> Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    let mut file =
-        fs::File::create(&temporary).map_err(|error| tool_error(temporary.display(), error))?;
+    contained(&temporary)?;
+    // A crash between the create and the rename is the one thing that can
+    // legitimately leave this behind, and it is a regular file when it happens —
+    // `contained` has already refused every other kind. Removing it is what
+    // keeps a crashed write from making the workspace permanently unwritable.
+    match fs::symlink_metadata(&temporary) {
+        Ok(_) => {
+            fs::remove_file(&temporary).map_err(|error| tool_error(temporary.display(), error))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(tool_error(temporary.display(), error)),
+    }
+    // Exclusive, so the answer cannot change between the check and the open: with
+    // `O_EXCL` a link at this path fails the create rather than being followed.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| tool_error(temporary.display(), error))?;
     file.write_all(text.as_bytes())
         .map_err(|error| tool_error(temporary.display(), error))?;
     file.sync_all()
@@ -1189,23 +1250,34 @@ fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> 
         Err(error) if error.code == EXIT_NOT_FOUND => None,
         Err(error) => return Err(error),
     };
-    // And that the projection this record lands on is one an admission may
-    // build on: the value its own admitted history produced, not merely a
-    // correctly sealed one. Asked here as well as at each entry to the gate,
-    // because "this workspace's authority was admitted" is a property of the
-    // durable boundary rather than of the route taken to it — and this is the
-    // step that would make an out-of-band edit durable, by writing a record
-    // that stands behind it.
+    // Which projection this record is validated against is the action's to
+    // choose, and it is the same choice `prepare` and `confirm` make.
     //
-    // `repair` is the exception, and it is the whole recovery contract: it
-    // exists to admit exactly this reconstruction, visibly, through the Human
-    // Gate.
-    if let Some(stored) = &stored {
-        if !matches!(event.action, Action::ObjectRepaired {}) {
+    // **Repair does not read the stored bytes at all.** They are what it exists
+    // to distrust: it is proposed against `ops::provable` and applies to it, so
+    // validating its tail from the corrupt projection asks whether a repair
+    // could be replayed over the damage it repairs. That is not a question with
+    // a meaningful answer, and its answer was often no — a projection whose
+    // `rev` was edited backwards replays events it has already applied, and the
+    // one recovery path was refused for it at the boundary after being offered
+    // and confirmed.
+    //
+    // Everything else builds on the stored projection, and must first establish
+    // that it is one an admission may build on: the value its own admitted
+    // history produced, not merely a correctly sealed one. Asked here as well as
+    // at each entry to the gate, because "this workspace's authority was
+    // admitted" is a property of the durable boundary rather than of the route
+    // taken to it — and this is the step that would make an out-of-band edit
+    // durable, by writing a record that stands behind it.
+    let predecessor = if matches!(event.action, Action::ObjectRepaired {}) {
+        Some(crate::ops::provable(root, &id)?)
+    } else {
+        if let Some(stored) = &stored {
             crate::ops::history_consistent_with(&tail, stored)?;
         }
-    }
-    validate_recoverable_tail(&id, stored, &tail)?;
+        stored
+    };
+    validate_recoverable_tail(&id, predecessor, &tail)?;
     // Last, and only for a record that is otherwise sound: a malformed Event
     // should be refused for being malformed, not for failing a proof about a
     // shape nothing could admit anyway.

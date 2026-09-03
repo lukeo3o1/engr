@@ -148,14 +148,14 @@ Objects are addressed by unique id prefix, like a git commit.
 Work that is not settled yet goes somewhere else entirely:
 
 ```bash
-engr backlog new --topic "reconsider the refresh strategy" \
+engr backlog new --title "reconsider the refresh strategy" \
                  --text "offline mode may invalidate it" \
                  --subject-file src/auth/session.rs
 engr backlog ls                              # unresolved topics
 engr backlog show <id>                       # points, subjects, outcomes so far
 engr backlog add <id> --text "another point"
 engr backlog revise <id> --section 2 --text "reworded"
-engr backlog rm <id> --section 2             # removing it is what says "settled"
+engr backlog consume <id> --section 2        # consuming it is what says "settled"
 ```
 
 Where execution currently stands goes somewhere else again — a sidecar on one
@@ -179,8 +179,8 @@ Which work belongs together goes in a **collection** — a plan, with an order a
 an optional schedule:
 
 ```bash
-engr collection new --name "Q3 authentication" --end 2026-09-30
-engr collection add <plan> --target engr:obj:<id> --order 10 --priority high
+engr collection new q3-auth --title "Q3 authentication" --end 2026-09-30
+engr collection add q3-auth --target engr:obj:<id> --order 10 --priority high
 engr collection ls                           # plans, and what still needs attention
 ```
 

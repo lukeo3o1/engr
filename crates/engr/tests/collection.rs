@@ -857,3 +857,116 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
     let text = engr::proof::canonical_bytes(value, "test fixture")?;
     std::fs::write(path, text).map_err(|error| engr::tool_error(path.display(), error))
 }
+
+/// A rank is positive, and unranked has one spelling.
+///
+/// #66 settles `order` as absent = unranked, persisted > 0, `0` at the input
+/// boundary meaning *clear* and therefore omitted, negative invalid. The writer
+/// stored whatever it was handed and the reader checked only uniqueness, so
+/// `order: 0` persisted as a second spelling of absence and `order: -1`
+/// persisted as a rank that `planned()` sorts ahead of every real one.
+#[test]
+fn a_rank_is_positive_and_zero_means_unranked() {
+    let (_dir, root) = workspace();
+    let plan = plan(&root, "ranking");
+    let first = new_object(&root, "first");
+    let second = new_object(&root, "second");
+    let third = new_object(&root, "third");
+
+    // Zero is not stored: it is how a caller says "no rank".
+    collection::add_member(
+        &root,
+        &plan.id,
+        &object_ref(&first),
+        Some(0),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("zero clears rather than ranks");
+    let stored: Value = store::read_json(&collection::path(&root, &plan.id)).expect("stored");
+    assert!(
+        !stored["members"][0]
+            .as_object()
+            .expect("member")
+            .contains_key("order"),
+        "zero is written by omitting the member: {stored}"
+    );
+
+    // A negative is not a rank at all, on either writer.
+    for (what, outcome) in [
+        (
+            "adding",
+            collection::add_member(
+                &root,
+                &plan.id,
+                &object_ref(&second),
+                Some(-1),
+                None,
+                engr::rules::Attempt::FIRST,
+            ),
+        ),
+        (
+            "ranking",
+            collection::set_order(
+                &root,
+                &plan.id,
+                &object_ref(&first),
+                Some(-1),
+                engr::rules::Attempt::FIRST,
+            ),
+        ),
+    ] {
+        let error = outcome.err().unwrap_or_else(|| panic!("{what}: refused"));
+        assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
+        assert!(
+            error.message.contains("ranks start at 1"),
+            "{what}: {error}"
+        );
+    }
+
+    // And `set_order(0)` clears an existing rank rather than storing one.
+    collection::add_member(
+        &root,
+        &plan.id,
+        &object_ref(&third),
+        Some(3),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("a real rank");
+    collection::set_order(
+        &root,
+        &plan.id,
+        &object_ref(&third),
+        Some(0),
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("zero clears");
+    assert!(
+        collection::load(&root, &plan.id)
+            .expect("load")
+            .members
+            .iter()
+            .all(|member| member.order.is_none()),
+        "nothing is ranked once every rank was cleared"
+    );
+
+    // A stored rank that could not have been written is refused on the way out,
+    // because this file is hand-editable and a rule only the writer enforces is
+    // one hand-edit away from being untrue.
+    let path = collection::path(&root, &plan.id);
+    for invalid in [json!(0), json!(-1)] {
+        let mut value: Value = store::read_json(&path).expect("read");
+        value["members"][0]["order"] = invalid.clone();
+        std::fs::write(
+            &path,
+            engr::proof::canonical_bytes(&value, "test fixture").expect("canonical"),
+        )
+        .expect("write");
+        let error = collection::load(&root, &plan.id)
+            .err()
+            .unwrap_or_else(|| panic!("{invalid}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{invalid}");
+        assert!(error.message.contains("a rank is positive"), "{error}");
+    }
+}

@@ -199,22 +199,73 @@ pub fn history_consistent(root: &Path, object: &Object) -> Result<()> {
 /// filtered out here, so a caller may pass a tail that already includes the
 /// record it is about to write.
 pub(crate) fn history_consistent_with(events: &[Event], object: &Object) -> Result<()> {
-    let admitted: Vec<Event> = events
+    match history_fault_with(events, object) {
+        Some(fault) => Err(Error::new(EXIT_INVARIANT, fault.message(&object.id))),
+        None => Ok(()),
+    }
+}
+
+/// Why a projection and its own admitted history do not agree.
+///
+/// **Two faults, not one.** Both refuse an admission and both fail
+/// verification, but they are damage to different things and a reader sent to
+/// the wrong one wastes the only move they have. Divergence is a projection
+/// that was changed outside an admission path: history replays perfectly and
+/// produces something else, so `repair` restores it. Unreplayable history is
+/// the opposite — the EventStore itself cannot be replayed, so there is nothing
+/// to restore *from*, and `repair` is not the answer.
+///
+/// Collapsing them into one boolean is how a read surface came to report
+/// EventStore corruption as "the projection was edited".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryFault {
+    /// Admitted history cannot be replayed at all, so there is nothing to check
+    /// the projection against.
+    Unreplayable(String),
+    /// History replays, and the fact it names is not what the projection holds.
+    Divergent(&'static str),
+}
+
+impl HistoryFault {
+    /// The machine-readable state, for structured output.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Unreplayable(_) => "unreplayable",
+            Self::Divergent(_) => "divergent",
+        }
+    }
+
+    /// What to tell somebody holding this Object, including what to do next.
+    pub fn message(&self, id: &str) -> String {
+        match self {
+            Self::Unreplayable(why) => why.clone(),
+            Self::Divergent(what) => format!(
+                "{id}: its {what} is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it"
+            ),
+        }
+    }
+}
+
+/// The fault between this projection and its own admitted history, if there is
+/// one.
+pub fn history_fault(root: &Path, object: &Object) -> Result<Option<HistoryFault>> {
+    Ok(history_fault_with(
+        &store::load_events(root, &object.id)?,
+        object,
+    ))
+}
+
+/// The same, for a caller already holding the history.
+pub(crate) fn history_fault_with(events: &[Event], object: &Object) -> Option<HistoryFault> {
+    let prefix: Vec<Event> = events
         .iter()
         .filter(|event| event.rev <= object.rev)
         .cloned()
         .collect();
-    let admitted = rebuilt(&object.id, &admitted)?;
-    if let Some(what) = disagreement(&admitted, object) {
-        return Err(Error::new(
-            EXIT_INVARIANT,
-            format!(
-                "{}: its {what} is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it",
-                object.id
-            ),
-        ));
+    match rebuilt(&object.id, &prefix) {
+        Err(error) => Some(HistoryFault::Unreplayable(error.message)),
+        Ok(admitted) => disagreement(&admitted, object).map(HistoryFault::Divergent),
     }
-    Ok(())
 }
 
 /// The predecessor an ordinary admission is allowed to build on.
@@ -408,13 +459,14 @@ pub struct Report {
     pub broken_replacements: Vec<BrokenReplacement>,
     pub unprojected: usize,
     pub projection_missing: bool,
-    /// Why the stored projection is not what its admitted history produced.
+    /// How the stored projection and its own admitted history fail to agree.
     ///
     /// Its own finding rather than a flavour of tampering, because the seals
     /// pass: this is the state a resealed out-of-band edit leaves, and reporting
     /// it as an integrity failure would say the bytes are damaged when what is
-    /// wrong is that nothing ever admitted them.
-    pub divergent_history: Option<String>,
+    /// wrong is that nothing ever admitted them. The two faults inside it are
+    /// kept apart for the same reason — see [`HistoryFault`].
+    pub history: Option<HistoryFault>,
     pub uncommitted: Option<bool>,
 }
 
@@ -427,7 +479,7 @@ impl Report {
             && self.standing_on_unreadable.is_empty()
             && self.broken_replacements.is_empty()
             && !self.projection_missing
-            && self.divergent_history.is_none()
+            && self.history.is_none()
             && self.unprojected == 0
     }
 }
@@ -467,15 +519,8 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     // resealed verifies perfectly; what exposes it is that admitted history
     // never produced it. Reported over the bytes actually persisted, for the
     // same reason the seals are: an unrepaired projection is the finding.
-    let divergent_history = match &persisted {
-        Some(persisted) => history_consistent(root, persisted).err().map(|error| {
-            // The identity is already the first column of the report.
-            error
-                .message
-                .strip_prefix(&format!("{id}: "))
-                .unwrap_or(&error.message)
-                .to_owned()
-        }),
+    let history = match &persisted {
+        Some(persisted) => history_fault_with(&events, persisted),
         None => None,
     };
     let mut tampered = Vec::new();
@@ -597,7 +642,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
             .filter(|event| event.rev > projection_rev)
             .count(),
         projection_missing: persisted.is_none(),
-        divergent_history,
+        history,
         uncommitted: git::uncommitted(root, &store::object_path(root, id)),
     })
 }

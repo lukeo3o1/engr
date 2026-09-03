@@ -249,6 +249,19 @@ impl Collection {
                 member.target.reference
             );
             if let Some(order) = member.order {
+                // A persisted rank is positive. Absence is how "unranked" is
+                // written, so a stored `0` would be a second spelling of it —
+                // and `0` is the input that *means* clear, which is why it is
+                // normalized to absence on the way in rather than stored.
+                // Negatives never had a meaning at all: `planned()` would sort
+                // them ahead of every real rank, so a hand-edited `-1` silently
+                // becomes first.
+                ensure!(
+                    order > 0,
+                    EXIT_SCHEMA,
+                    "{} is ranked {order}; a rank is positive, and unranked is written by leaving it out",
+                    member.target.reference
+                );
                 // Unranked members may share their absence; a *rank* cannot be
                 // shared, or the sequence it exists to express has a tie it
                 // cannot break.
@@ -636,6 +649,24 @@ fn require_target(root: &Path, target: &str) -> Result<()> {
     }
 }
 
+/// The rank to persist for what a caller supplied.
+///
+/// One place, because both writers take the same value and #66 gives it one
+/// reading: absent is unranked, a persisted rank is positive, and `0` at the
+/// input boundary *means* unrank — so it is normalized to absence rather than
+/// stored as a second spelling of it. A negative is not a rank at all; storing
+/// one would sort it ahead of every real rank in `planned()`.
+fn rank(order: Option<i64>) -> Result<Option<i64>> {
+    match order {
+        Some(0) | None => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(value) => Err(Error::new(
+            EXIT_USAGE,
+            format!("--order {value} is not a rank; ranks start at 1, and 0 clears one"),
+        )),
+    }
+}
+
 pub fn add_member(
     root: &Path,
     id: &str,
@@ -649,6 +680,7 @@ pub fn add_member(
     // question. This one needs no lock: it reads the argument, not the
     // workspace.
     check_target("a collection member", target)?;
+    let order = rank(order)?;
     edit(root, id, attempt, |collection| {
         // Existence is checked **inside** the lock, because the check is what
         // defines admission. Backlog consumption takes the same workspace lock,
@@ -692,6 +724,7 @@ pub fn set_order(
     order: Option<i64>,
     attempt: Attempt,
 ) -> Result<Collection> {
+    let order = rank(order)?;
     edit(root, id, attempt, |collection| {
         collection.member_mut(target)?.order = order;
         Ok(())

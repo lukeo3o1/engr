@@ -161,7 +161,8 @@ fn object_tampered(object: &Object) -> bool {
     crate::integrity::check_object_integrity(object).is_err()
 }
 
-/// Whether this projection is the value its own admitted history produced.
+/// Whether this projection is the value its own admitted history produced, and
+/// if not, which of the two faults it is.
 ///
 /// The question no seal can answer, because seals are recomputed from the bytes
 /// on disk: an out-of-band edit that was also resealed verifies perfectly, so
@@ -170,11 +171,11 @@ fn object_tampered(object: &Object) -> bool {
 /// Asked on `show` and deliberately not on `ls`. It replays the Object's whole
 /// history, which is affordable for the one Object somebody is reading and is
 /// not for a listing — and the listing already sends a reader to `verify` for
-/// the deep question. Unlike a Ref that has drifted, there is no reading of a
-/// divergence under which the record is fine, so a surface an agent reads before
-/// acting must not print `ok` over one.
-fn object_divergent(root: &Path, object: &Object) -> bool {
-    crate::ops::history_consistent(root, object).is_err()
+/// the deep question. Unlike a Ref that has drifted, there is no reading of
+/// either fault under which the record is fine, so a surface an agent reads
+/// before acting must not print `ok` over one.
+fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFault> {
+    ops::history_fault(root, object).ok().flatten()
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -431,10 +432,19 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 "!!         this Object was never committed, so there is nothing to compare against\n",
             ),
         }
-    } else if object_divergent(root, object) {
-        out.push_str(
-            "!!         Object is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Run: engr verify\n",
-        );
+    } else {
+        match history_fault(root, object) {
+            Some(ops::HistoryFault::Divergent(what)) => out.push_str(&format!(
+                "!!         Object {what} is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair\n"
+            )),
+            // A different fault and a different answer: there is nothing to
+            // restore from, so sending a reader to `repair` would be sending
+            // them to a path that refuses.
+            Some(ops::HistoryFault::Unreplayable(why)) => out.push_str(&format!(
+                "!!         Object history cannot be replayed, so nothing can check this projection: {why}\n"
+            )),
+            None => {}
+        }
     }
     // The canonical reference, on the screen you land on when you want to name
     // this object to something else. Every reference-taking flag wants this
@@ -686,16 +696,17 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         state: object.state.as_str(),
         attention: object.needs_attention(),
         rev: object.rev,
-        // Three answers, because there are three states and the third one used
-        // to be reported as the first. `tampered` is bytes that do not match
-        // their own seal; `divergent` is bytes that match it and that no
-        // admitted Event ever produced.
-        integrity: if object_tampered(object) {
-            "tampered"
-        } else if object_divergent(root, object) {
-            "divergent"
-        } else {
-            "ok"
+        // Four answers, because there are four states and three of them used to
+        // be reported as `ok`. `tampered` is bytes that do not match their own
+        // seal. `divergent` is bytes that match it and that no admitted Event
+        // ever produced — the projection is what is wrong, and `repair` restores
+        // it. `unreplayable` is the opposite: the EventStore cannot be replayed
+        // at all, so there is nothing to restore from and nothing to check
+        // against.
+        integrity: match history_fault(root, object) {
+            _ if object_tampered(object) => "tampered",
+            Some(fault) => fault.key(),
+            None => "ok",
         },
         digest: &object.digest,
         summary: JsonSummary {

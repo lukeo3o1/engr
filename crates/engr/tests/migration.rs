@@ -2197,3 +2197,244 @@ fn the_local_exclude_lands_where_git_reads_it_from_a_linked_worktree() {
         );
     }
 }
+
+/// The source of a migration is the bytes the released workspace persisted, so
+/// no part of it may be reached by following a link.
+///
+/// A migration establishes what the predecessor's repository actually held, and
+/// that claim is only as good as the paths it read. A link is a path denoting
+/// another path: git records the link, the read returns the target's contents,
+/// and the migrated record would be built from bytes the predecessor repository
+/// never tracked — while the captured source digest says otherwise. A *dangling*
+/// link is worse than refused-and-visible: `exists()` reports it as absence, and
+/// absence of a history file is a shape the release legitimately wrote, so an
+/// Object would have been migrated as though it had no admitted history at all.
+#[test]
+#[cfg(unix)]
+fn a_predecessor_reached_through_a_link_is_not_the_released_bytes() {
+    let (_temp, root) = released();
+    let outside = TempDir::new().expect("outside");
+    let before = fingerprint(&root);
+
+    let object = store::object_path(&root, AUTHORITY);
+    let moved = outside.path().join("authority.json");
+    std::fs::rename(&object, &moved).expect("move the projection out");
+    std::os::unix::fs::symlink(&moved, &object).expect("symlink");
+    let error = engr::migration::prepare(&root).expect_err("a redirected projection");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("link to somewhere else"),
+        "{}",
+        error.message
+    );
+    std::fs::remove_file(&object).expect("remove the link");
+    std::fs::rename(&moved, &object).expect("put it back");
+
+    // A dangling history link is the one that used to read as absence.
+    let history = store::engr_dir(&root)
+        .join("events")
+        .join(format!("{AUTHORITY}.jsonl"));
+    let kept = history.with_extension("jsonl.kept");
+    std::fs::rename(&history, &kept).expect("move the history aside");
+    std::os::unix::fs::symlink(root.join("nowhere"), &history).expect("symlink");
+    let error = engr::migration::prepare(&root).expect_err("a dangling history link");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("link to somewhere else"),
+        "{}",
+        error.message
+    );
+    std::fs::remove_file(&history).expect("remove the link");
+    std::fs::rename(&kept, &history).expect("put it back");
+
+    // And a whole source directory.
+    let objects = store::objects_dir(&root);
+    let moved = outside.path().join("objects");
+    std::fs::rename(&objects, &moved).expect("move");
+    std::os::unix::fs::symlink(&moved, &objects).expect("symlink");
+    let error = engr::migration::prepare(&root).expect_err("a redirected objects directory");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("link to somewhere else"),
+        "{}",
+        error.message
+    );
+    std::fs::remove_file(&objects).expect("remove the link");
+    std::fs::rename(&moved, &objects).expect("put it back");
+
+    assert_eq!(
+        fingerprint(&root).len(),
+        before.len(),
+        "a refused preflight publishes nothing"
+    );
+    assert!(!store::version_path(&root).exists());
+    engr::migration::prepare(&root).expect("and the restored workspace migrates again");
+}
+
+/// A confirmed migration locks the released build out of its own workspace,
+/// durably, before anything is published.
+///
+/// The predecessor lock is an OS lock held by one process: an interruption
+/// frees it, and the released build is then entitled to a workspace whose
+/// `format.json` still says version 1. It would admit predecessor state
+/// legitimately in that window, and a resume that went straight to publication
+/// would overwrite it — or leave a newly created predecessor Object standing as
+/// legacy-shaped bytes after its history directory was removed underneath it.
+///
+/// So the transaction leaves a bootstrap the released build cannot read, and it
+/// leaves it before the first published byte. What the released build does with
+/// that is its own affair; what this pins is that the file it reads to decide is
+/// no longer one it can accept.
+#[test]
+fn a_confirmed_migration_locks_the_predecessor_out_before_publishing() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let bootstrap = store::engr_dir(&root).join("format.json");
+    assert_eq!(
+        serde_json::from_str::<Value>(&read(&bootstrap)).expect("json")["format"],
+        "engr-workspace",
+        "the predecessor can read its own workspace while the question is open"
+    );
+
+    interrupt_after_confirmed_destination(&root, &proposed.challenge);
+
+    // Nothing is published yet: the destination is staged and `VERSION` is not
+    // there. And the released build is already out.
+    assert!(!store::version_path(&root).exists());
+    let barrier: Value = serde_json::from_str(&read(&bootstrap)).expect("json");
+    assert_eq!(barrier["format"], "engr-migration-in-progress");
+    assert_eq!(barrier["migration"], proposed.challenge.as_str());
+    assert!(
+        engr::store::validate_format(&root).is_err(),
+        "and so is every ordinary read, until the migration is finished"
+    );
+
+    // Resuming still finishes, and the result is an ordinary current workspace.
+    let report = match engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect("resume the confirmed migration")
+    {
+        engr::Confirmed::Migration(report) => report,
+        engr::Confirmed::Object(_) => panic!("a migration subject"),
+    };
+    assert_eq!(report.objects.len(), 4);
+    assert_eq!(
+        store::validate_format(&root).expect("current"),
+        WorkspaceFormat::Current
+    );
+    assert!(!bootstrap.exists(), "the barrier goes with the publication");
+}
+
+/// A released writer in the window before the barrier is not published over.
+///
+/// One window remains after the destination is staged and before the barrier is
+/// raised, and it is the window the old lock's release opens. A resume that
+/// found a confirmed destination used to go straight to `finish`, so anything
+/// admitted in the meantime was overwritten and its history deleted. The
+/// confirmed subject already pins the digest of every predecessor file it was
+/// derived from, so the resume can establish that the source did not move — and
+/// nothing has been published yet, so withdrawing and preparing again is a real
+/// answer rather than a wedge.
+#[test]
+fn a_predecessor_write_before_the_barrier_stops_the_resume() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "barrier", &proposed.challenge);
+
+    // The interruption left the destination staged and the predecessor readable,
+    // which is exactly what the released build needs to write again.
+    assert!(store::engr_dir(&root)
+        .join("local")
+        .join("migration")
+        .join("destination")
+        .exists());
+    assert_eq!(
+        serde_json::from_str::<Value>(&read(&store::engr_dir(&root).join("format.json")))
+            .expect("json")["format"],
+        "engr-workspace",
+        "the barrier is not up yet, which is the premise of this test"
+    );
+
+    // What a released build would do with the workspace it can still read: admit
+    // a mutation of its own, through its own gate. Reproduced as the bytes it
+    // would have written — the Event first and then the projection, in its own
+    // order — because those bytes are all this build can observe about it
+    // anyway, and a crude edit would be refused later as a tampered predecessor
+    // rather than as the legitimate admission this is.
+    rename_as_the_released_build_would(&root, AUTHORITY, "admitted by the old build");
+
+    let error = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect_err("the resume must not publish over it");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("moved after migration"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !store::version_path(&root).exists(),
+        "nothing was published"
+    );
+    assert_eq!(
+        predecessor_object(&root, AUTHORITY)["title"],
+        "admitted by the old build",
+        "and what the old build wrote is still there"
+    );
+
+    // And the way out is open, because nothing was published: a qualified
+    // response withdraws the confirmed migration, and it can be prepared again
+    // over the workspace as it now stands.
+    engr::confirm(&root, &format!("CONFIRM {} no", proposed.challenge))
+        .expect_err("a qualified response is not assent");
+    assert!(
+        !store::engr_dir(&root)
+            .join("local")
+            .join("migration")
+            .exists(),
+        "the withdrawn plan is gone"
+    );
+    engr::migration::prepare(&root).expect("and the migration can be prepared again");
+}
+
+/// One admission the released build would have made, written the way it wrote.
+///
+/// A rename: the Event appended to its own history first, then the projection —
+/// which is the order that generation used, and the reason its migration reads
+/// effective state rather than stored state. Nothing here is a hand edit
+/// pretending to be an admission: the record is sealed with the predecessor's
+/// own payload hash and the projection is exactly what replaying it derives, so
+/// the workspace afterwards is one the released build could have produced and
+/// one this build's preflight accepts.
+fn rename_as_the_released_build_would(root: &Path, id: &str, title: &str) {
+    let history = store::engr_dir(root)
+        .join("events")
+        .join(format!("{id}.jsonl"));
+    let mut projection = predecessor_object(root, id);
+    let rev = projection["rev"].as_u64().expect("rev") + 1;
+    let mut event = serde_json::json!({
+        "format": "engr-event",
+        "version": 1,
+        "event_id": engr::model::new_id(),
+        "rev": rev,
+        "time": "2026-09-03T00:00:00Z",
+        "action": "object_renamed",
+        "object": id,
+        "text": title,
+        "refs": [],
+        "confirmation": { "challenge": "K7M3PQ", "payload_sha256": "" },
+    });
+    reseal_predecessor_event(&mut event);
+    let mut stream = read(&history);
+    stream.push_str(&serde_json::to_string(&event).expect("json"));
+    stream.push('\n');
+    write(&history, &stream);
+
+    projection["title"] = Value::String(title.to_owned());
+    projection["rev"] = serde_json::json!(rev);
+    write(
+        &store::object_path(root, id),
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&projection).expect("json")
+        ),
+    );
+}

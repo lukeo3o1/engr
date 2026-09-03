@@ -2717,14 +2717,16 @@ fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
     assert!(!report.passed(), "a divergent projection is not a PASS");
     assert!(!report.object_tampered, "the seals verify");
     assert!(report.tampered.is_empty(), "and so does every Section seal");
-    let divergence = report
-        .divergent_history
-        .as_deref()
-        .expect("verification names the divergence");
-    assert!(
-        divergence.contains("not what its admitted history produced"),
-        "{divergence}"
-    );
+    // And as the right one of the two faults: history replays perfectly here,
+    // so this is the projection being wrong rather than the EventStore.
+    match report
+        .history
+        .as_ref()
+        .expect("verification names the fault")
+    {
+        engr::ops::HistoryFault::Divergent(what) => assert_eq!(*what, "sections"),
+        other => panic!("history replays, so this is not {other:?}"),
+    }
 
     // Nothing durable moved while all of that was refused.
     assert_eq!(
@@ -2896,4 +2898,54 @@ fn an_applied_challenge_is_cleaned_up_even_when_its_basis_is_gone() {
         gate::pending(&root).expect("candidates").is_empty(),
         "and the spent Challenge is gone"
     );
+}
+
+/// Repair reaches the durable boundary, whatever the corrupt projection says.
+///
+/// The stored bytes are what repair distrusts, so every boundary must take its
+/// predecessor from admitted history — including the append's own tail
+/// validation, which is the last one and was still reading the corrupt
+/// projection. A history whose later Events consume what the earlier ones
+/// created is where that shows: with `rev` edited backwards, the append
+/// validated the repair by replaying an Event the corrupt projection had already
+/// applied, and refused the one recovery action *after* it had been offered,
+/// confirmed and answered.
+#[test]
+fn a_repair_is_admitted_over_a_history_whose_later_events_consume_earlier_ones() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "delete then repair");
+    admit(
+        &root,
+        payload(Act::Add, &id, "wording that will be removed"),
+    );
+    admit(&root, common::delete(&id, 1));
+    let admitted = store::load_object(&root, &id).expect("object");
+    assert_eq!(admitted.rev, 3);
+    assert!(admitted.sections.is_empty(), "§1 was consumed at rev 3");
+
+    // Only the revision, and no reseal: the projection is integrity-invalid and
+    // claims to be one Event behind where history says it is.
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["rev"] = serde_json::json!(2);
+    write_raw(&path, &value).expect("write");
+
+    let prepared = gate::prepare_repair(&root, &id).expect("repair prepares");
+    assert_eq!(
+        prepared.candidate.expected_rev(),
+        3,
+        "against the provable revision"
+    );
+    let repaired = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("and the durable boundary admits it");
+    assert_eq!(repaired.object.rev, 4);
+    assert!(
+        repaired.object.sections.is_empty(),
+        "restored to what history proves, which is that §1 is gone"
+    );
+    assert_eq!(
+        repaired.object.next_section_id, admitted.next_section_id,
+        "including the counter, so the consumed id is never handed out again"
+    );
+    assert!(ops::verify(&root, &id).expect("verify").passed());
 }
