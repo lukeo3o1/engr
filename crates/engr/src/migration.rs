@@ -761,15 +761,40 @@ pub(crate) fn staged_code(root: &Path) -> Result<Option<String>> {
     Ok(staged(root)?.map(|manifest| manifest.challenge))
 }
 
+/// Read one file of local migration state, on the same terms as every other
+/// resource this workspace holds.
+///
+/// **The stage is workspace state, not scratch.** It lives under `.engr/local/`,
+/// it is what recovery reconstructs a confirmed transaction from, and its
+/// destination half is the exact material publication copies into the canonical
+/// Object and Event paths. Read with a bare `fs::read_to_string` it was outside
+/// the no-link boundary the rest of the tree is inside: a link at the stage
+/// directory, at either manifest or at a staged leaf was followed, so bytes from
+/// outside the workspace could be parsed as migration state and — for the
+/// destination — published into the record. And a *dangling* link was worse than
+/// visible, because `NotFound` is how a link that resolves to nothing arrives:
+/// it read as "no stage", which is the answer that lets everything proceed.
+///
+/// So: `None` is established absence and nothing else. A link on the way, a
+/// wrong shape, and any other stat failure fail closed, exactly as
+/// [`store::resource_present`] decides everywhere else.
+fn read_local(path: &Path) -> Result<Option<String>> {
+    if !store::resource_present(path)? {
+        return Ok(None);
+    }
+    Ok(Some(
+        fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?,
+    ))
+}
+
 fn staged(root: &Path) -> Result<Option<Manifest>> {
     let path = stage_dir(root).join(MANIFEST);
-    match fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display()))),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(tool_error(path.display(), error)),
-    }
+    let Some(text) = read_local(&path)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
 }
 
 /// Install the plan atomically, so a crash leaves either no stage or a complete
@@ -1630,10 +1655,8 @@ fn confirmed_destination(
 ) -> Result<Option<Vec<(String, String, String)>>> {
     let dir = destination_dir(root);
     let manifest_path = dir.join(DESTINATION_MANIFEST);
-    let text = match fs::read_to_string(&manifest_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(tool_error(manifest_path.display(), error)),
+    let Some(text) = read_local(&manifest_path)? else {
+        return Ok(None);
     };
     let destination: Destination = serde_json::from_str(&text).map_err(|error| {
         Error::new(EXIT_SCHEMA, format!("{}: {error}", manifest_path.display()))
@@ -1824,8 +1847,23 @@ fn confirmed_destination(
     Ok(Some(ready))
 }
 
+/// One staged destination leaf — the material publication copies verbatim into
+/// the canonical record, so of everything under the stage this is the read that
+/// must not follow a link.
+///
+/// Absence is a failure here rather than a `None`: the destination manifest has
+/// already named this file, so a leaf that is not there is an incomplete
+/// destination, not an absent one.
 fn read_staged(path: &Path) -> Result<String> {
-    fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))
+    read_local(path)?.ok_or_else(|| {
+        Error::new(
+            EXIT_INVARIANT,
+            format!(
+                "{}: the staged destination names this file and it is not there",
+                path.display()
+            ),
+        )
+    })
 }
 
 /// Copy the staged destination into place, then remove what the predecessor

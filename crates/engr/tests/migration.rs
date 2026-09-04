@@ -2233,6 +2233,112 @@ fn the_local_exclude_lands_where_git_reads_it_from_a_linked_worktree() {
     }
 }
 
+/// Migration recovery does not read its own stage through a link.
+///
+/// The stage is workspace state, not scratch. It is what a confirmed transaction
+/// is reconstructed from after a crash, and its destination half is the exact
+/// material publication copies into the canonical Object and EventStore paths —
+/// so a link there is the same escape the rest of `.engr` refuses, at the one
+/// place where outside bytes can become the record.
+///
+/// `staged`, `confirmed_destination` and `read_staged` each read with a bare
+/// `fs::read_to_string`, outside the boundary. A resolving link meant recovery
+/// parsed and validated bytes from outside the workspace; a *dangling* one was
+/// worse, because `NotFound` is how a link to nothing arrives and both of those
+/// readers mapped `NotFound` to "there is no stage" — the answer that lets
+/// everything else proceed.
+///
+/// Every one of them goes through `read_local` now, where absence means
+/// established absence and nothing else.
+#[test]
+#[cfg(unix)]
+fn migration_recovery_does_not_read_its_stage_through_a_link() {
+    let mut found: Vec<String> = Vec::new();
+    for what in [
+        "the stage directory",
+        "the plan",
+        "the destination manifest",
+        "a staged Object",
+        "a staged Event stream",
+        "a dangling plan",
+    ] {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        let code = proposed.challenge.clone();
+        // Destination staged and verified, predecessor shut out, nothing
+        // published: the state a resume picks up, and the whole of what it has
+        // to trust.
+        interrupt_after_confirmed_destination(&root, &code);
+
+        let stage = engr::migration::stage_dir(&root);
+        let destination = stage.join("destination");
+        let target = match what {
+            "the stage directory" => stage.clone(),
+            "the plan" | "a dangling plan" => stage.join("manifest.json"),
+            "the destination manifest" => destination.join("destination.json"),
+            "a staged Object" => destination
+                .join("objects")
+                .join(format!("{AUTHORITY}.json")),
+            _ => destination
+                .join("eventstore")
+                .join(format!("{AUTHORITY}.jsonl")),
+        };
+        assert!(
+            target.exists(),
+            "{what}: the fixture must actually stage this"
+        );
+
+        if what == "a dangling plan" {
+            std::fs::remove_file(&target).expect("remove");
+            std::os::unix::fs::symlink(root.join("nowhere"), &target).expect("symlink");
+        } else {
+            // The bytes behind it are the real staged bytes, which is the point:
+            // what is wrong is that the path no longer denotes what this
+            // workspace holds.
+            let moved = root.join("outside-stage");
+            std::fs::rename(&target, &moved).expect("move it out");
+            std::os::unix::fs::symlink(&moved, &target).expect("symlink");
+        }
+
+        let outcome = engr::confirm(&root, &format!("CONFIRM {code}"));
+
+        // Collected rather than asserted case by case, so one run reports every
+        // path that is still readable through a link instead of stopping at the
+        // first — which is the difference between "there is a hole" and "here
+        // is where all of them are".
+        let refusal = match &outcome {
+            Err(error)
+                if error.code == engr::EXIT_SCHEMA
+                    && error.message.contains("link to somewhere else")
+                    // The dangling case is really about this one: it must not be
+                    // downgraded into the ordinary "there is nothing staged"
+                    // answer, which is a refusal too and the wrong one.
+                    && !error.message.contains("no migration is staged") =>
+            {
+                None
+            }
+            Err(error) => Some(format!("{what}: refused, but not as a link: {error}")),
+            Ok(_) => Some(format!("{what}: read through the link and succeeded")),
+        };
+        let published = match (
+            store::version_path(&root).exists(),
+            store::eventstore_dir(&root).exists(),
+        ) {
+            (false, false) => None,
+            (activated, streams) => Some(format!(
+                "{what}: published on the strength of it (activated: {activated}, event streams: {streams})"
+            )),
+        };
+        found.extend(refusal);
+        found.extend(published);
+    }
+    assert!(
+        found.is_empty(),
+        "the stage is read on the workspace's own terms or not at all:\n{}",
+        found.join("\n")
+    );
+}
+
 /// A spent migration code answered again cannot publish over the record that
 /// has been admitted since.
 ///

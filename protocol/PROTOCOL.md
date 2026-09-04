@@ -85,6 +85,17 @@ path, not a private detail: its name is derived from the resource's, so it is as
 predictable as the resource, and a link planted there is followed by an ordinary
 create and then renamed into the canonical path.
 
+**Local transaction state is inside this boundary too, and for a different
+reason.** `local/` is not git-tracked, so the correspondence the paragraph above
+rests on does not reach it — and reading that as "the rule stops here" is the
+mistake. A confirmed migration's stage is what recovery reconstructs the
+transaction from, and its destination half is the exact material publication
+copies into the canonical Object and Event paths, so a link there is the one
+place where bytes from outside the workspace can *become* the record. Reads of
+local transaction state MUST refuse a link exactly as reads of the tracked tree
+do. A dangling one MUST NOT be read as "there is no transaction": that arrives as
+an ordinary not-found, and it is the answer that lets everything else proceed.
+
 **Every probe of that tree has three answers, not two.** "Is it there" asked as
 a boolean collapses a wrong-shaped or unreachable entry into absence, and absence
 is the answer that lets work continue: a resource directory that is a regular
