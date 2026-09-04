@@ -20,9 +20,10 @@
 //! corrupt file but a plausible one. Accepting `"status": "resolved"` and
 //! ignoring it is worse than refusing the file: engr would call the workspace
 //! valid, then drop the field on the next ordinary rewrite, having silently
-//! edited data it told the reader it understood. `.engr/format.json` is the
-//! only schema authority, so a resource carrying its own `format`/`version` is
-//! refused for that same reason.
+//! edited data it told the reader it understood. `.engr/VERSION` is the only
+//! schema authority in this generation, so a resource carrying its own
+//! `format`/`version` is refused for that same reason. (`format.json` was the
+//! predecessor's; this build reads it only to recognize a workspace to migrate.)
 
 use crate::model::new_id;
 use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
@@ -675,7 +676,7 @@ fn save(root: &Path, item: &Item) -> Result<()> {
 
 fn remove(root: &Path, id: &str) -> Result<()> {
     let path = item_path(root, id);
-    std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))
+    crate::store::remove_durably(&path)
 }
 
 pub fn all(root: &Path) -> Result<Vec<Item>> {

@@ -1498,6 +1498,39 @@ fn no_persisted_path_is_probed_with_a_two_state_exists() {
     );
 }
 
+/// Absence is published the way presence is.
+///
+/// A directory entry's *disappearance* lives in the containing directory's
+/// metadata exactly as its appearance does, so an unflushed removal can be
+/// undone by a power failure after the caller was told the thing was gone. The
+/// write side already treated a pathname as a durability boundary; deletion did
+/// not, and it is the asymmetric half that matters most: Challenge retirement is
+/// how a human **declines**, and unlike post-admission cleanup there is no
+/// durable Event that could later classify a resurrected question as already
+/// applied. A file that comes back is a live question, and if the Object still
+/// stands at its `expected_rev` the gate calls it pending — so a mutation
+/// somebody explicitly refused becomes admissible again. A withdrawn migration
+/// is the same shape, with a resumable transaction behind it.
+///
+/// Whether the flush reached the device is not observable here, so what is held
+/// is the property it rests on: one route out, and nothing takes another.
+#[test]
+fn every_removal_makes_the_absence_durable() {
+    let mut sites = call_sites("fs::remove_file(");
+    sites.extend(call_sites("fs::remove_dir_all("));
+    sites.sort();
+    assert_eq!(
+        sites,
+        vec![
+            ("store.rs".to_string(), "remove_durably".to_string()),
+            ("store.rs".to_string(), "remove_tree_durably".to_string()),
+        ],
+        "the two primitives are where the raw call lives, by definition; everything else \
+         removes through them, so the directory the name is gone from gets flushed — a \
+         removal that is not durable is a decision a power failure can undo"
+    );
+}
+
 /// Where a spelling appears in the crate's own **production** source, by file
 /// and function.
 ///

@@ -179,8 +179,41 @@ impl ObjectSubject {
     }
 
     /// The payload this subject freezes, rebuilt from its own members.
+    ///
+    /// **The reconstruction has to be lossless, and typed deserialization is
+    /// not.** `value` is a raw `serde_json::Value` — it has to be, because its
+    /// shape belongs to the action — so `deny_unknown_fields` on this struct
+    /// stops at its own level. The `Action` variants do not deny unknown
+    /// members, so `from_command` quietly discarded anything it did not
+    /// recognize: a stored Challenge could be canonical, carry a correctly
+    /// recomputed `Challenge.digest`, and hold `{"title":"new","extra":"x"}`,
+    /// and the rendering, the confirmation and the durable Event would all be
+    /// about the typed subset. `is_admission_of` cannot see it either, since it
+    /// compares history against this already-narrowed payload.
+    ///
+    /// That breaks the one thing a subject is for: it is the **complete**
+    /// immutable question, and the record has to match it on everything but the
+    /// admission instant. So the typed action is serialized back and required to
+    /// be exactly the frozen `value` — the same exact-shape technique persisted
+    /// resources are held to, for the same reason, and it reaches nested
+    /// flattened members without knowing they are there.
+    ///
+    /// Nothing this build mints can fail it: [`ObjectSubject::of`] derives
+    /// `value` from the very serialization this compares against.
     pub fn payload(&self) -> Result<Payload> {
         let action = Action::from_command(&self.action, self.value.clone())?;
+        let rebuilt = serde_json::to_value(&action)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("challenge subject: {error}")))?;
+        let data = rebuilt
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        ensure!(
+            data == self.value,
+            EXIT_SCHEMA,
+            "the frozen question carries {} members the record would not: a confirmed subject is the complete question, not the part this build happens to understand",
+            self.action
+        );
         Ok(Payload::new(self.object.clone(), action))
     }
 }
@@ -1442,8 +1475,7 @@ fn mint(
         if code != challenge.id
             && challenge_object(root, &code).as_deref() == Some(&*payload.object)
         {
-            fs::remove_file(store::challenge_path(root, &code)?)
-                .map_err(|error| tool_error("discarding a superseded challenge", error))?;
+            store::remove_durably(&store::challenge_path(root, &code)?)?;
             superseded.push(code);
         }
     }
@@ -1990,8 +2022,9 @@ pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
-    fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
-    Ok(())
+    // Durably. This is how a human declines, and there is no durable Event that
+    // could classify a question that came back as one already answered.
+    store::remove_durably(&path)
 }
 
 /// Admit a Challenge against the exact response.

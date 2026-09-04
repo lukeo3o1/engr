@@ -1005,6 +1005,19 @@ route. An implementation that makes names durable MUST therefore establish each
 newly created directory in its own parent, on the same terms as a rename, before
 any resource is published beneath it or any generation marker written above it.
 
+**And absence is a name too.** An entry's disappearance lives in the containing
+directory's metadata exactly as its appearance does, so a removal that is not
+flushed can be undone by a power failure after the caller was told the thing was
+gone. For most resources that is a lost delete. For a **Challenge** it is an
+authority failure: retirement is how a human declines, and unlike post-admission
+cleanup there is no durable Event that a resurrected question could be classified
+against — a file that comes back is a live question, and if the Object still
+stands at its `expected_rev` it is pending again, so a mutation somebody
+explicitly refused becomes admissible. A withdrawn migration has the same shape,
+with a resumable transaction behind it. An implementation that makes names
+durable MUST therefore publish absence the way it publishes presence: remove,
+then flush the directory the name is gone from, before reporting success.
+
 `rev` starts at 1. Revision zero is the Object before any Event; the first
 admitted Event advances it to 1, and no writer emits zero. Adjacency alone
 cannot refuse it, because a `0, 1, 2 …` log is perfectly contiguous, so the
@@ -1020,6 +1033,20 @@ boundary MUST therefore prove admission, under the same lock the write lands in:
   appends before it discards, so the file is still there, and the code is the one
   value a caller cannot invent. The named Challenge's frozen subject, the applied
   revision and the exact payload must all correspond.
+
+  **Correspond means the reconstruction is lossless, and typed deserialization
+  is not.** An action-specific payload has to be carried untyped inside the
+  subject, because its shape belongs to the action rather than to the envelope —
+  so an envelope that refuses unknown members refuses them only at its own
+  level, and rebuilding the typed action from it silently drops anything the
+  variant does not declare. A Challenge can then be canonical, correctly sealed
+  and internally consistent while meaning something the record cannot say: the
+  screen, the admission and the Event are all about the narrowed subset, and
+  comparing the Event against that same narrowed payload cannot see what went
+  missing. An implementation MUST therefore serialize the reconstructed action
+  back and require it to equal the frozen payload exactly, the same exact-shape
+  rule persisted resources are held to. A subject is the complete question or it
+  is not the question.
 - an Agent Event by **rebinding** the live applicable Rule set for exactly this
   mutation and requiring the record's claim about review to be one that could
   have happened: a record naming a passing review where no Rule governs the
@@ -2357,6 +2384,17 @@ and every persisted resource. Values such as
 `9007199254740992` and `2^60` are refused rather than hashed; values needing that
 precision are carried as strings. This prevents a subject from being accepted by
 one implementation yet rounded, rejected, or represented differently by another.
+
+**An identifier embedded in reference text is still inside that domain, and the
+sentence above is where implementations lose it.** "Carried as strings" is about
+values too large to be numbers; it is not permission for a bounded id to escape
+its bound by being spelled inside one. A Section selector in
+`obj:<compact-id>:<n>` is the id of a Section some workspace has to be able to
+hold, so `n` MUST be `1..=(2^53 - 1)` — the same range it would be held to as a
+JSON number, refused at the same boundary. A generic walk over persisted JSON
+cannot enforce this, because there is no number there to walk: it belongs to the
+shared reference parser and canonicalizer, which is also what carries it to every
+domain that reuses them.
 
 The canonical *spelling* of every value inside that domain is still the
 standard's, not the author's. JCS fixes number formatting as well as object-member

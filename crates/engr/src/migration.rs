@@ -803,7 +803,7 @@ fn stage(root: &Path, manifest: &Manifest) -> Result<()> {
     let temp = stage_temp(root);
     let final_dir = stage_dir(root);
     if store::namespace(&temp)? {
-        fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
+        store::remove_tree_durably(&temp)?;
     }
     store::create_dir_durably(&temp)?;
     store::write_json(&temp.join(MANIFEST), manifest)?;
@@ -869,7 +869,10 @@ fn retire_predecessor_lock(root: &Path) {
     // cannot establish is not one whose migration finished, and leaving the old
     // lock is the safe half of a question that cannot be answered here.
     if store::generation_present(root).unwrap_or(false) {
-        let _ = fs::remove_file(store::predecessor_lock_path(root));
+        // Durable like every other removal, and best-effort like it always was:
+        // the migration has already succeeded, and a lock file that outlives it
+        // is a stale byte rather than a failed transaction.
+        let _ = store::remove_durably(&store::predecessor_lock_path(root));
     }
 }
 
@@ -1487,12 +1490,12 @@ pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
     );
     let path = store::challenge_path(root, code)?;
     if store::resource_present(&path)? {
-        fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        store::remove_durably(&path)?;
     }
     if mine {
         let stage = stage_dir(root);
         if store::namespace(&stage)? {
-            fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
+            store::remove_tree_durably(&stage)?;
         }
     }
     Ok(())
@@ -1523,12 +1526,12 @@ fn sweep_completed_stage(root: &Path) -> Result<()> {
     if let Some(manifest) = staged(root)? {
         let spent = store::challenge_path(root, &manifest.challenge)?;
         if store::resource_present(&spent)? && is_this_migration(root, &manifest)? {
-            fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
+            store::remove_durably(&spent)?;
         }
     }
     let stage = stage_dir(root);
     if store::namespace(&stage)? {
-        fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
+        store::remove_tree_durably(&stage)?;
     }
     Ok(())
 }
@@ -1600,7 +1603,7 @@ fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Resul
     let dir = destination_dir(root);
     let temp = stage_dir(root).join("destination.tmp");
     if store::namespace(&temp)? {
-        fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
+        store::remove_tree_durably(&temp)?;
     }
     store::create_dir_durably(&temp.join("objects"))?;
     store::create_dir_durably(&temp.join("eventstore"))?;
@@ -1635,7 +1638,7 @@ fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Resul
         },
     )?;
     if store::namespace(&dir)? {
-        fs::remove_dir_all(&dir).map_err(|error| tool_error(dir.display(), error))?;
+        store::remove_tree_durably(&dir)?;
     }
     // The same, and more so: this is the only copy of what was confirmed.
     store::rename_durably(&temp, &dir)
@@ -1892,7 +1895,7 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
     for domain in ["events", "candidates"] {
         let path = store::engr_dir(root).join(domain);
         if store::namespace(&path)? {
-            fs::remove_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+            store::remove_tree_durably(&path)?;
         }
     }
     // The barrier this transaction raised, and the last thing the predecessor
@@ -1901,7 +1904,7 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
     // is not entitled to leave it standing.
     let bootstrap = store::engr_dir(root).join("format.json");
     if store::resource_present(&bootstrap)? {
-        fs::remove_file(&bootstrap).map_err(|error| tool_error(bootstrap.display(), error))?;
+        store::remove_durably(&bootstrap)?;
     }
     for path in [
         store::challenges_dir(root),

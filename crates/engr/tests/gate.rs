@@ -959,6 +959,71 @@ fn rewriting_a_challenge_is_detected_before_admission() {
     }
 }
 
+/// A frozen subject carrying members the record would drop is refused.
+///
+/// `ObjectSubject` denies unknown members at its own level, but its `value` is a
+/// raw `serde_json::Value` — it has to be, since the shape belongs to the
+/// action — and the `Action` variants do not deny unknown fields. So typed
+/// reconstruction *discarded* anything it did not recognize, and everything
+/// downstream was about the narrowed subset: the screen a person reads, the
+/// admission, and the durable Event. `is_admission_of` could not see it either,
+/// because it compares history against that same already-narrowed payload.
+///
+/// The subject is the **complete** immutable question. A Challenge that is
+/// canonical, correctly sealed, and internally consistent while meaning
+/// something the record cannot say is exactly the case a digest cannot catch —
+/// the digest proves nobody edited the file, not that the file means what will
+/// happen.
+#[test]
+fn a_frozen_subject_carrying_members_the_record_would_drop_is_refused() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "the complete question");
+    admit(&root, payload(Act::Add, &id, "old wording"));
+
+    let prepared =
+        gate::prepare(&root, payload(Act::Revise(1), &id, "new wording")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    gate::find(&root, &code).expect("untouched, it loads and would confirm");
+
+    // A member no `Action` variant knows, and then the envelope is resealed —
+    // so the digest recomputes, the bytes stay canonical, and the subject's own
+    // `deny_unknown_fields` is satisfied. Every check that existed still passes.
+    let mut challenge: engr::confirmation::Challenge = store::read_json(&path).expect("challenge");
+    challenge.subject.data["value"]["extra"] =
+        serde_json::json!("a member the durable Event would not carry");
+    challenge.digest = challenge.recomputed_digest().expect("reseal");
+    write_raw(&path, &challenge).expect("rewrite the challenge");
+
+    // The premise, checked rather than assumed: if the digest no longer matched,
+    // this would be testing the seal instead of the question.
+    let stored: engr::confirmation::Challenge = store::read_json(&path).expect("reread");
+    assert_eq!(
+        stored.digest,
+        stored.recomputed_digest().expect("recompute"),
+        "the fixture has to be internally consistent or it proves nothing"
+    );
+
+    for (surface, error) in [
+        ("find", gate::find(&root, &code).expect_err("find")),
+        (
+            "confirm",
+            gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("confirm"),
+        ),
+    ] {
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{surface}: {error}");
+        assert!(
+            error.message.contains("complete question"),
+            "{surface}: refused, but not as an incomplete reconstruction: {error}"
+        );
+    }
+    assert_eq!(
+        ops::effective(&root, &id).expect("object").sections[0].text,
+        "old wording",
+        "and nothing was admitted"
+    );
+}
+
 /// A stored Challenge with no digest is refused rather than read as one nothing
 /// needed to protect.
 #[test]

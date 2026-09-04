@@ -33,7 +33,7 @@ reference output resolves it to the full Git object ID.
 
 ```bash
 engr prepare --object 019ff75b --add --text-file draft.txt
-#   Candidate  section.added
+#   Challenge  section.create
 #   Object     019ff75b
 #   Based on   9348f28f
 #

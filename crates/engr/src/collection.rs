@@ -552,7 +552,7 @@ pub fn remove(root: &Path, id: &str, attempt: Attempt) -> Result<Removed> {
     locked(root, attempt, || {
         let collection = load(root, id)?;
         let path = path(root, id);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        crate::store::remove_durably(&path)?;
         Ok(Removed {
             title: collection.title,
             members: collection.members.len(),

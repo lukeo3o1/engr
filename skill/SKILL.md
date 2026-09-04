@@ -207,7 +207,7 @@ deliberate:
   engr will not escalate on your behalf — not that the mutation is forbidden. A
   human can still raise the same change and decide, having seen the review.
 - In the **Backlog**, it does not stop you. Unresolved work is worth keeping, so
-  the entry goes in marked `rule_review { attempts, limit }` — which is a
+  the entry goes in marked `review_exhaustion { attempts, limit }` — which is a
   standing note that this went in without a passing review, not a free pass.
   **Consuming** a Backlog point is the exception: that destroys unresolved work,
   so it needs a review that actually passed.
@@ -352,7 +352,7 @@ no predecessor to supply.
 
 Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
-Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so
+Past the ceiling, an ordinary edit still goes in and is marked `review_exhaustion`, so
 say the real number: the point is kept either way, and an honest one tells the
 next reader what it went in on. **Consume, merge and rename are the
 exceptions**, and past the ceiling they simply do not happen. Consume and merge

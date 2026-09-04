@@ -836,6 +836,49 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove a resource and make its **absence** durable.
+///
+/// **Deletion is the other half of a name, and it was the asymmetric half.**
+/// Publication treats a pathname as a durability boundary — the bytes are
+/// flushed, the rename is flushed into the directory that now holds it — while
+/// removal called `fs::remove_file` and returned success. The entry's
+/// disappearance lives in the containing directory's metadata exactly as its
+/// appearance does, so an unflushed removal can be undone by a power failure
+/// after the caller was told the thing was gone.
+///
+/// For most resources that is a lost delete. For a **Challenge** it is worse:
+/// retirement is how a human declines, and unlike post-admission cleanup there
+/// is no durable Event that could later classify a resurrected question as
+/// already applied. A file that comes back is a live question again, and if the
+/// Object still stands at its `expected_rev` the gate calls it pending — so a
+/// mutation a person explicitly refused becomes admissible. The same holds for a
+/// withdrawn migration, whose stage is a resumable transaction.
+///
+/// So absence is published like presence, and every removal in the workspace
+/// goes through here or [`remove_tree_durably`].
+pub(crate) fn remove_durably(path: &Path) -> Result<()> {
+    contained(path)?;
+    fs::remove_file(path).map_err(|error| tool_error(path.display(), error))?;
+    sync_parent(path)
+}
+
+/// The same for a directory tree, whose root entry is the name that has to go.
+pub(crate) fn remove_tree_durably(path: &Path) -> Result<()> {
+    contained(path)?;
+    fs::remove_dir_all(path).map_err(|error| tool_error(path.display(), error))?;
+    sync_parent(path)
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => sync_directory(parent),
+        None => Ok(()),
+    }
+}
+
 /// Create a directory and every missing parent, making each new *name* durable
 /// as it is established.
 ///
@@ -988,9 +1031,7 @@ fn publish(path: &Path, text: &str) -> Result<()> {
     // `contained` has already refused every other kind. Removing it is what
     // keeps a crashed write from making the workspace permanently unwritable.
     match fs::symlink_metadata(&temporary) {
-        Ok(_) => {
-            fs::remove_file(&temporary).map_err(|error| tool_error(temporary.display(), error))?
-        }
+        Ok(_) => remove_durably(&temporary)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(tool_error(temporary.display(), error)),
     }

@@ -226,6 +226,61 @@ fn contention_on_one_object_leaves_a_contiguous_history() {
 
 /// The three candidate states are reachable, distinct, and each one behaves.
 ///
+/// A declined question leaves nothing that could reclassify it, which is why its
+/// removal has to be durable.
+///
+/// **This test pins the hazard, not the fix.** Whether an unlink reached the
+/// device is not observable from in here; that half is held structurally by
+/// `every_removal_makes_the_absence_durable` in the record tests. What *is*
+/// observable is the asymmetry that makes the durability load-bearing, and it is
+/// worth stating because the post-admission case looks so similar and is safe.
+///
+/// After an admission, a Challenge file that outlives the Event is classified
+/// `AlreadyApplied` and the retry is idempotent — the durable Event is what
+/// makes a resurrected envelope harmless. A **decline** produces no Event. So
+/// the same resurrection puts the question back as `Pending`, indistinguishable
+/// from one nobody ever answered, and if the Object still stands at its
+/// `expected_rev` it will admit. A mutation a person explicitly refused becomes
+/// admissible by power failure alone.
+#[test]
+fn a_declined_question_leaves_nothing_that_could_reclassify_it() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "declined");
+    let before = store::load_events(&root, &id).expect("history").len();
+
+    let prepared =
+        gate::prepare(&root, add(&id, wording("wording the human refuses"))).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    let envelope = std::fs::read(&path).expect("the envelope on disk");
+
+    // A qualified yes is not assent, and the question is discarded rather than
+    // left standing for a second try.
+    let refused = gate::confirm(&root, &format!("CONFIRM {code} but not that wording"))
+        .expect_err("a qualified response is not assent");
+    assert_eq!(refused.code, engr::EXIT_USAGE, "{refused}");
+    assert!(gate::find(&root, &code).is_err(), "the question is gone");
+    assert_eq!(
+        store::load_events(&root, &id).expect("history").len(),
+        before,
+        "and nothing was admitted"
+    );
+
+    // Now the file a removal that never reached the device would let a power
+    // failure bring back. It is `Pending` — not `AlreadyApplied` — because there
+    // is no Event for a decline to be classified against.
+    std::fs::write(&path, &envelope).expect("what an unflushed delete would permit");
+    let restored = gate::find(&root, &code).expect("it reads again");
+    assert!(
+        matches!(
+            gate::candidate_state(&root, &restored).expect("classify"),
+            gate::CandidateState::Pending
+        ),
+        "a declined question that comes back is indistinguishable from a live one, \
+         which is the whole reason its removal is published rather than merely done"
+    );
+}
+
 /// Phase 4, scope item 3. Only `Stale` was asserted anywhere before this:
 /// `Pending` and `AlreadyApplied` were reached incidentally by tests about
 /// something else, so nothing pinned what they mean. They are the states a

@@ -128,10 +128,21 @@ impl EngrRef {
             }
         };
         validate_id(kind, id)?;
-        // A **positive** integer. Section ids are allocated from a counter that
-        // starts at 1, so `:0` names nothing that can ever exist — accepting it
-        // would let a reference parse, canonicalize and round-trip while being
-        // unresolvable by construction, which is worse than refusing it here.
+        // A **positive** integer, inside the protocol's shared safe-integer
+        // domain. Section ids are allocated from a counter that starts at 1, so
+        // `:0` names nothing that can ever exist — accepting it would let a
+        // reference parse, canonicalize and round-trip while being unresolvable
+        // by construction, which is worse than refusing it here.
+        //
+        // The upper bound is the same rule seen from the other side, and it has
+        // to be enforced *here* because nothing else can: the generic
+        // safe-integer walk inspects JSON numbers, and this id is embedded in a
+        // string. Without it `obj:<id>:9007199254740992` parsed and
+        // canonicalized happily, and embedding a Section id in reference text is
+        // explicitly not an escape from the owning workspace's numeric domain.
+        // The shared parser is where every domain that reuses it — Ref targets,
+        // Backlog subjects and produced outcomes, Collection members — inherits
+        // the bound.
         //
         // Whether a resource kind supports a section selector at all stays a
         // domain rule: shared syntax is not shared semantics.
@@ -144,6 +155,11 @@ impl EngrRef {
                     parsed > 0,
                     EXIT_SCHEMA,
                     "section selector must be a positive integer, and {parsed} is not"
+                );
+                ensure!(
+                    parsed <= crate::proof::MAX_SAFE_INTEGER,
+                    EXIT_SCHEMA,
+                    "section selector {parsed} is outside the shared safe-integer domain"
                 );
                 Ok(parsed)
             })
@@ -365,6 +381,63 @@ pub fn canonical_embedded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Section id embedded in reference text is inside the shared
+    /// safe-integer domain, on both spellings.
+    ///
+    /// The generic walk that holds every other integer to this bound inspects
+    /// JSON *numbers*, and this one lives in a string — so nothing else could
+    /// catch it, and `obj:<id>:9007199254740992` parsed and canonicalized as
+    /// though it named something. Embedding an id in canonical reference text is
+    /// not an escape from the numeric domain of the workspace that has to
+    /// resolve it. Enforcing it in the shared parser is what carries the bound
+    /// to Ref targets, Backlog subjects and produced outcomes, and Collection
+    /// members alike.
+    #[test]
+    fn an_embedded_section_id_cannot_escape_the_safe_integer_domain() {
+        let id = "01h47kwz2mfk0v47mffcnstqva";
+        let max = crate::proof::MAX_SAFE_INTEGER;
+        for (what, section, allowed) in [
+            ("one", 1, true),
+            ("the largest exact integer", max, true),
+            ("one past it", max + 1, false),
+            ("u64::MAX", u64::MAX, false),
+        ] {
+            for spelling in [
+                format!("obj:{id}:{section}"),
+                format!("engr:obj:{id}:{section}"),
+            ] {
+                let parsed = if spelling.starts_with("engr:") {
+                    EngrRef::parse_standalone(&spelling)
+                } else {
+                    EngrRef::parse_embedded(&spelling)
+                };
+                match (allowed, parsed) {
+                    (true, Ok(reference)) => {
+                        assert_eq!(reference.section(), Some(section), "{what}: {spelling}");
+                        // And it survives canonicalization, which is the other
+                        // half: a value that parses but cannot be written back
+                        // is a different fault.
+                        let canonical = reference
+                            .canonicalize(|_| None)
+                            .unwrap_or_else(|error| panic!("{what}: {spelling}: {error}"));
+                        assert_eq!(canonical.section(), Some(section), "{what}: {spelling}");
+                    }
+                    (true, Err(error)) => panic!("{what}: {spelling} must parse: {error}"),
+                    (false, Ok(_)) => {
+                        panic!("{what}: {spelling} names a Section no workspace can hold")
+                    }
+                    (false, Err(error)) => {
+                        assert_eq!(error.code, crate::EXIT_SCHEMA, "{what}: {spelling}");
+                        assert!(
+                            error.message.contains("safe-integer domain"),
+                            "{what}: {spelling}: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn fixed_uuid_vectors_round_trip() {

@@ -798,7 +798,7 @@ pub fn remove(root: &Path, subject: &Subject, attempt: Attempt) -> Result<Remove
     locked(root, attempt, || {
         let work = load(root, subject)?;
         let path = path(root, subject);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        crate::store::remove_durably(&path)?;
         Ok(Removed {
             was_paused: work.state == State::Paused,
         })
