@@ -2951,6 +2951,30 @@ while the stage exists, because resolving the workspace *is* a confirmation. So
 may then do is still decided by its own family, and an Object confirmation is
 refused mid-migration like every other mutation.
 
+**`VERSION` is a one-way door, and a migration Challenge MUST NOT publish
+through it a second time.** Cleanup happens after activation, so the window
+between them leaves a current workspace beside a spent Challenge and a stage
+that are both still readable — and retyping the code the tool is still showing
+is the obvious thing for a person to try. By then the staged bytes are a
+*predecessor* of the current record: ordinary admission is permitted the moment
+`VERSION` exists, so republishing them is not resuming a transaction but
+deleting whatever has been admitted since. The witness that publication has begun
+does not save this, and MUST NOT be relied on to: it answers from a single
+matching stream, which stays true for every migrated Object nobody has touched
+while another has moved on.
+
+So once the current generation marker is present, a migration Challenge reaching
+the apply path MUST be classified as **already applied** — cleanup only, never
+publication — and MUST be proved to be the migration that established *this*
+workspace before it is. The proof is immutable admitted history rather than any
+marker or staged material: each planned Object's revision-1 `object.migrated.v1`
+Event records the confirmation that admitted it, no later revision can restate
+it, and **every** planned Object MUST answer, since one agreeing witness is what
+the weaker rule above is made of. A Challenge that cannot be proved MUST be
+refused, leaving the workspace untouched; its residue remains recoverable
+through the ordinary migration command, which sweeps a completed transaction's
+leftovers whenever `VERSION` is already there.
+
 ### Four ways a workspace can refuse to be read as current
 
 They are different facts about a workspace and lead to different next actions,

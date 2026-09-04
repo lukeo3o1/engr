@@ -2233,6 +2233,191 @@ fn the_local_exclude_lands_where_git_reads_it_from_a_linked_worktree() {
     }
 }
 
+/// A spent migration code answered again cannot publish over the record that
+/// has been admitted since.
+///
+/// `finish` writes `VERSION` and then sweeps, and the window between them is a
+/// documented crash state: the workspace is already current while the spent
+/// Challenge and its stage are still on disk and still readable. So the obvious
+/// recovery — retype the code the tool is still showing — was also the
+/// destructive one.
+///
+/// `published_yet` answers from **one** matching staged Event stream. Any
+/// migrated Object nobody has touched still matches, so it stayed true after a
+/// *different* migrated Object had legitimately been admitted to revision 2.
+/// The resume then skipped revalidation and called `finish`, and `publish`
+/// rewrites every staged Object and stream — replacing the revision-2 Object
+/// with its revision-1 migration bytes and dropping the admitted Event with it.
+/// Confirmed history destroyed by answering a stale question.
+///
+/// The current generation is a one-way door now: a migration Challenge that
+/// reaches `apply` on a workspace that is already this generation is proved
+/// against the immutable `object.migrated.v1` bootstrap of every Object it
+/// planned, and then only cleaned up.
+#[test]
+fn a_spent_migration_code_cannot_republish_over_what_was_admitted_after_it() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let code = proposed.challenge.clone();
+    // Activated, and interrupted before the sweep: exactly the supported crash.
+    interrupt_at(&root, "challenge", &code);
+    assert!(store::version_path(&root).exists(), "it did activate");
+    assert!(
+        engr::migration::stage_dir(&root).exists(),
+        "and the sweep never ran"
+    );
+    assert!(
+        store::challenge_path(&root, &code)
+            .expect("challenge path")
+            .exists(),
+        "the spent code is still on disk, which is why somebody would retype it"
+    );
+
+    // Ordinary current-generation work on one migrated Object. The others are
+    // untouched, so their staged streams still match byte for byte — which is
+    // what made the stale answer look like an unfinished publication.
+    let payload = engr::model::Payload::new(
+        AUTHORITY,
+        engr::model::Action::SectionCreated {
+            value: engr::model::SectionValue::new(
+                engr::semantics::Admitted::new(
+                    engr::semantics::Admission::Human,
+                    time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .expect("timestamp"),
+                ),
+                engr::model::Content {
+                    text: "admitted after the migration, before the sweep".to_owned(),
+                    ..engr::model::Content::default()
+                },
+            ),
+            becomes: None,
+        },
+    );
+    let prepared = engr::gate::prepare(&root, payload).expect("prepare an ordinary question");
+    match engr::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("confirm the ordinary question")
+    {
+        engr::Confirmed::Object(admitted) => assert_eq!(admitted.object.rev, 2),
+        engr::Confirmed::Migration(_) => panic!("an Object confirmation"),
+    }
+    let admitted = store::load_object(&root, AUTHORITY).expect("the revision-2 Object");
+    let history = store::load_events(&root, AUTHORITY).expect("its history");
+    assert_eq!(history.len(), 2, "migration bootstrap plus the admission");
+
+    // The retry. Whatever it answers, it may not publish.
+    let retried = engr::confirm(&root, &format!("CONFIRM {code}"));
+
+    let after = store::load_object(&root, AUTHORITY).expect("the Object is still there");
+    assert_eq!(
+        after.rev, 2,
+        "a spent migration code must not take an admitted revision back to 1: {retried:?}"
+    );
+    assert_eq!(after, admitted, "and not one byte of it moved");
+    assert_eq!(
+        store::load_events(&root, AUTHORITY).expect("history"),
+        history,
+        "nor may admitted history be rewritten by a question that was already answered"
+    );
+    integrity::check_stored_object_integrity(&after).expect("it still seals");
+    assert!(
+        ops::verify(&root, AUTHORITY).expect("verify").passed(),
+        "and it still verifies"
+    );
+
+    // This *is* the migration that established the workspace, proved from the
+    // bootstrap Events, so the retry is the already-applied answer: cleanup, and
+    // the residue goes.
+    let report = match retried.expect("the completed migration is re-confirmable as cleanup") {
+        engr::Confirmed::Migration(report) => report,
+        engr::Confirmed::Object(_) => panic!("a migration confirmation"),
+    };
+    assert_eq!(report.objects.len(), 4, "it reports what the migration did");
+    assert!(
+        !engr::migration::stage_dir(&root).exists(),
+        "and the residue is swept"
+    );
+    assert!(
+        engr::gate::pending_codes(&root)
+            .expect("pending codes")
+            .is_empty(),
+        "the spent code with it"
+    );
+
+    // Every other migrated Object came through untouched as well.
+    for id in store::object_ids(&root).expect("object ids") {
+        ops::effective(&root, &id).expect("resolves");
+        assert!(ops::verify(&root, &id).expect("verify").passed(), "{id}");
+    }
+}
+
+/// A migration Challenge that is not the one that established this workspace is
+/// refused **by the generation door**, before any stage material is consulted.
+///
+/// Being honest about what this holds: the previous code refused this case too,
+/// from `confirmed_destination`, because restamping the code leaves the
+/// Challenge and the staged destination disagreeing. So this is not a second
+/// data-loss regression — the loss is the test above.
+///
+/// What it pins is the *ordering*, and that is worth pinning. The already-applied
+/// classification cannot be "the workspace is current, so this must be over":
+/// that would let any surviving migration question through on a workspace it has
+/// nothing to do with. So the door proves the Challenge against the immutable
+/// revision-1 `object.migrated.v1` bootstrap of **every** Object it planned —
+/// one agreeing witness being exactly what the original defect was made of — and
+/// it does so *first*, so the refusal never depends on stage material that a
+/// crash, a rewrite, or some later rearrangement of these checks could make
+/// agree. The assertion on the message is what distinguishes the two routes.
+#[test]
+fn a_migration_code_that_did_not_establish_this_workspace_is_refused() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    let code = proposed.challenge.clone();
+    interrupt_at(&root, "challenge", &code);
+
+    // Same crash state, but the surviving question claims a code the workspace's
+    // own bootstraps do not name — a question from some other transaction, or
+    // one somebody rewrote.
+    let elsewhere = "ZZZ234";
+    restamp_challenge(&root, &code, |challenge| {
+        challenge.id = elsewhere.to_owned();
+    });
+    let manifest = engr::migration::stage_dir(&root).join("manifest.json");
+    let text = read(&manifest).replace(&code, elsewhere);
+    write(&manifest, &text);
+
+    let before: Vec<_> = store::object_ids(&root)
+        .expect("object ids")
+        .into_iter()
+        .map(|id| {
+            (
+                store::load_object(&root, &id).expect("object"),
+                store::load_events(&root, &id).expect("history"),
+            )
+        })
+        .collect();
+
+    let error = engr::confirm(&root, &format!("CONFIRM {elsewhere}"))
+        .expect_err("a code this workspace was not migrated by must not be publishable");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{error}");
+    assert!(
+        error.message.contains("will not be published over"),
+        "and it says why: {error}"
+    );
+
+    let after: Vec<_> = store::object_ids(&root)
+        .expect("object ids")
+        .into_iter()
+        .map(|id| {
+            (
+                store::load_object(&root, &id).expect("object"),
+                store::load_events(&root, &id).expect("history"),
+            )
+        })
+        .collect();
+    assert_eq!(before, after, "and the record is untouched by the refusal");
+}
+
 /// Every exit that hands back a live code has established the exclusion that
 /// protects it, and doing so damages nothing the person already had.
 ///

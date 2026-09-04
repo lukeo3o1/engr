@@ -849,6 +849,19 @@ fn retire_predecessor_lock(root: &Path) {
 }
 
 fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {
+    // **The generation marker is a one-way door, and this is the check that
+    // makes it one.** Everything below this line can publish, and publication
+    // rewrites every staged Object and Event stream from the migration-time
+    // bytes. Once `VERSION` says the destination generation is active, those
+    // bytes are a *predecessor* of the current record, and writing them back is
+    // not resuming a transaction — it is deleting whatever has been admitted
+    // since.
+    //
+    // Asked first, before the stage is even read, so nothing a staged file
+    // happens to contain can route around it.
+    if store::generation_present(root)? {
+        return already_applied(root, challenge);
+    }
     let manifest = staged(root)?.ok_or_else(|| {
         Error::new(
             EXIT_INVARIANT,
@@ -962,6 +975,113 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
     lock_out_predecessor(root, &challenge.id)?;
     stop_for_test(Stage::AfterDestination, &challenge.id)?;
     finish(root, challenge, ready, sections)
+}
+
+/// A migration Challenge answered again after its own transaction completed.
+///
+/// `finish` writes `VERSION` and then sweeps, and the gap between the two is a
+/// documented crash window. What it leaves is a workspace that is already
+/// current, beside a spent Challenge and its stage that are both still perfectly
+/// readable — so `CONFIRM <the code it is still showing>` is the natural thing
+/// for a person to try. The natural thing must not be the destructive one.
+///
+/// It was. [`published_yet`] answers from **one** matching staged stream, which
+/// stays true for any migrated Object nobody has touched since; the resume
+/// branch therefore skipped revalidation and went straight to [`finish`], and
+/// [`publish`] rewrites *every* staged Object and stream. A migrated Object that
+/// had legitimately been admitted to revision 2 in the meantime was replaced by
+/// its revision-1 migration bytes, and its admitted Event with it. That is
+/// confirmed history destroyed by answering a question the tool left lying
+/// about — the one loss this whole design exists to make impossible.
+///
+/// So this is the whole of what is on the other side of the door: prove the
+/// Challenge is the migration that established *this* workspace, then clean up.
+/// Nothing here publishes.
+///
+/// The report describes the migration that did happen, which is what the Object
+/// gate's own already-applied path does — it returns the durable Event and the
+/// reconciled Object rather than a second kind of answer. The migration
+/// completed; a person re-confirming it is owed the outcome, not a new one.
+fn already_applied(root: &Path, challenge: &crate::confirmation::Challenge) -> Result<Report> {
+    let subject: MigrationSubject = serde_json::from_value(challenge.subject.data.clone())
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
+    established_this_workspace(root, &subject, &challenge.id)?;
+    // Only now, and it is the entire remaining operation: the spent question and
+    // the plan it was waiting on. Idempotent and order-independent, so a crash
+    // part way through leaves work this can simply do again.
+    sweep_completed_stage(root)?;
+    Ok(Report {
+        objects: subject
+            .objects
+            .iter()
+            .map(|planned| planned.object.clone())
+            .collect(),
+        sections: subject
+            .objects
+            .iter()
+            .map(|planned| planned.sections as usize)
+            .sum(),
+    })
+}
+
+/// Whether this Challenge is the migration that established the current
+/// workspace, proved from history that cannot be rewritten.
+///
+/// The evidence is each migrated Object's revision-1 Event. `object.migrated.v1`
+/// is emitted by nothing but a migration, appears once and only at revision 1,
+/// and records the confirmation code that admitted it — and admitted history is
+/// append-only, so no later revision can remove or restate it. A Challenge whose
+/// code is written across the bootstrap of every Object it planned is that
+/// migration; there is nothing else it could be.
+///
+/// **Every planned Object has to answer, not one of them.** That is the exact
+/// lesson [`published_yet`] is the counter-example to: one agreeing witness says
+/// nothing about the rest, and the rest is where the loss was.
+///
+/// A plan with no Objects offers no evidence and so cannot be proved. It is
+/// refused rather than passed vacuously — the residue is still recoverable,
+/// because `engr migrate` sweeps a completed transaction's leftovers whenever
+/// `VERSION` is already there, and a refusal that leaves a workspace intact is
+/// always the better half of a question that cannot be answered.
+fn established_this_workspace(
+    root: &Path,
+    subject: &MigrationSubject,
+    challenge: &str,
+) -> Result<()> {
+    let stale = format!(
+        "challenge {challenge} does not name the migration that established this workspace, and this workspace is already generation {}; it will not be published over — run `engr migrate` to clear what is left of it",
+        crate::WORKSPACE_GENERATION
+    );
+    ensure!(!subject.objects.is_empty(), EXIT_INVARIANT, "{stale}");
+    for planned in &subject.objects {
+        let events = store::load_events(root, &planned.object)?;
+        let bootstrap = events.first().ok_or_else(|| {
+            Error::new(
+                EXIT_INVARIANT,
+                format!("{stale} ({} has no admitted history)", planned.object),
+            )
+        })?;
+        ensure!(
+            bootstrap.rev == 1 && matches!(bootstrap.action, Action::ObjectMigrated { .. }),
+            EXIT_INVARIANT,
+            "{stale} ({} was not established by a migration)",
+            planned.object
+        );
+        let admitted = bootstrap
+            .metadata
+            .admitted
+            .confirmation
+            .as_ref()
+            .map(|confirmation| confirmation.challenge.as_str());
+        ensure!(
+            admitted == Some(challenge),
+            EXIT_INVARIANT,
+            "{stale} ({} was migrated by {})",
+            planned.object,
+            admitted.unwrap_or("no recorded confirmation")
+        );
+    }
+    Ok(())
 }
 
 /// The bootstrap a confirmed migration leaves where the predecessor's was.
