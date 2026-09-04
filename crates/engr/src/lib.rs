@@ -104,9 +104,14 @@ pub fn confirm(root: &std::path::Path, response: &str) -> Result<Confirmed> {
     store::with_lock(root, || {
         let code = confirmation::authorize(
             response,
+            // On the same three-way terms, and both answers that are not "it is
+            // there" mean the same thing here: do not discard. A qualified
+            // response is refused as a usage error either way, so failing closed
+            // costs nothing and never removes a question on the strength of a
+            // probe that followed a link.
             |code| {
                 store::challenge_path(root, code)
-                    .map(|path| path.exists())
+                    .and_then(|path| store::resource_present(&path))
                     .unwrap_or(false)
             },
             |code| discard_challenge(root, code),

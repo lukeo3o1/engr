@@ -310,8 +310,13 @@ const GITIGNORE: &str = "\
 
 pub fn init(root: &Path) -> Result<PathBuf> {
     let dir = engr_dir(root);
+    // On the same three-way terms as every other probe, because this one decides
+    // whether a workspace gets *created*: `exists()` reads a dangling `.engr`
+    // link as nothing there, and `create_dir_all` then materializes the whole
+    // layout behind the link, outside the repository, under a name git records
+    // as a link. Only established absence may proceed.
     ensure!(
-        !dir.exists(),
+        !namespace(&dir)?,
         EXIT_SCHEMA,
         "{} already exists",
         dir.display()
@@ -328,7 +333,7 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     // third kind could not be created here and forgotten everywhere else.
     layout.extend(crate::work::dirs(root));
     for path in layout {
-        fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+        create_dir_durably(&path)?;
     }
     // **The generation marker is written last, and that is the whole ordering.**
     // Its presence is what makes a workspace current — `require_current` asks
@@ -348,6 +353,21 @@ pub fn init(root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Whether this workspace carries the current generation marker, on the same
+/// three-way terms as every other resource.
+///
+/// **This is the generation boundary, not a resource diagnostic.** Its answer
+/// decides which storage contract may be interpreted and which migration path
+/// may write, so `exists()` is the wrong question twice over: it follows links,
+/// and it reports a dangling one as absence. A dangling `.engr/VERSION` beside a
+/// live predecessor bootstrap would classify the workspace as the released
+/// predecessor and hand it to migration, rather than refusing a generation
+/// authority this build cannot establish. Several callers ask it, which is why
+/// it is one function rather than a repeated probe.
+pub(crate) fn generation_present(root: &Path) -> Result<bool> {
+    resource_present(&version_path(root))
+}
+
 pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
     // `VERSION` first, and the order is the whole of what makes this correct.
     // It is written last, after every destination byte is published, so its
@@ -359,13 +379,13 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
     // Asking about the stage first said the opposite, and left a crash window
     // in which every read refused while the only command the refusal named
     // could no longer do anything about it.
-    if version_path(root).exists() {
+    if generation_present(root)? {
         read_generation(root)?;
         return Ok(WorkspaceFormat::Current);
     }
     let migration = crate::migration::stage_dir(root);
     ensure!(
-        !migration.exists(),
+        !namespace(&migration)?,
         EXIT_SCHEMA,
         "{} marks an incomplete coordinated migration; run `engr migrate` to resume it",
         migration.display()
@@ -432,7 +452,11 @@ fn unsupported_generation(path: &Path, text: &str) -> String {
 /// `.engr` that is neither generation.
 pub(crate) fn predecessor_bootstrap(root: &Path) -> Result<Option<u32>> {
     let path = engr_dir(root).join("format.json");
-    if !path.exists() {
+    // `None` is "not the predecessor", and only established absence may say so.
+    // A bootstrap that is there in some other shape is a `.engr` this build
+    // cannot classify, which is a refusal rather than a workspace with no
+    // predecessor in it.
+    if !resource_present(&path)? {
         return Ok(None);
     }
     let text = read_text(&path)?;
@@ -676,7 +700,7 @@ pub fn with_predecessor_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -
 
 fn with_lock_at<T>(path: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+        create_dir_durably(parent)?;
     }
     let file = fs::OpenOptions::new()
         .create(true)
@@ -800,8 +824,100 @@ fn sync_directory(path: &Path) -> Result<()> {
         .map_err(|error| tool_error(path.display(), error))
 }
 
+/// Windows has no equivalent, and that is a fact about the platform rather than
+/// about this code: a directory there cannot be opened for write, and
+/// `FlushFileBuffers` requires write access, so there is no supported call that
+/// puts a directory entry on the device. The protocol requires a platform that
+/// *can* make a name durable to do so before reporting success, and one that
+/// cannot to say so rather than imply a guarantee it does not keep — this is
+/// where it is said, next to the no-op that is the whole of what it can do.
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Create a directory and every missing parent, making each new *name* durable
+/// as it is established.
+///
+/// `create_dir_all` leaves the same gap [`rename_durably`] closes, one level up.
+/// A directory entry lives in its **parent's** metadata, so a directory that was
+/// created and never flushed into that parent has no durable name — and syncing
+/// the new directory itself says nothing about it, because the entry that
+/// reaches it is somewhere else.
+///
+/// `.engr/eventstore/objects` on a fresh workspace is the case that matters.
+/// `init` creates it; publication later flushes `.engr` when `.gitignore` and
+/// `VERSION` land, which establishes `eventstore` — but nothing establishes
+/// `objects` inside it. The first admission then syncs the Event file and the
+/// directory holding it, while the Object is published under `.engr/objects`
+/// whose own entry *was* covered. A power failure after the caller was told the
+/// admission succeeded could therefore keep the Object and lose the directory
+/// entry its history was written through: the projection ahead of history, which
+/// is the one direction the recovery model cannot repair. Migration has the same
+/// shape, because the released predecessor has no `eventstore/` at all and that
+/// hierarchy is created on the way to activation.
+///
+/// So a durable publication primitive needs a durable layout primitive. Every
+/// workspace directory is created through here, shallowest first, each new name
+/// flushed into the parent that now holds it.
+pub(crate) fn create_dir_durably(path: &Path) -> Result<()> {
+    contained(path)?;
+    // The missing suffix, deepest first.
+    //
+    // `metadata` rather than `symlink_metadata`: `contained` has already refused
+    // every link at or below `.engr`, and above it a link is ordinary — macOS
+    // hands out every temporary directory that way, and refusing to build a
+    // workspace inside one would be a check on how somebody arrived rather than
+    // on what they hold.
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    loop {
+        match fs::metadata(cursor) {
+            Ok(listed) => {
+                ensure!(
+                    listed.is_dir(),
+                    EXIT_SCHEMA,
+                    "{}: exists but is not a directory, so the layout beneath it cannot be created",
+                    cursor.display()
+                );
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(cursor);
+                match cursor.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+                    _ => break,
+                }
+            }
+            // Not knowing is not absence — here least of all, where the answer
+            // decides whether a name gets created.
+            Err(error) => return Err(tool_error(cursor.display(), error)),
+        }
+    }
+    for directory in missing.iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            // Another writer established the same name first. The entry is there
+            // either way; its shape is still ours to insist on.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let listed = fs::metadata(directory)
+                    .map_err(|error| tool_error(directory.display(), error))?;
+                ensure!(
+                    listed.is_dir(),
+                    EXIT_SCHEMA,
+                    "{}: exists but is not a directory, so the layout beneath it cannot be created",
+                    directory.display()
+                );
+            }
+            Err(error) => return Err(tool_error(directory.display(), error)),
+        }
+        if let Some(parent) = directory
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            sync_directory(parent)?;
+        }
+    }
     Ok(())
 }
 
@@ -861,7 +977,7 @@ fn publish(path: &Path, text: &str) -> Result<()> {
     // rather than materialized behind the link.
     contained(path)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+        create_dir_durably(parent)?;
     }
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
@@ -931,7 +1047,7 @@ pub(crate) fn decode_object_text(path: &Path, id: &str, text: &str) -> Result<Ob
 pub(crate) fn load_challenge(root: &Path, code: &str) -> Result<crate::confirmation::Challenge> {
     let path = challenge_path(root, code)?;
     ensure!(
-        path.exists(),
+        resource_present(&path)?,
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
@@ -1538,4 +1654,82 @@ fn check_event_history(path: &Path, id: &str, events: &[Event]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The layout primitive builds what was missing, and accepts what is there.
+    ///
+    /// **Whether each new name reached the device is not observable from a
+    /// test.** `fsync` returns nothing a caller can distinguish, and no power
+    /// failure is injectable here. So this holds the rest of the contract — the
+    /// hierarchy is created, and an existing one is not an error — while the
+    /// claim that the flush happens at all rests on this being the only route
+    /// any workspace directory is created through, which is what
+    /// `every_workspace_directory_is_created_through_the_durable_layout_primitive`
+    /// in the record tests holds.
+    #[test]
+    fn the_layout_primitive_builds_a_hierarchy_and_accepts_one_already_there() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let nested = eventstore_dir(temp.path());
+        create_dir_durably(&nested).expect("the hierarchy is created");
+        assert!(nested.is_dir(), "every component of it exists");
+        assert!(
+            engr_dir(temp.path()).join("eventstore").is_dir(),
+            "including the intermediate one, which is the entry nothing established before"
+        );
+        create_dir_durably(&nested).expect("and asking again is convergence, not a failure");
+    }
+
+    /// A name of the wrong shape is refused rather than created around.
+    #[test]
+    fn the_layout_primitive_refuses_a_name_that_is_not_a_directory() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let engr = engr_dir(temp.path());
+        fs::create_dir(&engr).expect("the workspace directory");
+        let occupied = engr.join("eventstore");
+        fs::write(&occupied, b"not a directory").expect("a file where a directory belongs");
+
+        let error =
+            create_dir_durably(&occupied).expect_err("a file is not a directory to publish into");
+        assert_eq!(error.code, EXIT_SCHEMA, "{error}");
+        assert!(error.message.contains("not a directory"), "{error}");
+
+        // And the same shape one component down. Which *error* that is depends on
+        // the platform — Unix answers `NotADirectory` for the lookup, Windows
+        // resolves it to `NotFound` and refuses on the shape a step later — so
+        // what is asserted is the property both keep: it fails rather than
+        // building anything.
+        create_dir_durably(&occupied.join("objects"))
+            .expect_err("nothing is created beneath a name that is not a directory");
+        assert!(
+            fs::symlink_metadata(&occupied)
+                .expect("still there")
+                .is_file(),
+            "and the file that was in the way is untouched"
+        );
+    }
+
+    /// A redirected component is refused: what would be created is not what this
+    /// workspace holds.
+    #[test]
+    #[cfg(unix)]
+    fn the_layout_primitive_refuses_a_redirected_component() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let engr = engr_dir(temp.path());
+        fs::create_dir(&engr).expect("the workspace directory");
+        std::os::unix::fs::symlink(temp.path().join("nowhere"), engr.join("eventstore"))
+            .expect("symlink");
+
+        let error = create_dir_durably(&eventstore_dir(temp.path()))
+            .expect_err("a dangling link is not an absent directory");
+        assert_eq!(error.code, EXIT_SCHEMA, "{error}");
+        assert!(error.message.contains("link to somewhere else"), "{error}");
+        assert!(
+            fs::symlink_metadata(temp.path().join("nowhere")).is_err(),
+            "and nothing was materialized behind the link"
+        );
+    }
 }

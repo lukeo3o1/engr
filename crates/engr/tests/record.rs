@@ -1345,6 +1345,182 @@ fn a_resource_namespace_of_the_wrong_shape_is_refused_rather_than_read_as_empty(
     }
 }
 
+/// A generation marker that cannot be established is not a missing one.
+///
+/// `validate_format` asked `VERSION.exists()`, which follows links and reports a
+/// dangling one as *no generation marker at all*. With a predecessor bootstrap
+/// beside it — which is exactly the workspace a migration source is — that made
+/// this build classify the workspace as the released predecessor and hand it to
+/// the one path that is entitled to write to a predecessor, instead of refusing
+/// a generation authority it could not establish.
+///
+/// This is not a resource diagnostic. The answer decides **which storage
+/// contract may be interpreted**, so the three-way rule belongs here more than
+/// anywhere it was already applied.
+#[test]
+#[cfg(unix)]
+fn a_generation_marker_that_cannot_be_established_is_not_a_missing_one() {
+    let (_dir, root) = workspace();
+    let version = store::version_path(&root);
+    // The released predecessor's own bootstrap, sitting beside it. This is what
+    // the misread resolves *to*.
+    std::fs::write(
+        store::engr_dir(&root).join("format.json"),
+        r#"{"format":"engr-workspace","version":1}"#,
+    )
+    .expect("the predecessor bootstrap");
+
+    let elsewhere = root.join("outside-VERSION");
+    std::fs::write(&elsewhere, engr::WORKSPACE_VERSION_FILE).expect("a marker somewhere else");
+
+    for what in [
+        "a dangling link",
+        "a link to a live marker outside",
+        "a directory",
+    ] {
+        std::fs::remove_file(&version).ok();
+        match what {
+            "a dangling link" => {
+                std::os::unix::fs::symlink(root.join("nowhere"), &version).expect("symlink")
+            }
+            // The bytes behind it are perfectly valid; that is the point. What
+            // is wrong is that the record would not be the one this workspace
+            // holds.
+            "a link to a live marker outside" => {
+                std::os::unix::fs::symlink(&elsewhere, &version).expect("symlink")
+            }
+            _ => std::fs::create_dir(&version).expect("directory"),
+        }
+
+        let error = store::validate_format(&root)
+            .expect_err(&format!("{what}: this must not classify the workspace"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+
+        // And the command that would write on the strength of that
+        // classification. A predecessor is precisely what migration may act on.
+        let refused = engr::migration::prepare(&root)
+            .expect_err(&format!("{what}: migration must not be entitled to write"));
+        assert_eq!(refused.code, engr::EXIT_SCHEMA, "{what}: {refused}");
+
+        match what {
+            "a directory" => std::fs::remove_dir(&version).expect("remove"),
+            _ => std::fs::remove_file(&version).expect("remove"),
+        }
+    }
+
+    // Put the marker itself back and the workspace is current again: the refusal
+    // was about establishing the marker, not about the bootstrap beside it.
+    std::fs::write(&version, engr::WORKSPACE_VERSION_FILE).expect("restore the marker");
+    assert_eq!(
+        store::validate_format(&root).expect("a workspace with its own marker"),
+        store::WorkspaceFormat::Current
+    );
+}
+
+/// Every workspace directory is created through the durable layout primitive.
+///
+/// A directory entry lives in its **parent's** metadata, so `create_dir_all`
+/// gives a new directory no durable name — and the guarantee `rename_durably`
+/// provides for a published resource is worth nothing if the directory it was
+/// published into can be lost by the same power failure that spared the file.
+/// `.engr/eventstore/objects` was the live case: created by `init`, never
+/// established in `.engr/eventstore`, and therefore losable while the Object
+/// published beside it survived. That is the projection ahead of history.
+///
+/// **Nothing observable distinguishes a flushed directory entry from an
+/// unflushed one**, so what a test can hold is the property the guarantee
+/// actually rests on: that there is one route, and nothing takes another. The
+/// single exception is named here rather than allowed by pattern, because an
+/// exception nobody has to justify is how the next one arrives.
+#[test]
+fn every_workspace_directory_is_created_through_the_durable_layout_primitive() {
+    assert_eq!(
+        call_sites("create_dir_all("),
+        vec![(
+            "migration.rs".to_string(),
+            "exclude_local_from_git".to_string()
+        )],
+        "every directory this workspace creates goes through `store::create_dir_durably`. \
+         The one permitted call site is git's own `.git/info`, which is not workspace layout \
+         and holds no phase boundary; a new one here means a name that a power failure can \
+         take while the resource published under it survives"
+    );
+}
+
+/// No persisted path is probed with a two-state `exists()`.
+///
+/// The three-way rule — only established absence is absence — was applied to the
+/// resource enumerators and then found, a review later, to stop short of the
+/// generation boundary: `VERSION`, the migration stage, the predecessor
+/// bootstrap and `init`'s own `.engr` were still asked with `exists()`, which
+/// follows links and reports a dangling one as nothing there. Those four decide
+/// which storage contract may be interpreted and which path may write, so they
+/// were the worst place left for it.
+///
+/// **A rule applied by hand is a rule that stops wherever the last reviewer
+/// stopped looking.** This is what makes the next one impossible to add
+/// quietly: `store::resource_present`, `store::namespace` and
+/// `store::generation_present` are the vocabulary, and there is no exception.
+#[test]
+fn no_persisted_path_is_probed_with_a_two_state_exists() {
+    assert_eq!(
+        call_sites(".exists()"),
+        Vec::new(),
+        "`exists()` follows links and reports a dangling one, a wrong shape and an \
+         unreadable entry alike as absence — and absence is what lets work proceed. \
+         Ask `store::resource_present`, `store::namespace` or `store::generation_present`, \
+         which answer three ways and fail closed on the two that are not absence"
+    );
+}
+
+/// Where a spelling appears in the crate's own source, by file and function.
+///
+/// Comment lines are skipped, so prose *about* a construct is not read as a use
+/// of it — the doc comments explaining why these two are refused would otherwise
+/// be the first thing to trip their own guards.
+fn call_sites(needle: &str) -> Vec<(String, String)> {
+    fn defined(trimmed: &str) -> Option<String> {
+        let rest = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+        let rest = rest.strip_prefix("unsafe ").unwrap_or(rest);
+        let name = rest.strip_prefix("fn ")?;
+        let end = name.find(['(', '<']).unwrap_or(name.len());
+        Some(name[..end].to_string())
+    }
+
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sites: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&source).expect("the source directory") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_string();
+        let text = std::fs::read_to_string(&path).expect("read the source");
+        let mut owner = "<not inside a function>".to_string();
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if let Some(name) = defined(trimmed) {
+                owner = name;
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains(needle) {
+                sites.push((file.clone(), owner.clone()));
+            }
+        }
+    }
+    sites.sort();
+    sites
+}
+
 /// The final Backlog consume cannot be reached through an unestablished Work
 /// tree.
 ///

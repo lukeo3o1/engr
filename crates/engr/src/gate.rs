@@ -307,7 +307,7 @@ fn challenge_object(root: &Path, code: &str) -> Option<String> {
 pub fn find(root: &Path, code: &str) -> Result<Candidate> {
     let path = store::challenge_path(root, code)?;
     ensure!(
-        path.exists(),
+        store::resource_present(&path)?,
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
@@ -1986,7 +1986,7 @@ pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
     store::require_current(root)?;
     let path = store::challenge_path(root, code)?;
     ensure!(
-        path.exists(),
+        store::resource_present(&path)?,
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
@@ -2009,9 +2009,11 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     store::require_current(root)?;
     let code = crate::confirmation::authorize(
         response,
+        // Fails closed like the one in `lib::confirm`, and for the same reason:
+        // not knowing is not "there is a question here to throw away".
         |code| {
             store::challenge_path(root, code)
-                .map(|path| path.exists())
+                .and_then(|path| store::resource_present(&path))
                 .unwrap_or(false)
         },
         |code| discard_locked(root, code),

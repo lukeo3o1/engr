@@ -619,7 +619,7 @@ pub fn prepare(root: &Path) -> Result<Proposed> {
         // between activation and the sweep is one of the ways it can still be
         // lying around. Cleanup converges through the same command that
         // converges the rest of the residue.
-        if store::version_path(root).exists() {
+        if store::generation_present(root)? {
             let outcome = prepare_locked(root);
             retire_predecessor_lock(root);
             return outcome;
@@ -642,7 +642,7 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
     // unfinished transaction here is what made that window unrecoverable: the
     // resume branch below demands the Challenge the same `finish` had already
     // removed, and answers with an instruction to delete files by hand.
-    if store::version_path(root).exists() {
+    if store::generation_present(root)? {
         sweep_completed_stage(root)?;
     }
     if let Some(manifest) = staged(root)? {
@@ -686,7 +686,7 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
             }
             Some(why) => {
                 ensure!(
-                    !destination_dir(root).exists(),
+                    !store::namespace(&destination_dir(root))?,
                     EXIT_INVARIANT,
                     "the staged migration was confirmed as challenge {} and is part-published, and that question is no longer usable ({why}); {} holds the only copy of what was confirmed, so it can only be finished",
                     manifest.challenge,
@@ -769,10 +769,10 @@ fn staged(root: &Path) -> Result<Option<Manifest>> {
 fn stage(root: &Path, manifest: &Manifest) -> Result<()> {
     let temp = stage_temp(root);
     let final_dir = stage_dir(root);
-    if temp.exists() {
+    if store::namespace(&temp)? {
         fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
     }
-    fs::create_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
+    store::create_dir_durably(&temp)?;
     store::write_json(&temp.join(MANIFEST), manifest)?;
     // Durable, because this name is a phase boundary: a staged plan that a power
     // failure can lose after the caller was told it exists is not a plan anybody
@@ -832,7 +832,10 @@ pub(crate) fn apply(root: &Path, challenge: &crate::confirmation::Challenge) -> 
 /// anyway — the file survives as an untracked stale byte, and reporting that as
 /// a failed migration would be a worse answer than leaving it.
 fn retire_predecessor_lock(root: &Path) {
-    if store::version_path(root).exists() {
+    // Fail closed on anything but an established marker: a generation this build
+    // cannot establish is not one whose migration finished, and leaving the old
+    // lock is the safe half of a question that cannot be answered here.
+    if store::generation_present(root).unwrap_or(false) {
         let _ = fs::remove_file(store::predecessor_lock_path(root));
     }
 }
@@ -1285,7 +1288,7 @@ fn finish(
 pub(crate) fn discard_locked(root: &Path, code: &str) -> Result<()> {
     let path = store::challenge_path(root, code)?;
     ensure!(
-        path.exists(),
+        store::resource_present(&path)?,
         EXIT_NOT_FOUND,
         "no challenge awaiting {code}"
     );
@@ -1324,18 +1327,18 @@ pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
     // after it, this stage is the only copy of what was confirmed and the
     // transaction can only go forward.
     ensure!(
-        !(mine && destination_dir(root).exists() && predecessor_locked_out(root)?),
+        !(mine && store::namespace(&destination_dir(root))? && predecessor_locked_out(root)?),
         EXIT_INVARIANT,
         "migration {code} was already confirmed and is part-published; {} holds the only copy of what was confirmed, so it can only be finished — `engr confirm CONFIRM {code}`",
         stage_dir(root).display()
     );
     let path = store::challenge_path(root, code)?;
-    if path.exists() {
+    if store::resource_present(&path)? {
         fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
     }
     if mine {
         let stage = stage_dir(root);
-        if stage.exists() {
+        if store::namespace(&stage)? {
             fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
         }
     }
@@ -1366,12 +1369,12 @@ pub(crate) fn retire_prepared(root: &Path, code: &str) -> Result<()> {
 fn sweep_completed_stage(root: &Path) -> Result<()> {
     if let Some(manifest) = staged(root)? {
         let spent = store::challenge_path(root, &manifest.challenge)?;
-        if spent.exists() && is_this_migration(root, &manifest)? {
+        if store::resource_present(&spent)? && is_this_migration(root, &manifest)? {
             fs::remove_file(&spent).map_err(|error| tool_error(spent.display(), error))?;
         }
     }
     let stage = stage_dir(root);
-    if stage.exists() {
+    if store::namespace(&stage)? {
         fs::remove_dir_all(&stage).map_err(|error| tool_error(stage.display(), error))?;
     }
     Ok(())
@@ -1443,12 +1446,11 @@ struct Destination {
 fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Result<()> {
     let dir = destination_dir(root);
     let temp = stage_dir(root).join("destination.tmp");
-    if temp.exists() {
+    if store::namespace(&temp)? {
         fs::remove_dir_all(&temp).map_err(|error| tool_error(temp.display(), error))?;
     }
-    fs::create_dir_all(temp.join("objects")).map_err(|error| tool_error(temp.display(), error))?;
-    fs::create_dir_all(temp.join("eventstore"))
-        .map_err(|error| tool_error(temp.display(), error))?;
+    store::create_dir_durably(&temp.join("objects"))?;
+    store::create_dir_durably(&temp.join("eventstore"))?;
 
     let mut files = Vec::new();
     for one in derived {
@@ -1479,7 +1481,7 @@ fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Resul
             files,
         },
     )?;
-    if dir.exists() {
+    if store::namespace(&dir)? {
         fs::remove_dir_all(&dir).map_err(|error| tool_error(dir.display(), error))?;
     }
     // The same, and more so: this is the only copy of what was confirmed.
@@ -1710,7 +1712,7 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
     for (id, _, event) in ready {
         let path = store::events_path(root, id);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
+            store::create_dir_durably(parent)?;
         }
         store::write_text(&path, event)?;
     }
@@ -1723,12 +1725,16 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
     // it. Prepare it again.
     for domain in ["events", "candidates"] {
         let path = store::engr_dir(root).join(domain);
-        if path.exists() {
+        if store::namespace(&path)? {
             fs::remove_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
         }
     }
+    // The barrier this transaction raised, and the last thing the predecessor
+    // owned. Only established absence means it is already gone: anything else
+    // there is a generation authority this build did not write, and publication
+    // is not entitled to leave it standing.
     let bootstrap = store::engr_dir(root).join("format.json");
-    if bootstrap.exists() {
+    if store::resource_present(&bootstrap)? {
         fs::remove_file(&bootstrap).map_err(|error| tool_error(bootstrap.display(), error))?;
     }
     for path in [
@@ -1737,10 +1743,10 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
         crate::collection::dir(root),
         crate::rules::dir(root),
     ] {
-        fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+        store::create_dir_durably(&path)?;
     }
     for path in crate::work::dirs(root) {
-        fs::create_dir_all(&path).map_err(|error| tool_error(path.display(), error))?;
+        store::create_dir_durably(&path)?;
     }
     ensure_local_ignored(root)
 }
@@ -1776,6 +1782,12 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
     if text.lines().any(|line| line.trim() == entry) {
         return Ok(());
     }
+    // The one directory creation here that is not `create_dir_durably`, and
+    // deliberately: `.git/info` is git's storage, not workspace layout, and no
+    // phase boundary is a name in it. Nothing durable rests on this file — the
+    // tracked ignore line publication writes is what the migrated workspace
+    // carries — so claiming a durability guarantee over git's own directory
+    // would be asserting something this transaction does not own.
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
     }

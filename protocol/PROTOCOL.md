@@ -94,6 +94,15 @@ subject safe to delete. Only established absence — the entry is genuinely not
 there — may be read as absence; a wrong shape, a link on the way, and any other
 failure to establish it MUST fail closed.
 
+**The generation boundary is inside that rule, not beside it.** `.engr` itself,
+`.engr/VERSION`, the predecessor bootstrap and the migration stage are read to
+decide which storage contract may be interpreted and which path may write, so
+they are the probes where collapsing three answers into two costs the most: a
+dangling `VERSION` read as "no marker" hands a workspace carrying a predecessor
+bootstrap to migration, to be interpreted and written under the predecessor's
+rules, when what the reader actually found was a generation authority it could
+not establish. These MUST fail closed like every other probe of the tree.
+
 There is no public writer for a persisted resource, and that is a contract. A
 raw serializer, or an Object save that validates shape, is not an admission
 boundary: a self-consistent, correctly resealed Object says nothing about whether
@@ -969,6 +978,21 @@ told the admission succeeded. Every phase boundary in a workspace is a name — 
 published resource, a staged migration, the generation marker — so a
 platform that can make a name durable MUST do so before reporting success, and
 one that cannot MUST say so rather than imply a guarantee it does not keep.
+
+**A directory is a name too, and that is where this rule is easiest to keep
+halfway.** A directory entry lives in its *parent's* metadata, so a directory
+created by an ordinary recursive mkdir has no durable name, and flushing that new
+directory says nothing about it — the entry that reaches it is somewhere else.
+Publishing a resource into such a directory reinstates exactly the failure the
+paragraph above removes: the file is flushed, its rename is flushed into the
+directory holding it, and the *directory* can still be lost by the same power
+failure. On a fresh workspace that is `eventstore/objects`, created with the
+layout and never established in `eventstore`, while the Object published beside
+it sits under a directory that was — so the loss is an Object whose history has
+no directory to be in, which is the projection ahead of history again by another
+route. An implementation that makes names durable MUST therefore establish each
+newly created directory in its own parent, on the same terms as a rename, before
+any resource is published beneath it or any generation marker written above it.
 
 `rev` starts at 1. Revision zero is the Object before any Event; the first
 admitted Event advances it to 1, and no writer emits zero. Adjacency alone
