@@ -3081,6 +3081,21 @@ hands the code to everyone with repository access, which is not where a code the
 gate expects a single human to return is supposed to go. The exclusion MUST NOT
 cover `objects/`, since look-back is delegated to git.
 
+**In place before it mints a code means *durably* in place, and at every exit
+that hands one back.** The staged plan and the Challenge are names an
+implementation makes deliberately durable; an exclusion written in place and
+never flushed is not, so a power failure after the command reported success can
+keep the live code and lose the only thing keeping `git add -A` from staging it.
+The exclusion MUST therefore be published the way any other file that has to
+survive a crash is — staged beside the destination, flushed, renamed over it —
+and a preparation that *resumes* an existing question MUST establish it too,
+because the code it returns is live and is exposed by the exclusion's absence
+exactly as a fresh one would be. The invariant is that a durable live Challenge
+never exists without a durable exclusion already covering it. Preparing MUST NOT
+damage exclusions it did not add: the update carries the existing content
+forward, and a crash leaves the complete previous file rather than a truncated
+one, since this file belongs to the person and not to the transaction.
+
 Events are safe to commit. The challenge codes they carry have been spent, and a
 spent code resolves to no Challenge.
 

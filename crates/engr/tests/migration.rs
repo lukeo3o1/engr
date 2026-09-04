@@ -2233,6 +2233,98 @@ fn the_local_exclude_lands_where_git_reads_it_from_a_linked_worktree() {
     }
 }
 
+/// Every exit that hands back a live code has established the exclusion that
+/// protects it, and doing so damages nothing the person already had.
+///
+/// Two halves of one invariant, and both were broken.
+///
+/// The exclusion was written with a direct in-place `fs::write`: nothing flushed
+/// the bytes and nothing flushed the name, while the staged plan and the
+/// Challenge minted a moment later were made deliberately durable. So a power
+/// failure after a *successful* `engr migrate` could keep the live code and lose
+/// the only thing keeping `git add -A` from staging it — the tracked
+/// `.gitignore` does not name `/local/` until the migration is confirmed. The
+/// same in-place write could truncate a person's existing exclusions, which
+/// preparing a migration has no business touching at all.
+///
+/// And the resume path never called it. It returns the *same live code* as the
+/// fresh path, so it needs the same protection to be in place — an earlier
+/// prepare having established it once is not the same as it being there now,
+/// because the file belongs to git and the person, not to this transaction.
+///
+/// The lost-write itself is not observable in-process; that half is held
+/// structurally by `no_file_that_must_survive_a_crash_is_written_in_place` in
+/// the record tests. What is observable is here: the content is preserved, and
+/// the exclusion is re-established on the exit that had skipped it.
+#[test]
+fn a_live_code_is_never_handed_back_without_the_exclusion_that_protects_it() {
+    let (_temp, root) = released();
+    let exclude = PathBuf::from(git(
+        &root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+    ));
+
+    // Exclusions the person already had. Preparing may add to this file; it may
+    // not damage it.
+    let mine = "# mine\n*.swp\nbuild/\n";
+    std::fs::create_dir_all(exclude.parent().expect("parent")).expect("git info");
+    write(&exclude, mine);
+
+    let first = engr::migration::prepare(&root).expect("prepare");
+    assert!(!first.resumed);
+    let after = read(&exclude);
+    for kept in ["# mine", "*.swp", "build/"] {
+        assert!(
+            after.contains(kept),
+            "preparing must not take away an exclusion it did not add: {after:?}"
+        );
+    }
+    assert!(after.contains(".engr/local/"), "{after:?}");
+
+    // The resume exit, which hands back the same live question. Whatever the
+    // first prepare wrote, this one is exposed by its absence exactly as a fresh
+    // one would be.
+    std::fs::remove_file(&exclude).expect("remove the exclusion");
+    let resumed = engr::migration::prepare(&root).expect("resume");
+    assert!(
+        resumed.resumed,
+        "the staged question is resumed, not re-minted"
+    );
+    assert_eq!(
+        resumed.challenge, first.challenge,
+        "and it is the same live code"
+    );
+    assert!(
+        read(&exclude).contains(".engr/local/"),
+        "so the exclusion has to be there again: {:?}",
+        read(&exclude)
+    );
+
+    // Asked of git rather than inferred from the file.
+    assert!(
+        store::challenges_dir(&root)
+            .join(format!("{}.json", resumed.challenge))
+            .exists(),
+        "the challenge is on disk"
+    );
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .expect("git status");
+    let listing = String::from_utf8_lossy(&status.stdout).to_string();
+    assert!(
+        !listing.contains(&resumed.challenge),
+        "a live challenge code must not be stageable: {listing}"
+    );
+}
+
 /// The source of a migration is the bytes the released workspace persisted, so
 /// no part of it may be reached by following a link.
 ///

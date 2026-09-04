@@ -1436,14 +1436,39 @@ fn a_generation_marker_that_cannot_be_established_is_not_a_missing_one() {
 fn every_workspace_directory_is_created_through_the_durable_layout_primitive() {
     assert_eq!(
         call_sites("create_dir_all("),
-        vec![(
-            "migration.rs".to_string(),
-            "exclude_local_from_git".to_string()
-        )],
-        "every directory this workspace creates goes through `store::create_dir_durably`. \
-         The one permitted call site is git's own `.git/info`, which is not workspace layout \
-         and holds no phase boundary; a new one here means a name that a power failure can \
-         take while the resource published under it survives"
+        Vec::new(),
+        "every directory this build creates goes through `store::create_dir_durably`. \
+         `.git/info` was the one exception and is no longer: the file under it is what \
+         keeps a live challenge code out of `git add -A` while the workspace is still the \
+         predecessor, so it is published like anything else that has to survive a crash"
+    );
+}
+
+/// Nothing is written in place over a file that has to survive a crash.
+///
+/// `fs::write` truncates and then writes, so a power failure inside it leaves
+/// neither the old content nor the new — and for a file whose *previous* content
+/// belongs to somebody else, that is damage rather than a lost update. It also
+/// flushes nothing, so a caller that goes on to publish something durable can
+/// return success having established the durable half and lost the other.
+///
+/// `.git/info/exclude` was where that bit: the exclusion protecting a live
+/// Challenge code was written in place, while the Challenge it protects was made
+/// durable a moment later. Everything goes through `store::write_text` /
+/// `store::write_json` now — staged beside the destination, flushed, renamed
+/// over it, directory flushed.
+///
+/// This names `fs::write` rather than claiming to catch every in-place write,
+/// because that is the one that replaces a whole file and so reinstates the
+/// truncation window wholesale.
+#[test]
+fn no_file_that_must_survive_a_crash_is_written_in_place() {
+    assert_eq!(
+        call_sites("fs::write("),
+        Vec::new(),
+        "publish through `store::write_text` or `store::write_json`, which stage beside \
+         the destination and rename over it, so a crash leaves the complete old file \
+         rather than a truncated one"
     );
 }
 
@@ -1473,11 +1498,18 @@ fn no_persisted_path_is_probed_with_a_two_state_exists() {
     );
 }
 
-/// Where a spelling appears in the crate's own source, by file and function.
+/// Where a spelling appears in the crate's own **production** source, by file
+/// and function.
 ///
 /// Comment lines are skipped, so prose *about* a construct is not read as a use
-/// of it — the doc comments explaining why these two are refused would otherwise
-/// be the first thing to trip their own guards.
+/// of it — the doc comments explaining why these are refused would otherwise be
+/// the first thing to trip their own guards.
+///
+/// `#[cfg(test)]` modules are skipped as well, and by their extent rather than
+/// by assuming they sit at the end of a file: a test that plants a regular file
+/// where a directory belongs is *using* `fs::write` for what it is good at, and
+/// the rules here are about what ships. `cargo fmt --check` is enforced, so the
+/// closing brace of a top-level module is a `}` in the first column.
 fn call_sites(needle: &str) -> Vec<(String, String)> {
     fn defined(trimmed: &str) -> Option<String> {
         let rest = trimmed
@@ -1504,8 +1536,31 @@ fn call_sites(needle: &str) -> Vec<(String, String)> {
             .to_string();
         let text = std::fs::read_to_string(&path).expect("read the source");
         let mut owner = "<not inside a function>".to_string();
+        let mut cfg_test = false;
+        let mut in_test_module = false;
         for line in text.lines() {
+            if in_test_module {
+                in_test_module = line != "}";
+                continue;
+            }
             let trimmed = line.trim_start();
+            if trimmed == "#[cfg(test)]" {
+                cfg_test = true;
+                continue;
+            }
+            if cfg_test && trimmed.starts_with("mod ") {
+                // Only a top-level one; anything nested keeps being read, so a
+                // `#[cfg(test)]` in an unexpected place cannot silently hide code.
+                assert_eq!(
+                    line, trimmed,
+                    "{file}: a nested `#[cfg(test)]` module is not something this scan \
+                     knows how to bound"
+                );
+                in_test_module = true;
+                cfg_test = false;
+                continue;
+            }
+            cfg_test = false;
             if let Some(name) = defined(trimmed) {
                 owner = name;
             }
@@ -1516,6 +1571,10 @@ fn call_sites(needle: &str) -> Vec<(String, String)> {
                 sites.push((file.clone(), owner.clone()));
             }
         }
+        assert!(
+            !in_test_module,
+            "{file}: a `#[cfg(test)]` module was never closed, so part of the file went unread"
+        );
     }
     sites.sort();
     sites

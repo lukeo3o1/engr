@@ -678,11 +678,19 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
         };
         match unusable {
             None => {
+                // The same safeguard the fresh path establishes before minting,
+                // because this exit hands back a **live** code too. The earlier
+                // prepare established it, but that is not the same as it still
+                // being there: the file is git's and a person may have rewritten
+                // or removed it in between, and a resumed question is exposed by
+                // its absence exactly as a fresh one is. Idempotent — it returns
+                // untouched when the line is already present.
+                exclude_local_from_git(root)?;
                 return Ok(Proposed {
                     challenge: manifest.challenge,
                     subject: manifest.subject,
                     resumed: true,
-                })
+                });
             }
             Some(why) => {
                 ensure!(
@@ -1766,6 +1774,32 @@ fn publish(root: &Path, ready: &[(String, String, String)]) -> Result<()> {
 ///
 /// Outside a repository there is nothing to keep the code out of, so this is
 /// satisfied by there being no git.
+///
+/// **This file is load-bearing, and it is published like one.** The previous
+/// round left it as the single directory creation outside
+/// [`store::create_dir_durably`], on the reasoning that `.git/info` is git's
+/// storage and nothing durable rests on it. The second half of that was wrong.
+/// While the workspace is still the predecessor this line is the *only* thing
+/// keeping a live Challenge code out of `git add -A` — the tracked
+/// `.engr/.gitignore` does not gain `/local/` until the human confirms — so a
+/// direct in-place `fs::write` produced an asymmetric power-loss state: the
+/// staged plan and the Challenge were deliberately made durable by
+/// [`store::write_json`] and [`store::rename_durably`] a moment later, while the
+/// exclusion that protects them could revert or vanish because nothing flushed
+/// it. `engr migrate` returned success, and the crash left the code exposed.
+///
+/// It goes through the ordinary publisher now, which is the same crash-safe
+/// primitive every resource gets: a temporary beside the file, the bytes
+/// flushed, an atomic rename over the destination, and the containing directory
+/// flushed after it. That also closes the second half of the report — an
+/// in-place write can truncate or partially replace a person's existing
+/// exclusions, and preparing a migration may not damage a file it does not own.
+/// A reader now sees the complete old exclude or the complete new one.
+///
+/// The invariant this keeps: **if a live local Challenge is durable, the
+/// mechanism that keeps git from staging it is already durable too.** Every exit
+/// from `prepare_locked` that hands back a live code establishes this first —
+/// the fresh path before minting, the resume path before returning.
 fn exclude_local_from_git(root: &Path) -> Result<()> {
     let Some(path) = crate::git::git_path(root, "info/exclude") else {
         return Ok(());
@@ -1782,15 +1816,6 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
     if text.lines().any(|line| line.trim() == entry) {
         return Ok(());
     }
-    // The one directory creation here that is not `create_dir_durably`, and
-    // deliberately: `.git/info` is git's storage, not workspace layout, and no
-    // phase boundary is a name in it. Nothing durable rests on this file — the
-    // tracked ignore line publication writes is what the migrated workspace
-    // carries — so claiming a durability guarantee over git's own directory
-    // would be asserting something this transaction does not own.
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| tool_error(parent.display(), error))?;
-    }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
@@ -1800,7 +1825,11 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
          # carries the same rule in its own tracked .gitignore.\n\
          {entry}\n"
     ));
-    fs::write(&path, text).map_err(|error| tool_error(path.display(), error))
+    // Everything the person already had, plus the line — published, not written
+    // over. `publish` establishes `.git/info` durably if git has not, stages the
+    // complete new text beside the file, flushes it, renames it into place and
+    // flushes the directory that now names it. Only then may a live code exist.
+    store::write_text(&path, &text)
 }
 
 /// The predecessor's `.gitignore` named `lock` and `candidates/`, which this
