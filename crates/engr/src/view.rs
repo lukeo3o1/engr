@@ -225,17 +225,9 @@ fn object_tampered(object: &Object) -> bool {
 /// on disk: an out-of-band edit that was also resealed verifies perfectly, so
 /// integrity says `ok` about a record nothing admitted.
 ///
-/// Asked by every surface that says how much an Object can be trusted, `ls`
-/// included. It was once asked only on `show`, on the reasoning that replaying
-/// a whole history is affordable for the one Object somebody is reading and not
-/// for a listing — but the sentence after it, in this same comment, is the one
-/// that decides: there is no reading of either fault under which the record is
-/// fine, so a surface an agent reads before acting must not print `ok` over one.
-/// `ls` is the first surface an agent reaches for, and it was the last one still
-/// answering `ok` about a projection nothing admitted while `verify` and `show`
-/// both exited 5 on it. The cost is real — a listing now reads each Object's
-/// stream as well as its projection, which is what `verify` already does — and
-/// it buys the only thing this column is for.
+/// Reserved for explicit assessment (show and ls --verify). Navigation
+/// listings read projections only and mark unchecked rows instead of claiming
+/// that matching seals prove admission.
 fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFault> {
     ops::history_fault(root, object).ok().flatten()
 }
@@ -244,7 +236,7 @@ fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFaul
 ///
 /// **Three answers, in the evaluator's own order.** The aggregate seal first,
 /// because bytes that do not match their own seal establish nothing about what
-/// history produced; then what that history says. Every listing surface asks
+/// history produced; then what that history says. Explicit assessment asks
 /// this before it asks about a Section, because an Object that is wrong at this
 /// level makes every row under it wrong in the same way — and each of them used
 /// to answer some part of it with `ok`.
@@ -263,24 +255,6 @@ enum ObjectFault {
 }
 
 impl ObjectFault {
-    /// The `ls` note column, beside `object tampered`.
-    fn note(self) -> &'static str {
-        match self {
-            Self::Tampered => "object tampered",
-            Self::Divergent => "object divergent",
-            Self::Unreplayable => "object unreplayable",
-        }
-    }
-
-    /// The `ls --sections` status column, which is snake_case throughout.
-    fn row(self) -> &'static str {
-        match self {
-            Self::Tampered => "object_tampered",
-            Self::Divergent => "object_divergent",
-            Self::Unreplayable => "object_unreplayable",
-        }
-    }
-
     /// The prose label, beside `REF UNADMITTED` and its neighbours.
     fn label(self) -> &'static str {
         match self {
@@ -327,6 +301,13 @@ fn canonical_reference(id: &str) -> String {
 /// The abbreviation width to use across one command's output.
 pub fn width(root: &Path) -> usize {
     ops::object_ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(8)
+}
+
+// Navigation must not discover identities by reading the EventStore.
+fn projection_width(root: &Path) -> usize {
+    store::object_ids(root)
         .map(|ids| store::abbrev_len(&ids))
         .unwrap_or(8)
 }
@@ -880,11 +861,9 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
 /// One line per object, stable columns, never wrapped — so `grep`, `awk` and
 /// `fzf` all compose with it.
 pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment = assess(root, object);
-        let tally = counts(&assessment);
         let hits = keyword.map(|needle| matching_sections(object, needle));
         if let Some(hits) = &hits {
             if hits.is_empty()
@@ -896,23 +875,22 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
                 continue;
             }
         }
-        let fault = object_fault(root, object);
         let note = match &hits {
-            Some(hits) if !hits.is_empty() => hits
-                .iter()
-                .map(|id| format!("§{id}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ if fault.is_some() => fault.expect("checked").note().to_owned(),
-            _ if tally.tampered > 0 => format!("{} tampered", tally.tampered),
-            _ if tally.attention > 0 => format!("{} stale", tally.attention),
-            _ => "ok".to_owned(),
+            Some(hits) if !hits.is_empty() => {
+                hits.iter()
+                    .map(|id| format!("§{id}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    + " unchecked"
+            }
+            _ if object_tampered(object) => "object tampered".to_owned(),
+            _ => "unchecked".to_owned(),
         };
         out.push_str(&format!(
             "{}  {:<20}  {:>2} sections  {:<12}  {}\n",
             abbrev(&object.id, w),
             classification(object),
-            tally.total,
+            object.sections.len(),
             note,
             object.title
         ));
@@ -949,32 +927,20 @@ pub fn tampered_count(objects: &[Object]) -> usize {
         .sum()
 }
 
-/// One line per section, so grep can reach the text.
-///
-/// Every row carries its own trust status, immediately before the wording.
-/// This is the surface the Skill recommends for searching before a decision, so
-/// a hit here is something an agent is about to act on — and wording that was
-/// forged, or that stands on authority which was, must not arrive looking
-/// exactly like wording a human confirmed. A count on stderr did not do that
-/// job: it says how many, never which, and it is the first thing a pipe drops.
-///
-/// The status sits before the text rather than after it because the text is the
-/// only field that can contain spaces; anything following it is not a column.
+/// One line per stored section. The unchecked marker travels through pipes:
+/// seals can expose damage cheaply, but cannot establish admission or freshness.
 pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
-        let fault = object_fault(root, object);
+        let tampered = object_tampered(object);
         for section in &object.sections {
-            let status = if let Some(fault) = fault {
-                fault.row()
+            let status = if tampered {
+                "object_tampered"
+            } else if section_tampered(object, section) {
+                "tampered"
             } else {
-                assessment
-                    .iter()
-                    .find(|(id, _)| *id == section.id)
-                    .map(|(_, status)| status.key())
-                    .unwrap_or("ok")
+                "unchecked"
             };
             out.push_str(&format!(
                 "{} §{:<3} {:<20}  {:<14}  {}\n",
@@ -989,39 +955,21 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     out
 }
 
-/// Which sections cannot be trusted, named rather than counted.
-///
-/// "3 sections do not match their hashes" tells a reader that something is
-/// wrong and nothing about where, which turns a warning into a chore. The
-/// listing above already marks each row; this is for the caller that wants to
-/// say so once, loudly, on the stream a pipe does not swallow.
+/// Cheap seal failures only; dependency and history checks belong to assessment.
 pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
-    let w = width(root);
+    let w = projection_width(root);
     let mut found = Vec::new();
     for object in objects {
-        // An Object-level fault is every row's fault. Asking only the Sections
-        // meant a broken aggregate seal — which the listing beside this already
-        // prints on every row — was counted as nothing to warn about, and a
-        // projection nothing admitted was not looked at at all.
-        if let Some(fault) = object_fault(root, object) {
-            for section in &object.sections {
-                found.push(format!(
-                    "{} §{} {}",
-                    abbrev(&object.id, w),
-                    section.id,
-                    fault.label()
-                ));
-            }
-            continue;
-        }
-        for (id, status) in assess(root, object) {
-            if status.forged() {
-                found.push(format!(
-                    "{} §{id} {}",
-                    abbrev(&object.id, w),
-                    status.label()
-                ));
-            }
+        let tampered = object_tampered(object);
+        for section in &object.sections {
+            let label = if tampered {
+                "OBJECT TAMPERED"
+            } else if section_tampered(object, section) {
+                "TAMPERED"
+            } else {
+                continue;
+            };
+            found.push(format!("{} §{} {label}", abbrev(&object.id, w), section.id));
         }
     }
     found
@@ -1288,7 +1236,7 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
 /// at, whose basis has since moved. Outside the attention set is exactly where
 /// drift goes unnoticed — which is why this reads the derived class rather than
 /// `open`/`closed`, and so covers an accepted design and a mitigated risk too.
-pub fn render_stale(root: &Path, objects: &[Object]) -> String {
+pub fn render_ls_verify(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
     for object in objects {

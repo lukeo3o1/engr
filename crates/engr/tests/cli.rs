@@ -16,7 +16,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 #[test]
-fn missing_object_projection_remains_addressable_on_every_cli_read_surface() {
+fn missing_projection_is_addressable_for_assessment_but_not_in_navigation() {
     let workspace = TempDir::new().expect("workspace");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -53,7 +53,7 @@ fn missing_object_projection_remains_addressable_on_every_cli_read_surface() {
 
     let listed = run_engr(root, &["ls", "--all"]);
     assert!(listed.status.success());
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("history survives projection loss"));
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("history survives projection loss"));
     assert!(
         !projection.exists(),
         "read surfaces must not recreate authority"
@@ -672,11 +672,14 @@ fn a_crash_tail_is_reported_before_it_is_repaired() {
         "verify must still name the tail it is passing over: {}",
         String::from_utf8_lossy(&verified.stdout)
     );
-    // And reporting it moved nothing, took no lock, and rendered the wording
-    // history proves rather than the wording the stale file holds.
+    // Navigation shows only the stored snapshot; recovering the admitted tail
+    // belongs to show. Neither diagnostic takes a writer lock or changes bytes.
     let listed = run_engr(root, &["ls", "--sections"]);
     assert!(listed.status.success(), "crash-tail ls failed");
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("recovered confirmed wording"));
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("recovered confirmed wording"));
+    let listed = run_engr(root, &["ls"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("unchecked"));
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("0 sections"));
     assert!(
         !lock_path.exists(),
         "a diagnostic must not create the workspace writer lock"
@@ -734,9 +737,9 @@ fn a_crash_tail_is_reported_before_it_is_repaired() {
 }
 
 /// A revision the history cannot arrive at is corrupt stored recovery data, and
-/// every surface says so rather than reading past it.
+/// assessment refuses it while navigation leaves history unchecked.
 #[test]
-fn a_future_event_gap_is_refused_on_every_surface() {
+fn a_future_event_gap_is_refused_by_assessment_without_blocking_navigation() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -760,7 +763,10 @@ fn a_future_event_gap_is_refused_on_every_surface() {
     .expect("event");
     let before = workspace_bytes(root);
 
-    for args in [vec!["show", id], vec!["ls"], vec!["migrate"]] {
+    let listed = run_engr(root, &["ls"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("unchecked"));
+    for args in [vec!["show", id], vec!["ls", "--verify"], vec!["migrate"]] {
         let output = run_engr(root, &args);
         assert_ne!(output.status.code(), Some(0), "{args:?}");
     }
@@ -1449,16 +1455,16 @@ fn stale_listing_includes_closed_objects_whose_basis_moved() {
     git(root, &["add", "basis.txt"]);
     git(root, &["commit", "-qm", "basis moved"]);
 
-    let output = run_engr(root, &["ls", "--stale"]);
+    let output = run_engr(root, &["ls", "--verify"]);
     assert!(
         output.status.success(),
-        "ls --stale failed: {}",
+        "ls --verify failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let listing = String::from_utf8(output.stdout).expect("utf8 listing");
     assert!(
         listing.contains("closed"),
-        "a closed object whose basis moved must be surfaced by `ls --stale`; got {listing:?}"
+        "a closed object whose basis moved must be surfaced by `ls --verify`; got {listing:?}"
     );
 }
 
@@ -1737,8 +1743,8 @@ fn an_empty_commit_is_not_the_basis_moving() {
         &["commit", "--allow-empty", "-qm", "no source changes"],
     );
 
-    let output = run_engr(root, &["ls", "--stale"]);
-    assert!(output.status.success(), "ls --stale");
+    let output = run_engr(root, &["ls", "--verify"]);
+    assert!(output.status.success(), "ls --verify");
     let listing = String::from_utf8(output.stdout).expect("utf8 listing");
     assert_eq!(
         listing, "all ok\n",
@@ -1750,7 +1756,7 @@ fn an_empty_commit_is_not_the_basis_moving() {
     std::fs::write(root.join("basis.txt"), "changed basis\n").expect("change basis");
     git(root, &["add", "basis.txt"]);
     git(root, &["commit", "-qm", "basis moved"]);
-    let output = run_engr(root, &["ls", "--stale"]);
+    let output = run_engr(root, &["ls", "--verify"]);
     let listing = String::from_utf8(output.stdout).expect("utf8 listing");
     assert!(
         listing.contains("closed"),
@@ -6593,14 +6599,14 @@ fn an_event_id_is_canonical_uuidv7_text_and_two_spellings_are_one_identity() {
     );
 }
 
-/// Every read surface says the same thing about a dependency that is not
+/// Every assessment surface says the same thing about a dependency that is not
 /// established, and says which kind it is.
 ///
 /// A new dependency answer is not finished when `verify` reports it. `drift_for`
 /// had no mapping for it, so the value fell through to ordinary drift:
 /// `forged()` was false, `show` exited 0 on an Object standing on a forgery, the
 /// advice line said the target "no longer exists" when it is right there, JSON
-/// said `stale_refs`, and `ls --sections` left it out of the untrusted warning —
+/// said `stale_refs`, and the stale survey missed the integrity failure —
 /// while `verify` failed on the same workspace at the same moment. One state,
 /// two verdicts, and the quiet one is the one an agent reads before acting.
 ///
@@ -6708,12 +6714,14 @@ fn every_read_surface_reports_a_dependency_that_is_not_established() {
     assert_eq!(document["sections"][0]["status"], "ref_unadmitted");
 
     let listed = run_engr(root, &["ls", "--sections"]);
-    assert!(listed.status.success(), "the survey keeps exiting 0");
+    assert!(listed.status.success(), "navigation keeps exiting 0");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("unchecked"));
     assert!(
-        String::from_utf8_lossy(&listed.stderr).contains("REF UNADMITTED"),
-        "and warns: {}",
-        String::from_utf8_lossy(&listed.stderr)
+        listed.stderr.is_empty(),
+        "navigation does not assess dependencies"
     );
+    let assessed = run_engr(root, &["ls", "--verify"]);
+    assert!(String::from_utf8_lossy(&assessed.stdout).contains("REF UNADMITTED"));
 
     // (b) The target's own history will not replay. Nothing here establishes
     // what it should say, so nothing may send a reader to `repair`.
@@ -6800,20 +6808,10 @@ fn every_read_surface_reports_a_dependency_that_is_not_established() {
     );
 }
 
-/// Every listing surface says an Object is not what its history produced.
-///
-/// `ls` was the last one that did not. `verify` exits 5 on a resealed
-/// out-of-band edit, `show` prints the fault and exits 5, and the JSON surface
-/// answers `"integrity": "divergent"` — and the listing, which is the cheapest
-/// command and the first one an agent reaches for, printed `ok` in the same
-/// column that says `object tampered` for a broken seal. `ok` is not true of
-/// this state under any reading: nothing admitted those bytes.
-///
-/// The cost is real and is the reason it was left out: a listing now reads each
-/// Object's stream as well as its projection. That is what `verify` already
-/// does, and it is what this column is for.
+/// Navigation is cheap and makes no admission claim; explicit assessment still
+/// detects a resealed edit that no event produced.
 #[test]
-fn every_listing_surface_says_a_divergent_object_is_not_ok() {
+fn navigation_is_unchecked_and_explicit_assessment_detects_divergence() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
@@ -6850,10 +6848,13 @@ fn every_listing_surface_says_a_divergent_object_is_not_ok() {
             .unwrap_or_default()
             .to_owned()
     };
-    assert!(row(&["ls", "--all"]).contains(" ok "), "the premise");
-    assert!(row(&["ls", "--sections"]).contains(" ok "), "the premise");
+    assert!(row(&["ls", "--all"]).contains(" unchecked "), "the premise");
     assert!(
-        String::from_utf8_lossy(&run_engr(root, &["ls", "--stale"]).stdout).contains("all ok"),
+        row(&["ls", "--sections"]).contains(" unchecked "),
+        "the premise"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["ls", "--verify"]).stdout).contains("all ok"),
         "the premise"
     );
 
@@ -6866,20 +6867,12 @@ fn every_listing_surface_says_a_divergent_object_is_not_ok() {
     save_raw(root, &resealed.object).expect("put it on disk");
 
     let listed = row(&["ls", "--all"]);
-    assert!(listed.contains("object divergent"), "{listed}");
+    assert!(listed.contains("unchecked"), "{listed}");
     let sections = row(&["ls", "--sections"]);
-    assert!(sections.contains("object_divergent"), "{sections}");
-    // The alarm counts what cannot be trusted, and every row under a divergent
-    // Object is exactly that. It was silent here, and silent for a broken
-    // aggregate seal too — the surface beside it marked every row and the count
-    // that summarises them found nothing to say.
+    assert!(sections.contains("unchecked"), "{sections}");
     let alarm = run_engr(root, &["ls", "--sections"]);
-    assert!(
-        String::from_utf8_lossy(&alarm.stderr).contains("OBJECT DIVERGENT"),
-        "{}",
-        String::from_utf8_lossy(&alarm.stderr)
-    );
-    let stale = String::from_utf8_lossy(&run_engr(root, &["ls", "--stale"]).stdout).to_string();
+    assert!(alarm.stderr.is_empty(), "history was not assessed");
+    let stale = String::from_utf8_lossy(&run_engr(root, &["ls", "--verify"]).stdout).to_string();
     assert!(!stale.contains("all ok"), "{stale}");
     assert!(stale.contains("OBJECT DIVERGENT"), "{stale}");
 
@@ -6890,6 +6883,25 @@ fn every_listing_surface_says_a_divergent_object_is_not_ok() {
     save_raw(root, &tampered).expect("put it on disk");
     assert!(row(&["ls", "--all"]).contains("object tampered"));
     assert!(row(&["ls", "--sections"]).contains("object_tampered"));
+
+    // A wrong-shaped EventStore makes even discovery fail if navigation reaches
+    // it. This pins the cost boundary without a machine-dependent timing limit.
+    save_raw(root, &object).expect("restore projection");
+    let eventstore = root.join(".engr/eventstore");
+    std::fs::rename(&eventstore, root.join("saved-eventstore")).expect("move history");
+    std::fs::write(&eventstore, "not a directory").expect("block history reads");
+    for args in [
+        vec!["ls"],
+        vec!["ls", "--all"],
+        vec!["ls", "wording"],
+        vec!["ls", "--sections"],
+    ] {
+        let listed = run_engr(root, &args);
+        assert!(listed.status.success(), "{args:?}: {:?}", listed.stderr);
+        assert!(String::from_utf8_lossy(&listed.stdout).contains("unchecked"));
+    }
+    assert!(!run_engr(root, &["ls", "--verify"]).status.success());
+    assert!(!run_engr(root, &["verify", &id]).status.success());
 }
 
 /// `--expect` is two levels, and the refusal must name the one this operation

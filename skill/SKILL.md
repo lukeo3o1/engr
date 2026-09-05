@@ -221,7 +221,7 @@ history.
 
 ## Reading the record
 
-At the start of engineering work, run `engr ls --stale`. It lists **sections that
+At the start of engineering work, run `engr ls --verify`. It lists **sections that
 no longer verify cleanly** — a moved basis, a rewritten reference, wording that
 was tampered with, or a dependency that will not load — and it marks the ones
 belonging to objects nobody is looking at, which is where that goes unnoticed.

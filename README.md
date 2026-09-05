@@ -126,15 +126,20 @@ engr prepare --object <id> --classify --type decision --state accepted
 engr prepare --object <id> --supersede <other> --text "why it was replaced"
 engr candidate                               # what is awaiting a human
 engr candidate <code>                        # show it again, hours later
-engr ls                                      # what needs attention
-engr ls --stale                              # sections whose basis or refs moved
-engr ls --all --sections | grep <term>       # one line per section, greppable
+engr ls                                      # stored projections needing attention; unchecked
+engr ls --verify                              # explicit, more expensive history/basis/ref assessment
+engr ls --all --sections | grep <term>       # stored section text, unchecked and greppable
 engr show <id>                               # sections, and how far each can be trusted
 engr show <id> --format json                 # the same, for an agent
 engr verify                                  # verify Object, Sections, and dependencies
 engr rules ls --domain object                # policy governing Agent mutations
 engr protocol                                # the spec this binary implements
 ```
+
+Plain `ls` and `ls --sections` read only stored projections, so their cost does
+not grow with event history or dependency graphs. `unchecked` means history,
+bases and dependencies were not assessed; crash tails and missing projections
+are not recovered here. Use `show <id>` or `verify` before relying on the wording.
 
 For an Agent mutation, first run the intended command with `--agent`. If a Rule
 applies, engr refuses without writing and surfaces the ReviewDigest and Rule ids.

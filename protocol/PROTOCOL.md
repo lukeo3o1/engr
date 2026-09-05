@@ -248,20 +248,22 @@ is the other direction: a projection asserting something no admitted Event ever
 said. Verification MUST report it, and `repair` — never an ordinary mutation —
 is the one path that reconstructs a divergent projection.
 
-**Every surface that says how far an Object can be trusted MUST report it, not
-only the deep one.** A listing is entitled to be terse and is not entitled to be
-wrong: `ok` about a projection nothing admitted is the same claim `verify` makes
-when it passes, in the surface a reader meets first and the one an agent reaches
-for before acting. Cost is the reason it gets left out — the question replays a
-history, and a listing would rather read projections alone — and cost is not a
-reason to answer a question wrongly. A surface that cannot afford the question
-MUST NOT answer it: the choice is to ask, or to stop claiming soundness.
+**Navigation MUST stay cheap and MUST NOT claim soundness.** Plain `ls`, keyword
+search and `ls --sections` read stored Object projections only: no EventStore
+reads or replay, Git basis walks, or dependency evaluation. Their cost scales
+with current projections, not accumulated history or dependency graphs. They
+mark rows `unchecked`, including section wording copied through a pipe; matching
+seals are not proof of admission. Cheap seal failures may still be reported.
+These are stored snapshots: a crash tail is not applied and an Object whose
+projection is missing is not discovered. Use `show` to recover effective state
+or `verify` to check the record. Explicit `ls --verify` performs the more expensive
+assessment and reports Object history faults as well as Section drift.
 
 **And the prefix rule below is a rule about reconciliation, not a rule about
 eligibility.** `repair` decides whether there is anything to repair, and that
 question is asked of the *whole* history: a tail that cannot be applied at all is
 not a recovery buffer, and an eligibility check that sees only the prefix
-concludes the Object is sound while every read surface is refusing the workspace.
+concludes the Object is sound while every assessment surface refuses the workspace.
 An implementation MUST establish that history replays before it reports that a
 projection is what history produced.
 
@@ -1274,8 +1276,9 @@ reader to a path that refuses.
 `show` reports all three for the one Object it is about, and **fails** when it
 reports any of them: a screen that says an Object is not what its history
 produced and then exits 0 tells a script the opposite of what it told the
-reader. `ls` surveys and keeps exiting 0 — it would have to replay every
-Object's history to answer, and it already sends a reader to `verify`.
+reader. Plain `ls` and `ls --sections` are unchecked projection surveys and keep
+exiting 0 for readable projections. `ls --verify` explicitly requests assessment;
+it reports discovered faults while keeping the survey's exit convention.
 
 Committed git history provides an additional tamper anchor, which is why
 `verify` also reports an uncommitted object.

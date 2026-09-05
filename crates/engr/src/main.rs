@@ -37,18 +37,18 @@ enum Command {
     },
     /// Admit a candidate. The response must be exactly `CONFIRM <code>`
     Confirm { response: String },
-    /// List objects. Only the ones needing attention unless --all
+    /// List stored projections without verification. Attention only unless --all
     Ls {
         /// Keyword to filter by, matched against titles and section text
         keyword: Option<String>,
         #[arg(long)]
         all: bool,
-        /// One line per section, so grep can reach the text
+        /// One line per stored section, marked unchecked, so grep can reach the text
         #[arg(long)]
         sections: bool,
-        /// Sections whose basis or references moved, or that will not verify
-        #[arg(long)]
-        stale: bool,
+        /// Assess history, bases and dependencies (more expensive than plain ls)
+        #[arg(long, conflicts_with = "sections")]
+        verify: bool,
     },
     /// Show one object: its sections, and how much each can be trusted
     Show {
@@ -1068,8 +1068,8 @@ fn run(cli: Cli) -> Result<()> {
             keyword,
             all,
             sections,
-            stale,
-        } => ls(&root, keyword.as_deref(), all, sections, stale),
+            verify,
+        } => ls(&root, keyword.as_deref(), all, sections, verify),
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
             let stored = store::load_object(&root, &id);
@@ -2745,10 +2745,19 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
     }
 }
 
-fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
+fn load_all(root: &Path, all: bool, assess: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
-    for id in ops::object_ids(root)? {
-        let object = ops::effective(root, &id)?;
+    let ids = if assess {
+        ops::object_ids(root)?
+    } else {
+        store::object_ids(root)?
+    };
+    for id in ids {
+        let object = if assess {
+            ops::effective(root, &id)?
+        } else {
+            store::load_object(root, &id)?
+        };
         if all || object.needs_attention() {
             objects.push(object);
         }
@@ -2757,17 +2766,16 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     Ok(objects)
 }
 
-fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool) -> Result<()> {
+fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, verify: bool) -> Result<()> {
     // A closed object whose basis moved is the one case that must surface
-    // unprompted. `--stale` therefore cannot inherit `ls`'s open-only default.
-    let objects = load_all(root, all || stale)?;
+    // unprompted. `--verify` therefore cannot inherit `ls`'s open-only default.
+    let objects = load_all(root, all || verify, verify)?;
     if objects.is_empty() {
         println!("no objects");
         return Ok(());
     }
     if sections {
-        // stdout stays byte for byte what it was — this is the surface people
-        // pipe into grep — so the alarm goes to stderr, which survives the pipe.
+        // Keep the per-row marker in pipes and the detailed alarm on stderr.
         print!("{}", view::render_ls_sections(root, &objects));
         let untrusted = view::untrusted_sections(root, &objects);
         if !untrusted.is_empty() {
@@ -2779,8 +2787,8 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
                 eprintln!("!!   {row}");
             }
         }
-    } else if stale {
-        let out = view::render_stale(root, &objects);
+    } else if verify {
+        let out = view::render_ls_verify(root, &objects);
         if out.is_empty() {
             println!("all ok");
         } else {
