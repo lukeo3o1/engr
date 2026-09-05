@@ -210,6 +210,15 @@ fn the_projection_excludes_identity_provenance_and_the_seal() {
 
 /// Selected absent optionals project as `null`, and set-like values project
 /// canonically.
+///
+/// **An empty optional collection is one of the absent ones**, and this used to
+/// check only the scalars. The persisted form omits an empty `content`, `refs`
+/// or `relations`, so nothing distinguishes a Section that has one from a
+/// Section that never did — there is no fact there to project as `[]`. Sending
+/// `[]` instead of `null` gave a different RefDigest from the one #66 §6.5
+/// defines, so this build and a conforming one disagreed about the same Section,
+/// and migration inherited it: a legacy Ref selects `refs` whether or not its
+/// target has any.
 #[test]
 fn absent_optionals_project_as_null_and_sets_project_canonically() {
     let mut section = section();
@@ -223,6 +232,21 @@ fn absent_optionals_project_as_null_and_sets_project_canonically() {
         semantic_value(&section, SemanticField::Role).expect("value"),
         serde_json::Value::Null
     );
+
+    for empty in [
+        SemanticField::Content,
+        SemanticField::Refs,
+        SemanticField::Relations,
+    ] {
+        assert!(section.content.is_empty() && section.refs.is_empty());
+        assert!(section.relations.is_empty());
+        assert_eq!(
+            semantic_value(&section, empty).expect("value"),
+            serde_json::Value::Null,
+            "an omitted {} is absent, not an empty list",
+            empty.as_str()
+        );
+    }
 
     section.content = vec![Supplement::new("data.note", "a note")];
     assert_eq!(
@@ -559,6 +583,35 @@ fn the_two_projections_agree_field_by_field() {
             Some(&semantic_value(&section, *field).expect("value")),
             "{} differs between the two projections",
             field.as_str()
+        );
+    }
+
+    // And the one place they part, said out loud rather than left to be
+    // discovered. The whole-Section projection is a fixed record: every key is
+    // always there, so an empty collection reads unambiguously as "none". The
+    // per-field projection is a map whose keys are exactly what a Ref selected,
+    // and the only way to say "none" in it is to say so — which is what #66
+    // §6.5 requires of a selected absent optional.
+    let mut bare = section.clone();
+    bare.content.clear();
+    bare.refs.clear();
+    bare.relations.clear();
+    let proof = serde_json::to_value(engr::proof::SectionSemantic::of(&bare).expect("project"))
+        .expect("value");
+    for field in [
+        SemanticField::Content,
+        SemanticField::Refs,
+        SemanticField::Relations,
+    ] {
+        assert_eq!(
+            proof[field.as_str()],
+            serde_json::json!([]),
+            "the whole-Section record always carries the key"
+        );
+        assert_eq!(
+            semantic_value(&bare, field).expect("value"),
+            serde_json::Value::Null,
+            "and the selected-fields map says absent"
         );
     }
 }
@@ -1401,4 +1454,49 @@ fn write_raw<T: serde::Serialize>(path: &std::path::Path, value: &T) -> engr::Re
 /// Put an Object on disk directly, for a fixture that needs one there.
 fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Result<()> {
     write_raw(&engr::store::object_path(root, &object.id), object)
+}
+
+/// Golden RefDigest vectors for a Section whose optional collections are absent.
+///
+/// Fixed bytes rather than a round trip, because a round trip agrees with
+/// whatever this build happens to project. #66 §6.5 pins the preimage: `values`
+/// carries exactly the selected keys, and a selected absent optional is `null`.
+/// These three selections used to hash `[]` and therefore disagreed with a
+/// conforming implementation about the same Section.
+#[test]
+fn a_selected_absent_collection_hashes_as_null_and_not_as_an_empty_list() {
+    let mut bare = section();
+    bare.content.clear();
+    bare.refs.clear();
+    bare.relations.clear();
+
+    for field in [
+        SemanticField::Content,
+        SemanticField::Refs,
+        SemanticField::Relations,
+    ] {
+        let taken = snapshot(&bare, &[field]);
+        assert_eq!(
+            taken.values().get(field.as_str()),
+            Some(&serde_json::Value::Null),
+            "{} must be carried as absent",
+            field.as_str()
+        );
+
+        // And the digest is the one that preimage produces, computed here
+        // independently of the code under test.
+        let preimage = serde_json::json!({
+            "target": target(),
+            "fields": [field.as_str()],
+            "values": { field.as_str(): serde_json::Value::Null },
+            "commit": commit(),
+        });
+        let expected = format!(
+            "1:{}",
+            engr::proof::sha256_of(
+                &engr::proof::canonical_bytes(&preimage, "preimage").expect("canonical")
+            )
+        );
+        assert_eq!(digest_of(&taken), expected, "{}", field.as_str());
+    }
 }

@@ -604,6 +604,38 @@ fn predecessor_references_convert_to_what_they_attested_and_still_resolve() {
         dependency::Dependency::Unchanged,
         "a migrated reference is not born stale"
     );
+
+    // **The selected `refs` of a target that has none.** Every migrated Ref
+    // selects `refs`, because the released whole-content seal covered it, and
+    // most targets have no references of their own — so this is the ordinary
+    // case, not an edge. #66 §6.5 carries a selected absent optional as `null`;
+    // projecting the empty list instead gave a digest a conforming
+    // implementation would not agree with, on nearly every migrated Ref there
+    // is.
+    // The fixture's chain is PROVENANCE §4 -> MODEL §1 -> AUTHORITY §1, and the
+    // last of those has no references of its own — so MODEL's migrated Ref
+    // selects `refs` on a target that has none, and its digest is the one at
+    // issue. This is the ordinary case rather than an edge: every migrated Ref
+    // selects `refs`, and most targets have none.
+    let end_of_chain = ops::effective(&root, AUTHORITY).expect("the far end of the chain");
+    let pinned = end_of_chain.section(1).expect("§1");
+    assert!(
+        pinned.refs.is_empty(),
+        "the far end of the chain has no references of its own, which is the case at issue"
+    );
+    assert_eq!(
+        engr::dependency::semantic_value(pinned, engr::dependency::SemanticField::Refs)
+            .expect("projection"),
+        serde_json::Value::Null,
+        "and it is carried as absent, not as an empty list"
+    );
+    let midpoint = store::load_object(&root, MODEL).expect("model");
+    let onward = &midpoint.section(1).expect("§1").refs[0];
+    assert_eq!(
+        dependency::evaluate(&root, &end_of_chain, onward).expect("evaluate"),
+        dependency::Dependency::Unchanged,
+        "and the Ref whose selection includes that absence still verifies"
+    );
 }
 
 /// A migrated Ref depends on what the predecessor Ref actually attested, and on
@@ -3197,4 +3229,201 @@ fn a_completed_migration_answered_again_does_not_report_a_migration() {
         !said.contains("sections"),
         "nor the plan's counts, which are not this workspace's: {said}"
     );
+}
+
+/// A withdrawal interrupted inside its own recursive removal is recoverable.
+///
+/// `retire_prepared` unlinks the Challenge and then removes the stage tree, and
+/// `remove_dir_all` is not atomic — the directory's own name goes last. So an
+/// interruption could leave the stage standing with its manifest already gone:
+/// no question, no plan, no `VERSION`, predecessor bytes untouched. Every route
+/// out was closed. `staged` found nothing to resume, and `validate_format`
+/// refused the workspace because a stage directory existed, naming `engr
+/// migrate` — which reached the same refusal. Recovery meant deleting a
+/// directory by hand.
+///
+/// The state is built here rather than injected, because it is a filesystem
+/// state and not a code path: unlink exactly what that interruption would have
+/// unlinked, in that order, and leave what it would have left.
+#[test]
+fn a_withdrawal_interrupted_inside_its_own_removal_can_still_be_prepared_again() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+    let before = fingerprint(root);
+    let proposed = engr::migration::prepare(root).expect("prepare");
+
+    // Exactly the interruption: the Challenge is gone, the manifest is gone, the
+    // stage directory is still standing.
+    std::fs::remove_file(store::challenge_path(root, &proposed.challenge).expect("path"))
+        .expect("remove the challenge");
+    std::fs::remove_file(engr::migration::stage_dir(root).join("manifest.json"))
+        .expect("remove the manifest");
+    assert!(engr::migration::stage_dir(root).is_dir());
+    assert!(!store::version_path(root).exists());
+
+    // Reads are not refused by residue that marks no transaction.
+    assert_eq!(
+        store::validate_format(root).expect("still the predecessor"),
+        WorkspaceFormat::Predecessor
+    );
+
+    // And preparing again asks a fresh question rather than pointing at itself.
+    let again = engr::migration::prepare(root).expect("prepare again");
+    assert_ne!(again.challenge, proposed.challenge, "a new question");
+    assert!(store::challenge_path(root, &again.challenge)
+        .expect("path")
+        .exists());
+
+    // Nothing the predecessor owns was touched by any of it.
+    assert_eq!(before, fingerprint(root));
+}
+
+/// But a stage holding a confirmed destination is still the only copy of what
+/// was answered, and losing its manifest does not make it disposable.
+#[test]
+fn a_stage_that_holds_a_destination_is_not_swept_as_orphan_residue() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+    let proposed = engr::migration::prepare(root).expect("prepare");
+    interrupt_after_confirmed_destination(root, &proposed.challenge);
+    assert!(engr::migration::stage_dir(root)
+        .join("destination")
+        .is_dir());
+
+    std::fs::remove_file(engr::migration::stage_dir(root).join("manifest.json"))
+        .expect("lose the manifest");
+
+    let refused = store::validate_format(root).expect_err("a confirmed transaction is not residue");
+    assert!(
+        refused.message.contains("incomplete coordinated migration"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        engr::migration::stage_dir(root)
+            .join("destination")
+            .is_dir(),
+        "and nothing swept it"
+    );
+}
+
+/// The local exclusion is a pattern, and the workspace path in it is data.
+///
+/// A nested workspace whose directory name carries `[` and `]` emitted
+/// `/project[1]/.engr/local/`, which git reads as a character class — so the
+/// directory was never ignored. While the workspace is still the predecessor
+/// that line is the whole of what keeps a live Challenge out of `git add -A`,
+/// and a Challenge's filename **is** its code.
+///
+/// Git is the oracle at both ends: the unescaped pattern is written first and
+/// git is asked whether it hides the file — it does not — and then the pattern
+/// engr actually writes is asked the same question.
+#[test]
+fn the_local_exclusion_escapes_a_workspace_path_git_would_read_as_a_pattern() {
+    let (temp, clone) = released();
+    // A workspace nested under the repository root, which is where a
+    // repo-relative path with a name in it comes from at all. Reduced to the one
+    // Object with no references, because a moved `.engr` cannot resolve
+    // historical Ref targets at the paths its commits recorded.
+    let outer = temp.path().join("outer");
+    std::fs::rename(&clone, &outer).expect("rename the clone");
+    let nested = outer.join("project[1]");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::fs::rename(store::engr_dir(&outer), store::engr_dir(&nested)).expect("nest the workspace");
+    for id in [AUTHORITY, MODEL, PROVENANCE_OBJECT] {
+        std::fs::remove_file(
+            store::engr_dir(&nested)
+                .join("objects")
+                .join(format!("{id}.json")),
+        )
+        .expect("drop a referencing object");
+        std::fs::remove_file(
+            store::engr_dir(&nested)
+                .join("events")
+                .join(format!("{id}.jsonl")),
+        )
+        .expect("drop its history");
+    }
+    git(&outer, &["add", "-A"]);
+    git(
+        &outer,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "the workspace, nested",
+        ],
+    );
+
+    let exclude = outer.join(".git").join("info").join("exclude");
+    let untracked = |root: &Path| -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .output()
+            .expect("git status");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    let proposed = engr::migration::prepare(&nested).expect("prepare in the nested workspace");
+    let live = store::challenges_dir(&nested).join(format!("{}.json", proposed.challenge));
+    assert!(live.exists(), "the challenge is on disk");
+
+    // The control: the pattern this used to write, asked of git.
+    let unescaped = "/project[1]/.engr/local/\n";
+    std::fs::write(&exclude, unescaped).expect("write the unescaped pattern");
+    assert!(
+        untracked(&outer).contains(&proposed.challenge),
+        "the unescaped pattern must fail to hide the code, or this test proves nothing"
+    );
+
+    // And what engr writes, asked the same way.
+    std::fs::remove_file(&exclude).expect("clear it");
+    engr::migration::prepare(&nested).expect("prepare again, rewriting the exclusion");
+    let text = std::fs::read_to_string(&exclude).expect("exclude");
+    assert!(
+        text.contains(r"/project\[1\]/.engr/local/"),
+        "the brackets are escaped for git's ignore grammar: {text}"
+    );
+    let listing = untracked(&outer);
+    assert!(
+        !listing.contains(&proposed.challenge),
+        "a live challenge code must not be stageable: {listing}"
+    );
+    assert!(
+        !listing.contains("local/"),
+        "and nor must anything else under local/: {listing}"
+    );
+}
+
+/// Every character git gives meaning to, escaped; and the separator left alone.
+///
+/// Over-escaping is safe here and under-escaping is not: git reads `\x` as the
+/// literal `x` for any `x`, so a backslash in front of something that was never
+/// special costs nothing, while a missing one silently changes what the pattern
+/// matches.
+#[test]
+fn the_ignore_escape_covers_what_git_treats_as_pattern_syntax() {
+    let backslash = '\\';
+    for (raw, escaped) in [
+        ("plain".to_owned(), "plain".to_owned()),
+        ("project[1]".to_owned(), r"project\[1\]".to_owned()),
+        ("star*".to_owned(), r"star\*".to_owned()),
+        ("one?".to_owned(), r"one\?".to_owned()),
+        ("!bang".to_owned(), r"\!bang".to_owned()),
+        ("hash#".to_owned(), r"hash\#".to_owned()),
+        (
+            format!("back{backslash}slash"),
+            format!("back{backslash}{backslash}slash"),
+        ),
+        ("keeps/separators".to_owned(), "keeps/separators".to_owned()),
+        ("trailing ".to_owned(), r"trailing\ ".to_owned()),
+    ] {
+        assert_eq!(engr::git::escape_ignore_literal(&raw), escaped, "{raw}");
+    }
 }

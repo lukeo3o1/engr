@@ -406,6 +406,38 @@ pub fn git_path(root: &Path, internal: &str) -> Option<PathBuf> {
 pub fn repo_relative_dir(root: &Path, path: &Path) -> Option<String> {
     repo_relative(root, path)
 }
+
+/// A literal path, spelled so git's ignore grammar reads it as one.
+///
+/// **A path is data; an ignore entry is a pattern.** Writing the first into the
+/// second unescaped means any workspace whose name carries `*`, `?`, `[`, `]`,
+/// `\` or a leading `!` produces an entry that does not match the directory it
+/// was written for. That is not cosmetic where this is used: while the workspace
+/// is still the predecessor, this line is the whole of what keeps a live
+/// Challenge code — whose filename *is* the code — out of `git add -A`. A
+/// workspace at `project[1]` emitted `/project[1]/.engr/local/`, git read `[1]`
+/// as a character class, and `git status --untracked-files=all` listed the
+/// Challenge.
+///
+/// `/` is left alone: it is the separator, not a literal to protect. Everything
+/// else git gives meaning to is preceded by a backslash, which git reads as "the
+/// next character, literally" — including for characters that were not special
+/// anyway, so over-escaping is safe and under-escaping is not. A trailing space
+/// is escaped too, because git strips unescaped ones.
+pub fn escape_ignore_literal(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']' | '!' | '#') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    if escaped.ends_with(' ') {
+        escaped.pop();
+        escaped.push_str("\\ ");
+    }
+    escaped
+}
 /// The type of the object this id names, without peeling it.
 ///
 /// [`exists`] asks whether a revision *reaches* a commit, which is the right

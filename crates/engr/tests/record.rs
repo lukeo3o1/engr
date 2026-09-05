@@ -1909,3 +1909,89 @@ fn verify_names_a_dependency_that_moved_and_still_passes() {
         "named down to the selected field that moved"
     );
 }
+
+/// A dependency admitted in a crash tail is checked, and one the tail removed is
+/// not.
+///
+/// Verification asks two different questions of two different things. Seals and
+/// history-consistency are about the bytes actually stored, so replay must not
+/// get in front of them. What a Section *stands on* is a fact about the record,
+/// and a Ref admitted in a durable Event the projection has not caught up to is
+/// already part of what the Object asserts.
+///
+/// Walking the older projection for both meant the second question was answered
+/// about a state that had been superseded. It was masked while an unprojected
+/// tail failed verification on its own; the moment that stopped being a failure,
+/// a crash tail carrying a Ref to an unreadable target returned PASS — and
+/// reconciling, which any later `show` does, turned the same workspace into a
+/// FAIL with nothing in between to explain it.
+#[test]
+fn a_dependency_from_an_unprojected_event_is_verified_and_one_it_dropped_is_not() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    admit(
+        &root,
+        payload(Act::Add, &target, "what the source leans on"),
+    );
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "the source");
+    let object_path = store::object_path(&root, &source);
+    let events_path = store::events_path(&root, &source);
+    // Revision 1: no references at all. These are the bytes the crash leaves.
+    let rev_one = std::fs::read(&object_path).expect("rev 1 projection");
+
+    let mut with_ref = payload(Act::Add, &source, "stands on the target");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
+    admit(&root, with_ref);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+
+    // The crash state: the Event is durable, the projection is not written back.
+    std::fs::write(&object_path, &rev_one).expect("put the rev-1 projection back");
+    let stored = store::load_object(&root, &source).expect("stored");
+    assert_eq!(stored.rev, 1);
+    assert!(stored.sections.is_empty(), "no Ref in the stored bytes");
+    let events_before = std::fs::read(&events_path).expect("events");
+
+    // And the target the *admitted* Ref stands on stops being readable.
+    let target_path = store::object_path(&root, &target);
+    let sound: Value = store::read_json(&target_path).expect("read");
+    let mut broken = sound.clone();
+    broken["state"] = Value::String("not-a-state".into());
+    write_raw(&target_path, &broken).expect("write");
+
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(
+        !report.passed(),
+        "a Ref this Object has already admitted is not unchecked because the \
+         projection has not caught up to it"
+    );
+    assert_eq!(report.standing_on_unreadable.len(), 1);
+    assert_eq!(report.standing_on_unreadable[0].section, 1);
+    assert_eq!(report.unprojected, 1, "and the tail is still reported");
+    // Reporting it moved nothing.
+    assert_eq!(std::fs::read(&object_path).expect("object"), rev_one);
+    assert_eq!(std::fs::read(&events_path).expect("events"), events_before);
+
+    // The converse, which the same rule decides: once the target is sound again
+    // and a further admitted Event drops the dependency, the old projection's
+    // copy of it must not keep failing.
+    write_raw(&target_path, &sound).expect("restore the target");
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+    // Caught up first, so the second half is the same shape as the first: one
+    // admitted Event the projection has not reached.
+    let caught_up = ops::reconcile(&root, &source).expect("reconcile");
+    assert_eq!(caught_up.rev, 2);
+    let rev_two = std::fs::read(&object_path).expect("rev 2 projection");
+    admit(&root, payload(Act::Delete(1), &source, ""));
+    std::fs::write(&object_path, &rev_two).expect("fall behind again");
+    write_raw(&target_path, &broken).expect("break the target once more");
+
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(
+        report.passed(),
+        "the admitted record no longer stands on that target: {:?}",
+        report.standing_on_unreadable
+    );
+    assert_eq!(report.unprojected, 1);
+}

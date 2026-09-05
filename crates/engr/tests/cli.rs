@@ -6532,3 +6532,63 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
     let shown = run_engr(root, &["backlog", "show", &id]);
     assert!(!String::from_utf8_lossy(&shown.stdout).contains("exhausted"));
 }
+
+/// An Event id is canonical UUIDv7 text, and two spellings of one UUID are one
+/// identity.
+///
+/// `Event::validate` called the helper that *returns* the canonical spelling and
+/// threw the result away, so it only ever asked whether the text parsed. Every
+/// alternative spelling the parser accepts — uppercase here — therefore passed,
+/// and the seal did not object because it is computed over whatever the id says.
+/// The stream's duplicate check then compared the stored strings, so two
+/// spellings of one UUID were two identities to the one rule that exists to
+/// catch a repeated Event.
+#[test]
+fn an_event_id_is_canonical_uuidv7_text_and_two_spellings_are_one_identity() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "canonical event ids"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let events = store::load_events(root, &id).expect("history");
+    let bootstrap = &events[0];
+    let uppercase = bootstrap.id.to_uppercase();
+    assert_ne!(uppercase, bootstrap.id, "the fixture must actually differ");
+    assert_eq!(
+        uppercase.to_lowercase(),
+        bootstrap.id,
+        "and be the same UUID"
+    );
+
+    // Sealed over the uppercase spelling, so the digest agrees and the only
+    // thing left to object to is the spelling itself.
+    let alternate = engr::model::Event::sealed(
+        &id,
+        uppercase.clone(),
+        bootstrap.action.clone(),
+        2,
+        bootstrap.metadata.admitted.clone(),
+    )
+    .expect("seal an event over the alternate spelling");
+    assert!(
+        alternate.validate(&id).is_err(),
+        "a non-canonical Event id must be refused even when its own seal agrees"
+    );
+
+    // And on the stream, where the duplicate rule lives: the same identity twice,
+    // spelled two ways.
+    append_admitted_raw(root, &id, &alternate);
+    let refused = store::load_events(root, &id).expect_err("the stream must be refused");
+    assert_eq!(refused.code, engr::EXIT_SCHEMA, "{}", refused.message);
+    assert!(
+        refused.message.contains("canonical UUIDv7")
+            || refused.message.contains("appears more than once"),
+        "{}",
+        refused.message
+    );
+}

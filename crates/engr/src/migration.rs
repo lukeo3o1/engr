@@ -681,6 +681,10 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
     if store::generation_present(root)? {
         sweep_completed_stage(root)?;
     }
+    // And a stage that marks no transaction at all, left by an interruption
+    // inside a recursive removal. `validate_format` no longer refuses for one;
+    // this is where it actually goes, under the lock that owns every removal.
+    discard_orphaned_stage(root)?;
     if let Some(manifest) = staged(root)? {
         // A staged plan is the question a human is already holding, so resuming
         // returns their code rather than minting a second one for the same
@@ -823,6 +827,48 @@ fn read_local(path: &Path) -> Result<Option<String>> {
     Ok(Some(
         fs::read_to_string(path).map_err(|error| tool_error(path.display(), error))?,
     ))
+}
+
+/// A stage directory that marks no transaction at all.
+///
+/// **Recursive removal is not atomic, and the name it removes goes last.**
+/// `retire_prepared` unlinks the Challenge and then removes the stage tree, so
+/// an interruption in between could leave the directory standing with its
+/// manifest already gone — no question, no plan, no `VERSION`, and predecessor
+/// bytes untouched. Every route out was then closed: `staged` reported nothing
+/// to resume, and `validate_format` refused the workspace because a stage
+/// directory existed, naming the one command that hit the same refusal. Recovery
+/// meant deleting a directory by hand.
+///
+/// This is the rule that reopens it, and it is deliberately narrow. A stage with
+/// **no manifest and no destination** describes nothing that was ever confirmed:
+/// no plan was staged into it, or the plan is gone and nothing was published
+/// against it, so there is no transaction to protect and nothing to lose by
+/// sweeping it. A stage carrying a destination is the opposite case — the only
+/// copy of what somebody answered — and stays a refusal even with its manifest
+/// missing.
+///
+/// Asked on the same three-way terms as every other probe: only established
+/// absence is absence, so an unreadable stage is not swept on the strength of
+/// not being able to see into it.
+pub(crate) fn orphaned_stage(root: &Path) -> Result<bool> {
+    let stage = stage_dir(root);
+    if !store::namespace(&stage)? {
+        return Ok(false);
+    }
+    Ok(!store::resource_present(&stage.join(MANIFEST))?
+        && !store::namespace(&destination_dir(root))?)
+}
+
+/// Sweep a stage that marks nothing, so the next question can be asked.
+///
+/// Under the writer lock, like every other removal, and idempotent: a crash part
+/// way through leaves work this can simply do again.
+pub(crate) fn discard_orphaned_stage(root: &Path) -> Result<()> {
+    if orphaned_stage(root)? {
+        store::remove_tree_durably(&stage_dir(root))?;
+    }
+    Ok(())
 }
 
 fn staged(root: &Path) -> Result<Option<Manifest>> {
@@ -2018,7 +2064,9 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
     let Some(relative) = crate::git::repo_relative_dir(root, &store::local_dir(root)) else {
         return Ok(());
     };
-    let entry = format!("/{relative}/");
+    // Escaped, because this is a pattern and the workspace name is data. See
+    // [`crate::git::escape_ignore_literal`].
+    let entry = format!("/{}/", crate::git::escape_ignore_literal(&relative));
     let mut text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),

@@ -384,8 +384,13 @@ pub fn validate_format(root: &Path) -> Result<WorkspaceFormat> {
         return Ok(WorkspaceFormat::Current);
     }
     let migration = crate::migration::stage_dir(root);
+    // A stage that marks nothing is not an incomplete migration, and refusing
+    // for it closed every route out: `engr migrate` was named by the refusal and
+    // hit the same one. See [`crate::migration::orphaned_stage`] — a stage
+    // carrying a destination is still the only copy of a confirmed answer and is
+    // still refused here.
     ensure!(
-        !namespace(&migration)?,
+        !namespace(&migration)? || crate::migration::orphaned_stage(root)?,
         EXIT_SCHEMA,
         "{} marks an incomplete coordinated migration; run `engr migrate` to resume it",
         migration.display()
@@ -1693,10 +1698,18 @@ fn check_event_history(path: &Path, id: &str, events: &[Event]) -> Result<()> {
             event.action.event_type()
         );
     }
+    // Keyed on the identity, not on the spelling. `Event::validate` now holds an
+    // Event id to canonical UUIDv7 text, which makes the two the same thing —
+    // and this does not depend on that having happened first. Comparing raw
+    // strings meant two spellings of one UUID were two identities here, so the
+    // one rule that exists to catch a duplicated Event was the rule a duplicate
+    // could be spelled around.
     let mut seen = std::collections::BTreeSet::new();
     for event in events {
+        let identity =
+            crate::model::canonical_object_id(&event.id).unwrap_or_else(|_| event.id.clone());
         ensure!(
-            seen.insert(event.id.clone()),
+            seen.insert(identity),
             EXIT_SCHEMA,
             "{}: event id {} appears more than once in the stream for {id}",
             path.display(),

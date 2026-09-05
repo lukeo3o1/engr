@@ -576,7 +576,27 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let mut standing_on_unreadable = Vec::new();
     let mut broken_replacements = Vec::new();
     let mut drifted = Vec::new();
+    // Seals are asked of the bytes that are actually stored. That is the whole
+    // point of `persisted` above: an unrepaired projection is a finding, and
+    // replaying a tail over it before checking would let recovery hide
+    // corruption in the very bytes being judged.
     for section in &object.sections {
+        if crate::integrity::check_section_seal(section).is_err() {
+            tampered.push(section.id);
+        }
+    }
+    // **Dependencies are a different question, and they are asked of the
+    // admitted current state.** What a Section stands on is a fact about the
+    // record, not about which bytes happen to be written back yet: a Ref
+    // admitted in a durable Event the projection has not caught up to is
+    // already part of what this Object asserts, and walking the older
+    // projection would never look at it. That mattered from the moment an
+    // unprojected tail stopped failing verification — before, the stale walk
+    // was masked by the FAIL the tail itself produced, and afterwards a crash
+    // tail carrying a Ref to an unreadable target returned PASS. The converse
+    // is the same rule: a tail that *drops* an obsolete dependency must not
+    // leave the old projection failing for it.
+    for section in &recovered.sections {
         // An authoritative forward link, checked here because nothing else
         // rechecks it after admission. The gate proves the target exists when
         // the relation is admitted; from then on the source Object's own seals
@@ -585,9 +605,6 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         // following the chain to find current knowledge could arrive nowhere
         // while `verify` said PASS.
         broken_replacements.extend(broken_replacements_in(root, section));
-        if crate::integrity::check_section_seal(section).is_err() {
-            tampered.push(section.id);
-        }
         for reference in &section.refs {
             let (target_id, target_section_id) =
                 crate::dependency::parse_target(reference.target())?;

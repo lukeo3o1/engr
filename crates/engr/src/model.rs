@@ -1463,7 +1463,15 @@ impl Event {
 
     pub fn validate(&self, object: &str) -> Result<()> {
         validate_object_id(object)?;
-        canonical_object_id(&self.id).map_err(|_| {
+        // `validate_object_id`, not `canonical_object_id`. The second only asks
+        // whether the text *parses* as a UUIDv7 and hands back the canonical
+        // spelling; discarding that result accepted every other spelling the
+        // parser tolerates — uppercase, braces, urn form — as a stored Event id.
+        // #66 says Event ids are canonical UUIDv7 text, and the duplicate check
+        // below compares the stored strings, so two spellings of one identity
+        // were two identities to it and neither the seal nor the uniqueness rule
+        // noticed.
+        validate_object_id(&self.id).map_err(|_| {
             Error::new(
                 EXIT_SCHEMA,
                 format!("event id {:?} must be a canonical UUIDv7", self.id),

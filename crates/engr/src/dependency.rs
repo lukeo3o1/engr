@@ -112,6 +112,16 @@ pub const ALL: &[SemanticField] = &[
 /// nowhere to omit it *to*: `values` must carry exactly the selected keys, so
 /// "absent" has to be a value.
 ///
+/// **An empty optional collection is absent.** The persisted form omits an empty
+/// `content`, `refs` or `relations`, so no Section can be distinguished from one
+/// that never had the member — there is no fact there to project as `[]`, and
+/// #66 §6.5 says a selected absent optional is `null`. This is the one place the
+/// per-field projection and [`crate::proof::SectionSemantic`] deliberately
+/// differ, and they differ because they answer different questions: that one is
+/// a fixed record where every key is always present, so an empty collection
+/// reads unambiguously as "none"; this one is a map whose keys are exactly what
+/// a Ref selected, where the only way to say "none" is to say it.
+///
 /// **One field, and only that field.** Selecting `[text]` must not look at
 /// `refs` at all.
 ///
@@ -136,13 +146,23 @@ pub fn semantic_value(section: &Section, field: SemanticField) -> Result<Value> 
         // moved assertion.
         SemanticField::Admission => serde_json::to_value(section.admitted.by),
         SemanticField::BasedOn => serde_json::to_value(&section.based_on),
+        // An empty optional collection is an *absent* optional, not a present
+        // empty one: the persisted form omits it, so a Section with `content:
+        // []` and a Section with no `content` member are the same Section and
+        // there is no fact distinguishing them. Absent projects `null` here like
+        // every other absent optional — `[]` said "this Section has a content
+        // list, and it is empty", which is a different claim and a different
+        // digest from the one #66 defines.
+        SemanticField::Content if section.content.is_empty() => Ok(Value::Null),
         SemanticField::Content => serde_json::to_value(&section.content),
         SemanticField::Header => serde_json::to_value(&section.header),
+        SemanticField::Refs if section.refs.is_empty() => Ok(Value::Null),
         SemanticField::Refs => {
             let mut refs = section.refs.clone();
             canonical_set(&mut refs, "reference")?;
             serde_json::to_value(refs)
         }
+        SemanticField::Relations if section.relations.is_empty() => Ok(Value::Null),
         SemanticField::Relations => {
             let mut relations = section.relations.clone();
             canonical_set(&mut relations, "relation")?;
