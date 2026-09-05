@@ -1,20 +1,14 @@
 //! Human Gate and Agent Rule Review are the only ways in. These tests pin both.
 
-use engr::model::{
-    Action, Content, HumanConfirmation, Merge, Payload, Provenance, Ref, TaggedAdmission,
-};
-use engr::semantics::{Relation, Role, State, Supplement};
+mod common;
+
+use common::{admit, new_object, text_ref, workspace, Act};
+use engr::model::{Content, EventAdmission, Payload, Ref};
+use engr::semantics::{BasedOn, State};
 use engr::{gate, ops, store};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::TempDir;
-
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
 
 fn commit_all(root: &Path, message: &str) -> String {
     for args in [
@@ -50,26 +44,31 @@ fn content(text: &str) -> Content {
     }
 }
 
-fn candidate_event(candidate: &gate::Candidate) -> engr::model::Event {
-    engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
-        rev: candidate.binding.expected_rev + 1,
-        time: "2026-08-13T00:00:00Z".to_owned(),
-        payload: candidate.payload.clone(),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: engr::semantics::Admission::Human,
-                confirmation: Some(HumanConfirmation {
-                    challenge: candidate.challenge.clone(),
-                    candidate_digest: candidate.candidate_digest.clone(),
-                }),
-                rule_review: None,
-            },
-        },
+/// The action as confirmation stamps it.
+///
+/// A Section admitted by an Event was admitted when that Event was, and the
+/// durable boundary requires the record to say so. A fixture that stamped only
+/// the envelope was building a record history could not hold, and would be
+/// refused for that rather than for whatever it was written to test.
+fn stamped(action: engr::model::Action, at: &str) -> engr::model::Action {
+    let mut action = action;
+    if let Some(value) = action.value_mut() {
+        value.admitted.at = at.to_owned();
     }
+    action
 }
+
+fn candidate_event(candidate: &gate::Candidate) -> engr::model::Event {
+    engr::model::Event::sealed(
+        candidate.object(),
+        engr::model::new_id(),
+        stamped(candidate.payload.action.clone(), "2026-08-13T00:00:00Z"),
+        candidate.expected_rev() + 1,
+        EventAdmission::human("2026-08-13T00:00:00Z", candidate.code()),
+    )
+    .expect("an Event for a challenge that was really prepared")
+}
+
 /// A Human Event for a change that really was prepared.
 ///
 /// The durable boundary admits one only against the candidate it was prepared
@@ -77,9 +76,24 @@ fn candidate_event(candidate: &gate::Candidate) -> engr::model::Event {
 /// wants to reach that boundary goes through `prepare`, exactly as `confirm`
 /// does. [`direct_human_event`] stays for records that must be refused before
 /// the admission proof is ever reached.
-fn admissible_human_event(root: &Path, payload: Payload) -> engr::model::Event {
+fn admissible_human_event(root: &Path, _object: &str, payload: Payload) -> engr::model::Event {
     let prepared = gate::prepare(root, payload).expect("prepare");
     candidate_event(&prepared.candidate)
+}
+
+/// A well-formed Human record naming a challenge nobody minted.
+///
+/// For the cases that must be refused before the admission proof is reached at
+/// all — a shape no history could arrive at, a beginning nothing follows from.
+fn unadmitted_human_event(object: &str, payload: Payload, rev: u64) -> engr::model::Event {
+    engr::model::Event::sealed(
+        object,
+        engr::model::new_id(),
+        stamped(payload.action, "2026-08-23T00:00:00Z"),
+        rev,
+        EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a well formed record, whatever admitted it")
 }
 
 fn direct_human_event(root: &Path, id: &str, payload: Payload, rev: u64) -> engr::model::Event {
@@ -88,98 +102,55 @@ fn direct_human_event(root: &Path, id: &str, payload: Payload, rev: u64) -> engr
         .into_iter()
         .find_map(|event| event.human_confirmation().cloned())
         .expect("human confirmation");
-    engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
+    engr::model::Event::sealed(
+        id,
+        engr::model::new_id(),
+        stamped(payload.action, "2026-08-23T00:00:00Z"),
         rev,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: engr::semantics::Admission::Human,
-                confirmation: Some(confirmation),
-                rule_review: None,
-            },
-        },
-        payload,
-    }
-}
-
-fn payload(action: Action, object: &str, text: &str) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content: content(text),
-    }
-}
-
-fn empty(action: Action, object: &str) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content: Content {
-            text: String::new(),
-            based_on: None,
-            refs: Vec::new(),
-            ..Content::default()
-        },
-    }
-}
-
-fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
-    let target = ops::effective(root, object).expect("reference target");
-    let seal = target.sha256.as_deref().expect("aggregate seal");
-    Ref::selective(
-        engr::dependency::admit(
-            root,
-            &target,
-            seal,
-            section,
-            &[engr::dependency::SemanticField::Text],
-            commit,
-        )
-        .expect("admit selective reference"),
+        EventAdmission::human("2026-08-23T00:00:00Z", &confirmation.challenge),
     )
+    .expect("a well formed record, whatever admitted it")
+}
+
+fn payload(action: Act, object: &str, text: &str) -> Payload {
+    common::payload(action, object, content(text))
+}
+
+fn empty(action: Act, object: &str) -> Payload {
+    common::payload(action, object, Content::default())
+}
+
+/// Adjust the wording a payload already carries.
+fn edit(payload: &mut Payload, adjust: impl FnOnce(&mut Content)) {
+    adjust(
+        &mut payload
+            .action
+            .value_mut()
+            .expect("this action carries wording")
+            .content,
+    );
 }
 
 fn stored_text_ref(object: &str, section: u64, commit: &str, digest: &str) -> Ref {
-    Ref::selective(
-        engr::dependency::SelectiveRef::stored(
-            engr::proof::section_target(object, section),
-            vec![engr::dependency::SemanticField::Text],
-            commit,
-            digest,
-        )
-        .expect("stored selective reference"),
+    engr::dependency::SelectiveRef::stored(
+        engr::proof::section_target(object, section).expect("section target"),
+        vec![engr::dependency::SemanticField::Text],
+        commit,
+        digest,
     )
-}
-
-/// Prepare, then confirm with the exact phrase.
-fn admit(root: &Path, payload: Payload) -> engr::model::Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
+    .expect("stored selective reference")
 }
 
 /// One way a stored candidate can be rewritten on disk, named so the matrix
 /// below reads as a list of risks rather than a list of closure types.
 type Tamper = (&'static str, Box<dyn Fn(&mut serde_json::Value)>);
 
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(root, payload(Action::ObjectCreated, &id, title));
-    id
-}
-
 #[test]
 fn a_candidate_is_only_admitted_by_the_exact_phrase() {
     let (_dir, root) = workspace();
     let id = engr::model::new_id();
-    let prepared =
-        gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Create, &id, "a title")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
 
     for response in [
         "yes",
@@ -206,9 +177,8 @@ fn a_candidate_is_only_admitted_by_the_exact_phrase() {
 fn hedged_assent_discards_the_candidate() {
     let (_dir, root) = workspace();
     let id = engr::model::new_id();
-    let prepared =
-        gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Create, &id, "a title")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
 
     let error = gate::confirm(&root, &format!("CONFIRM {code} but reword the second line"))
         .expect_err("hedged assent is not assent");
@@ -223,14 +193,13 @@ fn hedged_assent_discards_the_candidate() {
 fn malformed_confirmation_codes_never_escape_candidates() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "confirmation paths");
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
-    let format_path = store::engr_dir(&root).join("format.json");
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "pending")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let format_path = store::version_path(&root);
     let object_path = store::object_path(&root, &id);
     let outside_path = root.join("outside.json");
     std::fs::write(&outside_path, "outside candidate storage").expect("outside fixture");
-    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
+    let candidate_path = store::challenge_path(&root, &code).expect("candidate path");
     let before: Vec<_> = [&format_path, &object_path, &outside_path, &candidate_path]
         .iter()
         .map(|path| ((*path).clone(), std::fs::read(path).expect("snapshot")))
@@ -285,15 +254,20 @@ fn malformed_confirmation_codes_never_escape_candidates() {
 fn direct_confirmation_refuses_an_older_workspace_without_partial_mutation() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "generation boundary");
-    let prepared = gate::prepare(&root, empty(Action::ObjectClosed, &id)).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, empty(Act::Close, &id)).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
     let object_path = store::object_path(&root, &id);
-    let candidate_path = store::candidate_path(&root, &code).expect("candidate path");
+    let candidate_path = store::challenge_path(&root, &code).expect("candidate path");
     let events_path = store::events_path(&root, &id);
 
+    std::fs::remove_file(store::version_path(&root)).expect("drop the generation marker");
     std::fs::write(
         store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":2}"#,
+        format!(
+            r#"{{"format":"{}","version":{}}}"#,
+            engr::PREDECESSOR_WORKSPACE_FORMAT,
+            engr::PREDECESSOR_WORKSPACE_VERSION
+        ),
     )
     .expect("put the workspace back a generation");
 
@@ -326,15 +300,15 @@ fn direct_confirmation_refuses_an_older_workspace_without_partial_mutation() {
 fn section_ids_are_never_reused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "ids");
-    admit(&root, payload(Action::SectionAdded, &id, "first"));
-    admit(&root, payload(Action::SectionAdded, &id, "second"));
-    let object = admit(&root, empty(Action::SectionDeleted { section: 2 }, &id));
+    admit(&root, payload(Act::Add, &id, "first"));
+    admit(&root, payload(Act::Add, &id, "second"));
+    let object = admit(&root, empty(Act::Delete(2), &id));
     assert_eq!(object.next_section_id, 3);
 
     // The counter, not max(existing) + 1, decides the next id — otherwise this
     // section would take §2 and every outside reference to the deleted one would
     // silently point at different content.
-    let object = admit(&root, payload(Action::SectionAdded, &id, "third"));
+    let object = admit(&root, payload(Act::Add, &id, "third"));
     let ids: Vec<u64> = object.sections.iter().map(|section| section.id).collect();
     assert_eq!(ids, vec![1, 3]);
 }
@@ -343,16 +317,14 @@ fn section_ids_are_never_reused() {
 fn merging_keeps_the_destination_id_and_removes_its_sources() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "merging");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
+    admit(&root, payload(Act::Add, &id, "one"));
+    admit(&root, payload(Act::Add, &id, "two"));
     let object = admit(
         &root,
         payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
-                },
+            Act::Merge {
+                destination: 1,
+                sources: vec![2],
             },
             &id,
             "one and two together",
@@ -368,17 +340,15 @@ fn merging_keeps_the_destination_id_and_removes_its_sources() {
 fn the_phase_three_merge_representation_is_admitted() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "durable boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
+    admit(&root, payload(Act::Add, &id, "one"));
+    admit(&root, payload(Act::Add, &id, "two"));
 
     let object = admit(
         &root,
         payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
-                },
+            Act::Merge {
+                destination: 1,
+                sources: vec![2],
             },
             &id,
             "together",
@@ -398,23 +368,23 @@ fn a_merge_cannot_consume_a_section_something_still_depends_on() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "target");
     let source = new_object(&root, "source");
-    admit(&root, payload(Action::SectionAdded, &target, "depended on"));
-    admit(&root, payload(Action::SectionAdded, &target, "the other"));
+    admit(&root, payload(Act::Add, &target, "depended on"));
+    admit(&root, payload(Act::Add, &target, "the other"));
     let commit = commit_all(&root, "record target wording");
 
-    let mut dependent = payload(Action::SectionAdded, &source, "rests on §1");
-    dependent.content.based_on = Some(commit.clone());
-    dependent.content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    let mut dependent = payload(Act::Add, &source, "rests on §1");
+    edit(&mut dependent, |content| {
+        content.based_on = Some(BasedOn::new(&commit));
+        content.refs = vec![text_ref(&root, &target, 1, &commit)];
+    });
     admit(&root, dependent);
 
     let error = gate::prepare(
         &root,
         payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 2,
-                    sources: vec![1],
-                },
+            Act::Merge {
+                destination: 2,
+                sources: vec![1],
             },
             &target,
             "together",
@@ -428,29 +398,28 @@ fn a_merge_cannot_consume_a_section_something_still_depends_on() {
 fn a_closed_object_refuses_section_changes() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "closing");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    let object = admit(&root, empty(Action::ObjectClosed, &id));
+    admit(&root, payload(Act::Add, &id, "one"));
+    let object = admit(&root, empty(Act::Close, &id));
     assert_eq!(object.state, State::Closed);
 
-    let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "two"))
-        .expect_err("a closed object is sealed");
+    let error =
+        gate::prepare(&root, payload(Act::Add, &id, "two")).expect_err("a closed object is sealed");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
 
-    admit(&root, empty(Action::ObjectReopened, &id));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
+    admit(&root, empty(Act::Reopen, &id));
+    admit(&root, payload(Act::Add, &id, "two"));
 }
 
 #[test]
 fn one_live_candidate_per_object() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "candidates");
-    let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first draft"))
+    let first = gate::prepare(&root, payload(Act::Add, &id, "first draft"))
         .expect("first")
         .candidate
-        .challenge
-        .clone();
-    let second =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "second draft")).expect("second");
+        .code()
+        .to_owned();
+    let second = gate::prepare(&root, payload(Act::Add, &id, "second draft")).expect("second");
     assert_eq!(second.superseded, vec![first.clone()]);
     assert!(
         gate::find(&root, &first).is_err(),
@@ -462,50 +431,69 @@ fn one_live_candidate_per_object() {
 fn direct_gate_callers_cannot_persist_non_v7_object_identities() {
     let (_dir, root) = workspace();
     for id in ["not-a-uuid", "550e8400-e29b-41d4-a716-446655440000"] {
-        let error = gate::prepare(
-            &root,
-            payload(Action::ObjectCreated, id, "invalid identity"),
-        )
-        .expect_err("a direct caller cannot bypass Object identity validation");
+        let error = gate::prepare(&root, payload(Act::Create, id, "invalid identity"))
+            .expect_err("a direct caller cannot bypass Object identity validation");
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{id}");
     }
 
-    let source = new_object(&root, "source");
-    let mut invalid_ref = payload(Action::SectionAdded, &source, "invalid dependency");
-    invalid_ref.content.refs = vec![Ref::legacy("not-a-uuid", 1, "0".repeat(64), "HEAD")];
-    let error =
-        gate::prepare(&root, invalid_ref).expect_err("a Ref Object identity is persisted data too");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    // A Ref names an Object too, and that identity is refused where the Ref is
+    // built rather than where the payload is prepared. There is no way to hand
+    // the gate a reference onto an identity no Object could hold.
+    for id in ["not-a-uuid", "550e8400-e29b-41d4-a716-446655440000"] {
+        let error = engr::dependency::SelectiveRef::stored(
+            format!("obj:{id}:1"),
+            vec![engr::dependency::SemanticField::Text],
+            "0".repeat(40),
+            format!("1:{}", "0".repeat(64)),
+        )
+        .expect_err("a Ref Object identity is persisted data too");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{id}");
+    }
     assert!(
         gate::pending(&root).expect("pending candidates").is_empty(),
         "rejected direct inputs must not leave a candidate behind"
     );
 }
 
+/// A title has no basis and no references, and in the activated generation that
+/// is a fact about the shape rather than a rule applied to it: `object.created`
+/// and `object.renamed` carry a title and nothing else, so there is no member a
+/// hidden basis could arrive in. This pins the shape, and pins that a stored
+/// record which invents one is refused rather than read past.
 #[test]
-fn title_actions_cannot_carry_hidden_basis_or_references() {
+fn title_actions_carry_a_title_and_nothing_else() {
     let (_dir, root) = workspace();
-    let mut created = payload(Action::ObjectCreated, &engr::model::new_id(), "new title");
-    created.content.based_on = Some("HEAD".to_owned());
-    created.content.refs = vec![Ref::legacy(
-        engr::model::new_id(),
-        1,
-        "0".repeat(64),
-        "HEAD",
-    )];
-    let error = gate::prepare(&root, created).expect_err("a title has no hidden context");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
-    assert!(gate::pending(&root).expect("pending").is_empty());
-
     let id = new_object(&root, "old title");
-    let mut renamed = payload(Action::ObjectRenamed, &id, "new title");
-    renamed.content.based_on = Some("HEAD".to_owned());
-    let error = gate::prepare(&root, renamed).expect_err("a renamed title has no basis");
-    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    let admitted = common::admitted(&root, common::rename(&id, "new title"));
+    let stored = serde_json::to_value(&admitted.event).expect("event as json");
+    assert_eq!(
+        stored["data"],
+        serde_json::json!({ "title": "new title" }),
+        "a renamed title has no room for a basis or a reference"
+    );
+
+    // A stored record that invents one is refused rather than read past. The
+    // envelope cannot use `deny_unknown_fields` — the action is flattened into
+    // it, and serde will not combine the two — so what closes it is the read
+    // boundary comparing the stored bytes against this build's own
+    // serialization of the record it decoded to.
+    let path = store::events_path(&root, &id);
+    let good = std::fs::read_to_string(&path).expect("events");
+    let mut invented = stored.clone();
+    invented["data"]["based_on"] = serde_json::json!({ "commit": "0".repeat(40) });
+    let rewritten = engr::proof::canonical_bytes(&invented, "event").expect("canonical");
+    let kept = good.lines().next().expect("the creation record");
+    std::fs::write(&path, [kept, &rewritten, ""].join("\n")).expect("write");
+
+    let error =
+        store::load_events(&root, &id).expect_err("a title record that invents a basis is refused");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    std::fs::write(&path, &good).expect("restore");
     assert_eq!(
         store::load_events(&root, &id).expect("events").len(),
-        1,
-        "rejected title context must not enter Event history"
+        2,
+        "and nothing extra entered Event history"
     );
 }
 
@@ -515,8 +503,8 @@ fn public_gate_mutations_serialize_direct_callers() {
 
     let (_dir, root) = workspace();
     let id = new_object(&root, "direct lock");
-    let first = payload(Action::SectionAdded, &id, "first proposal");
-    let second = payload(Action::SectionAdded, &id, "second proposal");
+    let first = payload(Act::Add, &id, "first proposal");
+    let second = payload(Act::Add, &id, "second proposal");
     let start = Arc::new(Barrier::new(2));
     let (first_prepare, second_prepare) = std::thread::scope(|scope| {
         let first_start = Arc::clone(&start);
@@ -544,7 +532,7 @@ fn public_gate_mutations_serialize_direct_callers() {
         "direct prepares must supersede under one lock"
     );
 
-    let response = format!("CONFIRM {}", candidates[0].challenge);
+    let response = format!("CONFIRM {}", candidates[0].code());
     let start = Arc::new(Barrier::new(2));
     let (first_confirm, second_confirm) = std::thread::scope(|scope| {
         let first_start = Arc::clone(&start);
@@ -586,47 +574,37 @@ fn direct_gate_callers_canonicalize_git_anchors_before_confirmation() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "target");
     let source = new_object(&root, "source");
-    let target = admit(
-        &root,
-        payload(Action::SectionAdded, &target, "target wording"),
-    );
+    let target = admit(&root, payload(Act::Add, &target, "target wording"));
     let target_id = target.id;
     let commit = commit_all(&root, "record target wording");
     let reference = text_ref(&root, &target_id, 1, &commit);
 
-    let mut direct = payload(
-        Action::SectionAdded,
-        &source.to_ascii_uppercase(),
-        "dependent wording",
-    );
-    direct.content.based_on = Some("HEAD".to_owned());
-    direct.content.refs = vec![reference];
+    let mut direct = payload(Act::Add, &source.to_ascii_uppercase(), "dependent wording");
+    edit(&mut direct, |content| {
+        content.based_on = Some(BasedOn::new("HEAD"));
+        content.refs = vec![reference];
+    });
 
     let prepared = gate::prepare(&root, direct).expect("direct payload is canonicalized");
     assert_eq!(prepared.candidate.payload.object, source);
+    let content = prepared.candidate.payload.content();
+    assert_eq!(content.based_on.expect("basis").commit, commit);
     assert_eq!(
-        prepared.candidate.payload.content.based_on.as_deref(),
-        Some(commit.as_str())
-    );
-    assert_eq!(
-        prepared.candidate.payload.content.refs[0]
-            .target_identity()
+        engr::dependency::parse_target(content.refs[0].target())
             .expect("target")
             .0,
         target_id
     );
-    assert_eq!(prepared.candidate.payload.content.refs[0].commit(), commit);
-    assert!(prepared.candidate.candidate_digest.starts_with("1:"));
+    assert_eq!(content.refs[0].commit(), commit);
+    assert!(prepared.candidate.challenge.digest.starts_with("1:"));
 
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    let response = format!("CONFIRM {}", prepared.candidate.code());
     let event = gate::confirm(&root, &response)
         .expect("confirm canonical candidate")
         .event;
-    assert_eq!(
-        event.payload.content.based_on.as_deref(),
-        Some(commit.as_str())
-    );
-    assert_eq!(event.payload.content.refs[0].commit(), commit);
+    let content = event.payload(&source).content();
+    assert_eq!(content.based_on.expect("basis").commit, commit);
+    assert_eq!(content.refs[0].commit(), commit);
     assert!(
         !serde_json::to_string(&event)
             .expect("event JSON")
@@ -640,10 +618,7 @@ fn references_are_checked_at_the_gate() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "the target");
     let source = new_object(&root, "the source");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, "depended upon"),
-    );
+    admit(&root, payload(Act::Add, &target, "depended upon"));
     let commit = commit_all(&root, "record target");
     let good_ref = text_ref(&root, &target, 1, &commit);
 
@@ -659,8 +634,10 @@ fn references_are_checked_at_the_gate() {
         engr::proof::canonical_bytes(&tampered, "target").expect("canonical"),
     )
     .expect("tamper target");
-    let mut forged_current = payload(Action::SectionAdded, &source, "depends on forged wording");
-    forged_current.content.refs = vec![good_ref.clone()];
+    let mut forged_current = payload(Act::Add, &source, "depends on forged wording");
+    edit(&mut forged_current, |content| {
+        content.refs = vec![good_ref.clone()];
+    });
     let error = gate::prepare(&root, forged_current)
         .expect_err("a reference cannot trust a stale stored target hash");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
@@ -669,35 +646,28 @@ fn references_are_checked_at_the_gate() {
 
     admit(
         &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &target,
-            "new uncommitted wording",
-        ),
+        payload(Act::Revise(1), &target, "new uncommitted wording"),
     );
-    let mut uncommitted = payload(Action::SectionAdded, &source, "depends on new wording");
-    uncommitted.content.refs = vec![good_ref.clone()];
+    let mut uncommitted = payload(Act::Add, &source, "depends on new wording");
+    edit(&mut uncommitted, |content| {
+        content.refs = vec![good_ref.clone()]
+    });
     let error = gate::prepare(&root, uncommitted)
         .expect_err("a commit cannot be paired with newer uncommitted wording");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("Drifted"));
 
-    admit(
-        &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &target,
-            "depended upon",
-        ),
-    );
+    admit(&root, payload(Act::Revise(1), &target, "depended upon"));
 
-    let mut with_missing_object = payload(Action::SectionAdded, &source, "depends");
-    with_missing_object.content.refs = vec![stored_text_ref(
-        &engr::model::new_id(),
-        1,
-        &commit,
-        &format!("1:{}", "0".repeat(64)),
-    )];
+    let mut with_missing_object = payload(Act::Add, &source, "depends");
+    edit(&mut with_missing_object, |content| {
+        content.refs = vec![stored_text_ref(
+            &engr::model::new_id(),
+            1,
+            &commit,
+            &format!("1:{}", "0".repeat(64)),
+        )]
+    });
     assert_eq!(
         gate::prepare(&root, with_missing_object)
             .expect_err("a reference to a missing object is refused")
@@ -705,13 +675,15 @@ fn references_are_checked_at_the_gate() {
         engr::EXIT_NOT_FOUND
     );
 
-    let mut with_missing_section = payload(Action::SectionAdded, &source, "depends");
-    with_missing_section.content.refs = vec![stored_text_ref(
-        &target,
-        99,
-        &commit,
-        &format!("1:{}", "0".repeat(64)),
-    )];
+    let mut with_missing_section = payload(Act::Add, &source, "depends");
+    edit(&mut with_missing_section, |content| {
+        content.refs = vec![stored_text_ref(
+            &target,
+            99,
+            &commit,
+            &format!("1:{}", "0".repeat(64)),
+        )]
+    });
     assert_eq!(
         gate::prepare(&root, with_missing_section)
             .expect_err("a reference to a missing section is refused")
@@ -719,13 +691,15 @@ fn references_are_checked_at_the_gate() {
         engr::EXIT_NOT_FOUND
     );
 
-    let mut with_wrong_hash = payload(Action::SectionAdded, &source, "depends");
-    with_wrong_hash.content.refs = vec![stored_text_ref(
-        &target,
-        1,
-        &commit,
-        &format!("1:{}", "0".repeat(64)),
-    )];
+    let mut with_wrong_hash = payload(Act::Add, &source, "depends");
+    edit(&mut with_wrong_hash, |content| {
+        content.refs = vec![stored_text_ref(
+            &target,
+            1,
+            &commit,
+            &format!("1:{}", "0".repeat(64)),
+        )]
+    });
     assert_eq!(
         gate::prepare(&root, with_wrong_hash)
             .expect_err("a reference cannot pin something the target never said")
@@ -733,352 +707,340 @@ fn references_are_checked_at_the_gate() {
         engr::EXIT_INVARIANT
     );
 
-    let mut good = payload(Action::SectionAdded, &source, "depends");
-    good.content.refs = vec![good_ref];
+    let mut good = payload(Act::Add, &source, "depends");
+    edit(&mut good, |content| content.refs = vec![good_ref]);
     gate::prepare(&root, good).expect("a well-formed reference is admitted");
 }
 
+/// A reference resolves against the snapshot's own workspace authority. A
+/// commit taken by this generation decodes under this generation's rules, and a
+/// commit whose authority this build does not read is refused rather than
+/// interpreted under whichever rules happen to be current.
+///
+/// The predecessor half of that question — a commit taken before the migration
+/// — is pinned in `migration.rs` against the real released bundle.
 #[test]
 fn historical_references_decode_the_snapshot_workspace_format() {
     let (_dir, root) = workspace();
     let target = new_object(&root, "historical target");
     let source = new_object(&root, "historical source");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, "historical wording"),
-    );
+    admit(&root, payload(Act::Add, &target, "historical wording"));
     let pinned = store::load_object(&root, &target).expect("target").sections[0]
-        .sha256
+        .digest
         .clone();
     let current_commit = commit_all(&root, "current historical snapshot");
-    assert_eq!(
+    let engr::git::HistoricalObject::Current(current) =
         engr::git::object_at(&root, &current_commit, &target)
             .expect("current snapshot format")
             .expect("current target")
-            .section(1)
-            .expect("current section")
-            .sha256,
-        pinned
-    );
+    else {
+        panic!("a snapshot of this generation decodes as this generation");
+    };
+    assert_eq!(current.section(1).expect("current section").digest, pinned);
 
-    let format_path = store::engr_dir(&root).join("format.json");
-    let format_before = std::fs::read(&format_path).expect("format");
-    let objects_before: Vec<_> = store::object_ids(&root)
-        .expect("object ids")
-        .into_iter()
-        .map(|id| {
-            let path = store::object_path(&root, &id);
-            (path.clone(), std::fs::read(path).expect("object"))
-        })
-        .collect();
-    for (path, _) in &objects_before {
-        let decoded: engr::model::Object =
-            serde_json::from_slice(&std::fs::read(path).expect("object")).expect("object");
-        let mut object: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).expect("object")).expect("json");
-        // Every member v0 did not have, not only the ones whose names changed.
-        // A downgrade that leaves `type`, `role`, `content` and `relations`
-        // behind produces a file no v0 build could have written, and the
-        // snapshot decoder is entitled to say so. Their v3 values here are the
-        // empty ones, which the content hash omits, so the legacy seals below
-        // are unaffected by removing them.
-        let members = object.as_object_mut().expect("object");
-        members.remove("sha256");
-        members.remove("type");
-        object["format"] = serde_json::Value::String("engr-object".to_owned());
-        object["version"] = serde_json::Value::from(1);
-        let state = object
-            .as_object_mut()
-            .expect("object")
-            .remove("state")
-            .expect("state");
-        object["status"] = state;
-        for stored in object["sections"].as_array_mut().expect("sections") {
-            let stored = stored.as_object_mut().expect("section");
-            let id = stored["id"].as_u64().expect("section id");
-            let section = decoded.section(id).expect("decoded section");
-            stored.remove("admission");
-            for later in ["role", "content", "relations"] {
-                stored.remove(later);
-            }
-            let admitted_at = stored.remove("admitted_at").expect("admitted_at");
-            stored.insert("confirmed_at".to_owned(), admitted_at);
-            stored.insert(
-                "sha256".to_owned(),
-                serde_json::Value::String(
-                    section.recomputed_sha256().expect("legacy Section seal"),
-                ),
-            );
-        }
-        std::fs::write(path, serde_json::to_vec_pretty(&object).expect("json"))
-            .expect("legacy object");
-    }
-    std::fs::remove_file(&format_path).expect("remove workspace authority");
-    let legacy_commit = commit_all(&root, "legacy v0 historical snapshot");
-    let legacy = engr::git::object_at(&root, &legacy_commit, &target)
-        .expect("recognized legacy snapshot")
-        .expect("legacy target");
-    let legacy = legacy.section(1).expect("legacy section");
-    assert_eq!(
-        legacy.recomputed_sha256().expect("legacy seal"),
-        legacy.sha256
-    );
+    let mut reference = payload(Act::Add, &source, "uses that wording");
+    edit(&mut reference, |content| {
+        content.refs = vec![text_ref(&root, &target, 1, &current_commit)]
+    });
+    let prepared = gate::prepare(&root, reference).expect("a current reference is admitted");
+    gate::discard(&root, prepared.candidate.code()).expect("discard test candidate");
 
-    for (path, bytes) in &objects_before {
-        std::fs::write(path, bytes).expect("restore object");
-    }
-    std::fs::write(&format_path, &format_before).expect("restore workspace authority");
-    let mut legacy_reference = payload(Action::SectionAdded, &source, "uses old wording");
-    legacy_reference.content.refs = vec![text_ref(&root, &target, 1, &legacy_commit)];
-    let prepared = gate::prepare(&root, legacy_reference).expect("legacy ref is admitted");
-    gate::discard(&root, &prepared.candidate.challenge).expect("discard test candidate");
-
-    commit_all(&root, "restore canonical historical snapshot");
-    std::fs::write(&format_path, r#"{"format":"engr-workspace","version":99}"#)
-        .expect("unsupported workspace authority");
+    let version_path = store::version_path(&root);
+    let version_before = std::fs::read(&version_path).expect("VERSION");
+    std::fs::write(&version_path, "99\n").expect("unsupported workspace generation");
     let unsupported_commit = commit_all(&root, "unsupported historical snapshot");
-    std::fs::write(&format_path, &format_before).expect("restore current workspace authority");
+    std::fs::write(&version_path, &version_before).expect("restore workspace generation");
     let error = engr::git::object_at(&root, &unsupported_commit, &target)
-        .expect_err("an unknown historical workspace version is refused");
+        .expect_err("an unknown historical workspace generation is refused");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("workspace version 99"));
+    assert!(error.message.contains("workspace generation"), "{error}");
 
-    let mut unsupported_reference = payload(Action::SectionAdded, &source, "must not guess");
-    unsupported_reference.content.refs = vec![stored_text_ref(
-        &target,
-        1,
-        &unsupported_commit,
-        &format!("1:{}", "0".repeat(64)),
-    )];
+    let mut unsupported_reference = payload(Act::Add, &source, "must not guess");
+    edit(&mut unsupported_reference, |content| {
+        content.refs = vec![stored_text_ref(
+            &target,
+            1,
+            &unsupported_commit,
+            &format!("1:{}", "0".repeat(64)),
+        )]
+    });
     let error = gate::prepare(&root, unsupported_reference)
         .expect_err("a reference cannot decode an unsupported historical workspace");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("cannot be interpreted"));
+    assert!(error.message.contains("cannot be interpreted"), "{error}");
 }
 
 #[test]
 fn sibling_references_are_allowed_but_direct_self_reference_is_not() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "self reference");
-    admit(&root, payload(Action::SectionAdded, &id, "the first"));
+    admit(&root, payload(Act::Add, &id, "the first"));
     let commit = commit_all(&root, "record sibling");
 
-    let mut inward = payload(Action::SectionAdded, &id, "the second");
-    inward.content.refs = vec![text_ref(&root, &id, 1, &commit)];
+    let mut inward = payload(Act::Add, &id, "the second");
+    edit(&mut inward, |content| {
+        content.refs = vec![text_ref(&root, &id, 1, &commit)]
+    });
     admit(&root, inward);
 
     let commit = commit_all(&root, "record dependent sibling");
-    let mut direct = payload(Action::SectionRevised { section: 2 }, &id, "self-dependent");
-    direct.content.refs = vec![text_ref(&root, &id, 2, &commit)];
+    let mut direct = payload(Act::Revise(2), &id, "self-dependent");
+    edit(&mut direct, |content| {
+        content.refs = vec![text_ref(&root, &id, 2, &commit)]
+    });
     let error = gate::prepare(&root, direct).expect_err("a direct self reference is refused");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("cannot directly reference itself"));
 }
 
+/// A Challenge prepared by a generator this build cannot interpret is refused
+/// rather than reinterpreted. Pending Challenges are local and short-lived, so
+/// the cost of preparing again is a moment; the cost of the other answer is a
+/// person confirming a question under rules nobody agreed on.
 #[test]
-fn a_legacy_revision_candidate_without_semantic_history_cannot_be_confirmed() {
+fn a_challenge_from_another_generator_cannot_be_confirmed() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "legacy candidate");
-    admit(&root, payload(Action::SectionAdded, &id, "old wording"));
-    let prepared = gate::prepare(
-        &root,
-        payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
-    )
-    .expect("prepare");
-    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
-    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
-    stored
-        .as_object_mut()
-        .expect("candidate object")
-        .remove("previous_semantics_recorded");
-    write_raw(&path, &stored).expect("legacy candidate");
+    let id = new_object(&root, "generator identity");
+    admit(&root, payload(Act::Add, &id, "old wording"));
+    let prepared =
+        gate::prepare(&root, payload(Act::Revise(1), &id, "new wording")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("challenge");
+    stored["generator"]["fingerprint"] = serde_json::json!(format!("1:{}", "0".repeat(64)));
+    write_raw(&path, &stored).expect("another generator's challenge");
 
-    let error = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
-        .expect_err("semantic history is required");
+    let error = gate::confirm(&root, &format!("CONFIRM {code}"))
+        .expect_err("a generator this build cannot interpret admits nothing");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("prepare it again"));
+    assert_eq!(
+        ops::effective(&root, &id).expect("object").sections[0].text,
+        "old wording"
+    );
 }
 
-/// A candidate is not only a mutation. It is also the binding that decides
-/// whether admission is fresh, and the previous wording the human is shown the
-/// change against. Rewriting either on disk would let a candidate present or
-/// bind a different confirmation context and still pass its own hash, so one
-/// integrity value covers all of it.
+/// A Challenge is the frozen question: which act, against which Object, at which
+/// revision, with exactly which value, and standing behind which review. One
+/// digest covers all of it, because a file that could be rewritten in any of
+/// those would present one change, admit another, and still pass its own checks.
 ///
-/// Exhaustive by construction, not by sample. Every field of `PreparedContext`
-/// has a case below, and the assertion after the loop fails when one does not —
-/// because the way a field silently stops being hashed is by being moved out of
-/// the context struct, and a sampled list would never notice.
+/// Exhaustive by construction, not by sample. The cases below are compared
+/// against the two structs' own serialized keys, so a member added to a
+/// Challenge or to its Object subject without a case here fails this test rather
+/// than quietly becoming a member nothing proves is bound.
 #[test]
-fn rewriting_a_candidates_binding_or_presentation_is_detected_before_admission() {
+fn rewriting_a_challenge_is_detected_before_admission() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "candidate integrity");
-    admit(&root, payload(Action::SectionAdded, &id, "old wording"));
+    let id = new_object(&root, "challenge integrity");
+    admit(&root, payload(Act::Add, &id, "old wording"));
 
-    let cases: Vec<Tamper> = vec![
+    let envelope: Vec<Tamper> = vec![
+        (
+            "id",
+            Box::new(|value: &mut serde_json::Value| value["id"] = serde_json::json!("ZZZZZZ")),
+        ),
+        (
+            "generator",
+            Box::new(|value: &mut serde_json::Value| {
+                value["generator"]["version"] = serde_json::json!(99)
+            }),
+        ),
+        (
+            "created_at",
+            Box::new(|value: &mut serde_json::Value| {
+                value["created_at"] = serde_json::json!("2000-01-01T00:00:00Z")
+            }),
+        ),
+        (
+            "subject",
+            Box::new(|value: &mut serde_json::Value| {
+                value["subject"]["type"] = serde_json::json!("migration")
+            }),
+        ),
+        (
+            "digest",
+            Box::new(|value: &mut serde_json::Value| {
+                value["digest"] = serde_json::json!(format!("1:{}", "0".repeat(64)))
+            }),
+        ),
+    ];
+    let subject: Vec<Tamper> = vec![
+        (
+            "action",
+            Box::new(|value: &mut serde_json::Value| {
+                value["subject"]["data"]["action"] = serde_json::json!("section.delete")
+            }),
+        ),
+        (
+            "object",
+            Box::new(|value: &mut serde_json::Value| {
+                value["subject"]["data"]["object"] = serde_json::json!(engr::model::new_id())
+            }),
+        ),
         (
             "expected_rev",
-            Box::new(|value: &mut serde_json::Value| value["expected_rev"] = serde_json::json!(0)),
-        ),
-        (
-            "previous_text",
             Box::new(|value: &mut serde_json::Value| {
-                value["previous_text"] = serde_json::json!("wording that was never confirmed")
+                value["subject"]["data"]["expected_rev"] = serde_json::json!(0)
             }),
         ),
         (
-            "previous_based_on",
+            "value",
             Box::new(|value: &mut serde_json::Value| {
-                value["previous_based_on"] = serde_json::json!("0".repeat(40))
+                value["subject"]["data"]["value"]["text"] =
+                    serde_json::json!("wording nobody was shown")
             }),
         ),
         (
-            "previous_refs",
+            "review",
             Box::new(|value: &mut serde_json::Value| {
-                value["previous_refs"] = serde_json::json!([{
-                    "object": engr::model::new_id(),
-                    "section": 1,
-                    "sha256": "0".repeat(64),
-                    "commit": "0".repeat(40),
-                }])
-            }),
-        ),
-        (
-            "previous_semantics_recorded",
-            Box::new(|value: &mut serde_json::Value| {
-                value["previous_semantics_recorded"] = serde_json::json!(false)
-            }),
-        ),
-        // The four below arrived with Phase 3 and Phase 4. Each is skipped when
-        // empty, so tampering means introducing one that was never prepared —
-        // which is the shape the risk actually takes: an exception nobody
-        // granted, a supplementary body nobody was shown, a Backlog source
-        // nobody named.
-        (
-            "previous_role",
-            Box::new(|value: &mut serde_json::Value| {
-                value["previous_role"] = serde_json::to_value(Role::Decision).expect("role")
-            }),
-        ),
-        (
-            "previous_content",
-            Box::new(|value: &mut serde_json::Value| {
-                value["previous_content"] =
-                    serde_json::to_value(vec![Supplement::new("code.rs", "fn main() {}")])
-                        .expect("content")
-            }),
-        ),
-        (
-            "previous_relations",
-            Box::new(|value: &mut serde_json::Value| {
-                value["previous_relations"] = serde_json::to_value(vec![Relation::superseded_by(
-                    format!("obj:{}", "0".repeat(26)),
-                )])
-                .expect("relations")
-            }),
-        ),
-        (
-            "oversize",
-            Box::new(|value: &mut serde_json::Value| value["oversize"] = serde_json::json!(true)),
-        ),
-        (
-            "object_title",
-            Box::new(|value: &mut serde_json::Value| {
-                value["object_title"] = serde_json::json!("a record this is not")
+                value["subject"]["data"]["review"] = serde_json::json!({
+                    "outcome": "passed",
+                    "digest": format!("1:{}", "0".repeat(64)),
+                })
             }),
         ),
     ];
 
-    // Every field of `PreparedContext` is exercised above. The comparison is
-    // against the struct's own serialized keys rather than a list written out
-    // here, so adding a field to the prepared context without proving it is
-    // hashed fails this test instead of passing quietly.
-    let populated = gate::PreparedContext {
-        previous_text: Some("wording".to_owned()),
-        previous_based_on: Some("0".repeat(40)),
-        previous_refs: vec![Ref::legacy(
-            engr::model::new_id(),
-            1,
-            "0".repeat(64),
-            "0".repeat(40),
-        )],
-        previous_role: Some(Role::Decision),
-        previous_content: vec![Supplement::new("code.rs", "fn main() {}")],
-        previous_relations: vec![Relation::superseded_by(format!("obj:{}", "0".repeat(26)))],
-        previous_semantics_recorded: true,
-        oversize: true,
-        object_title: Some("the record being changed".to_owned()),
-        rule_review: None,
+    let members = |value: serde_json::Value| -> BTreeSet<String> {
+        value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect()
     };
-    let declared: BTreeSet<String> = serde_json::to_value(&populated)
-        .expect("context")
-        .as_object()
-        .expect("an object")
-        .keys()
-        .cloned()
-        .collect();
-    let exercised: BTreeSet<String> = cases
-        .iter()
-        .map(|(name, _)| (*name).to_owned())
-        .filter(|name| name != "expected_rev")
-        .collect();
+    let named = |cases: &[Tamper]| -> BTreeSet<String> {
+        cases.iter().map(|(name, _)| (*name).to_owned()).collect()
+    };
+    let live = gate::prepare(&root, payload(Act::Revise(1), &id, "new wording")).expect("prepare");
     assert_eq!(
-        declared, exercised,
-        "a prepared-context field with no case here is a field nothing proves is hashed"
+        members(serde_json::to_value(&live.candidate.challenge).expect("challenge")),
+        named(&envelope),
+        "a Challenge member with no case here is a member nothing proves is bound"
     );
+    let mut populated = live.candidate.subject.clone();
+    populated.review = Some(engr::gate::FrozenReview {
+        digest: format!("1:{}", "0".repeat(64)),
+        result: engr::proof::ReviewResult::Passed,
+        attempts: 1,
+        rules: vec!["a-rule".to_owned()],
+        explanation: Some("why it could not pass".to_owned()),
+    });
+    assert_eq!(
+        members(serde_json::to_value(&populated).expect("subject")),
+        named(&subject),
+        "an Object subject member with no case here is a member nothing proves is bound"
+    );
+    gate::discard(&root, live.candidate.code()).expect("clear the untampered challenge");
 
-    for (name, tamper) in cases {
-        let prepared = gate::prepare(
-            &root,
-            payload(Action::SectionRevised { section: 1 }, &id, "new wording"),
-        )
-        .expect("prepare");
-        let code = prepared.candidate.challenge.clone();
-        let path = store::candidate_path(&root, &code).expect("path");
+    for (name, tamper) in envelope.into_iter().chain(subject) {
+        let prepared =
+            gate::prepare(&root, payload(Act::Revise(1), &id, "new wording")).expect("prepare");
+        let code = prepared.candidate.code().to_owned();
+        let path = store::challenge_path(&root, &code).expect("path");
 
-        // Untouched, it confirms — and renders — exactly as prepared.
-        gate::find(&root, &code).expect("an untouched candidate loads");
+        // Untouched, it loads and would confirm exactly as prepared.
+        gate::find(&root, &code).expect("an untouched challenge loads");
 
-        let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
+        let mut stored: serde_json::Value = store::read_json(&path).expect("challenge");
         tamper(&mut stored);
-        write_raw(&path, &stored).expect("rewrite candidate");
+        write_raw(&path, &stored).expect("rewrite challenge");
 
         let error = gate::find(&root, &code).expect_err(name);
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
-        assert!(error.message.contains("integrity"), "{name}");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}: {error}");
         let error = gate::confirm(&root, &format!("CONFIRM {code}")).expect_err(name);
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{name}: {error}");
         assert_eq!(
             ops::effective(&root, &id).expect("object").sections[0].text,
             "old wording",
-            "{name}: a rewritten candidate must not be admitted"
+            "{name}: a rewritten challenge must not be admitted"
         );
-        gate::discard(&root, &code).expect("clear the tampered candidate");
+        gate::discard(&root, &code).expect("clear the tampered challenge");
     }
 }
 
-/// The upgrade refuses the old envelope rather than treating missing integrity
-/// data as if it were protected. A live candidate is local and short-lived, so
-/// the cost of re-preparing is a moment; the cost of the other choice is a
-/// guarantee that only looks like one.
+/// A frozen subject carrying members the record would drop is refused.
+///
+/// `ObjectSubject` denies unknown members at its own level, but its `value` is a
+/// raw `serde_json::Value` — it has to be, since the shape belongs to the
+/// action — and the `Action` variants do not deny unknown fields. So typed
+/// reconstruction *discarded* anything it did not recognize, and everything
+/// downstream was about the narrowed subset: the screen a person reads, the
+/// admission, and the durable Event. `is_admission_of` could not see it either,
+/// because it compares history against that same already-narrowed payload.
+///
+/// The subject is the **complete** immutable question. A Challenge that is
+/// canonical, correctly sealed, and internally consistent while meaning
+/// something the record cannot say is exactly the case a digest cannot catch —
+/// the digest proves nobody edited the file, not that the file means what will
+/// happen.
 #[test]
-fn a_candidate_envelope_without_integrity_is_refused_rather_than_trusted() {
+fn a_frozen_subject_carrying_members_the_record_would_drop_is_refused() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "envelope version");
+    let id = new_object(&root, "the complete question");
+    admit(&root, payload(Act::Add, &id, "old wording"));
+
     let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "pending")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
-    let path = store::candidate_path(&root, &code).expect("path");
-    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
-    let stored_object = stored.as_object_mut().expect("candidate object");
-    stored_object.insert("version".to_owned(), serde_json::json!(1));
-    stored_object.remove("integrity_sha256");
-    write_raw(&path, &stored).expect("legacy candidate");
+        gate::prepare(&root, payload(Act::Revise(1), &id, "new wording")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    gate::find(&root, &code).expect("untouched, it loads and would confirm");
+
+    // A member no `Action` variant knows, and then the envelope is resealed —
+    // so the digest recomputes, the bytes stay canonical, and the subject's own
+    // `deny_unknown_fields` is satisfied. Every check that existed still passes.
+    let mut challenge: engr::confirmation::Challenge = store::read_json(&path).expect("challenge");
+    challenge.subject.data["value"]["extra"] =
+        serde_json::json!("a member the durable Event would not carry");
+    challenge.digest = challenge.recomputed_digest().expect("reseal");
+    write_raw(&path, &challenge).expect("rewrite the challenge");
+
+    // The premise, checked rather than assumed: if the digest no longer matched,
+    // this would be testing the seal instead of the question.
+    let stored: engr::confirmation::Challenge = store::read_json(&path).expect("reread");
+    assert_eq!(
+        stored.digest,
+        stored.recomputed_digest().expect("recompute"),
+        "the fixture has to be internally consistent or it proves nothing"
+    );
+
+    for (surface, error) in [
+        ("find", gate::find(&root, &code).expect_err("find")),
+        (
+            "confirm",
+            gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("confirm"),
+        ),
+    ] {
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{surface}: {error}");
+        assert!(
+            error.message.contains("complete question"),
+            "{surface}: refused, but not as an incomplete reconstruction: {error}"
+        );
+    }
+    assert_eq!(
+        ops::effective(&root, &id).expect("object").sections[0].text,
+        "old wording",
+        "and nothing was admitted"
+    );
+}
+
+/// A stored Challenge with no digest is refused rather than read as one nothing
+/// needed to protect.
+#[test]
+fn a_challenge_without_a_digest_is_refused_rather_than_trusted() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "envelope integrity");
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "pending")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("challenge");
+    stored.as_object_mut().expect("challenge").remove("digest");
+    write_raw(&path, &stored).expect("undigested challenge");
 
     let error =
-        gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("no integrity, no admission");
+        gate::confirm(&root, &format!("CONFIRM {code}")).expect_err("no digest, no admission");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("integrity"), "{error}");
+    assert!(error.message.contains("digest"), "{error}");
     assert_eq!(ops::effective(&root, &id).expect("object").rev, 1);
 }
 
@@ -1094,16 +1056,14 @@ fn a_candidate_cannot_redirect_a_human_to_another_candidates_code() {
     let (_dir, root) = workspace();
     let first = new_object(&root, "the change they read");
     let second = new_object(&root, "the change they did not");
-    let a = gate::prepare(&root, payload(Action::SectionAdded, &first, "wording A"))
-        .expect("prepare A");
-    let b = gate::prepare(&root, payload(Action::SectionAdded, &second, "wording B"))
-        .expect("prepare B");
-    let (a_code, b_code) = (a.candidate.challenge.clone(), b.candidate.challenge.clone());
+    let a = gate::prepare(&root, payload(Act::Add, &first, "wording A")).expect("prepare A");
+    let b = gate::prepare(&root, payload(Act::Add, &second, "wording B")).expect("prepare B");
+    let (a_code, b_code) = (a.candidate.code().to_owned(), b.candidate.code().to_owned());
     assert_ne!(a_code, b_code);
 
-    let a_path = store::candidate_path(&root, &a_code).expect("path");
+    let a_path = store::challenge_path(&root, &a_code).expect("path");
     let mut stored: serde_json::Value = store::read_json(&a_path).expect("candidate A");
-    stored["challenge"] = serde_json::json!(b_code);
+    stored["id"] = serde_json::json!(b_code.clone());
     write_raw(&a_path, &stored).expect("redirect A at B");
 
     // A cannot be rendered, so no screen can ever pair A's change with B's code.
@@ -1151,47 +1111,33 @@ fn a_refused_candidate_does_not_block_the_rest_of_the_workspace() {
     let (_dir, root) = workspace();
     let stranded = new_object(&root, "left by an older build");
     let unrelated = new_object(&root, "prepared afterwards");
-    let prepared = gate::prepare(
-        &root,
-        payload(Action::SectionAdded, &stranded, "old envelope"),
-    )
-    .expect("prepare");
-    let code = prepared.candidate.challenge.clone();
-    let path = store::candidate_path(&root, &code).expect("path");
-    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
-    let stored_object = stored.as_object_mut().expect("candidate object");
-    stored_object.insert("version".to_owned(), serde_json::json!(1));
-    stored_object.remove("integrity_sha256");
-    write_raw(&path, &stored).expect("legacy candidate");
+    let prepared =
+        gate::prepare(&root, payload(Act::Add, &stranded, "old envelope")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
+    let mut stored: serde_json::Value = store::read_json(&path).expect("challenge");
+    stored["generator"]["fingerprint"] = serde_json::json!(format!("1:{}", "0".repeat(64)));
+    write_raw(&path, &stored).expect("a challenge this build refuses");
 
     // Preparing something else works, and does not reuse the stranded code.
-    let other = gate::prepare(
-        &root,
-        payload(Action::SectionAdded, &unrelated, "unaffected"),
-    )
-    .expect("an unrelated proposal is unaffected");
-    assert_ne!(other.candidate.challenge, code);
+    let other = gate::prepare(&root, payload(Act::Add, &unrelated, "unaffected"))
+        .expect("an unrelated proposal is unaffected");
+    assert_ne!(other.candidate.code(), code);
     assert!(other.superseded.is_empty());
     assert!(
-        gate::confirm(&root, &format!("CONFIRM {}", other.candidate.challenge)).is_ok(),
+        gate::confirm(&root, &format!("CONFIRM {}", other.candidate.code())).is_ok(),
         "and confirms normally"
     );
 
     // Proposing the stranded candidate's own object supersedes it.
-    let replacement = gate::prepare(
-        &root,
-        payload(Action::SectionAdded, &stranded, "prepared again"),
-    )
-    .expect("prepare again");
+    let replacement = gate::prepare(&root, payload(Act::Add, &stranded, "prepared again"))
+        .expect("prepare again");
     assert_eq!(replacement.superseded, vec![code.clone()]);
-    assert!(store::candidate_path(&root, &code)
+    assert!(store::challenge_path(&root, &code)
         .map(|path| !path.exists())
         .unwrap_or(false));
-    gate::confirm(
-        &root,
-        &format!("CONFIRM {}", replacement.candidate.challenge),
-    )
-    .expect("the replacement admits");
+    gate::confirm(&root, &format!("CONFIRM {}", replacement.candidate.code()))
+        .expect("the replacement admits");
 }
 
 /// The already-applied retry still has to work, and integrity is checked on the
@@ -1201,15 +1147,14 @@ fn a_refused_candidate_does_not_block_the_rest_of_the_workspace() {
 fn candidate_integrity_does_not_break_the_idempotent_cleanup_retry() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "integrity retry");
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "apply once")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "apply once")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
     gate::confirm(&root, &format!("CONFIRM {code}")).expect("apply");
     write_raw(
-        &store::candidate_path(&root, &code).expect("path"),
-        &prepared.candidate,
+        &store::challenge_path(&root, &code).expect("path"),
+        &prepared.candidate.challenge,
     )
-    .expect("restore the candidate a crash would have left");
+    .expect("restore the challenge a crash would have left");
 
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
         .expect("the retry is idempotent")
@@ -1227,11 +1172,8 @@ fn a_title_that_is_really_a_body_is_refused() {
 
     let body = "The audit failure reason code is not queryable. ".repeat(12);
     assert!(body.chars().count() > 120);
-    let error = gate::prepare(
-        &root,
-        payload(Action::ObjectCreated, &engr::model::new_id(), &body),
-    )
-    .expect_err("a 500-character title is refused");
+    let error = gate::prepare(&root, payload(Act::Create, &engr::model::new_id(), &body))
+        .expect_err("a 500-character title is refused");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(
         error.message.contains("title") && error.message.contains("--add"),
@@ -1242,7 +1184,7 @@ fn a_title_that_is_really_a_body_is_refused() {
     let error = gate::prepare(
         &root,
         payload(
-            Action::ObjectCreated,
+            Act::Create,
             &engr::model::new_id(),
             "a title\nwith a second line",
         ),
@@ -1253,7 +1195,7 @@ fn a_title_that_is_really_a_body_is_refused() {
     gate::prepare(
         &root,
         payload(
-            Action::ObjectCreated,
+            Act::Create,
             &engr::model::new_id(),
             "audit failure reason codes",
         ),
@@ -1272,7 +1214,7 @@ fn a_duplicate_title_is_flagged_but_not_blocked() {
     let prepared = gate::prepare(
         &root,
         payload(
-            Action::ObjectCreated,
+            Act::Create,
             &engr::model::new_id(),
             "  Audit Failure Reason Codes  ",
         ),
@@ -1285,7 +1227,7 @@ fn a_duplicate_title_is_flagged_but_not_blocked() {
     let prepared = gate::prepare(
         &root,
         payload(
-            Action::ObjectCreated,
+            Act::Create,
             &engr::model::new_id(),
             "something else entirely",
         ),
@@ -1303,16 +1245,22 @@ fn a_title_changes_through_one_confirmation() {
 
     let prepared = gate::prepare(
         &root,
-        payload(Action::ObjectRenamed, &id, "audit failure reason codes v2"),
+        payload(Act::Rename, &id, "audit failure reason codes v2"),
     )
     .expect("prepare");
     assert_eq!(
-        prepared.candidate.context.previous_text.as_deref(),
-        Some("audit failure reason codes"),
-        "a rename shows the change, so the old title has to travel with it"
+        prepared.candidate.expected_rev(),
+        1,
+        "a rename is shown against the record as it stands, so the challenge binds
+         the revision the old title is read from rather than carrying a copy"
+    );
+    assert_eq!(
+        ops::effective(&root, &id).expect("object").title,
+        "audit failure reason codes",
+        "and the old title is still what the record holds until the code is answered"
     );
 
-    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
         .expect("confirm")
         .object;
     assert_eq!(object.title, "audit failure reason codes v2");
@@ -1331,8 +1279,7 @@ fn a_rename_is_held_to_the_same_shape_as_a_title() {
     let id = new_object(&root, "short enough");
 
     let body = "The audit failure reason code is not queryable. ".repeat(12);
-    let error =
-        gate::prepare(&root, payload(Action::ObjectRenamed, &id, &body)).expect_err("too long");
+    let error = gate::prepare(&root, payload(Act::Rename, &id, &body)).expect_err("too long");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(
         error.message.contains("--rename") && !error.message.contains("--new"),
@@ -1340,7 +1287,7 @@ fn a_rename_is_held_to_the_same_shape_as_a_title() {
         error.message
     );
 
-    let error = gate::prepare(&root, payload(Action::ObjectRenamed, &id, "two\nlines"))
+    let error = gate::prepare(&root, payload(Act::Rename, &id, "two\nlines"))
         .expect_err("a title cannot span lines");
     assert_eq!(error.code, engr::EXIT_USAGE);
 }
@@ -1356,11 +1303,7 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
 
     let prepared = gate::prepare(
         &root,
-        payload(
-            Action::ObjectRenamed,
-            &second,
-            "  Audit Failure Reason Codes  ",
-        ),
+        payload(Act::Rename, &second, "  Audit Failure Reason Codes  "),
     )
     .expect("a duplicate title is admitted, not refused");
     assert_eq!(prepared.notes.len(), 1);
@@ -1369,16 +1312,14 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
     // Stored as it will be listed. The duplicate check above already ignores the
     // padding, and a listing that prints what that check ignores puts one row
     // out of column underneath a note saying the two titles match.
-    assert_eq!(
-        prepared.candidate.payload.content.text,
-        "Audit Failure Reason Codes"
-    );
+    let engr::model::Action::ObjectRenamed { title, .. } = &prepared.candidate.payload.action
+    else {
+        panic!("a rename")
+    };
+    assert_eq!(title, "Audit Failure Reason Codes");
 
-    let prepared = gate::prepare(
-        &root,
-        payload(Action::ObjectRenamed, &second, "Retry Policy"),
-    )
-    .expect("prepare");
+    let prepared =
+        gate::prepare(&root, payload(Act::Rename, &second, "Retry Policy")).expect("prepare");
     assert!(
         prepared.notes.is_empty(),
         "an object already holding this title is not a clash with itself"
@@ -1390,9 +1331,9 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
 fn a_closed_object_refuses_a_rename() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "settled");
-    admit(&root, empty(Action::ObjectClosed, &id));
+    admit(&root, empty(Act::Close, &id));
 
-    let error = gate::prepare(&root, payload(Action::ObjectRenamed, &id, "unsettled"))
+    let error = gate::prepare(&root, payload(Act::Rename, &id, "unsettled"))
         .expect_err("a closed object refuses a rename");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
@@ -1401,8 +1342,8 @@ fn a_closed_object_refuses_a_rename() {
         error.message
     );
 
-    admit(&root, empty(Action::ObjectReopened, &id));
-    let object = admit(&root, payload(Action::ObjectRenamed, &id, "unsettled"));
+    admit(&root, empty(Act::Reopen, &id));
+    let object = admit(&root, payload(Act::Rename, &id, "unsettled"));
     assert_eq!(object.title, "unsettled");
 }
 
@@ -1410,17 +1351,16 @@ fn a_closed_object_refuses_a_rename() {
 fn re_confirming_after_a_crash_does_not_apply_twice() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "recovery");
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "once")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
     let response = format!("CONFIRM {code}");
     gate::confirm(&root, &response).expect("confirm");
 
     // Reinstate the candidate to stand in for a crash between saving the
     // projection and clearing it.
     write_raw(
-        &store::candidate_path(&root, &code).expect("candidate path"),
-        &prepared.candidate,
+        &store::challenge_path(&root, &code).expect("challenge path"),
+        &prepared.candidate.challenge,
     )
     .expect("rewrite");
 
@@ -1436,17 +1376,16 @@ fn re_confirming_after_a_crash_does_not_apply_twice() {
 fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "interrupted confirmation");
-    let first = gate::prepare(&root, payload(Action::SectionAdded, &id, "first")).expect("first");
+    let first = gate::prepare(&root, payload(Act::Add, &id, "first")).expect("first");
     let event = candidate_event(&first.candidate);
-    append_admitted_raw(&root, &event);
+    append_admitted_raw(&root, &id, &event);
 
     // A later action must first replay the confirmed tail. Otherwise it is
     // prepared at the same revision, its event collides with this one, and
     // purging can erase the first confirmed section.
-    let second =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "second")).expect("second");
-    assert_eq!(second.candidate.binding.expected_rev, 2);
-    let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge))
+    let second = gate::prepare(&root, payload(Act::Add, &id, "second")).expect("second");
+    assert_eq!(second.candidate.expected_rev(), 2);
+    let object = gate::confirm(&root, &format!("CONFIRM {}", second.candidate.code()))
         .expect("confirm second")
         .object;
     assert_eq!(object.rev, 3);
@@ -1462,11 +1401,10 @@ fn preparing_after_an_unprojected_event_keeps_the_confirmed_change() {
 fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "interrupted confirmation");
-    let prepared =
-        gate::prepare(&root, payload(Action::SectionAdded, &id, "once")).expect("prepare");
-    let code = prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "once")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
     let event = candidate_event(&prepared.candidate);
-    append_admitted_raw(&root, &event);
+    append_admitted_raw(&root, &id, &event);
 
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
         .expect("the retry is idempotent")
@@ -1486,11 +1424,11 @@ fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     let (_dir, root) = workspace();
     let id = engr::model::new_id();
     let prepared =
-        gate::prepare(&root, payload(Action::ObjectCreated, &id, "created once")).expect("prepare");
+        gate::prepare(&root, payload(Act::Create, &id, "created once")).expect("prepare");
     let event = candidate_event(&prepared.candidate);
-    append_admitted_raw(&root, &event);
+    append_admitted_raw(&root, &id, &event);
 
-    let code = prepared.candidate.challenge.clone();
+    let code = prepared.candidate.code().to_owned();
     let object = gate::confirm(&root, &format!("CONFIRM {code}"))
         .expect("the retry is idempotent")
         .object;
@@ -1528,117 +1466,75 @@ fn ignored(root: &Path, relative: &str) -> bool {
 /// the record from ever being committed, and look-back lives in git.
 #[test]
 fn a_live_challenge_code_is_kept_out_of_git() {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["init", "-q", "."])
-        .status()
-        .expect("git init");
-    store::init(&root).expect("init");
+    let (_dir, root) = common::repository();
 
     let id = engr::model::new_id();
-    let prepared =
-        gate::prepare(&root, payload(Action::ObjectCreated, &id, "a title")).expect("prepare");
-    let code = &prepared.candidate.challenge.clone();
+    let prepared = gate::prepare(&root, payload(Act::Create, &id, "a title")).expect("prepare");
+    let code = &prepared.candidate.code().to_owned();
 
-    assert!(ignored(&root, ".engr/lock"));
-    assert!(ignored(&root, &format!(".engr/candidates/{code}.json")));
+    assert!(ignored(&root, ".engr/local/lock"));
+    assert!(ignored(
+        &root,
+        &format!(".engr/local/challenges/{code}.json")
+    ));
 
-    assert!(!ignored(&root, ".engr/format.json"));
+    assert!(!ignored(&root, ".engr/VERSION"));
     assert!(!ignored(&root, &format!(".engr/objects/{id}.json")));
-    assert!(!ignored(&root, &format!(".engr/events/{id}.jsonl")));
+    assert!(!ignored(
+        &root,
+        &format!(".engr/eventstore/objects/{id}.jsonl")
+    ));
 }
 
-/// A candidate prepared before Backlog left the gate cannot be admitted.
+/// A Challenge is the members this generation defines, and no others.
 ///
-/// Admission and Backlog bookkeeping became two operations, and the declared
-/// Backlog material left `PreparedContext` — which the candidate's integrity
-/// hash covered. So a candidate that was outstanding across that change names an
-/// integrity value the current build cannot reproduce.
-///
-/// What matters is which way it fails. Unknown fields are ignored on read, so
-/// the danger would be recomputing a hash that happens to match and admitting a
-/// candidate whose prepared context is not the one being checked. It does not:
-/// the stored value was taken over the wider context and no longer agrees, so
-/// the candidate is refused, told to be prepared again, and never rendered as
-/// though it were current.
+/// Backlog bookkeeping was once declared inside the prepared context and left
+/// it; a stored file that still carries it is not a Challenge with something
+/// extra, it is a question this build cannot render. Unknown members are refused
+/// rather than ignored, because ignoring one means rendering a question whose
+/// declared effects nobody checked and whose digest nobody can reproduce.
 #[test]
-fn a_candidate_that_still_declares_backlog_material_is_refused_not_reinterpreted() {
+fn a_challenge_declaring_members_this_generation_never_defined_is_refused() {
     let (_dir, root) = workspace();
     let prepared = gate::prepare(
         &root,
-        payload(Action::ObjectCreated, &engr::model::new_id(), "a record"),
+        payload(Act::Create, &engr::model::new_id(), "a record"),
     )
     .expect("prepare");
-    let challenge = prepared.candidate.challenge.clone();
-    let path = store::candidate_path(&root, &challenge).expect("path");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(&root, &code).expect("path");
 
-    // Reconstruct what the earlier build wrote: the same candidate, with the
-    // declared Backlog material still in its prepared context, and an integrity
-    // value taken over that wider context.
-    let mut stored: serde_json::Value = store::read_json(&path).expect("candidate");
-    let backlog = serde_json::json!([{ "item": "0195", "section": 1 }]);
-    let object = stored.as_object_mut().expect("object");
-    object.insert("backlog".to_owned(), backlog);
-    object.insert("version".to_owned(), serde_json::json!(2));
-    write_raw(&path, &stored).expect("rewrite as the earlier build");
+    for (what, invented) in [
+        ("the envelope", "/backlog"),
+        ("the subject", "/subject/data/backlog"),
+    ] {
+        let mut stored: serde_json::Value = store::read_json(&path).expect("challenge");
+        let (parent, member) = invented.rsplit_once('/').expect("a pointer");
+        stored
+            .pointer_mut(parent)
+            .expect("the member's parent")
+            .as_object_mut()
+            .expect("an object")
+            .insert(
+                member.to_owned(),
+                serde_json::json!([{ "item": "0195", "section": 1 }]),
+            );
+        write_raw(&path, &stored).expect("rewrite as an earlier build");
 
-    let error = gate::find(&root, &challenge).expect_err("prepared under a different contract");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(
-        error.message.contains("did not survive being read"),
-        "the refusal says what to do about it: {}",
-        error.message
-    );
-
-    // And it is refused wherever a candidate is loaded, not only at confirm —
-    // rendering it would present a prepared context nobody can check.
-    assert!(gate::pending(&root).is_err() || gate::pending(&root).expect("pending").is_empty());
-    let response = format!("CONFIRM {challenge}");
-    assert!(gate::confirm(&root, &response).is_err());
-}
-
-/// The durable write boundary must enforce each envelope generation, not only
-/// the ordinary admission path. `prepare` refusing is not enough: a candidate
-/// is a file, and `confirm` loads one that is already on disk.
-///
-/// Without this, `append_event` accepts a version 1 record carrying the merge
-/// shape version 1 never defined — and `load_events` then refuses that same
-/// record, so the supported confirmation path writes history its own next read
-/// rejects.
-#[test]
-fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "write boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    admit(&root, payload(Action::SectionAdded, &id, "two"));
-
-    let merged = payload(
-        Action::SectionMerged {
-            merge: Merge::Into {
-                destination: 1,
-                sources: vec![2],
-            },
-        },
-        &id,
-        "together",
-    );
-    let event = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
-        event_id: engr::model::new_id(),
-        rev: 4,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::confirmed("TEST00".to_owned(), merged.sha256().expect("hash")),
-        payload: merged,
-    };
-
-    let error = store::check_appendable(&root, &event)
-        .expect_err("a generation may only carry the shapes it defined");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    store::load_events(&root, &id).expect("and the history is still readable");
+        // Refused wherever a Challenge is loaded, not only at confirm —
+        // rendering it would present declared effects nobody can check.
+        let error = gate::find(&root, &code).expect_err(what);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert!(error.message.contains("backlog"), "{what}: {error}");
+        assert!(
+            gate::pending(&root).is_err(),
+            "{what}: and the strict listing says so"
+        );
+        assert!(
+            gate::confirm(&root, &format!("CONFIRM {code}")).is_err(),
+            "{what}: and it admits nothing"
+        );
+    }
 }
 
 /// There is no public writer for a persisted Object, and every read says so.
@@ -1654,10 +1550,10 @@ fn the_event_write_boundary_refuses_a_shape_its_generation_never_defined() {
 fn there_is_no_public_write_boundary_that_could_promote_authority() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "authority boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    admit(&root, payload(Act::Add, &id, "wording"));
 
     let mut object = store::load_object(&root, &id).expect("object");
-    object.sections[0].admission = engr::semantics::Admission::Agent;
+    object.sections[0].admitted.by = engr::semantics::Admission::Agent;
     save_raw(&root, &object).expect("bytes can always be put on disk from outside");
 
     let report = engr::ops::verify(&root, &id).expect("verify");
@@ -1667,7 +1563,7 @@ fn there_is_no_public_write_boundary_that_could_promote_authority() {
     );
     assert!(report.object_tampered || !report.tampered.is_empty());
     assert!(
-        engr::integrity::check_stored_object_integrity(
+        engr::integrity::check_object_integrity(
             &store::load_object(&root, &id).expect("still loads")
         )
         .is_err(),
@@ -1675,169 +1571,78 @@ fn there_is_no_public_write_boundary_that_could_promote_authority() {
     );
 }
 
-/// The generation guard has to guard the generation, not only the shapes it
-/// defines. An ordinary payload carrying a version this build does not support is
-/// the same self-corrupting write one level up: `append_event` writes it and
-/// `load_events` refuses it.
-#[test]
-fn the_event_write_boundary_refuses_an_unsupported_generation() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "generation boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "one"));
-    let before = std::fs::read(store::events_path(&root, &id)).expect("events");
-
-    let ordinary = payload(Action::SectionAdded, &id, "an ordinary payload");
-    let event = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION + 1,
-        event_id: engr::model::new_id(),
-        rev: 3,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::confirmed("TEST00".to_owned(), ordinary.sha256().expect("hash")),
-        payload: ordinary,
-    };
-
-    let error = store::check_appendable(&root, &event)
-        .expect_err("this build does not support that generation");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert_eq!(
-        std::fs::read(store::events_path(&root, &id)).expect("events"),
-        before,
-        "nothing was written"
-    );
-    store::load_events(&root, &id).expect("and the history is still readable");
-}
-
-/// The read-side counterpart of the Object write boundary. Writes must not drop
-/// P3-only authority state; reads must not silently reinterpret it.
+/// A snapshot is read under its own workspace generation, and refused when the
+/// bytes disagree with what that generation defines.
 ///
-/// A file carrying `admission` is not a version 2 file. Reconstructing `human`
-/// from it is only exact for the *exact* version 2 representation — for a file
-/// that already carries a field version 2 never defined, it answers a question
-/// the file was trying to answer differently.
+/// Historical reads go through the same decoder as current ones, so the
+/// guarantee has to hold there too — otherwise a reference could pin a file
+/// nothing would accept today and still resolve.
 #[test]
-fn a_v2_object_carrying_p3_only_fields_fails_closed() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "read boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
-    let path = store::object_path(&root, &id);
-    let current = store::load_object(&root, &id).expect("current object");
-    let mut predecessor: serde_json::Value =
-        serde_json::to_value(&current).expect("predecessor object");
-    predecessor
-        .as_object_mut()
-        .expect("object")
-        .remove("sha256");
-    let section = predecessor["sections"][0].as_object_mut().expect("section");
-    section.remove("admission");
-    let admitted_at = section.remove("admitted_at").expect("admitted_at");
-    section.insert("confirmed_at".to_owned(), admitted_at);
-    section.insert(
-        "sha256".to_owned(),
-        serde_json::Value::String(
-            current.sections[0]
-                .recomputed_sha256()
-                .expect("legacy Section seal"),
-        ),
-    );
-    std::fs::write(
-        store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":2}"#,
-    )
-    .expect("v2 authority");
-
-    for injected in ["admission", "admitted_at"] {
-        let mut value = predecessor.clone();
-        value["sections"][0]
-            .as_object_mut()
-            .expect("section")
-            .insert(
-                injected.to_owned(),
-                serde_json::Value::String("agent".to_owned()),
-            );
-        std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
-
-        let error = store::load_object(&root, &id)
-            .expect_err("a field this version never defined is not this version's file");
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{injected}");
-    }
-}
-
-/// The same rule for a snapshot, decoded under the version the snapshot itself
-/// records. Historical reads go through the same struct, so the guarantee has to
-/// hold there or a reference could pin a file nothing would accept today.
-#[test]
-fn a_historical_snapshot_carrying_p3_only_fields_fails_closed() {
+fn a_historical_snapshot_carrying_undefined_members_fails_closed() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "historical read boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    admit(&root, payload(Act::Add, &id, "wording"));
     let path = store::object_path(&root, &id);
+    let good = std::fs::read(&path).expect("object");
 
-    let current = store::load_object(&root, &id).expect("current object");
-    let mut value = serde_json::to_value(&current).expect("object");
-    value.as_object_mut().expect("object").remove("sha256");
-    let section = value["sections"][0].as_object_mut().expect("section");
-    section.remove("admission");
-    let admitted_at = section.remove("admitted_at").expect("admitted_at");
-    section.insert("confirmed_at".to_owned(), admitted_at);
-    section.insert(
-        "sha256".to_owned(),
-        serde_json::Value::String(
-            current.sections[0]
-                .recomputed_sha256()
-                .expect("legacy Section seal"),
-        ),
-    );
+    let mut value: serde_json::Value = serde_json::from_slice(&good).expect("json");
     value["sections"][0]
         .as_object_mut()
         .expect("section")
-        .insert(
-            "admission".to_owned(),
-            serde_json::Value::String("agent".to_owned()),
-        );
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
-    std::fs::write(
-        store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":2}"#,
-    )
-    .expect("v2 authority");
-    let commit = commit_all(&root, "a snapshot claiming more than its version defines");
+        .insert("confirmed_at".to_owned(), serde_json::json!("2026-08-28"));
+    write_raw(&path, &value).expect("a member this generation never defined");
+    let commit = commit_all(
+        &root,
+        "a snapshot claiming more than its generation defines",
+    );
+    std::fs::write(&path, &good).expect("restore");
 
     let error = engr::git::object_at(&root, &commit, &id)
-        .expect_err("a snapshot is read under its own version, and refused when it disagrees");
+        .expect_err("a snapshot is read under its own generation, and refused when it disagrees");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
 }
 
-/// The EventStore analogue of the Object read boundary. A record carrying
-/// admission provenance is not a record of the generation that had only one
-/// door, and the check has to happen before a typed decode can drop the field
-/// that says so.
+/// The EventStore counterpart. A record carrying a member this generation never
+/// defined is refused before a typed decode can drop it.
 ///
-/// Without this, the dropped field leaves the stored `payload_sha256` verifying
-/// — it was never inside the payload — and replay reaches `human` for bytes that
-/// explicitly claimed `agent`. Reconciliation can then make that authoritative.
+/// `Event` cannot use `deny_unknown_fields` — the action is flattened into the
+/// envelope, and serde will not combine the two — so the rule is enforced by
+/// comparing the stored bytes against this build's own canonical serialization
+/// of the record it decoded to. A dropped member changes those bytes, which is
+/// the stricter check and not the weaker one.
 #[test]
-fn a_retained_event_carrying_admission_provenance_is_refused() {
+fn an_event_carrying_undefined_members_is_refused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "event read boundary");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    admit(&root, payload(Act::Add, &id, "wording"));
     let path = store::events_path(&root, &id);
     let good = std::fs::read_to_string(&path).expect("events");
 
-    let mut lines = Vec::new();
-    for line in good.lines() {
-        let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
-        event.as_object_mut().expect("event").insert(
-            "admission".to_owned(),
-            serde_json::json!({ "kind": "agent" }),
-        );
-        lines.push(serde_json::to_string(&event).expect("event"));
-    }
-    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+    for injected in [
+        serde_json::json!({ "admission": { "kind": "agent" } }),
+        serde_json::json!({ "object": engr::model::new_id() }),
+        serde_json::json!({ "payload_sha256": format!("1:{}", "0".repeat(64)) }),
+    ] {
+        let mut lines = Vec::new();
+        for line in good.lines() {
+            let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
+            for (key, value) in injected.as_object().expect("an object") {
+                event
+                    .as_object_mut()
+                    .expect("event")
+                    .insert(key.clone(), value.clone());
+            }
+            lines.push(engr::proof::canonical_bytes(&event, "event").expect("canonical"));
+        }
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
 
-    let error = store::load_events(&root, &id)
-        .expect_err("a record claiming an admission this generation never had");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
+        let error = store::load_events(&root, &id)
+            .expect_err("a record claiming more than this generation defines");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{injected}");
+    }
+
+    std::fs::write(&path, &good).expect("restore");
+    store::load_events(&root, &id).expect("and the emitted records read back");
 }
 
 /// The durable Event write path is part of the workspace-generation boundary,
@@ -1848,64 +1653,89 @@ fn appending_an_event_requires_a_workspace_this_build_may_write() {
     let id = new_object(&root, "append boundary");
     let path = store::events_path(&root, &id);
     let before = std::fs::read(&path).expect("events");
+    let event = admissible_human_event(&root, &id, payload(Act::Add, &id, "wording"));
 
-    let format = store::engr_dir(&root).join("format.json");
-    std::fs::write(&format, r#"{"format":"engr-workspace","version":99}"#).expect("format");
+    for generation in ["99\n", "1", ""] {
+        std::fs::write(store::version_path(&root), generation).expect("VERSION");
+        let error = store::check_appendable(&root, &event)
+            .expect_err("this build does not write a workspace at that generation");
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{generation:?}");
+        assert_eq!(
+            std::fs::read(&path).expect("events"),
+            before,
+            "{generation:?}: and the store is byte-for-byte what it was"
+        );
+    }
 
-    let added = payload(Action::SectionAdded, &id, "wording");
-    let event = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
-        event_id: engr::model::new_id(),
-        rev: 2,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::confirmed("TEST00".to_owned(), added.sha256().expect("hash")),
-        payload: added,
-    };
-
-    let error = store::check_appendable(&root, &event)
-        .expect_err("this build does not write a workspace at that version");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert_eq!(
-        std::fs::read(&path).expect("events"),
-        before,
-        "and the store is byte-for-byte what it was"
-    );
+    std::fs::write(store::version_path(&root), engr::WORKSPACE_VERSION_FILE).expect("restore");
+    store::check_appendable(&root, &event).expect("and this generation may write it");
 }
 
-/// A historical record spells an absent basis `"based_on": null`, because that
-/// is what engr emitted before no-basis became an absent field. The generation
-/// guard must tell an unknown field apart from a spelling this generation once
-/// wrote — history is read under its own contract, and the current serializer's
-/// one spelling is not that whole contract.
+/// An absent basis is an absent member. `"based_on": null` is a second spelling
+/// of the same fact, and a record is its exact canonical shape or it is not a
+/// record this generation reads.
 #[test]
 fn current_events_reject_a_noncanonical_explicit_absent_basis() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "legacy spelling");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
+    let id = new_object(&root, "canonical omission");
+    admit(&root, payload(Act::Add, &id, "wording"));
     let path = store::events_path(&root, &id);
+    let good = std::fs::read_to_string(&path).expect("events");
 
     let mut lines = Vec::new();
-    for line in std::fs::read_to_string(&path).expect("events").lines() {
+    for line in good.lines() {
         let mut event: serde_json::Value = serde_json::from_str(line).expect("event");
-        let object = event.as_object_mut().expect("event");
-        assert!(
-            !object.contains_key("based_on"),
-            "this build omits it, which is why the older spelling has to be tolerated"
-        );
-        object.insert("based_on".to_owned(), serde_json::Value::Null);
-        lines.push(serde_json::to_string(&event).expect("event"));
+        if let Some(value) = event.pointer_mut("/data/value") {
+            let value = value.as_object_mut().expect("a section value");
+            assert!(
+                !value.contains_key("based_on"),
+                "this build omits it, which is what makes the null spelling a second one"
+            );
+            value.insert("based_on".to_owned(), serde_json::Value::Null);
+        }
+        lines.push(engr::proof::canonical_bytes(&event, "event").expect("canonical"));
     }
     std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
 
-    let error = store::load_events(&root, &id).expect_err("Event v2 has one exact shape");
-    assert!(error.message.contains("exact canonical shape"));
+    let error = store::load_events(&root, &id).expect_err("an Event has one exact shape");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+}
+
+/// An empty array or object is omitted, never written. A record that spells one
+/// out is a second encoding of the same fact, and the digest is taken over one.
+#[test]
+fn an_empty_member_written_out_is_not_a_second_spelling() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "canonical omission");
+    admit(&root, payload(Act::Add, &id, "wording"));
+    let path = store::events_path(&root, &id);
+    let good = std::fs::read_to_string(&path).expect("events");
+    let line = good.lines().last().expect("the section record").to_owned();
+    assert!(
+        !line.contains(r#""refs""#),
+        "the writer omits an empty set: {line}"
+    );
+
+    let mut event: serde_json::Value = serde_json::from_str(&line).expect("event");
+    event["data"]["value"]["refs"] = serde_json::json!([]);
+    let written = engr::proof::canonical_bytes(&event, "event").expect("canonical");
+    std::fs::write(
+        &path,
+        format!("{}{written}\n", &good[..good.len() - line.len() - 1]),
+    )
+    .expect("write");
+
+    let error = store::load_events(&root, &id).expect_err("an empty member is omitted");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
+    std::fs::write(&path, &good).expect("restore");
+    store::load_events(&root, &id).expect("and the emitted records read back");
 }
 
 /// The durable Event write path must not accept a record its own next read
-/// refuses. The generation is only part of that contract: the rest of what
-/// `load_events` demands has to be demanded here too, or a direct library caller
-/// writes history nothing can load.
+/// refuses. The workspace generation is only part of that contract: the rest of
+/// what `load_events` demands has to be demanded here too, or a direct library
+/// caller writes history nothing can load.
 #[test]
 fn appending_an_event_enforces_the_contract_its_own_read_applies() {
     let (_dir, root) = workspace();
@@ -1913,28 +1743,53 @@ fn appending_an_event_enforces_the_contract_its_own_read_applies() {
     let path = store::events_path(&root, &id);
     let before = std::fs::read(&path).expect("events");
 
-    let added = payload(Action::SectionAdded, &id, "wording");
-    let sound = admissible_human_event(&root, added);
+    let sound = admissible_human_event(&root, &id, payload(Act::Add, &id, "wording"));
 
-    let mut wrong_format = sound.clone();
-    wrong_format.format = "not-an-engr-event".to_owned();
-    let mut wrong_confirmation = sound.clone();
-    if let Provenance::Tagged { admission } = &mut wrong_confirmation.provenance {
-        admission.confirmation = None;
-    }
-    let mut wrong_rev = sound.clone();
-    wrong_rev.rev = 9;
-    let mut wrong_object = sound.clone();
-    wrong_object.payload.object = engr::model::new_id();
+    // Each variant is *correctly sealed* for exactly what it says, so what
+    // refuses it is the rule it breaks rather than an arithmetic slip. The one
+    // exception is the broken seal itself, and its refusal is the interesting
+    // one: the owning Object is recovered from the seal, so a record whose
+    // digest describes nothing names no stream to be appended to.
+    let mut broken_seal = sound.clone();
+    broken_seal.digest = format!("1:{}", "0".repeat(64));
+    let unconfirmed = engr::model::Event::sealed(
+        &id,
+        sound.id.clone(),
+        sound.action.clone(),
+        sound.rev,
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Human,
+            at: sound.metadata.admitted.at.clone(),
+            confirmation: None,
+            review: None,
+        },
+    )
+    .expect("sealed over what it says");
+    let wrong_rev = engr::model::Event::sealed(
+        &id,
+        sound.id.clone(),
+        sound.action.clone(),
+        9,
+        sound.metadata.admitted.clone(),
+    )
+    .expect("sealed over what it says");
+    let wrong_id = engr::model::Event::sealed(
+        &id,
+        "not-a-uuid".to_owned(),
+        sound.action.clone(),
+        sound.rev,
+        sound.metadata.admitted.clone(),
+    )
+    .expect("sealed over what it says");
 
-    for (what, event) in [
-        ("format", wrong_format),
-        ("human confirmation", wrong_confirmation),
-        ("revision continuity", wrong_rev),
-        ("object identity", wrong_object),
+    for (what, code, event) in [
+        ("its own seal", engr::EXIT_NOT_FOUND, broken_seal),
+        ("human confirmation", engr::EXIT_SCHEMA, unconfirmed),
+        ("revision continuity", engr::EXIT_SCHEMA, wrong_rev),
+        ("event identity", engr::EXIT_SCHEMA, wrong_id),
     ] {
         let error = store::check_appendable(&root, &event).unwrap_err_or_else_note(what);
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+        assert_eq!(error.code, code, "{what}: {error}");
         assert_eq!(
             std::fs::read(&path).expect("events"),
             before,
@@ -1971,9 +1826,9 @@ impl NoteErr for engr::Result<()> {
 fn two_callers_cannot_both_admit_the_same_predecessor() {
     let (dir, root) = workspace();
     let id = new_object(&root, "one predecessor");
-    let prepared = gate::prepare(&root, payload(Action::SectionAdded, &id, "wording"))
-        .expect("one prepared candidate");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
+    let prepared =
+        gate::prepare(&root, payload(Act::Add, &id, "wording")).expect("one prepared candidate");
+    let response = format!("CONFIRM {}", prepared.candidate.code());
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let outcomes: Vec<bool> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..2)
@@ -2008,9 +1863,9 @@ fn two_callers_cannot_both_admit_the_same_predecessor() {
 }
 
 /// A record can be perfectly well formed, contiguous, and still not something
-/// this history can arrive at. `.engr/events/<id>.jsonl` is append-only and is
-/// never purged, so a record that cannot be replayed is not a mistake somebody
-/// can take back — it durably poisons every read that reconstructs the Object.
+/// this history can arrive at. The EventStore is append-only and is never
+/// purged, so a record that cannot be replayed is not a mistake somebody can
+/// take back — it durably poisons every read that reconstructs the Object.
 #[test]
 fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
     let (_dir, root) = workspace();
@@ -2018,9 +1873,9 @@ fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
     let path = store::events_path(&root, &id);
     let before = std::fs::read(&path).expect("events");
 
-    // Structurally valid, contiguous, correct payload hash — and it revises a
+    // Structurally valid, contiguous, correctly sealed — and it revises a
     // Section that does not exist.
-    let absent = payload(Action::SectionRevised { section: 999 }, &id, "wording");
+    let absent = payload(Act::Revise(999), &id, "wording");
     let event = direct_human_event(&root, &id, absent, 2);
 
     let error = store::check_appendable(&root, &event)
@@ -2036,97 +1891,48 @@ fn the_append_path_refuses_a_record_the_reducer_could_not_replay() {
 
 /// The first record of a history has to be one a missing Object can be
 /// reconstructed from. Continuity says nothing here — there is no predecessor to
-/// be contiguous with — so without this an empty history accepts a beginning it
-/// can never replay.
+/// be contiguous with — so without this an empty history would accept a
+/// beginning it can never replay.
+///
+/// Asked at the gate, because that is the door: an Object with no history has no
+/// stored file either, and the read-only boundary recovers the owning Object
+/// from the seal — so a record for an Object nothing knows about is refused one
+/// step earlier, for naming no stream at all. Both refusals are here, because
+/// both are the property.
 #[test]
 fn the_append_path_refuses_a_first_record_no_object_could_come_from() {
     let (_dir, root) = workspace();
     let id = engr::model::new_id();
     let path = store::events_path(&root, &id);
 
-    let added = payload(Action::SectionAdded, &id, "wording");
-    let not_a_beginning = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
-        rev: 1,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: engr::semantics::Admission::Human,
-                confirmation: Some(HumanConfirmation {
-                    challenge: "TEST00".to_owned(),
-                    candidate_digest: format!("1:{}", "0".repeat(64)),
-                }),
-                rule_review: None,
-            },
-        },
-        payload: added,
-    };
-    let mut skipping = not_a_beginning.clone();
-    skipping.rev = 2;
+    let error = gate::prepare(&root, payload(Act::Add, &id, "wording"))
+        .expect_err("an object begins with its creation");
+    assert_ne!(error.code, 0);
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "no candidate was minted for a history that cannot start there"
+    );
+    assert!(!path.exists(), "and no history was created");
 
-    for (what, event) in [
-        ("an action no object begins with", not_a_beginning),
-        ("a revision nothing precedes", skipping),
-    ] {
-        let error = store::check_appendable(&root, &event)
-            .expect_err("a history must be able to start where it says it starts");
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
-        assert!(!path.exists(), "{what}: no history was created");
-    }
-}
-
-/// Retained Event v1 had only confirmation provenance. A tagged admission under
-/// that generation would retroactively change what its envelope means.
-#[test]
-fn retained_event_generation_cannot_carry_tagged_admission() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "provenance boundary");
-    let path = store::events_path(&root, &id);
-    let before = std::fs::read(&path).expect("events");
-
-    let added = payload(Action::SectionAdded, &id, "wording");
-    let tagged = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
-        event_id: engr::model::new_id(),
-        rev: 2,
-        time: "2026-08-23T00:00:00Z".to_owned(),
-        provenance: Provenance::Tagged {
-            admission: engr::model::TaggedAdmission {
-                kind: engr::semantics::Admission::Agent,
-                confirmation: None,
-                rule_review: None,
-            },
-        },
-        payload: added,
-    };
-
-    let error = store::check_appendable(&root, &tagged)
-        .expect_err("that provenance belongs to Event generation 2");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert_eq!(std::fs::read(&path).expect("events"), before);
-
-    // And refused on the way back in, because a record can arrive by other means.
-    let line = serde_json::to_string(&tagged).expect("event");
-    let mut history = String::from_utf8(before).expect("utf8");
-    history.push_str(&line);
-    history.push('\n');
-    std::fs::write(&path, history).expect("write");
-    let error = store::load_events(&root, &id).expect_err("nor read under this generation");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    // And the same record offered straight to the durable boundary: the owning
+    // Object is recovered from the seal, and no Object answers for this one.
+    let error = store::check_appendable(
+        &root,
+        &unadmitted_human_event(&id, payload(Act::Add, &id, "wording"), 1),
+    )
+    .expect_err("a record naming no stream is not appendable to one");
+    assert_eq!(error.code, engr::EXIT_NOT_FOUND);
+    assert!(!path.exists(), "and still no history was created");
 }
 
 /// A well-formed Event is not an admitted one.
 ///
 /// Every shape check can pass on a record a caller assembled: the schema is
-/// exact, the revision follows, the reducer can replay it, and the provenance
-/// scalars are syntactically perfect. None of that says a person was shown
-/// anything or that any Rule was read. Without a proof at this boundary, a
-/// direct library caller appends the record and lets recovery project it into
-/// current authority — which is the whole admission model, bypassed by the one
-/// door that writes durable history.
+/// exact, the revision follows, the reducer can replay it, and the seal is
+/// perfectly computed over it. None of that says a person was shown anything.
+/// Without a proof at this boundary, a direct library caller appends the record
+/// and lets recovery project it into current authority — which is the whole
+/// admission model, bypassed by the one door that writes durable history.
 #[test]
 fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
     let (_dir, root) = workspace();
@@ -2135,19 +1941,16 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
     let before = std::fs::read(&path).expect("events");
 
     // Prepared for real, then the challenge swapped for one that was never
-    // minted. Everything else about the record is exactly right.
-    let admissible = admissible_human_event(&root, payload(Action::SectionAdded, &id, "wording"));
-    let mut forged = admissible.clone();
-    if let Provenance::Tagged { admission } = &mut forged.provenance {
-        admission.confirmation = Some(HumanConfirmation {
-            challenge: "ZZZZZZ".to_owned(),
-            candidate_digest: admissible
-                .human_confirmation()
-                .expect("confirmation")
-                .candidate_digest
-                .clone(),
-        });
-    }
+    // minted. Everything else about the record is exactly right, seal included.
+    let admissible = admissible_human_event(&root, &id, payload(Act::Add, &id, "wording"));
+    let forged = engr::model::Event::sealed(
+        &id,
+        admissible.id.clone(),
+        admissible.action.clone(),
+        admissible.rev,
+        engr::model::EventAdmission::human(&admissible.metadata.admitted.at, "ZZZZZZ"),
+    )
+    .expect("a perfectly sealed forgery");
     let error = store::check_appendable(&root, &forged)
         .expect_err("a challenge nobody minted admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
@@ -2156,37 +1959,46 @@ fn a_direct_caller_cannot_append_a_human_event_nobody_was_shown() {
         "{error}"
     );
 
-    // And the digest, against the real challenge: the pair is what the Event
-    // persists, so neither half stands on its own.
-    let mut swapped = admissible.clone();
-    if let Provenance::Tagged { admission } = &mut swapped.provenance {
-        admission.confirmation = Some(HumanConfirmation {
-            challenge: admissible
-                .human_confirmation()
-                .expect("confirmation")
-                .challenge
-                .clone(),
-            candidate_digest: format!("1:{}", "b".repeat(64)),
-        });
-    }
-    let error = store::check_appendable(&root, &swapped)
-        .expect_err("a candidate digest nothing produced admits nothing");
+    // And a code that was minted, for a transition it does not describe.
+    let elsewhere = gate::prepare(&root, payload(Act::Add, &id, "some other wording"))
+        .expect("a second live challenge");
+    let mismatched = engr::model::Event::sealed(
+        &id,
+        admissible.id.clone(),
+        admissible.action.clone(),
+        admissible.rev,
+        engr::model::EventAdmission::human(
+            &admissible.metadata.admitted.at,
+            elsewhere.candidate.code(),
+        ),
+    )
+    .expect("sealed against a real code");
+    let error = store::check_appendable(&root, &mismatched)
+        .expect_err("a code for another transition admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("does not describe the transition"),
+        "{error}"
+    );
 
     assert_eq!(
         std::fs::read(&path).expect("events"),
         before,
         "neither forgery was written"
     );
-    store::check_appendable(&root, &admissible).expect("the prepared record is still admissible");
 }
 
-/// The same, for the Agent door.
+/// The same, for the Agent door — and what it can and cannot prove is stated
+/// here rather than implied.
 ///
-/// `Provenance::validate` reads a ReviewDigest for spelling. It cannot tell an
-/// attestation made against a Rule set somebody read from sixty-four invented
-/// hex characters, so the digest is recomputed here against the live applicable
-/// Rules for exactly this mutation.
+/// Durable review provenance is interpretable facts, not a binding token: the
+/// ReviewDigest is admission-time material and does not enter history. So the
+/// boundary establishes that a Rule Review is a thing this mutation *could* have
+/// had — a record claiming one where no Rule governs it describes a review that
+/// could not have happened — and that a record claiming none is refused where
+/// one is required. It no longer establishes which review, and that is
+/// deliberate; the barrier against a caller writing one is that there is no
+/// public append at all.
 #[test]
 fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
     let (_dir, root) = workspace();
@@ -2194,38 +2006,74 @@ fn a_direct_caller_cannot_append_an_agent_event_no_rule_review_produced() {
     let path = store::events_path(&root, &id);
     let before = std::fs::read(&path).expect("events");
 
-    let forged = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
-        rev: 2,
-        time: "2026-08-25T00:00:00Z".to_owned(),
-        payload: payload(Action::SectionAdded, &id, "admitted by nobody"),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: engr::semantics::Admission::Agent,
-                confirmation: None,
-                rule_review: Some(engr::model::ReviewProvenance {
-                    outcome: engr::model::ReviewOutcome::Passed,
-                    review_digest: format!("1:{}", "c".repeat(64)),
-                }),
-            },
+    let action = stamped(
+        common::agent_payload(Act::Add, &id, content("admitted by nobody")).action,
+        "2026-08-25T00:00:00Z",
+    );
+    let forged = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        action.clone(),
+        2,
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: engr::proof::ReviewResult::Passed,
+                attempts: 1,
+            }),
         },
-    };
+    )
+    .expect("a well-formed record");
     let error = store::check_appendable(&root, &forged)
-        .expect_err("an invented review digest admits nothing");
+        .expect_err("a review of a mutation no Rule governs admits nothing");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
-        error.message.contains("Rule Review that is not the one"),
+        error.message.contains("no Rule governs the mutation"),
         "{error}"
     );
 
+    // And the two members must agree with each other. Only a human can overrule
+    // a review, so a record saying an Agent admitted one that did not pass is
+    // not a record whose authority is wrong — it is one that contradicts itself.
+    let incoherent = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        action.clone(),
+        2,
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: engr::proof::ReviewResult::Failed,
+                attempts: 1,
+            }),
+        },
+    )
+    .expect("a well-formed record");
+    let error = store::check_appendable(&root, &incoherent)
+        .expect_err("passed and failed are not the same review");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+
     // And with no review at all: semantic Agent admission needs an applicable
     // usable Object Rule, and a title is the sole exception.
-    let mut bare = forged.clone();
-    if let Provenance::Tagged { admission } = &mut bare.provenance {
-        admission.rule_review = None;
-    }
+    let bare = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        action,
+        2,
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: None,
+        },
+    )
+    .expect("a well-formed record");
     let error = store::check_appendable(&root, &bare)
         .expect_err("no Rule Review, no semantic Agent admission");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
@@ -2253,8 +2101,24 @@ fn save_raw(root: &std::path::Path, object: &engr::model::Object) -> engr::Resul
     write_raw(&engr::store::object_path(root, &object.id), object)
 }
 
-/// A persisted Event-v2 record *is* its canonical bytes, not merely a value
-/// that parses to the right thing.
+/// Put a whole Event stream on disk from outside, as its canonical records.
+///
+/// One record per line and every record terminated, because that is the framing
+/// the read path requires — a fixture written any other way would be refused
+/// for its framing rather than for whatever it was written to test.
+fn write_raw_events(root: &std::path::Path, id: &str, events: &[engr::model::Event]) {
+    let path = store::events_path(root, id);
+    std::fs::create_dir_all(path.parent().expect("eventstore")).expect("eventstore directory");
+    let mut text = String::new();
+    for event in events {
+        text.push_str(&engr::proof::canonical_bytes(event, "test fixture").expect("canonical"));
+        text.push('\n');
+    }
+    std::fs::write(&path, text).expect("write the stream");
+}
+
+/// A persisted Event record *is* its canonical bytes, not merely a value that
+/// parses to the right thing.
 ///
 /// Comparing parsed values has already lost the answer: member order,
 /// insignificant whitespace and any duplicate member name the parser collapsed
@@ -2309,7 +2173,8 @@ fn an_event_record_that_is_not_its_canonical_bytes_is_refused() {
 /// Adjacency cannot refuse it: a `0, 1, 2 …` log is perfectly contiguous, and
 /// recovery filters records at or below the projection as old evidence — so an
 /// impossible record could sit in the log being silently skipped rather than
-/// reported. The lower bound belongs to the record contract.
+/// reported. The lower bound belongs to the record contract, which is why it is
+/// checked on a record whose seal is perfectly correct for `rev = 0`.
 #[test]
 fn event_revisions_start_at_one() {
     let (_dir, root) = workspace();
@@ -2319,14 +2184,20 @@ fn event_revisions_start_at_one() {
     let first: engr::model::Event =
         serde_json::from_str(original.lines().next().expect("record")).expect("event");
 
-    let mut zero = first.clone();
-    zero.rev = 0;
+    let zero = engr::model::Event::sealed(
+        &id,
+        first.id.clone(),
+        first.action.clone(),
+        0,
+        first.metadata.admitted.clone(),
+    )
+    .expect("a record sealed for revision zero");
     let record = engr::proof::canonical_bytes(&zero, "event").expect("canonical");
     std::fs::write(&path, format!("{record}\n{original}")).expect("prefix with rev 0");
 
     let error = store::load_events(&root, &id).expect_err("there is no revision zero");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("start at 1"), "{error}");
+    assert!(error.message.contains("counted from 1"), "{error}");
 }
 
 /// The Event file is the complete audit trail, not merely a suffix that can be
@@ -2336,17 +2207,7 @@ fn event_revisions_start_at_one() {
 fn a_purged_event_prefix_is_refused() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "complete history");
-    gate::confirm(
-        &root,
-        &format!(
-            "CONFIRM {}",
-            gate::prepare(&root, payload(Action::SectionAdded, &id, "second record"))
-                .expect("prepare")
-                .candidate
-                .challenge
-        ),
-    )
-    .expect("confirm");
+    admit(&root, payload(Act::Add, &id, "second record"));
 
     let path = store::events_path(&root, &id);
     let retained = std::fs::read_to_string(&path)
@@ -2368,88 +2229,28 @@ fn a_purged_event_prefix_is_refused() {
     );
 }
 
-/// A retained v1 Event may precede v2, but never follow it: no current writer
-/// can produce that regression and replaying it would reintroduce old authority
-/// after mixed-authority history began.
+/// A historical Object is its canonical JCS bytes, like every other persisted
+/// resource. A snapshot that merely parses to the right value is a second
+/// encoding of the material a Ref's digest was taken over.
 #[test]
-fn retained_event_v1_cannot_follow_event_v2() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "event generations");
-    let path = store::events_path(&root, &id);
-    let v2 = std::fs::read_to_string(&path).expect("v2 creation");
-    let old_payload = payload(Action::SectionAdded, &id, "old generation tail");
-    let v1 = engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION_V0,
-        event_id: engr::model::new_id(),
-        rev: 2,
-        time: "2026-08-27T00:00:00Z".to_owned(),
-        payload: old_payload.clone(),
-        provenance: Provenance::confirmed("234567", old_payload.sha256().expect("hash")),
-    };
-    std::fs::write(
-        &path,
-        format!("{}{}\n", v2, serde_json::to_string(&v1).expect("v1")),
-    )
-    .expect("append retained generation");
-
-    let error = store::load_events(&root, &id).expect_err("generation cannot go backward");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(
-        error.message.contains("cannot follow generation 2"),
-        "{error}"
-    );
-}
-
-/// Candidate envelopes are deleted after confirmation, but their digest remains
-/// durable evidence. It is recomputed from Event history rather than accepted
-/// as a syntactically plausible long-lived label.
-#[test]
-fn a_human_event_candidate_digest_is_rechecked_from_history() {
-    let (_dir, root) = workspace();
-    let id = new_object(&root, "durable candidate proof");
-    let path = store::events_path(&root, &id);
-    let mut event: serde_json::Value = serde_json::from_str(
-        std::fs::read_to_string(&path)
-            .expect("history")
-            .lines()
-            .next()
-            .expect("creation"),
-    )
-    .expect("event");
-    event["admission"]["confirmation"]["candidate_digest"] =
-        serde_json::Value::String(format!("1:{}", "b".repeat(64)));
-    write_raw(&path, &event).expect("replace with canonical forged event");
-
-    let error = store::load_events(&root, &id).expect_err("digest was not admitted");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("candidate digest"), "{error}");
-    assert_eq!(
-        ops::effective(&root, &id)
-            .expect_err("authority cannot use forged Event evidence")
-            .code,
-        engr::EXIT_SCHEMA
-    );
-}
-
-#[test]
-fn a_historical_v3_format_must_be_jcs() {
+fn a_historical_object_must_be_jcs() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "historical format");
-    let format = store::engr_dir(&root).join("format.json");
-    let canonical = std::fs::read(&format).expect("canonical format");
+    let path = store::object_path(&root, &id);
+    let canonical = std::fs::read_to_string(&path).expect("canonical object");
+    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("json");
     std::fs::write(
-        &format,
-        "{ \"version\": 3, \"format\": \"engr-workspace\" }",
+        &path,
+        serde_json::to_string_pretty(&parsed).expect("pretty"),
     )
-    .expect("noncanonical v3 format");
-    let commit = commit_all(&root, "noncanonical historical v3 format");
-    std::fs::write(&format, canonical).expect("restore working format");
+    .expect("noncanonical snapshot");
+    let commit = commit_all(&root, "noncanonical historical object");
+    std::fs::write(&path, &canonical).expect("restore working object");
 
     let error = engr::git::object_at(&root, &commit, &id)
-        .expect_err("historical v3 format must have its generation spelling");
+        .expect_err("a historical Object carries its canonical spelling");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("not persisted as JCS"), "{error}");
+    assert!(error.message.contains("canonical JCS bytes"), "{error}");
 }
 
 /// A transition whose numbers no identity can carry is refused before anything
@@ -2458,135 +2259,136 @@ fn a_historical_v3_format_must_be_jcs() {
 /// An Object at the shared ceiling is itself entirely valid; what is not
 /// representable is the transition out of it. Some of those numbers appear
 /// nowhere in the payload — the reducer allocates them — so a per-payload check
-/// passes, and for an operation whose CandidateDigest excludes `rev` the hash
-/// succeeds too. A person would then be holding a code for a mutation that can
-/// never be admitted.
+/// passes and a person would be holding a code for a mutation that can never be
+/// admitted.
+///
+/// The fixture is a **migration bootstrap**, which is the only admitted history
+/// that can put a section counter at the ceiling in one Event. It used to be a
+/// hand-edited projection, and that is now refused one step earlier and for a
+/// better reason — see
+/// [`a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor`]. The
+/// revision ceiling has no such history at all: reaching it would take 2^53
+/// admitted Events, so the only way to see one is a divergent projection, and
+/// the second half of this test pins that refusal instead.
 #[test]
 fn preparation_refuses_a_transition_no_identity_can_carry() {
     let (_dir, root) = workspace();
     let ceiling = engr::proof::MAX_SAFE_INTEGER;
 
-    let set_rev: fn(&mut engr::model::Object, u64) = |object, value| object.rev = value;
-    let set_counter: fn(&mut engr::model::Object, u64) =
-        |object, value| object.next_section_id = value;
-    for (what, at_ceiling) in [
-        ("the revision", set_rev),
-        ("the section counter", set_counter),
-    ] {
-        let id = new_object(&root, "at the ceiling");
-        let object = store::load_object(&root, &id).expect("object");
-        let seal = object.sha256.clone().expect("aggregate seal");
-        let resealed = engr::integrity::mutate(&object, &seal, |object| {
-            at_ceiling(object, ceiling);
-            Ok(())
-        })
-        .expect("reseal at the ceiling");
-        save_raw(&root, &resealed.object).expect("put it on disk");
+    let id = engr::model::new_id();
+    let bootstrap = engr::model::Event::sealed(
+        &id,
+        engr::model::new_id(),
+        engr::model::Action::ObjectMigrated {
+            snapshot: Box::new(engr::model::Snapshot {
+                title: "at the ceiling".to_owned(),
+                object_type: None,
+                state: State::Open,
+                next_section_id: ceiling,
+                sections: Vec::new(),
+            }),
+        },
+        1,
+        EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a migration bootstrap at the ceiling is a valid record");
+    write_raw_events(&root, &id, std::slice::from_ref(&bootstrap));
+    let mut migrated = engr::model::Object::new(id.clone(), String::new()).expect("object");
+    migrated.rev = 0;
+    migrated.reseal().expect("seal");
+    engr::model::project(&mut migrated, &bootstrap).expect("bootstrap projects");
+    migrated.reseal().expect("reseal the projection");
+    save_raw(&root, &migrated).expect("put the migrated projection on disk");
+    // The fixture is coherent authority: the projection is what its own history
+    // produced, so nothing below is refused for being out of band.
+    assert!(
+        ops::verify(&root, &id).expect("verify").passed(),
+        "the migrated fixture must be valid stored authority"
+    );
 
-        let events = std::fs::read(store::events_path(&root, &id)).expect("events");
-        let error = gate::prepare(&root, payload(Action::SectionAdded, &id, "one more"))
-            .err()
-            .unwrap_or_else(|| panic!("{what}: this must be refused"));
-        assert_eq!(error.code, engr::EXIT_USAGE, "{what}");
-        assert!(error.message.contains("safe integer"), "{what}: {error}");
-        assert!(
-            gate::pending(&root).expect("candidates").is_empty(),
-            "{what}: no candidate was minted"
-        );
-        assert_eq!(
-            std::fs::read(store::events_path(&root, &id)).expect("events"),
-            events,
-            "{what}: and nothing durable moved"
-        );
-    }
+    let events = std::fs::read(store::events_path(&root, &id)).expect("events");
+    let error = gate::prepare(&root, payload(Act::Add, &id, "one more"))
+        .expect_err("the section counter cannot advance past the ceiling");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(error.message.contains("safe integer"), "{error}");
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "no candidate was minted"
+    );
+    assert_eq!(
+        std::fs::read(store::events_path(&root, &id)).expect("events"),
+        events,
+        "and nothing durable moved"
+    );
+
+    // A revision at the ceiling can only be a projection nothing admitted, and
+    // that is what it is refused as.
+    let other = new_object(&root, "at the ceiling");
+    let object = store::load_object(&root, &other).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.rev = ceiling;
+        Ok(())
+    })
+    .expect("reseal at the ceiling");
+    save_raw(&root, &resealed.object).expect("put it on disk");
+    let error = gate::prepare(&root, payload(Act::Add, &other, "one more"))
+        .expect_err("a revision no history produced is not a predecessor");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("its revision is not what"),
+        "{error}"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "no candidate was minted"
+    );
 }
 
-/// Two envelopes can share a CandidateDigest and differ in challenge.
+/// Two Challenges can name the same transition and are still two questions.
 ///
-/// The digest names the semantic transition, not the envelope, so an older
-/// identical candidate restored after a later one was applied would match on
-/// the digest alone. Event v2 persists the pair precisely so a record proves
-/// confirmation of *its* challenge, and reporting the older envelope as the
-/// newer one's idempotent retry would say a person answered for something they
-/// never saw.
+/// An older envelope restored from a backup after a later one was applied
+/// describes exactly the mutation that landed. Reporting it as that mutation's
+/// idempotent retry would say a person answered for something they never saw,
+/// so the record proves confirmation of *its own* code and this one is stale.
 #[test]
 fn an_identical_candidate_with_another_challenge_is_not_an_applied_retry() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "two envelopes");
-    let proposal = || payload(Action::SectionAdded, &id, "the same wording");
+    let proposal = || payload(Act::Add, &id, "the same wording");
 
     let first = gate::prepare(&root, proposal()).expect("first envelope");
-    let first_path = store::candidate_path(&root, &first.candidate.challenge).expect("path");
+    let first_path = store::challenge_path(&root, first.candidate.code()).expect("path");
     let kept = std::fs::read_to_string(&first_path).expect("keep the envelope");
 
-    // A second proposal for the same mutation supersedes it. Same transition,
-    // same digest, different challenge.
+    // A second proposal for the same mutation supersedes it: same transition,
+    // same frozen subject, a different question.
     let second = gate::prepare(&root, proposal()).expect("second envelope");
     assert_eq!(
-        first.candidate.candidate_digest, second.candidate.candidate_digest,
-        "the same transition has the same digest"
+        first.candidate.subject.action, second.candidate.subject.action,
+        "the same transition"
     );
-    assert_ne!(first.candidate.challenge, second.candidate.challenge);
+    assert_eq!(
+        first.candidate.subject.expected_rev,
+        second.candidate.subject.expected_rev
+    );
+    assert_ne!(first.candidate.code(), second.candidate.code());
+    assert_ne!(
+        first.candidate.challenge.digest, second.candidate.challenge.digest,
+        "two questions are never one digest"
+    );
 
-    gate::confirm(&root, &format!("CONFIRM {}", second.candidate.challenge)).expect("admit B");
+    gate::confirm(&root, &format!("CONFIRM {}", second.candidate.code())).expect("admit B");
 
     // A restores from a backup. It is stale, and it is not B's retry.
     std::fs::write(&first_path, &kept).expect("restore the older envelope");
-    let restored = gate::find(&root, &first.candidate.challenge).expect("it still reads");
+    let restored = gate::find(&root, first.candidate.code()).expect("it still reads");
     match gate::candidate_state(&root, &restored).expect("classify") {
         gate::CandidateState::Stale { .. } => {}
         other => panic!("an envelope nobody answered is not applied: {other:?}"),
     }
-    let error = gate::confirm(&root, &format!("CONFIRM {}", first.candidate.challenge))
+    let error = gate::confirm(&root, &format!("CONFIRM {}", first.candidate.code()))
         .expect_err("and confirming it admits nothing");
     assert_eq!(error.code, engr::EXIT_STALE);
-}
-
-/// The current generation emits exactly one Ref shape, wherever it emits.
-///
-/// The legacy decoder is retained so historical Objects and Events can still be
-/// read under their own generation. Letting that compatibility shape reach an
-/// emission path lets a supported writer mint a candidate — and hand a person a
-/// code for it — that this same build's reader then refuses as schema-invalid.
-#[test]
-fn a_legacy_reference_never_reaches_a_current_candidate() {
-    let (_dir, root) = workspace();
-    let target = new_object(&root, "the target");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, "depended upon"),
-    );
-    let commit = commit_all(&root, "record target");
-    let source = new_object(&root, "the source");
-
-    // The writer refuses before anything is minted.
-    let mut proposal = payload(Action::SectionAdded, &source, "stands on the target");
-    proposal.content.refs = vec![Ref::legacy(&target, 1, "c".repeat(64), &commit)];
-    let error = gate::prepare(&root, proposal).expect_err("this generation has one Ref shape");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(
-        gate::pending(&root).expect("candidates").is_empty(),
-        "and no challenge was handed out"
-    );
-
-    // And the reader refuses it in the presentation context too, where a
-    // conforming writer of some other build might have put one.
-    let good = text_ref(&root, &target, 1, &commit);
-    let mut proposal = payload(Action::SectionAdded, &source, "stands on the target");
-    proposal.content.refs = vec![good];
-    let prepared = gate::prepare(&root, proposal).expect("a selective ref is fine");
-    let path = store::candidate_path(&root, &prepared.candidate.challenge).expect("path");
-    let mut candidate = prepared.candidate.clone();
-    candidate.context.previous_refs = vec![Ref::legacy(&target, 1, "c".repeat(64), &commit)];
-    candidate.integrity_sha256 = candidate
-        .integrity_digest()
-        .expect("recompute the envelope");
-    write_raw(&path, &candidate).expect("a self-consistent envelope");
-
-    let error = gate::find(&root, &prepared.candidate.challenge)
-        .expect_err("a v3 candidate carries no legacy reference");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("legacy references"), "{error}");
 }
 
 /// `sources[]` is a set like any other, and takes the shared order.
@@ -2601,24 +2403,20 @@ fn merge_sources_take_the_shared_canonical_set_order() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "many sections");
     for n in 1..=10 {
-        admit(
-            &root,
-            payload(Action::SectionAdded, &id, &format!("section {n}")),
-        );
+        admit(&root, payload(Act::Add, &id, &format!("section {n}")));
     }
 
     let proposal = payload(
-        Action::SectionMerged {
-            merge: engr::model::Merge::Into {
-                destination: 1,
-                sources: vec![2, 10],
-            },
+        Act::Merge {
+            destination: 1,
+            sources: vec![2, 10],
         },
         &id,
         "one point",
     );
     let prepared = gate::prepare(&root, proposal).expect("prepare the merge");
-    let Action::SectionMerged { merge } = &prepared.candidate.payload.action else {
+    let engr::model::Action::SectionMerged { merge, .. } = &prepared.candidate.payload.action
+    else {
         panic!("a merge");
     };
     assert_eq!(
@@ -2627,7 +2425,7 @@ fn merge_sources_take_the_shared_canonical_set_order() {
         "canonical set order is over JCS bytes, not over the numbers"
     );
 
-    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
+    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
         .expect("confirm")
         .object;
     assert_eq!(
@@ -2638,7 +2436,7 @@ fn merge_sources_take_the_shared_canonical_set_order() {
         .expect("events")
         .pop()
         .expect("the merge");
-    let Action::SectionMerged { merge } = &event.payload.action else {
+    let engr::model::Action::SectionMerged { merge, .. } = &event.action else {
         panic!("a merge");
     };
     assert_eq!(merge.consumed(), &[10, 2], "and that is what is persisted");
@@ -2674,14 +2472,18 @@ fn a_workspace_reached_through_a_symlink_still_resolves_its_own_paths() {
 
     store::init(&root).expect("init");
     let id = new_object(&root, "reached through a link");
-    admit(&root, payload(Action::SectionAdded, &id, "depended upon"));
+    admit(&root, payload(Act::Add, &id, "depended upon"));
     let commit = commit_all(&root, "record");
 
     // Historical resolution: the workspace prefix has to be found for this to
     // read at all.
-    let historical = engr::git::object_at(&root, &commit, &id)
-        .expect("the historical workspace resolves")
-        .expect("and holds the object");
+    let engr::git::HistoricalObject::Current(historical) =
+        engr::git::object_at(&root, &commit, &id)
+            .expect("the historical workspace resolves")
+            .expect("and holds the object")
+    else {
+        panic!("a snapshot of this generation decodes as this generation");
+    };
     assert_eq!(historical.sections[0].text, "depended upon");
 
     // Provenance: the object file is committed, and saying otherwise is the
@@ -2699,8 +2501,10 @@ fn a_workspace_reached_through_a_symlink_still_resolves_its_own_paths() {
     // And a selective Ref, which is what actually broke: it resolves the target
     // through the historical workspace.
     let source = new_object(&root, "the source");
-    let mut proposal = payload(Action::SectionAdded, &source, "stands on it");
-    proposal.content.refs = vec![text_ref(&root, &id, 1, &commit)];
+    let mut proposal = payload(Act::Add, &source, "stands on it");
+    edit(&mut proposal, |content| {
+        content.refs = vec![text_ref(&root, &id, 1, &commit)]
+    });
     gate::prepare(&root, proposal).expect("a reference resolves through the link");
 }
 
@@ -2711,9 +2515,9 @@ fn a_workspace_reached_through_a_symlink_still_resolves_its_own_paths() {
 /// reproduces is the state a crash leaves: the record is durable and the
 /// projection is not, which is exactly what recovery has to cope with. Written
 /// as the canonical JCS bytes, because that is what the read boundary requires.
-fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
-    let path = store::events_path(root, &event.payload.object);
-    let line = engr::proof::canonical_bytes(event, "Event v2").expect("canonical");
+fn append_admitted_raw(root: &Path, object: &str, event: &engr::model::Event) {
+    let path = store::events_path(root, object);
+    let line = engr::proof::canonical_bytes(event, "Event").expect("canonical");
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
     existing.push_str(&line);
     existing.push('\n');
@@ -2730,8 +2534,8 @@ fn append_admitted_raw(root: &Path, event: &engr::model::Event) {
 fn a_title_event_with_no_review_is_refused_where_a_rule_governs() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "governed titles");
-    let renamed = payload(Action::ObjectRenamed, &id, "a different title");
-    let bare = agent_event_without_review(&renamed, 2);
+    let renamed = common::agent_payload(Act::Rename, &id, content("a different title"));
+    let bare = agent_event_without_review(&id, &renamed, 2);
 
     // Ungoverned, there is genuinely nothing to review against.
     store::check_appendable(&root, &bare).expect("no applicable Rule, no review to carry");
@@ -2751,22 +2555,20 @@ fn a_title_event_with_no_review_is_refused_where_a_rule_governs() {
     assert!(error.message.contains("even a title mutation"), "{error}");
 }
 
-fn agent_event_without_review(payload: &Payload, rev: u64) -> engr::model::Event {
-    engr::model::Event {
-        format: engr::model::EVENT_FORMAT.to_owned(),
-        version: engr::EVENT_ENVELOPE_VERSION,
-        event_id: engr::model::new_id(),
+fn agent_event_without_review(object: &str, payload: &Payload, rev: u64) -> engr::model::Event {
+    engr::model::Event::sealed(
+        object,
+        engr::model::new_id(),
+        stamped(payload.action.clone(), "2026-08-27T00:00:00Z"),
         rev,
-        time: "2026-08-27T00:00:00Z".to_owned(),
-        payload: payload.clone(),
-        provenance: Provenance::Tagged {
-            admission: TaggedAdmission {
-                kind: engr::semantics::Admission::Agent,
-                confirmation: None,
-                rule_review: None,
-            },
+        engr::model::EventAdmission {
+            by: engr::semantics::Admission::Agent,
+            at: "2026-08-27T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: None,
         },
-    }
+    )
+    .expect("a well-formed record, whatever admitted it")
 }
 
 /// The attempt is why a durable record cannot be the whole admission capability.
@@ -2794,7 +2596,7 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
     let before = store::load_events(&root, &id).expect("events").len();
     let error = gate::admit_agent(
         &root,
-        payload(Action::SectionAdded, &id, "wording"),
+        common::agent_payload(Act::Add, &id, content("wording")),
         Some(engr::gate::ReviewAttestation {
             review_digest: format!("1:{}", "a".repeat(64)),
             reviewed_rules: vec!["careful".to_owned()],
@@ -2812,74 +2614,567 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
     );
 }
 
-/// An always-present member is not optional just because serde has a default.
+/// A Section is admitted when somebody admits it, not when somebody asked.
 ///
-/// #9 says Event-v2 `refs` is always present, including `[]`, and #25 says the
-/// same of the candidate's presentation context. A decoder with `#[serde(default)]`
-/// happily fills either in, and `check_nothing_was_dropped` iterates the members
-/// that *were* stored, so it cannot see one that is absent. What closes it is
-/// comparing the stored value against this build's own serialization of the
-/// record it decoded to: the writer always emits `refs`, so a record without it
-/// is not the shape, whatever serde was willing to reconstruct.
+/// `admitted.by` is frozen with the rest of the question, because which door a
+/// value comes through is part of what a person assents to. `admitted.at` is
+/// not: it is a fact the admission creates, and at prepare it has not happened
+/// yet. A Challenge can sit for a long time before it is answered, so carrying
+/// the preparation instant into the record would persist an admission time that
+/// predates the admission — a false statement in the one place the record exists
+/// to be true.
+///
+/// The cost is that the Event's action is no longer byte-identical to the frozen
+/// subject, so the already-applied comparison ignores that one member. Nothing
+/// is loosened: everything a person assented to is still compared, and the two
+/// halves of that trade are checked together here.
 #[test]
-fn an_omitted_always_present_member_is_not_a_second_spelling() {
+fn a_section_is_admitted_when_it_is_admitted_and_not_when_it_was_proposed() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "always present");
-    let path = store::events_path(&root, &id);
-    let original = std::fs::read_to_string(&path).expect("events");
-    let line = original.lines().next().expect("record").to_owned();
+    let id = new_object(&root, "when it happened");
+    let prepared = gate::prepare(&root, payload(Act::Add, &id, "wording")).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+
+    let frozen = prepared
+        .candidate
+        .payload
+        .value()
+        .expect("the subject freezes a value")
+        .admitted
+        .clone();
+    // Long enough that a clock cannot make the two look alike by accident.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+    let admitted = common::admitted_code(&root, &code);
+    let stamped = admitted
+        .event
+        .action
+        .value()
+        .expect("the record holds a value")
+        .admitted
+        .clone();
+
+    assert_eq!(
+        stamped.by, frozen.by,
+        "the door is what was asked about, and it is frozen"
+    );
     assert!(
-        line.contains(r#""refs":[]"#),
-        "the writer emits the member: {line}"
+        stamped.at > frozen.at,
+        "and the instant is when it was admitted, not when it was put up: {} is not after {}",
+        stamped.at,
+        frozen.at
+    );
+    assert_eq!(
+        admitted.object.sections[0].admitted, stamped,
+        "the Section carries exactly what the Event admitted"
     );
 
-    // Drop it. Everything else is untouched, and serde would decode it back.
-    let without = line.replacen(r#""refs":[],"#, "", 1);
-    assert_ne!(without, line, "the fixture must actually drop it");
-    std::fs::write(&path, format!("{without}\n")).expect("rewrite");
-    let error = store::load_events(&root, &id).expect_err("refs is always present");
-    assert_eq!(error.code, engr::EXIT_SCHEMA);
-    assert!(error.message.contains("exact canonical shape"), "{error}");
-
-    std::fs::write(&path, &original).expect("restore");
-    store::load_events(&root, &id).expect("and the emitted record reads back");
+    // The retry still recognises its own record. This is the half the comparison
+    // change had to keep: a crash between the append and the projection leaves a
+    // durable Event whose action now differs from the frozen subject by that one
+    // member, and reporting it as unapplied would admit the same wording twice.
+    write_raw(
+        &store::challenge_path(&root, &code).expect("path"),
+        &prepared.candidate.challenge,
+    )
+    .expect("restore the challenge a crash would have left");
+    let again = common::admitted_code(&root, &code);
+    assert_eq!(again.object.rev, 2, "the retry is idempotent");
+    assert_eq!(again.object.sections.len(), 1);
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert_eq!(
+        again.object.sections[0].admitted, stamped,
+        "and reports the instant the record actually holds"
+    );
 }
 
-/// The same, for each of the candidate's always-present presentation members.
+/// A resealed out-of-band edit cannot become the predecessor of an admission.
+///
+/// Integrity alone does not close this. Seals are recomputed from the bytes on
+/// disk, so wording changed outside an admission path and then resealed
+/// verifies perfectly — and the projection would then be the predecessor of an
+/// unrelated legitimate mutation, which appends normally and saves a state the
+/// complete EventStore never produced. One Event later the unauthorized wording
+/// reads as ordinary admitted authority, with a durable record standing behind
+/// it.
+///
+/// Every route to that state is asked the same question.
 #[test]
-fn a_candidate_cannot_omit_its_always_present_presentation_members() {
+fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "candidate shape");
-    admit(&root, payload(Action::SectionAdded, &id, "wording"));
-    let prepared = gate::prepare(
-        &root,
-        payload(Action::SectionRevised { section: 1 }, &id, "reworded"),
-    )
-    .expect("prepare");
-    let code = prepared.candidate.challenge.clone();
-    let path = store::candidate_path(&root, &code).expect("candidate path");
-    let original = std::fs::read_to_string(&path).expect("candidate");
+    let id = new_object(&root, "laundering");
+    admit(&root, payload(Act::Add, &id, "the confirmed wording"));
+    // Prepared *before* the edit, so the confirm path is asked about a
+    // predecessor that moved underneath a question a person is holding.
+    let held = gate::prepare(&root, payload(Act::Add, &id, "an unrelated addition"))
+        .expect("prepare against sound authority");
 
-    for member in [
-        "previous_text",
-        "previous_based_on",
-        "previous_refs",
-        "previous_semantics_recorded",
-    ] {
-        let mut stored: serde_json::Value = serde_json::from_str(&original).expect("json");
+    let object = store::load_object(&root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(&root, &resealed.object).expect("put it on disk");
+
+    // The seals pass. That is the whole difficulty: nothing about the bytes is
+    // damaged, and only admitted history establishes that they were admitted.
+    let stored = store::load_object(&root, &id).expect("it loads");
+    engr::integrity::check_stored_object_integrity(&stored).expect("and it verifies");
+    assert_eq!(stored.sections[0].text, "wording nobody was ever shown");
+
+    let divergent = |what: &str, error: Option<engr::Error>| {
+        let error = error.unwrap_or_else(|| panic!("{what}: this must be refused"));
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}");
         assert!(
-            stored.as_object().expect("object").contains_key(member),
-            "the writer emits {member}"
+            error
+                .message
+                .contains("not what its admitted history produced"),
+            "{what}: {error}"
         );
-        stored.as_object_mut().expect("object").remove(member);
-        write_raw(&path, &stored).expect("a candidate missing one member");
+        assert!(error.message.contains("engr repair"), "{what}: {error}");
+    };
+    divergent(
+        "preparing a Human mutation",
+        gate::prepare(&root, payload(Act::Add, &id, "more")).err(),
+    );
+    divergent(
+        "admitting an Agent mutation",
+        gate::admit_agent(
+            &root,
+            common::agent_payload(Act::Add, &id, content("more")),
+            None,
+        )
+        .err(),
+    );
+    divergent(
+        "confirming a question prepared beforehand",
+        gate::confirm(&root, &format!("CONFIRM {}", held.candidate.code())).err(),
+    );
+    // And the pending surface says so rather than offering the code.
+    match gate::answerable(&root, &held.candidate).expect("answerable") {
+        gate::Answerable::Unanswerable(reason) => assert!(
+            reason.contains("not what its admitted history produced"),
+            "{reason}"
+        ),
+        other => panic!("a divergent predecessor is not answerable: {other:?}"),
+    }
+    // The durable boundary asks it too, whatever route reaches it. This is the
+    // step that would make the edit durable — by writing a record that stands
+    // behind it — so the property belongs to the boundary and not only to the
+    // three ways in.
+    divergent(
+        "the durable append boundary",
+        store::check_appendable(
+            &root,
+            &unadmitted_human_event(&id, payload(Act::Add, &id, "more"), 3),
+        )
+        .err(),
+    );
 
-        let error = gate::find(&root, &code)
-            .err()
-            .unwrap_or_else(|| panic!("{member}: an always-present member is not optional"));
-        assert_eq!(error.code, engr::EXIT_SCHEMA, "{member}");
+    // Verification reports it, and reports it as itself: the seals are sound, so
+    // this is not a tampering finding.
+    let report = ops::verify(&root, &id).expect("verify");
+    assert!(!report.passed(), "a divergent projection is not a PASS");
+    assert!(!report.object_tampered, "the seals verify");
+    assert!(report.tampered.is_empty(), "and so does every Section seal");
+    // And as the right one of the two faults: history replays perfectly here,
+    // so this is the projection being wrong rather than the EventStore.
+    match report
+        .history
+        .as_ref()
+        .expect("verification names the fault")
+    {
+        engr::ops::HistoryFault::Divergent(what) => assert_eq!(*what, "sections"),
+        other => panic!("history replays, so this is not {other:?}"),
     }
 
-    std::fs::write(&path, &original).expect("restore");
-    gate::find(&root, &code).expect("and the prepared envelope reads back");
+    // Nothing durable moved while all of that was refused.
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "no route appended anything"
+    );
+
+    // And `repair` is the way back, which is the half that makes detection worth
+    // anything. The seals verify here, so eligibility cannot be integrity alone:
+    // a state every trust surface reports and no supported path can undo is a
+    // state that leaves hand-editing as the only answer, which is what put the
+    // record here.
+    let prepared = gate::prepare_repair(&root, &id).expect("a divergent projection is repairable");
+    let repaired = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("and the repair is confirmable");
+    assert_eq!(
+        repaired.object.sections[0].text, "the confirmed wording",
+        "restored to what history proves, not to what the bytes claimed"
+    );
+    assert!(
+        ops::verify(&root, &id).expect("verify").passed(),
+        "restored authority verifies again"
+    );
+    assert!(
+        ops::history_fault(&root, &repaired.object)
+            .expect("fault")
+            .is_none(),
+        "and is what its admitted history produced"
+    );
+    admit(&root, payload(Act::Add, &id, "and ordinary work continues"));
+}
+
+/// A repair is classified from admitted history, not from the bytes it
+/// distrusts.
+///
+/// `prepare_repair` already derives its `expected_rev` from provable history.
+/// Classification used to read the stored projection instead, so corruption
+/// that moved `rev` made the one recovery action `Stale` before confirmation
+/// could reach the repair-specific path — and cleanup would then discard a
+/// legitimate repair Challenge as dead.
+#[test]
+fn a_repair_is_classified_from_history_when_the_stored_revision_is_corrupt() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "corrupt revision");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+
+    // A schema-valid, integrity-invalid stored projection whose revision itself
+    // is wrong: the seal is left alone, so this is corruption rather than a
+    // resealed edit.
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["rev"] = serde_json::json!(9);
+    write_raw(&path, &value).expect("write");
+    store::load_object(&root, &id).expect("it still parses");
+
+    let prepared = gate::prepare_repair(&root, &id).expect("repair is proposable");
+    assert_eq!(
+        prepared.candidate.expected_rev(),
+        2,
+        "the predecessor is the provable revision, not the stored one"
+    );
+    assert!(
+        matches!(
+            gate::candidate_state(&root, &prepared.candidate).expect("state"),
+            gate::CandidateState::Pending
+        ),
+        "a repair is pending, not stale"
+    );
+    assert!(
+        gate::is_live(&root, &prepared.candidate),
+        "so cleanup must not treat it as spent"
+    );
+    assert!(
+        matches!(
+            gate::answerable(&root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "and the screen offers the code"
+    );
+
+    let admitted = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("the repair is confirmable");
+    assert_eq!(admitted.object.rev, 3);
+    assert_eq!(admitted.object.sections[0].text, "admitted wording");
+    assert!(ops::verify(&root, &id).expect("verify").passed());
+}
+
+/// An integrity-invalid ordinary predecessor makes its pending question
+/// unanswerable, and the screen says so.
+///
+/// Ordinary confirmation refuses it — correctly, or unrelated work would launder
+/// an out-of-band edit into valid authority. The surface used to be rendered
+/// from diagnostic material and a Rule check alone, so it offered a code that
+/// could not be spent.
+#[test]
+fn an_ordinary_question_over_corrupt_authority_is_unanswerable() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "corrupt authority");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+    let held = gate::prepare(&root, payload(Act::Add, &id, "an addition"))
+        .expect("prepare against sound authority");
+
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["sections"][0]["text"] = serde_json::json!("edited without resealing");
+    write_raw(&path, &value).expect("write");
+
+    match gate::answerable(&root, &held.candidate).expect("answerable") {
+        // The seal failure itself, named — not a Rule verdict, and not a
+        // confirmation instruction.
+        gate::Answerable::Unanswerable(reason) => {
+            assert!(reason.contains("seal"), "{reason}");
+        }
+        other => panic!("corrupt authority is not answerable: {other:?}"),
+    }
+    let error = gate::confirm(&root, &format!("CONFIRM {}", held.candidate.code()))
+        .expect_err("and confirmation refuses it too");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+}
+
+/// Cleaning up a spent Challenge does not depend on material that mattered only
+/// before admission.
+///
+/// The documented crash window leaves a durable Event, a saved projection and a
+/// Challenge file. The only operation left is removing the file — but live
+/// payload validation used to run first, resolving `based_on` and reference
+/// commits against the repository. If those commits stopped resolving in the
+/// meantime, the retry failed and the spent Challenge stayed on disk with
+/// nothing left to admit and no way to say so.
+#[test]
+fn an_applied_challenge_is_cleaned_up_even_when_its_basis_is_gone() {
+    let (_dir, root) = workspace();
+    let commit = commit_all(&root, "a basis to pin");
+    let id = new_object(&root, "spent challenge");
+    let mut proposal = payload(Act::Add, &id, "wording pinned to a commit");
+    proposal
+        .action
+        .value_mut()
+        .expect("a section value")
+        .content
+        .based_on = Some(BasedOn::new(commit.clone()));
+    let prepared = gate::prepare(&root, proposal).expect("prepare");
+    let code = prepared.candidate.code().to_owned();
+    let admitted = common::admitted_code(&root, &code);
+    assert_eq!(admitted.object.rev, 2);
+
+    // The crash: the record and the projection are durable, the Challenge was
+    // never removed.
+    write_raw(
+        &store::challenge_path(&root, &code).expect("path"),
+        &prepared.candidate.challenge,
+    )
+    .expect("restore the challenge a deletion crash would have left");
+
+    // And the repository moves on in a way that makes the pinned commit
+    // unresolvable — a prune, a rewritten branch, a fresh shallow clone.
+    // Reproduced here by replacing the repository entirely.
+    std::fs::remove_dir_all(root.join(".git")).expect("drop the repository");
+    commit_all(&root, "a different history");
+    assert!(
+        engr::git::resolve(&root, &commit).is_none(),
+        "the pinned commit must no longer resolve"
+    );
+
+    // Nothing is left to admit, so nothing about the mutation is revalidated.
+    match gate::answerable(&root, &prepared.candidate).expect("answerable") {
+        gate::Answerable::Cleanup => {}
+        other => panic!("an applied admission is cleanup, not {other:?}"),
+    }
+    let again = gate::confirm(&root, &format!("CONFIRM {code}")).expect("cleanup finishes");
+    assert_eq!(again.object.rev, 2, "the retry admits nothing");
+    assert_eq!(
+        store::load_events(&root, &id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert!(
+        gate::pending(&root).expect("candidates").is_empty(),
+        "and the spent Challenge is gone"
+    );
+}
+
+/// Repair reaches the durable boundary, whatever the corrupt projection says.
+///
+/// The stored bytes are what repair distrusts, so every boundary must take its
+/// predecessor from admitted history — including the append's own tail
+/// validation, which is the last one and was still reading the corrupt
+/// projection. A history whose later Events consume what the earlier ones
+/// created is where that shows: with `rev` edited backwards, the append
+/// validated the repair by replaying an Event the corrupt projection had already
+/// applied, and refused the one recovery action *after* it had been offered,
+/// confirmed and answered.
+#[test]
+fn a_repair_is_admitted_over_a_history_whose_later_events_consume_earlier_ones() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "delete then repair");
+    admit(
+        &root,
+        payload(Act::Add, &id, "wording that will be removed"),
+    );
+    admit(&root, common::delete(&id, 1));
+    let admitted = store::load_object(&root, &id).expect("object");
+    assert_eq!(admitted.rev, 3);
+    assert!(admitted.sections.is_empty(), "§1 was consumed at rev 3");
+
+    // Only the revision, and no reseal: the projection is integrity-invalid and
+    // claims to be one Event behind where history says it is.
+    let path = store::object_path(&root, &id);
+    let mut value: serde_json::Value = store::read_json(&path).expect("read");
+    value["rev"] = serde_json::json!(2);
+    write_raw(&path, &value).expect("write");
+
+    let prepared = gate::prepare_repair(&root, &id).expect("repair prepares");
+    assert_eq!(
+        prepared.candidate.expected_rev(),
+        3,
+        "against the provable revision"
+    );
+    let repaired = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("and the durable boundary admits it");
+    assert_eq!(repaired.object.rev, 4);
+    assert!(
+        repaired.object.sections.is_empty(),
+        "restored to what history proves, which is that §1 is gone"
+    );
+    assert_eq!(
+        repaired.object.next_section_id, admitted.next_section_id,
+        "including the counter, so the consumed id is never handed out again"
+    );
+    assert!(ops::verify(&root, &id).expect("verify").passed());
+}
+
+/// A Ref cannot borrow authority from a target that seals perfectly and is not
+/// what its own history produced.
+///
+/// **Two Objects, because that is where the hole was.** A source's own
+/// admission-predecessor check already refuses a divergent *self*, so a
+/// same-Object fixture is caught for the wrong reason and proves nothing. Here A
+/// is the target and B is the source: A is admitted and committed, then one
+/// field of A's stored Section is changed and both seals are recomputed. A's
+/// EventStore and the pinned commit are untouched.
+///
+/// The forged field is deliberately one the Ref does **not** select. Nothing
+/// about drift or staleness can see it: the selected `text` still equals what
+/// the commit holds, every seal passes, and B's own history is impeccable —
+/// which is exactly why B's verification reported nothing. The sharpest instance
+/// of the same hole is promoting a Section from `agent` to `human`, where the
+/// Human-only Ref rule then reads the forged door; the check closes it wherever
+/// the divergence lies, because it asks about the target rather than about which
+/// field moved.
+#[test]
+fn a_reference_cannot_borrow_authority_from_a_resealed_target() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    let source = new_object(&root, "the source");
+    admit(&root, payload(Act::Add, &target, "depended upon"));
+    let commit = commit_all(&root, "record the target");
+    let good_ref = text_ref(&root, &target, 1, &commit);
+
+    // Sound first, so what follows is a statement about the forgery rather than
+    // about the fixture.
+    let mut sound_use = payload(Act::Add, &source, "depends on the target");
+    edit(&mut sound_use, |content| {
+        content.refs = vec![good_ref.clone()];
+    });
+    let prepared =
+        gate::prepare(&root, sound_use.clone()).expect("a sound target is referenceable");
+    gate::discard(&root, prepared.candidate.code()).expect("discard");
+
+    let sound = store::load_object(&root, &target).expect("target");
+    let forged = {
+        let mut forged = sound.clone();
+        forged.sections[0].header = Some("a heading nobody admitted".to_owned());
+        forged.sections[0] = engr::integrity::sealed_section(&forged.sections[0]).expect("seal");
+        forged.reseal().expect("reseal");
+        forged
+    };
+    save_raw(&root, &forged).expect("put the forgery on disk");
+    engr::integrity::check_object_integrity(&forged).expect("the forgery vouches for itself");
+    assert!(
+        !ops::verify(&root, &target).expect("verify").passed(),
+        "the target's own verification sees it, and always did"
+    );
+
+    // 1. Preparation refuses it, and says what is wrong with the target.
+    let mut against_forged = payload(Act::Add, &source, "depends on a forged target");
+    edit(&mut against_forged, |content| {
+        content.refs = vec![good_ref.clone()];
+    });
+    let error = gate::prepare(&root, against_forged).expect_err("a forgery is not authority");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("admitted history"),
+        "the refusal names the target's own fault: {error}"
+    );
+
+    // 2. And so does confirmation, when the target is forged after the question
+    // was prepared against a sound one.
+    save_raw(&root, &sound).expect("restore");
+    let prepared =
+        gate::prepare(&root, sound_use.clone()).expect("prepared against a sound target");
+    save_raw(&root, &forged).expect("forge it again before the answer");
+    let error = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect_err("the target moved out of band between the question and the answer");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("admitted history"),
+        "and confirmation says the same thing: {error}"
+    );
+
+    // 3. A Ref admitted while the target was sound stops reporting the source as
+    // sound once the target is forged under it.
+    save_raw(&root, &sound).expect("restore for the admission");
+    admit(&root, sound_use);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+    save_raw(&root, &forged).expect("forge it after the fact");
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(
+        !report.passed(),
+        "a source standing on a forged target is not sound"
+    );
+    assert_eq!(report.standing_on_divergent.len(), 1);
+    assert!(
+        report.standing_on_tampered.is_empty(),
+        "and it is not tampering, because the seals pass"
+    );
+}
+
+/// `repair` must not answer a broken Event tail by calling the Object sound.
+///
+/// Eligibility asks [`ops::history_fault`], and that question is about the
+/// prefix at `rev <= object.rev` — deliberately, because a durable tail the
+/// projection has not caught up to is the recovery buffer working rather than a
+/// fault. A tail that cannot be applied at all is outside the question, so it
+/// came back `None`, and the refusal that fired said the Object "verifies and is
+/// what its admitted history produced". `verify`, `show` and `ls` were all
+/// refusing that exact workspace at the same instant.
+///
+/// The order is the fix: `ops::provable` replays the whole history and is where
+/// the comment always said unreplayable history is refused, so it is asked
+/// before the question that sees a prefix. Nothing here is about repair doing
+/// more; it is about it not making a claim.
+#[test]
+fn repair_does_not_call_an_unreplayable_tail_sound() {
+    let (_temp, root) = workspace();
+    let id = new_object(&root, "a tail that cannot be applied");
+    admit(
+        &root,
+        common::payload(Act::Add, &id, content("the wording")),
+    );
+    let stored = store::load_object(&root, &id).expect("object");
+    let mut events = store::load_events(&root, &id).expect("events");
+    assert_eq!(stored.rev, events.len() as u64, "the projection is current");
+
+    // Correctly sealed, correctly framed, revision-contiguous — and it deletes a
+    // Section that does not exist, so replay refuses it. Every read surface
+    // fails on this workspace; the question is what `repair` says.
+    events.push(unadmitted_human_event(
+        &id,
+        common::payload(Act::Delete(99), &id, content("")),
+        stored.rev + 1,
+    ));
+    write_raw_events(&root, &id, &events);
+
+    assert!(
+        ops::verify(&root, &id).is_err(),
+        "the premise: the read surfaces refuse this workspace"
+    );
+    let error = gate::prepare_repair(&root, &id).expect_err("and so must repair");
+    assert!(
+        !error.message.contains("nothing to repair"),
+        "a claim of soundness is the one answer this must never give: {error}"
+    );
+    assert!(
+        error.message.contains("cannot be replayed"),
+        "and it names the fault it found: {error}"
+    );
+
+    // The control, on the same construction: with the tail removed, the Object
+    // really is sound and `repair` says exactly that.
+    events.pop();
+    write_raw_events(&root, &id, &events);
+    let sound = gate::prepare_repair(&root, &id).expect_err("nothing to repair");
+    assert!(sound.message.contains("nothing to repair"), "{sound}");
 }

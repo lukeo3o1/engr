@@ -8,6 +8,8 @@
 //! refuses what it does not understand rather than reading past it.
 
 use engr::rules::{self, Domain};
+
+mod common;
 use engr::store;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -59,20 +61,7 @@ fn commit_all(root: &Path, message: &str) -> String {
 
 /// An admitted Object, so a Work sidecar has a subject that exists.
 fn admitted_object(root: &Path) -> String {
-    let id = engr::model::new_id();
-    let payload = engr::model::Payload {
-        action: engr::model::Action::ObjectCreated,
-        object: id.clone(),
-        becomes: None,
-        content: engr::model::Content {
-            text: "a thing to work on".to_owned(),
-            ..engr::model::Content::default()
-        },
-    };
-    let prepared = engr::gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    engr::gate::confirm(root, &response).expect("confirm");
-    id
+    common::new_object(root, "a thing to work on")
 }
 
 const ARCHITECTURE: &str = "\
@@ -1507,16 +1496,17 @@ fn the_review_block_refuses_what_v1_does_not_define() {
     }
 }
 
-/// The workspace-version boundary holds on every public door, not just the CLI.
+/// The workspace-generation boundary holds on every public door, not just the
+/// CLI.
 ///
-/// Rule semantics are versioned by the workspace, so an older workspace must not
-/// be read under the current generation's defaults — and it must not matter which
-/// public API asked. Enforcing it only in the command left `engr rules ls` refusing a
-/// workspace that `rules::load_all` accepted and silently assigned the newer
-/// effective policy, which is the exact reinterpretation the version exists to
+/// Rule semantics belong to the generation, so a predecessor workspace must not
+/// be read under this one's rules — and it must not matter which public API
+/// asked. Enforcing it only in the command left `engr rules ls` refusing a
+/// workspace that `rules::load_all` accepted and silently assigned the current
+/// effective policy, which is the exact reinterpretation the marker exists to
 /// prevent, reached through a different door.
 #[test]
-fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
+fn no_public_rule_path_reads_a_predecessor_workspace_under_the_new_semantics() {
     let (_dir, root) = workspace();
     write_rule(
         &root,
@@ -1525,18 +1515,19 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
     );
     let (mutation, precondition) = subject();
 
-    // Exactly what a version 2 workspace is: intact, and one explicit command
-    // away from being current.
+    // Exactly what the released predecessor is: no generation marker, and the
+    // bootstrap that release wrote.
+    std::fs::remove_file(store::version_path(&root)).expect("remove VERSION");
     std::fs::write(
         store::engr_dir(&root).join("format.json"),
-        r#"{"format":"engr-workspace","version":2}"#,
+        "{\"format\":\"engr-workspace\",\"version\":1}",
     )
     .expect("format");
 
     let refused = |error: engr::Error, what: &str| {
         assert!(
-            error.message.contains("version 2") && error.message.contains("engr migrate"),
-            "{what} should refuse an older workspace by name, said {:?}",
+            error.message.contains("migrate"),
+            "{what} should refuse a predecessor workspace by name, said {:?}",
             error.message
         );
     };
@@ -1551,15 +1542,15 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
         mutation.clone(),
         precondition.clone(),
     ) {
-        Ok(_) => panic!("bind produced a v3 binding over a workspace declaring v2"),
+        Ok(_) => panic!("bind produced a binding over a predecessor workspace"),
         Err(error) => refused(error, "bind"),
     }
     refused(
         rules::check(
             &root,
             Domain::Backlog,
-            mutation.clone(),
-            precondition.clone(),
+            mutation,
+            precondition,
             "any hash",
             &["recording-policy".to_owned()],
         )
@@ -1567,15 +1558,12 @@ fn no_public_rule_path_reads_an_older_workspace_under_the_new_semantics() {
         "check",
     );
 
-    // And the explicit migration is what makes the newer semantics available,
-    // through those same doors.
-    store::migrate(&root).expect("migrate");
-    let rule = rules::load_all(&root)
-        .expect("load_all after migrating")
-        .remove(0);
-    assert_eq!(rule.review, rules::Review::default());
-    let bound = rules::bind(&root, Domain::Backlog, mutation, precondition).expect("bind");
-    assert_eq!(bound.rule_ids(), vec!["recording-policy".to_owned()]);
+    // And there is no route forward for this one, because the released
+    // generation had no Rule subsystem at all: a `rules/` directory says this
+    // workspace was written by a build that was never published.
+    let error =
+        engr::migration::prepare(&root).expect_err("no route from a later unreleased build");
+    assert!(error.message.contains("rules/"), "{}", error.message);
 }
 
 /// One scalar attempt, judged against each rule's own ceiling.
@@ -2092,7 +2080,7 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
 
     // The domain is the shared safe-integer range, not RFC 8785's wider
     // "exactly a binary64 value". That is narrower than the standard allows,
-    // deliberately: the coordinated Phase-3 contract fixes one domain every
+    // deliberately: the protocol fixes one domain every
     // implementation can carry, and a value a conforming reader in another
     // language cannot hold is a value two readers disagree about. 2^53 and 2^60
     // are exact binary64 values and are refused here for that reason.
@@ -2115,7 +2103,7 @@ fn a_subject_outside_the_canonical_number_range_is_refused() {
     }
 
     assert!(
-        engr::PROTOCOL.contains("shared Phase-3 integer domain"),
+        engr::PROTOCOL.contains("shared protocol integer domain"),
         "the shipped protocol must state the range the implementation enforces"
     );
     assert!(
@@ -2464,9 +2452,8 @@ fn provenance_is_resolved_from_the_repository_root_not_the_workspace() {
 /// nothing.
 ///
 /// The companion half is not testable from out here, and that is the point:
-/// `CandidateSubject` and `ReviewMutation` have private members, so the forging
-/// code in the earlier version of this test no longer compiles. Unreachable
-/// beats refused.
+/// `ReviewMutation` has private members, so the forging code in the earlier
+/// version of this test no longer compiles. Unreachable beats refused.
 #[test]
 fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
     let (_dir, root) = workspace();
@@ -2474,12 +2461,12 @@ fn the_public_library_cannot_bind_an_object_review_from_arbitrary_json() {
         serde_json::json!({"action": "section_revised"}),
         serde_json::json!({
             "operation": {"name": "not.a.frozen.operation", "parameters": {}},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
             "after": null
         }),
         serde_json::json!({
             "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
-            "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+            "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
             "after": null
         }),
     ] {
@@ -2635,12 +2622,12 @@ fn object_transition() -> (
     let before = engr::model::Object::new(id.clone(), "a title".to_owned()).expect("object");
     let mut after = before.clone();
     after.rev = 1;
-    let payload = engr::model::Payload {
-        action: engr::model::Action::ObjectCreated,
-        object: id,
-        becomes: None,
-        content: engr::model::Content::default(),
-    };
+    let payload = engr::model::Payload::new(
+        id,
+        engr::model::Action::ObjectCreated {
+            title: "a title".to_owned(),
+        },
+    );
     (before, after, payload)
 }
 
@@ -2738,19 +2725,26 @@ fn a_snapshot_body_is_as_strict_as_the_loader() {
 /// over a target denoting nothing — and `object_review_mutation` delegates to
 /// the same builder, so it reached ReviewDigest too.
 #[test]
-fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
+fn an_object_projection_cannot_be_built_over_an_identity_that_is_not_one() {
+    fn section_value() -> engr::model::SectionValue {
+        engr::model::SectionValue::new(
+            engr::semantics::Admitted::new(engr::semantics::Admission::Human, common::now()),
+            common::wording("wording"),
+        )
+    }
+
     let (before, after, payload) = object_transition();
-    engr::proof::candidate_subject(&before, &after, &payload, None).expect("a real transition");
+    engr::proof::object_projection(&before, &after, &payload).expect("a real transition");
 
     let mut malformed = payload.clone();
     malformed.object = "not-an-id".to_owned();
-    engr::proof::candidate_subject(&before, &after, &malformed, None)
+    engr::proof::object_projection(&before, &after, &malformed)
         .expect_err("that is not an object id");
 
     // Well-formed, and not the object either side describes.
     let mut mismatched = payload.clone();
     mismatched.object = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e11".to_owned();
-    let refused = engr::proof::candidate_subject(&before, &after, &mismatched, None)
+    let refused = engr::proof::object_projection(&before, &after, &mismatched)
         .expect_err("a different object");
     assert!(
         refused.message.contains("states either side"),
@@ -2760,13 +2754,20 @@ fn a_candidate_subject_cannot_be_built_over_an_identity_that_is_not_one() {
 
     // A section number that names no section.
     let mut zero = payload.clone();
-    zero.action = engr::model::Action::SectionRevised { section: 0 };
-    engr::proof::candidate_subject(&before, &after, &zero, None)
-        .expect_err("section ids start at 1");
+    zero.action = engr::model::Action::SectionUpdated {
+        section: 0,
+        value: section_value(),
+        becomes: None,
+    };
+    engr::proof::object_projection(&before, &after, &zero).expect_err("section ids start at 1");
 
     let mut oversize = payload;
-    oversize.action = engr::model::Action::SectionRevised { section: 1 << 53 };
-    engr::proof::candidate_subject(&before, &after, &oversize, None)
+    oversize.action = engr::model::Action::SectionUpdated {
+        section: 1 << 53,
+        value: section_value(),
+        becomes: None,
+    };
+    engr::proof::object_projection(&before, &after, &oversize)
         .expect_err("past the shared safe-integer ceiling");
 }
 
@@ -2787,7 +2788,8 @@ fn a_collection_or_work_rule_with_unusable_material_blocks_its_domain() {
     let (_dir, root) = workspace();
     let object = admitted_object(&root);
     engr::work::start(&root, &obj(&object), Some("stands here"), attempt(1)).expect("start");
-    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    let plan =
+        engr::collection::create(&root, "a-plan", "a plan", None, None, attempt(1)).expect("plan");
 
     write_rule(
         &root,
@@ -2814,7 +2816,7 @@ based_on:
         .expect_err("the applicable Rule cannot be established");
     assert_ne!(refused.code, 0);
     assert_eq!(
-        engr::collection::load(&root, &plan.id).expect("load").name,
+        engr::collection::load(&root, &plan.id).expect("load").title,
         "a plan",
         "nothing was written"
     );
@@ -2834,7 +2836,8 @@ fn a_usable_collection_or_work_rule_admits_an_attempt_within_its_ceiling() {
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let object = admitted_object(&root);
     engr::work::start(&root, &obj(&object), None, attempt(1)).expect("start");
-    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    let plan =
+        engr::collection::create(&root, "a-plan", "a plan", None, None, attempt(1)).expect("plan");
     write_rule(
         &root,
         "direct",
@@ -2872,7 +2875,8 @@ fn an_exhausted_collection_or_work_attempt_refuses_rather_than_guessing() {
     std::fs::write(root.join("AGENTS.md"), "the contract\n").expect("basis");
     let object = admitted_object(&root);
     engr::work::start(&root, &obj(&object), None, attempt(1)).expect("start");
-    let plan = engr::collection::create(&root, "a plan", None, None, attempt(1)).expect("plan");
+    let plan =
+        engr::collection::create(&root, "a-plan", "a plan", None, None, attempt(1)).expect("plan");
     write_rule(
         &root,
         "direct",
@@ -2912,7 +2916,7 @@ based_on:
         );
     }
     assert_eq!(
-        engr::collection::load(&root, &plan.id).expect("load").name,
+        engr::collection::load(&root, &plan.id).expect("load").title,
         "a plan",
         "a refused mutation writes nothing"
     );
@@ -2974,4 +2978,233 @@ fn a_rule_binding_never_mixes_two_reads_of_the_file() {
 /// A Work subject from a bare Object id, which is what these tests hold.
 fn obj(id: &str) -> engr::work::Subject {
     engr::work::Subject::Object(id.to_owned())
+}
+
+/// A Rule id is `[a-z0-9][a-z0-9-]{0,31}`, bounded and starting with something.
+///
+/// The grammar is not decoration. An id is typed at a command line, printed in
+/// a refusal, and used as the identity a ReviewDigest binds — so a leading `-`
+/// reads as a flag wherever it is typed, and an unbounded one is a name this
+/// build would happily write and another filesystem would refuse. Held at the
+/// loader, so an id nothing could address never reaches a review at all.
+#[test]
+fn a_rule_id_is_bounded_and_starts_with_something() {
+    let (_dir, root) = workspace();
+    let body = |id: &str| {
+        format!("---\nid: {id}\napplies:\n  domains:\n    - object\n---\n\n# A rule\n\nSay it.\n")
+    };
+
+    for id in ["a", "0", "a-b", "recording-policy", &"a".repeat(32)] {
+        write_rule(&root, "policy", &body(id));
+        rules::load_all(&root).unwrap_or_else(|error| panic!("{id:?} is canonical: {error}"));
+    }
+
+    for id in [
+        "-leading-dash",
+        "Uppercase",
+        "under_score",
+        "with space",
+        &"a".repeat(33),
+    ] {
+        write_rule(&root, "policy", &body(id));
+        let error = rules::load_all(&root).expect_err(id);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{id:?}");
+        assert!(
+            error.message.contains("is not canonical"),
+            "{id:?}: {}",
+            error.message
+        );
+    }
+}
+
+/// The restricted YAML profile is enforced, not merely declared — and enforced
+/// on the construct rather than on the way it happens to be written.
+///
+/// #66 fixes the profile: no anchors, no aliases, no custom tags, no duplicate
+/// keys. A typed deserializer enforces almost none of it — it resolves an alias
+/// into its anchor's value, applies a tag, and hands back a `FrontMatter` that
+/// looks exactly like one written plainly.
+///
+/// The reason it has to bite is artifact-exact identity. A Rule's ReviewDigest
+/// changes on any byte-level change, "including semantically equivalent YAML
+/// reformatting" — so two files whose bytes differ must never be one policy, and
+/// an anchor is precisely a way of writing one policy twice.
+///
+/// **Every case appears in both block and flow style.** The first version of
+/// this guard asked only what a node started with, so a construct nested inside
+/// a flow collection was never looked at: `applies: { domains: [&x object] }`
+/// has a node beginning with `{`. A profile that depends on presentation is not
+/// a profile.
+#[test]
+fn the_restricted_yaml_profile_refuses_what_it_says_it_refuses() {
+    let (_dir, root) = workspace();
+    let body = |front: &str| format!("---\n{front}---\n\n# Policy\n\nSay it.\n");
+
+    // Both presentations of the same schema load, so the cases below fail for
+    // the construct they carry and not for the way they are written.
+    for spelling in [
+        "id: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 3\n  on_exhaustion: reject\n",
+        "id: policy\napplies: { domains: [object] }\nreview: { max_attempts: 3, on_exhaustion: reject }\n",
+    ] {
+        write_rule(&root, "policy", &body(spelling));
+        let loaded = rules::load_all(&root)
+            .unwrap_or_else(|error| panic!("an ordinary rule loads: {error}"));
+        assert_eq!(loaded.len(), 1);
+    }
+
+    for (what, front) in [
+        (
+            "an anchor, block",
+            "id: policy\napplies:\n  domains: &d\n    - object\n",
+        ),
+        (
+            "an anchor, flow",
+            "id: policy\napplies: { domains: [&d object] }\n",
+        ),
+        (
+            "an anchor on an explicit key, block",
+            "? &key id\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "an anchor on an explicit key, flow",
+            "{ ? &key id : policy, applies: { domains: [object] } }\n",
+        ),
+        (
+            "an alias, block",
+            "id: policy\napplies:\n  domains: &d\n    - object\nunused: *d\n",
+        ),
+        (
+            "an alias, flow",
+            "id: policy\napplies: { domains: &d [object], spare: *d }\n",
+        ),
+        (
+            "an alias on an explicit key, block",
+            "? *key\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "an alias on an explicit key, flow",
+            "{ ? *key : policy, applies: { domains: [object] } }\n",
+        ),
+        (
+            "a tag, block",
+            "id: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: !!int 3\n  on_exhaustion: reject\n",
+        ),
+        (
+            "a tag, flow",
+            "id: policy\napplies: { domains: [ !!str object ] }\n",
+        ),
+        (
+            "a tag on a nested flow value",
+            "id: policy\napplies: { domains: !!seq [object] }\n",
+        ),
+        (
+            "a tag on an explicit key, block",
+            "? !policy-key id\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "a tag on an explicit key, flow",
+            "{ ? !policy-key id : policy, applies: { domains: [object] } }\n",
+        ),
+        (
+            "a duplicate key, block",
+            "id: policy\nid: other\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a duplicate nested key, block",
+            "id: policy\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 3\n  max_attempts: 4\n  on_exhaustion: reject\n",
+        ),
+        (
+            "a duplicate key, flow",
+            "id: policy\napplies: { domains: [object], domains: [backlog] }\n",
+        ),
+        (
+            "a folded block scalar",
+            "id: policy\napplies:\n  domains:\n    - object\nspare: >\n  smuggled\n",
+        ),
+        (
+            "a block scalar",
+            "id: policy\napplies:\n  domains:\n    - object\nspare: |\n  id: smuggled\n",
+        ),
+        (
+            "a second document",
+            "id: policy\napplies:\n  domains:\n    - object\n...\n",
+        ),
+        (
+            "an explicit document start",
+            "---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a directive, which forces an explicit document",
+            "%YAML 1.2\n---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a tag directive",
+            "%TAG !e! tag:example.com,2026:\n---\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        // The document node itself is a node, and node properties are refused
+        // there for the same reason they are refused anywhere else.
+        (
+            "an anchor on the document root",
+            "&root\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a tag on the document root",
+            "!!map\nid: policy\napplies:\n  domains:\n    - object\n",
+        ),
+        // A mapping keyed by a collection. libyaml normalizes explicit-key
+        // syntax into the same key/value alternation as `key:`, so this is
+        // caught by the same rule rather than by a special case.
+        (
+            "a sequence used as a mapping key",
+            "? [a, b]\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        (
+            "a mapping used as a mapping key",
+            "? { a: b }\n: policy\napplies:\n  domains: [object]\n",
+        ),
+        // Duplicate keys are compared as resolved scalar *values*. Two
+        // spellings of one key are one key, which a scanner comparing raw
+        // source text would report as two different keys and let through.
+        (
+            "a duplicate key spelled two ways",
+            "id: policy\n\"id\": other\napplies:\n  domains:\n    - object\n",
+        ),
+        (
+            "a duplicate key across block and flow presentation",
+            "applies:\n  domains: [object]\napplies: { domains: [backlog] }\nid: policy\n",
+        ),
+    ] {
+        write_rule(&root, "policy", &body(front));
+        let error = rules::load_all(&root)
+            .err()
+            .unwrap_or_else(|| panic!("{what} must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}");
+    }
+
+    // And the restriction is about YAML structure, not about characters. An
+    // ampersand, an asterisk, a colon or a hash inside a scalar is content, and
+    // refusing those would make the profile unusable for ordinary writing.
+    write_rule(
+        &root,
+        "policy",
+        &body("id: policy\napplies:\n  domains:\n    - object\n"),
+    );
+    rules::load_all(&root).expect("the plain spelling still loads");
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: policy\napplies:\n  domains:\n    - object\n---\n\n# Policy & more\n\nSay it: *emphatically* # not a comment\n",
+    );
+    rules::load_all(&root).expect("ordinary prose in the body is untouched");
+    write_rule(
+        &root,
+        "policy",
+        "---\nid: policy\napplies:\n  domains:\n    - object\nnote: \"a * b & c\"\n---\n\n# Policy\n\nSay it.\n",
+    );
+    let error = rules::load_all(&root).expect_err("an unknown member is still refused");
+    assert!(
+        error.message.contains("note"),
+        "and refused for being unknown, not for its punctuation: {}",
+        error.message
+    );
 }

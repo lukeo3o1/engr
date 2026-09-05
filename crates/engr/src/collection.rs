@@ -153,19 +153,21 @@ pub struct Member {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
-    /// Ten Crockford Base32 characters, stable and independent of the name.
-    /// Renaming a plan does not make it a different plan, and nothing about the
-    /// id says what the plan is — no milestone number, no date, no type.
+    /// A stable workspace-scoped key the caller chose: `[a-z0-9][a-z0-9-]{0,31}`.
+    /// Renaming a plan does not make it a different plan, so the id is not the
+    /// title — but unlike every other identity here it is meant to be said out
+    /// loud, so it is a name rather than a token.
     pub id: String,
-    pub name: String,
+    pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub state: State,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
-    /// Required, and may be empty. Not `#[serde(default)]`: an omitted list and
-    /// an empty one would be one plan written two ways, and a stored shape the
-    /// write path cannot produce is a second schema waiting to be depended on.
+    /// Required, and may be `[]`. One of the two explicit exceptions to the
+    /// canonical omission rule: a Collection is a statement about what is grouped
+    /// together, so "nothing yet" is an answer it has to give rather than leave
+    /// out.
     pub members: Vec<Member>,
 }
 
@@ -223,7 +225,7 @@ impl Collection {
             &[ResourceKind::Collection],
             "a collection id",
         )?;
-        check_stored_name(&self.name)?;
+        check_stored_title(&self.title)?;
         if let Some(description) = &self.description {
             ensure!(
                 !description.trim().is_empty(),
@@ -247,6 +249,19 @@ impl Collection {
                 member.target.reference
             );
             if let Some(order) = member.order {
+                // A persisted rank is positive. Absence is how "unranked" is
+                // written, so a stored `0` would be a second spelling of it —
+                // and `0` is the input that *means* clear, which is why it is
+                // normalized to absence on the way in rather than stored.
+                // Negatives never had a meaning at all: `planned()` would sort
+                // them ahead of every real rank, so a hand-edited `-1` silently
+                // becomes first.
+                ensure!(
+                    order > 0,
+                    EXIT_SCHEMA,
+                    "{} is ranked {order}; a rank is positive, and unranked is written by leaving it out",
+                    member.target.reference
+                );
                 // Unranked members may share their absence; a *rank* cannot be
                 // shared, or the sequence it exists to express has a tie it
                 // cannot break.
@@ -307,12 +322,12 @@ fn check_date(code: i32, what: &str, value: &str) -> Result<()> {
 /// is refused is a name that cannot do its job: an empty one, or one carrying a
 /// line break, which would break every other row in the listing as well as its
 /// own. Detail belongs in `description`, which is unbounded.
-fn check_name(code: i32, name: &str) -> Result<()> {
-    ensure!(!name.trim().is_empty(), code, "a collection needs a name");
+fn check_title(code: i32, title: &str) -> Result<()> {
+    ensure!(!title.trim().is_empty(), code, "a collection needs a title");
     ensure!(
-        !name.contains('\n'),
+        !title.contains('\n'),
         code,
-        "a collection name is the line a listing prints, so it cannot span lines. \
+        "a collection title is the line a listing prints, so it cannot span lines. \
          Put the detail in --description."
     );
     Ok(())
@@ -325,13 +340,13 @@ fn check_name(code: i32, name: &str) -> Result<()> {
 /// be accepting a spelling the API cannot produce. Two spellings of `Q3` that
 /// only a listing's alignment can tell apart is exactly the shadow schema the
 /// other domains were closed against.
-fn check_stored_name(name: &str) -> Result<()> {
-    check_name(EXIT_SCHEMA, name)?;
+fn check_stored_title(title: &str) -> Result<()> {
+    check_title(EXIT_SCHEMA, title)?;
     ensure!(
-        name.trim() == name,
+        title.trim() == title,
         EXIT_SCHEMA,
-        "a stored collection name carries no surrounding whitespace, so this is not \
-         one this build wrote: {name:?}"
+        "a stored collection title carries no surrounding whitespace, so this is not \
+         one this build wrote: {title:?}"
     );
     Ok(())
 }
@@ -360,7 +375,7 @@ pub fn check_target(what: &str, reference: &str) -> Result<()> {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
-    if !dir.is_dir() {
+    if !store::namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
@@ -399,7 +414,11 @@ fn check_canonical_members(path: &Path, collection: &Collection) -> Result<()> {
 
 pub fn load(root: &Path, id: &str) -> Result<Collection> {
     let path = path(root, id);
-    ensure!(path.exists(), EXIT_NOT_FOUND, "no collection {id}");
+    ensure!(
+        store::resource_present(&path)?,
+        EXIT_NOT_FOUND,
+        "no collection {id}"
+    );
     let collection: Collection = store::read_resource(root, &path)?;
     collection.validate()?;
     // Current generation only: a predecessor workspace kept whatever order its
@@ -416,35 +435,6 @@ pub fn load(root: &Path, id: &str) -> Result<Collection> {
         path.display(),
         collection.id
     );
-    Ok(collection)
-}
-
-/// Decode predecessor bytes already captured by coordinated migration.
-pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Collection> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
-    let collection: Collection = serde_json::from_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    collection.validate()?;
-    ensure!(
-        collection.id == id,
-        EXIT_SCHEMA,
-        "{} says it is collection {}, and a plan has one identity",
-        path.display(),
-        collection.id
-    );
-    Ok(collection)
-}
-
-/// Validate a staged Collection artifact as a current resource before publication.
-pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Collection> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    store::check_canonical_bytes(path, text, &value)?;
-    let collection = decode_for_migration(path, id, text)?;
-    store::check_current_resource_shape(path, text, &collection)?;
-    check_canonical_members(path, &collection)?;
     Ok(collection)
 }
 
@@ -483,24 +473,21 @@ fn edit<T>(
     })
 }
 
-/// Ten Crockford characters of workspace-scoped identity.
+/// The caller's own workspace-scoped key, checked against what is already there.
 ///
-/// Checked against what is already on disk rather than trusted to be unique:
-/// fifty random bits make a clash vanishingly unlikely and not impossible, and
-/// the cost of checking once at creation is nothing next to two plans sharing
-/// an id that every reference to either then resolves ambiguously.
-fn mint(root: &Path) -> Result<String> {
-    let taken = ids(root)?;
-    for _ in 0..64 {
-        let id = crate::reference::random_collection_id();
-        if !taken.contains(&id) {
-            return Ok(id);
-        }
-    }
-    Err(Error::new(
+/// A Collection id is supplied rather than minted, because it is a name a person
+/// uses — `auth-01`, said out loud in a standup. That makes uniqueness the
+/// caller's problem to be told about rather than a generator's to avoid, and
+/// being told is better than a second `auth-01` quietly becoming the first one.
+fn claim(root: &Path, id: &str) -> Result<String> {
+    crate::reference::validate_collection_id(id)
+        .map_err(|error| Error::new(EXIT_USAGE, error.message))?;
+    ensure!(
+        !ids(root)?.iter().any(|held| held == id),
         EXIT_INVARIANT,
-        "could not find an unused collection id".to_owned(),
-    ))
+        "collection {id} already exists; a plan's id is its stable name, so pick another"
+    );
+    Ok(id.to_owned())
 }
 
 /// Resolve any unique id prefix, the way objects and backlog items resolve.
@@ -525,19 +512,20 @@ pub fn resolve_id(root: &Path, spec: &str) -> Result<String> {
 
 pub fn create(
     root: &Path,
-    name: &str,
+    id: &str,
+    title: &str,
     description: Option<&str>,
     schedule: Option<Schedule>,
     attempt: Attempt,
 ) -> Result<Collection> {
-    check_name(EXIT_USAGE, name)?;
+    check_title(EXIT_USAGE, title)?;
     if let Some(schedule) = &schedule {
         schedule.validate(EXIT_USAGE)?;
     }
     locked(root, attempt, || {
         let collection = Collection {
-            id: mint(root)?,
-            name: name.trim().to_owned(),
+            id: claim(root, id)?,
+            title: title.trim().to_owned(),
             description: description.map(str::to_owned),
             state: State::Open,
             schedule,
@@ -564,9 +552,9 @@ pub fn remove(root: &Path, id: &str, attempt: Attempt) -> Result<Removed> {
     locked(root, attempt, || {
         let collection = load(root, id)?;
         let path = path(root, id);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        crate::store::remove_durably(&path)?;
         Ok(Removed {
-            name: collection.name,
+            title: collection.title,
             members: collection.members.len(),
         })
     })
@@ -575,14 +563,14 @@ pub fn remove(root: &Path, id: &str, attempt: Attempt) -> Result<Removed> {
 /// What deleting a plan threw away, so a caller can say so.
 #[derive(Debug)]
 pub struct Removed {
-    pub name: String,
+    pub title: String,
     pub members: usize,
 }
 
-pub fn rename(root: &Path, id: &str, name: &str, attempt: Attempt) -> Result<Collection> {
-    check_name(EXIT_USAGE, name)?;
+pub fn rename(root: &Path, id: &str, title: &str, attempt: Attempt) -> Result<Collection> {
+    check_title(EXIT_USAGE, title)?;
     edit(root, id, attempt, |collection| {
-        collection.name = name.trim().to_owned();
+        collection.title = title.trim().to_owned();
         Ok(())
     })?;
     load(root, id)
@@ -664,6 +652,24 @@ fn require_target(root: &Path, target: &str) -> Result<()> {
     }
 }
 
+/// The rank to persist for what a caller supplied.
+///
+/// One place, because both writers take the same value and #66 gives it one
+/// reading: absent is unranked, a persisted rank is positive, and `0` at the
+/// input boundary *means* unrank — so it is normalized to absence rather than
+/// stored as a second spelling of it. A negative is not a rank at all; storing
+/// one would sort it ahead of every real rank in `planned()`.
+fn rank(order: Option<i64>) -> Result<Option<i64>> {
+    match order {
+        Some(0) | None => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(value) => Err(Error::new(
+            EXIT_USAGE,
+            format!("--order {value} is not a rank; ranks start at 1, and 0 clears one"),
+        )),
+    }
+}
+
 pub fn add_member(
     root: &Path,
     id: &str,
@@ -677,6 +683,7 @@ pub fn add_member(
     // question. This one needs no lock: it reads the argument, not the
     // workspace.
     check_target("a collection member", target)?;
+    let order = rank(order)?;
     edit(root, id, attempt, |collection| {
         // Existence is checked **inside** the lock, because the check is what
         // defines admission. Backlog consumption takes the same workspace lock,
@@ -720,6 +727,7 @@ pub fn set_order(
     order: Option<i64>,
     attempt: Attempt,
 ) -> Result<Collection> {
+    let order = rank(order)?;
     edit(root, id, attempt, |collection| {
         collection.member_mut(target)?.order = order;
         Ok(())

@@ -7,28 +7,38 @@
 
 use engr::integrity::{
     check_mechanical_reseal, check_object_integrity, check_object_seal, check_section_seal, mutate,
-    reseal, sealed_object, sealed_section,
+    reseal, sealed_section,
 };
-use engr::model::{Object, Ref, Section};
-use engr::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
+mod common;
+
+use engr::model::{Content, Object, Ref, Section, SectionValue};
+use engr::semantics::{Admission, Admitted, ObjectType, Relation, Role, State, Supplement};
+
+const AT: &str = "2026-08-24T00:00:00Z";
 
 fn object_id() -> String {
     "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f".to_owned()
 }
 
+fn value(content: Content) -> SectionValue {
+    SectionValue::new(Admitted::new(Admission::Human, AT), content)
+}
+
 fn section(id: u64) -> Section {
-    Section {
+    Section::from_value(
         id,
-        admission: Admission::Human,
-        role: Some(Role::Decision),
-        text: "the store appends under a lock".to_owned(),
-        content: Vec::new(),
-        based_on: None,
-        refs: Vec::new(),
-        relations: Vec::new(),
-        sha256: String::new(),
-        admitted_at: "2026-08-24T00:00:00Z".to_owned(),
-    }
+        value(Content {
+            role: Some(Role::Decision),
+            text: "the store appends under a lock".to_owned(),
+            ..Content::default()
+        }),
+    )
+    .expect("section")
+}
+
+/// The same Object, for a test that has already shadowed the name.
+fn fresh() -> Object {
+    object()
 }
 
 /// An Object whose Sections carry the seals their own contents produce — the
@@ -38,28 +48,17 @@ fn object() -> Object {
     let mut object = Object::new(object_id(), "the append boundary".to_owned()).expect("object");
     object.rev = 3;
     object.next_section_id = 3;
-    object.sections = vec![sealed(section(1)), sealed(section(2))];
-    object.sha256 = Some(seal_of(&object));
+    object.sections = vec![section(1), section(2)];
+    object.reseal().expect("seal");
     object
 }
 
-fn sealed(mut section: Section) -> Section {
-    section.sha256 = seal_of_section(&section);
-    section
-}
-
 fn seal_of(object: &Object) -> String {
-    sealed_object(object)
-        .expect("project")
-        .seal()
-        .expect("seal")
+    object.recomputed_digest().expect("seal")
 }
 
 fn seal_of_section(section: &Section) -> String {
-    sealed_section(section)
-        .expect("project")
-        .seal()
-        .expect("seal")
+    section.recomputed_digest().expect("seal")
 }
 
 /// The three consequences #31 spells out, in one place.
@@ -72,28 +71,28 @@ fn a_change_anywhere_under_the_seal_is_visible_from_the_object() {
     // aggregate — which carries both — moves as well.
     let mut edited = original.clone();
     edited.sections[0].text = "the store appends without a lock".to_owned();
-    check_section_seal(&edited.sections[0], &edited.sections[0].sha256.clone())
-        .expect_err("the section seal says so");
+    check_section_seal(&edited.sections[0]).expect_err("the section seal says so");
     assert_ne!(sealed, seal_of(&edited), "change section data");
-    check_object_seal(&edited, &sealed).expect_err("and so does the object seal");
+    check_object_seal(&edited).expect_err("and so does the object seal");
 
     // Change only a Section's stored seal, leaving every semantic field alone.
     // Both consequences must hold: the Section fails verification, and the
     // aggregate fails too — because it hashes the stored seal, not a fresh one.
     let mut retagged = original.clone();
-    retagged.sections[0].sha256 = "f".repeat(64);
-    check_section_seal(&retagged.sections[0], &"f".repeat(64))
-        .expect_err("the contents do not produce that seal");
-    assert_ne!(sealed, seal_of(&retagged), "change only Section.sha256");
+    retagged.sections[0].digest = format!("1:{}", "f".repeat(64));
+    check_section_seal(&retagged.sections[0]).expect_err("the contents do not produce that seal");
+    assert_ne!(sealed, seal_of(&retagged), "change only Section.digest");
 
     // Rewrite the contents and the seal together. The aggregate is internally
     // coherent, every Section verifies, and only the stored aggregate value
     // says anything is wrong — which is why the aggregate exists.
     let mut consistent = original.clone();
     consistent.sections[0].text = "quietly different".to_owned();
-    consistent.sections[0].sha256 = seal_of_section(&consistent.sections[0]);
-    check_object_integrity(&consistent, &seal_of(&consistent)).expect("nothing internal disagrees");
-    check_object_integrity(&consistent, &sealed).expect_err("but it is not what was sealed");
+    consistent.sections[0].digest = seal_of_section(&consistent.sections[0]);
+    let mut resealed = consistent.clone();
+    resealed.reseal().expect("seal");
+    check_object_integrity(&resealed).expect("nothing internal disagrees");
+    check_object_integrity(&consistent).expect_err("but it is not what was sealed");
 
     // Remove a section.
     let mut shortened = original.clone();
@@ -103,7 +102,9 @@ fn a_change_anywhere_under_the_seal_is_visible_from_the_object() {
     // Reassign one section's id to another's.
     let mut swapped = original.clone();
     swapped.sections[1].id = 1;
-    sealed_object(&swapped).expect_err("two sections cannot claim one id");
+    swapped
+        .validate()
+        .expect_err("two sections cannot claim one id");
 }
 
 /// Every field the contract protects, one edit at a time.
@@ -121,12 +122,16 @@ fn each_protected_section_field_moves_the_seal() {
     assert_ne!(sealed, seal_of_section(&moved), "id");
 
     let mut moved = original.clone();
-    moved.admission = Admission::Agent;
+    moved.admitted.by = Admission::Agent;
     assert_ne!(
         sealed,
         seal_of_section(&moved),
-        "admission — the field the v2 seal does not carry at all"
+        "admitted.by — a Section that changed door is a different Section"
     );
+
+    let mut moved = original.clone();
+    moved.header = Some("a label".to_owned());
+    assert_ne!(sealed, seal_of_section(&moved), "header");
 
     let mut moved = original.clone();
     moved.role = Some(Role::Risk);
@@ -145,7 +150,7 @@ fn each_protected_section_field_moves_the_seal() {
     assert_ne!(sealed, seal_of_section(&moved), "content");
 
     let mut moved = original.clone();
-    moved.based_on = Some("a".repeat(40));
+    moved.based_on = Some(engr::semantics::BasedOn::new("a".repeat(40)));
     assert_ne!(sealed, seal_of_section(&moved), "based_on");
 
     let mut moved = original.clone();
@@ -157,12 +162,12 @@ fn each_protected_section_field_moves_the_seal() {
     assert_ne!(sealed, seal_of_section(&moved), "relations");
 
     let mut moved = original.clone();
-    moved.admitted_at = "2026-08-25T00:00:00Z".to_owned();
-    assert_ne!(sealed, seal_of_section(&moved), "admitted_at");
+    moved.admitted.at = "2026-08-25T00:00:00Z".to_owned();
+    assert_ne!(sealed, seal_of_section(&moved), "admitted.at");
 
     // And the one field that must not participate, because it is the answer.
     let mut moved = original.clone();
-    moved.sha256 = "e".repeat(64);
+    moved.digest = format!("1:{}", "e".repeat(64));
     assert_eq!(
         sealed,
         seal_of_section(&moved),
@@ -171,30 +176,85 @@ fn each_protected_section_field_moves_the_seal() {
 }
 
 fn reference(section: u64) -> Ref {
-    Ref::legacy(object_id(), section, "c".repeat(64), "d".repeat(40))
+    engr::dependency::SelectiveRef::stored(
+        engr::proof::section_target(&object_id(), section).expect("section target"),
+        vec![engr::dependency::SemanticField::Text],
+        "d".repeat(40),
+        format!("1:{}", "c".repeat(64)),
+    )
+    .expect("a well formed stored reference")
 }
 
-/// Sets are ordered by their elements' canonical bytes, and sections by id.
-/// Neither is the order the file happened to be written in.
+/// One persisted order, enforced where the bytes are read rather than smoothed
+/// over where they are hashed.
+///
+/// The seal is taken over the persisted value, so a reordered set really does
+/// hash differently — which is the point. What stops two spellings of one value
+/// from both being valid authority is the shape boundary: a stored set that is
+/// not in canonical order, or a Section list that is not in increasing id order,
+/// is refused as schema before any seal is consulted.
 #[test]
-fn incidental_order_is_not_integrity_meaning() {
-    let mut one = section(1);
-    one.refs = vec![reference(4), reference(2), reference(9)];
-    let mut other = section(1);
-    other.refs = vec![reference(9), reference(4), reference(2)];
-    assert_eq!(
-        seal_of_section(&one),
-        seal_of_section(&other),
-        "the same three references are the same assertion"
+fn one_persisted_order_is_enforced_where_the_bytes_are_read() {
+    let (_dir, root) = common::workspace();
+    let id = common::new_object(&root, "ordering");
+    common::admit(
+        &root,
+        common::add(&id, common::wording("wording with no references")),
+    );
+    let path = engr::store::object_path(&root, &id);
+    let sound: serde_json::Value = engr::store::read_json(&path).expect("read");
+
+    // Two Sections, written out of id order. Every seal in the file is still
+    // the one its own contents produce; only the array order moved.
+    let mut object = engr::store::load_object(&root, &id).expect("object");
+    let second = Section::from_value(
+        2,
+        value(Content {
+            text: "a second point".to_owned(),
+            ..Content::default()
+        }),
+    )
+    .expect("section");
+    object.next_section_id = 3;
+    object.sections = vec![second, object.sections[0].clone()];
+    object.reseal().expect("seal");
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&object, "object").expect("canonical"),
+    )
+    .expect("write");
+    let error = engr::store::load_object(&root, &id).expect_err("out of id order");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("increasing id order"),
+        "{}",
+        error.message
     );
 
-    let forward = object();
-    let mut backward = forward.clone();
-    backward.sections.reverse();
-    assert_eq!(
-        seal_of(&forward),
-        seal_of(&backward),
-        "sections are canonicalized by id"
+    // And the same for a set inside one Section.
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&sound, "object").expect("canonical"),
+    )
+    .expect("restore");
+    let mut object = engr::store::load_object(&root, &id).expect("object");
+    let mut refs = vec![reference(4), reference(2), reference(9)];
+    engr::proof::canonical_set(&mut refs, "reference").expect("canonical");
+    refs.reverse();
+    object.sections[0].refs = refs;
+    object.sections[0] = sealed_section(&object.sections[0]).expect("seal");
+    object.reseal().expect("seal");
+    std::fs::write(
+        &path,
+        engr::proof::canonical_bytes(&object, "object").expect("canonical"),
+    )
+    .expect("write");
+    let error = engr::store::load_object(&root, &id).expect_err("out of canonical set order");
+    assert_eq!(error.code, engr::EXIT_SCHEMA);
+    assert!(
+        error.message.contains("canonical set order"),
+        "{}",
+        error.message
     );
 }
 
@@ -205,8 +265,8 @@ fn incidental_order_is_not_integrity_meaning() {
 fn a_canonical_duplicate_is_refused_rather_than_collapsed() {
     let mut section = section(1);
     section.refs = vec![reference(2), reference(2)];
-    let refused = sealed_section(&section).expect_err("the same reference twice");
-    assert!(refused.to_string().contains("appears twice"), "{refused}");
+    let refused = section.validate().expect_err("the same reference twice");
+    assert!(refused.to_string().contains("twice"), "{refused}");
 }
 
 /// #31 and #35 both say it: no Unicode normalization before hashing. Two
@@ -225,19 +285,26 @@ fn visually_equal_text_is_not_the_same_integrity_input() {
     );
 }
 
-/// The seal is over the current Object state, and legacy per-resource markers
-/// are not part of it — the migration removes them, so an Object that still
-/// carries them and one that never did are the same current Object.
+/// An Object carries no per-resource schema markers at all, so there is nothing
+/// for the aggregate to have to exclude.
 #[test]
-fn legacy_format_markers_do_not_reach_the_aggregate() {
-    let clean = object();
-    let mut migrated = clean.clone();
-    migrated.legacy_format = Some("engr-object".to_owned());
-    migrated.legacy_version = Some(1);
+fn an_object_carries_no_per_resource_format_markers() {
+    let value = serde_json::to_value(object()).expect("json");
+    let members: Vec<&String> = value.as_object().expect("object").keys().collect();
+    assert!(!members.contains(&&"format".to_owned()), "{members:?}");
+    assert!(!members.contains(&&"version".to_owned()), "{members:?}");
     assert_eq!(
-        seal_of(&clean),
-        seal_of(&migrated),
-        "provenance is not current Object state"
+        members,
+        vec![
+            "digest",
+            "id",
+            "next_section_id",
+            "rev",
+            "sections",
+            "state",
+            "title"
+        ],
+        "the generation is the workspace's, not each file's"
     );
 }
 
@@ -271,7 +338,7 @@ fn each_protected_object_field_moves_the_aggregate() {
         "next_section_id — wind it back by hand and the next section reuses an id"
     );
 
-    check_object_seal(&original, &sealed).expect("unchanged");
+    check_object_seal(&original).expect("unchanged");
 }
 
 /// The nested Section representation carries each field once. #31 warns that a
@@ -279,15 +346,17 @@ fn each_protected_object_field_moves_the_aggregate() {
 /// `id` twice; this pins that it does not.
 #[test]
 fn the_nested_section_representation_holds_each_field_once() {
-    let projected = sealed_object(&object()).expect("project");
-    let first = projected.sections[0].as_object().expect("object");
+    let value = serde_json::to_value(object()).expect("json");
+    let first = value["sections"][0].as_object().expect("object").clone();
     assert_eq!(first["id"], serde_json::json!(1));
+    let mut members: Vec<&str> = first.keys().map(String::as_str).collect();
+    members.sort_unstable();
     assert_eq!(
-        first.len(),
-        10,
-        "nine protected fields plus the seal, each exactly once: {first:?}"
+        members,
+        vec!["admitted", "digest", "id", "role", "text"],
+        "each member once, and everything empty omitted: {first:?}"
     );
-    assert!(first.contains_key("sha256"), "and the seal is one of them");
+    assert!(first.contains_key("digest"), "and the seal is one of them");
 }
 
 /// The shared safe-integer domain applies before anything is hashed. An
@@ -298,9 +367,8 @@ fn the_nested_section_representation_holds_each_field_once() {
 fn an_integer_outside_the_shared_domain_cannot_be_sealed() {
     let mut object = object();
     object.next_section_id = 1 << 53;
-    let refused = sealed_object(&object)
-        .expect("project")
-        .seal()
+    let refused = object
+        .recomputed_digest()
         .expect_err("outside the common ceiling");
     assert!(refused.to_string().contains("safe"), "{refused}");
 
@@ -312,12 +380,15 @@ fn an_integer_outside_the_shared_domain_cannot_be_sealed() {
 /// Verification reports which resource disagreed, and fails closed.
 #[test]
 fn a_broken_seal_is_an_error_rather_than_a_flag() {
-    let object = object();
-    let wrong = "0".repeat(64);
-    let refused = check_object_seal(&object, &wrong).expect_err("not this object");
+    let mut object = object();
+    let wrong = format!("1:{}", "0".repeat(64));
+    object.digest = wrong.clone();
+    let refused = check_object_seal(&object).expect_err("not this object");
     assert!(refused.to_string().contains(&object.id), "{refused}");
 
-    let refused = check_section_seal(&object.sections[0], &wrong).expect_err("not this section");
+    let mut other = fresh();
+    other.sections[0].digest = wrong;
+    let refused = check_section_seal(&other.sections[0]).expect_err("not this section");
     assert!(refused.to_string().contains("section 1"), "{refused}");
 }
 
@@ -331,18 +402,23 @@ fn the_two_checks_catch_different_lies() {
     let aggregate = seal_of(&object);
 
     object.sections[1].text = "changed under a valid aggregate".to_owned();
-    object.sections[1].sha256 = seal_of_section(&object.sections[1]);
+    object.sections[1].digest = seal_of_section(&object.sections[1]);
     let resealed = seal_of(&object);
 
-    check_object_integrity(&object, &resealed).expect("internally coherent");
-    check_object_seal(&object, &aggregate).expect_err("but not the object that was sealed");
+    let mut coherent = object.clone();
+    coherent.reseal().expect("seal");
+    check_object_integrity(&coherent).expect("internally coherent");
+    assert_ne!(
+        coherent.digest, aggregate,
+        "but not the object that was sealed"
+    );
+    let _ = resealed;
 
     // Now break only the internal agreement, and reseal the aggregate over it.
-    object.sections[1].sha256 = "a".repeat(64);
-    let over_a_lie = seal_of(&object);
-    check_object_seal(&object, &over_a_lie).expect("the aggregate is happy");
-    let refused =
-        check_object_integrity(&object, &over_a_lie).expect_err("the section it covers is not");
+    object.sections[1].digest = format!("1:{}", "a".repeat(64));
+    object.reseal().expect("seal");
+    check_object_seal(&object).expect("the aggregate is happy");
+    let refused = check_object_integrity(&object).expect_err("the section it covers is not");
     assert!(refused.to_string().contains("section 2"), "{refused}");
 }
 
@@ -352,7 +428,7 @@ fn the_two_checks_catch_different_lies() {
 #[test]
 fn a_mutation_over_invalid_state_is_refused_before_it_runs() {
     let object = object();
-    let sealed = seal_of(&object);
+    let _sealed = seal_of(&object);
 
     // Hand-edit a Section and leave its seal alone: the file still parses and
     // every schema check passes.
@@ -360,7 +436,7 @@ fn a_mutation_over_invalid_state_is_refused_before_it_runs() {
     tampered.sections[0].text = "quietly rewritten".to_owned();
 
     let mut ran = false;
-    let refused = mutate(&tampered, &sealed, |object| {
+    let refused = mutate(&tampered, |object| {
         ran = true;
         object.title = "and mutated on top".to_owned();
         Ok(())
@@ -369,7 +445,7 @@ fn a_mutation_over_invalid_state_is_refused_before_it_runs() {
     assert!(!ran, "the mutation must not run at all: {refused}");
 
     // Same object, same edit, resealing instead of mutating: also refused.
-    reseal(&tampered, &sealed).expect_err("a reseal is not a repair path");
+    reseal(&tampered).expect_err("a reseal is not a repair path");
 }
 
 /// The order in #35 §12 is not decoration. Sections are resealed first and the
@@ -380,21 +456,21 @@ fn a_mutation_reseals_the_sections_before_the_aggregate() {
     let object = object();
     let sealed = seal_of(&object);
 
-    let done = mutate(&object, &sealed, |object| {
+    let done = mutate(&object, |object| {
         object.sections[0].text = "revised under the gate".to_owned();
         object.rev += 1;
         Ok(())
     })
     .expect("authorized");
 
-    check_object_integrity(&done.object, &done.seal).expect("coherent afterwards");
+    check_object_integrity(&done.object).expect("coherent afterwards");
     assert_ne!(done.seal, sealed, "the object moved");
     assert_ne!(
-        done.object.sections[0].sha256, object.sections[0].sha256,
+        done.object.sections[0].digest, object.sections[0].digest,
         "and so did the section it changed"
     );
     assert_eq!(
-        done.object.sections[1].sha256, object.sections[1].sha256,
+        done.object.sections[1].digest, object.sections[1].digest,
         "the one it did not touch is untouched"
     );
 }
@@ -404,10 +480,10 @@ fn a_mutation_reseals_the_sections_before_the_aggregate() {
 #[test]
 fn a_refused_mutation_produces_no_object_at_all() {
     let object = object();
-    let sealed = seal_of(&object);
+    let _sealed = seal_of(&object);
     let before = object.clone();
 
-    mutate(&object, &sealed, |object| {
+    mutate(&object, |object| {
         object.title = "half done".to_owned();
         Err(engr::Error::new(engr::EXIT_INVARIANT, "no".to_owned()))
     })
@@ -429,18 +505,18 @@ fn a_mechanical_reseal_cannot_reach_a_semantic_field() {
     let sealed = seal_of(&object);
 
     // The honest case: nothing semantic moved, so the seal does not move either.
-    let done = reseal(&object, &sealed).expect("nothing moved");
+    let done = reseal(&object).expect("nothing moved");
     assert_eq!(done.seal, sealed, "and the seal says so");
     assert_eq!(done.object, object);
 
     type Forbidden = fn(&mut Object) -> engr::Result<()>;
     let forbidden: [(&str, Forbidden); 5] = [
-        ("admission", |object| {
-            object.sections[0].admission = Admission::Agent;
+        ("admitted.by", |object| {
+            object.sections[0].admitted.by = Admission::Agent;
             Ok(())
         }),
-        ("admitted_at", |object| {
-            object.sections[0].admitted_at = "2026-08-25T00:00:00Z".to_owned();
+        ("admitted.at", |object| {
+            object.sections[0].admitted.at = "2026-08-25T00:00:00Z".to_owned();
             Ok(())
         }),
         ("text", |object| {
@@ -458,7 +534,7 @@ fn a_mechanical_reseal_cannot_reach_a_semantic_field() {
     ];
 
     for (what, apply) in forbidden {
-        let done = mutate(&object, &sealed, apply).expect("a real mutation may do this");
+        let done = mutate(&object, apply).expect("a real mutation may do this");
         let refused = check_mechanical_reseal(&object, &done.object)
             .expect_err("but a mechanical reseal may not");
         assert!(
@@ -473,38 +549,22 @@ fn a_mechanical_reseal_cannot_reach_a_semantic_field() {
 #[test]
 fn a_reseal_after_an_authorized_mutation_is_the_normal_case() {
     let object = object();
-    let sealed = seal_of(&object);
+    let _sealed = seal_of(&object);
 
-    let admitted = mutate(&object, &sealed, |object| {
-        object.sections[0].admission = Admission::Agent;
+    let admitted = mutate(&object, |object| {
+        object.sections[0].admitted.by = Admission::Agent;
         object.rev += 1;
         Ok(())
     })
     .expect("the authority path already said yes");
 
-    check_object_integrity(&admitted.object, &admitted.seal).expect("sealed over what it now says");
-    reseal(&admitted.object, &admitted.seal).expect("and reseals to itself unchanged");
+    check_object_integrity(&admitted.object).expect("sealed over what it now says");
+    reseal(&admitted.object).expect("and reseals to itself unchanged");
 }
-
-/// P3 renames one persisted member and adds one the v2 shape does not write.
-///
-/// Listed rather than inferred, because both are exactly the kind of difference
-/// that makes a name-based coverage check quietly vacuous.
-const RENAMED_IN_PHASE_3: &[(&str, &str)] = &[("confirmed_at", "admitted_at")];
 
 /// Persisted members the seal deliberately does not cover, each with a reason
 /// the contract gives.
-const NOT_SEALED: &[(&str, &str)] = &[
-    ("sha256", "a seal cannot cover itself"),
-    (
-        "format",
-        "#31 removes the legacy per-resource marker from current Objects",
-    ),
-    (
-        "version",
-        "the workspace version comes only from .engr/format.json",
-    ),
-];
+const NOT_SEALED: &[(&str, &str)] = &[("digest", "a seal cannot cover itself")];
 
 fn members(value: &serde_json::Value) -> Vec<String> {
     value
@@ -515,102 +575,77 @@ fn members(value: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn covered(persisted: &[String], sealed: &[String], what: &str) {
-    for member in persisted {
-        if let Some((_, reason)) = NOT_SEALED.iter().find(|(name, _)| name == member) {
-            let _ = reason;
-            continue;
-        }
-        let expected = RENAMED_IN_PHASE_3
-            .iter()
-            .find(|(from, _)| from == member)
-            .map(|(_, to)| (*to).to_owned())
-            .unwrap_or_else(|| member.clone());
-        assert!(
-            sealed.contains(&expected),
-            "the persisted {what} writes {member:?} and the seal projection does not cover it; \
-             add it to the projection, or to NOT_SEALED with the reason it is excluded"
-        );
-    }
-}
-
 /// Every member the persisted shape writes is either under the seal or on a
 /// list saying why it is not.
 ///
-/// The claim "`Object.sha256` covers every stable persisted Object field except
+/// The claim "`Object.digest` covers every stable persisted Object field except
 /// itself" is otherwise enforced by nobody: add a field to `Object` and the
-/// projection silently stops covering it, every existing test still passes, and
-/// the new field is one a hand-edit can change without detection. #31 says the
-/// omission of `next_section_id` from illustrative lists was not an exclusion —
-/// this is what stops the next such omission from being one.
+/// seal input silently stops covering it, every existing test still passes, and
+/// the new field is one a hand-edit can change without detection.
 ///
 /// Deliberately a list of exclusions rather than a list of inclusions: forget
 /// to extend it and the test fails, which is the direction that fails safe.
 #[test]
 fn no_persisted_field_escapes_the_seal() {
     // Everything optional is populated, so nothing is missing merely because it
-    // was empty and skipped.
-    let mut section = section(1);
-    section.content = vec![Supplement::new("data.note", "a note")];
-    section.based_on = Some("a".repeat(40));
-    section.refs = vec![reference(2)];
-    section.relations = vec![Relation::superseded_by(object_id())];
-    section.sha256 = seal_of_section(&section);
+    // was empty and therefore omitted.
+    let full = Section::from_value(
+        1,
+        value(Content {
+            header: Some("a label".to_owned()),
+            role: Some(Role::Decision),
+            text: "the store appends under a lock".to_owned(),
+            content: vec![Supplement::new("data.note", "a note")],
+            based_on: Some(engr::semantics::BasedOn::new("a".repeat(40))),
+            refs: vec![reference(2)],
+            relations: vec![Relation::superseded_by(object_id())],
+        }),
+    )
+    .expect("section");
 
-    let persisted = members(&serde_json::to_value(&section).expect("persisted section"));
-    let sealed = members(
-        &serde_json::to_value(sealed_section(&section).expect("project")).expect("projection"),
-    );
+    let persisted = members(&serde_json::to_value(&full).expect("persisted section"));
     assert!(
-        persisted.contains(&"sha256".to_owned()),
+        persisted.contains(&"digest".to_owned()),
         "the fixture must exercise the excluded member too: {persisted:?}"
     );
-    covered(&persisted, &sealed, "section");
-
-    let mut object = object();
-    object.sections = vec![section];
-    object.object_type = Some(ObjectType::Decision);
-    object.legacy_format = Some("engr-object".to_owned());
-    object.legacy_version = Some(1);
-
-    let persisted = members(&serde_json::to_value(&object).expect("persisted object"));
-    let sealed = members(
-        &serde_json::to_value(sealed_object(&object).expect("project")).expect("projection"),
-    );
-    assert!(
-        persisted.contains(&"format".to_owned()) && persisted.contains(&"version".to_owned()),
-        "the fixture must exercise the legacy markers: {persisted:?}"
-    );
-    covered(&persisted, &sealed, "object");
-}
-
-/// The same question for the nested Section representation the aggregate
-/// carries: it holds the Section's own members plus the seal, and nothing else.
-#[test]
-fn the_nested_representation_covers_the_same_members_plus_the_seal() {
-    let mut section = section(1);
-    section.based_on = Some("a".repeat(40));
-    section.sha256 = seal_of_section(&section);
-    let mut object = object();
-    object.sections = vec![section.clone()];
-
-    let projected = sealed_object(&object).expect("project");
-    let nested = members(&projected.sections[0]);
-    let sealed = members(
-        &serde_json::to_value(sealed_section(&section).expect("project")).expect("projection"),
-    );
-
-    for member in &sealed {
-        assert!(
-            nested.contains(member),
-            "the nested form dropped {member:?}"
+    for member in &persisted {
+        if NOT_SEALED.iter().any(|(name, _)| name == member) {
+            continue;
+        }
+        let mut edited = serde_json::to_value(&full).expect("json");
+        edited[member] = serde_json::Value::String("moved".to_owned());
+        edited.as_object_mut().expect("object").remove("digest");
+        let moved = engr::proof::sha256_of(
+            &engr::proof::canonical_bytes(&edited, "section").expect("canonical"),
+        );
+        assert_ne!(
+            format!("1:{moved}"),
+            full.digest,
+            "the persisted Section writes {member:?} and the seal does not cover it"
         );
     }
-    assert_eq!(
-        nested.len(),
-        sealed.len() + 1,
-        "and adds exactly one member, the seal: {nested:?}"
-    );
+
+    // And the same for the Object's own members.
+    let mut object = object();
+    object.object_type = Some(ObjectType::Decision);
+    object.reseal().expect("seal");
+    let persisted = members(&serde_json::to_value(&object).expect("persisted object"));
+    for member in &persisted {
+        if NOT_SEALED.iter().any(|(name, _)| name == member) {
+            continue;
+        }
+        let mut edited = serde_json::to_value(&object).expect("json");
+        edited[member] = serde_json::Value::String("moved".to_owned());
+        edited.as_object_mut().expect("object").remove("digest");
+        let moved = engr::proof::sha256_of(
+            &engr::proof::canonical_bytes(&edited, "object").expect("canonical"),
+        );
+        assert_ne!(
+            format!("1:{moved}"),
+            object.digest,
+            "the persisted Object writes {member:?} and the seal does not cover it"
+        );
+    }
 }
 
 /// A representation-only rewrite may reorder the stored `sections[]` array,
@@ -623,13 +658,7 @@ fn reordered_sections_are_the_same_object_to_the_equivalence_guard() {
     let forward = object();
     let mut backward = forward.clone();
     backward.sections.reverse();
-
-    assert_eq!(
-        seal_of(&forward),
-        seal_of(&backward),
-        "the contract already says these are one object"
-    );
-    check_mechanical_reseal(&forward, &backward).expect("so the guard must agree");
+    check_mechanical_reseal(&forward, &backward).expect("the guard reads identity, not position");
 
     // And it still catches a real change hiding behind a reorder.
     let mut edited = backward.clone();
@@ -643,70 +672,63 @@ fn reordered_sections_are_the_same_object_to_the_equivalence_guard() {
     check_mechanical_reseal(&forward, &duplicated).expect_err("section 2 is gone");
 }
 
-/// The canonical v3 Section writes every schema-defined member, absent or not.
+/// The canonical Section omits every optional member it does not carry, and the
+/// seal is over exactly those bytes.
 ///
-/// Frozen by the #35 ruling `5392551560` (Option A): an absent optional is an
-/// explicit `null` and an empty collection is an explicit `[]`, never an
-/// omission. This is now a permanent byte contract, so it is pinned as bytes.
-///
-/// The failure it exists to catch is a member quietly gaining
-/// `skip_serializing_if` — a change that reads as tidy, breaks nothing locally,
-/// and silently gives every Section with an empty `relations` a different seal
-/// from the one another implementation computes.
+/// This is a permanent byte contract, so it is pinned as bytes. The failure it
+/// exists to catch is a member quietly *losing* its `skip_serializing_if` — a
+/// change that reads as tidy, breaks nothing locally, and silently gives every
+/// Section with an empty `relations` a different seal from the one another
+/// implementation computes.
 #[test]
-fn every_schema_defined_member_is_written_even_when_it_is_empty() {
-    let bare = section(1);
-    assert!(bare.role.is_some(), "the fixture carries a role by default");
+fn the_canonical_section_omits_what_it_does_not_carry() {
+    let bare = Section::from_value(
+        1,
+        value(Content {
+            text: "the store appends under a lock".to_owned(),
+            ..Content::default()
+        }),
+    )
+    .expect("section");
 
-    let mut empty = bare.clone();
-    empty.role = None;
-    empty.based_on = None;
-    empty.content = Vec::new();
-    empty.refs = Vec::new();
-    empty.relations = Vec::new();
-
-    let projected = serde_json::to_value(sealed_section(&empty).expect("project")).expect("value");
-    let members = projected.as_object().expect("object");
-    for absent in ["role", "based_on"] {
-        assert_eq!(
-            members.get(absent),
-            Some(&serde_json::Value::Null),
-            "{absent} is present and null, not omitted: {members:?}"
-        );
-    }
-    for empty_collection in ["content", "refs", "relations"] {
-        assert_eq!(
-            members.get(empty_collection),
-            Some(&serde_json::json!([])),
-            "{empty_collection} is present and empty, not omitted: {members:?}"
+    let value = serde_json::to_value(&bare).expect("json");
+    let members = value.as_object().expect("object");
+    for omitted in ["header", "role", "based_on", "content", "refs", "relations"] {
+        assert!(
+            !members.contains_key(omitted),
+            "{omitted} is omitted when empty, never written out: {members:?}"
         );
     }
     assert_eq!(
         members.len(),
-        9,
-        "nine schema-defined members, none of them optional to write: {members:?}"
+        4,
+        "id, admitted, text and the seal: {members:?}"
     );
 
     // The bytes themselves, because the contract is bytes.
+    let mut unsealed = value.clone();
+    unsealed.as_object_mut().expect("object").remove("digest");
     assert_eq!(
-        engr::proof::canonical_bytes(&projected, "section").expect("canonical"),
-        r#"{"admission":"human","admitted_at":"2026-08-24T00:00:00Z","based_on":null,"content":[],"id":1,"refs":[],"relations":[],"role":null,"text":"the store appends under a lock"}"#
+        engr::proof::canonical_bytes(&unsealed, "section").expect("canonical"),
+        concat!(
+            r#"{"admitted":{"at":"2026-08-24T00:00:00Z","by":"human"},"#,
+            r#""id":1,"text":"the store appends under a lock"}"#
+        )
     );
+    check_section_seal(&bare).expect("and it seals over exactly that");
 }
 
-/// And the nested representation inside the aggregate says the same, since it
-/// is the same projection plus the seal.
+/// An Object with no Sections omits the member rather than writing `[]`, so the
+/// two spellings cannot seal differently.
 #[test]
-fn the_nested_representation_writes_the_empty_members_too() {
-    let mut empty = section(1);
-    empty.role = None;
-    empty.based_on = None;
-    empty.sha256 = seal_of_section(&empty);
+fn an_object_with_no_sections_omits_the_member() {
     let mut object = object();
-    object.sections = vec![empty];
-
-    let nested = sealed_object(&object).expect("project").sections[0].clone();
-    let members = nested.as_object().expect("object");
-    assert_eq!(members.get("role"), Some(&serde_json::Value::Null));
-    assert_eq!(members.get("relations"), Some(&serde_json::json!([])));
+    object.sections.clear();
+    object.reseal().expect("seal");
+    let value = serde_json::to_value(&object).expect("json");
+    assert!(
+        !value.as_object().expect("object").contains_key("sections"),
+        "{value}"
+    );
+    check_object_integrity(&object).expect("and it still seals");
 }

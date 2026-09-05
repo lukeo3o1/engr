@@ -38,17 +38,18 @@ right about what the tool does — say so rather than working around it.
 
 ## The one rule
 
-If engr reports a legacy workspace, reading remains safe but mutation is
-blocked. Get explicit human direction before running `engr migrate`; never
-silently create `.engr/format.json` or rewrite stored records. Never change an
-unknown or newer workspace version.
+If engr reports the released predecessor workspace, every command refuses and
+says so. Get explicit human direction before running `engr migrate`; it only
+proposes the transition, and a human answers the code like any other. Never
+silently create `.engr/VERSION` or rewrite stored records. Never change an
+unknown or newer workspace generation.
 
-Read the refusal before deciding what it means. A workspace at version 1 or 2 is
-a recognized predecessor: it is intact, `engr migrate` moves it forward, and
-version 1 is what the published release wrote, so an old record is a migration
-away rather than lost. A workspace mid-migration says so and asks you to resume.
-A version this build has never heard of is neither — do not offer migration for
-it, and do not go looking for an older binary to bridge with.
+Read the refusal before deciding what it means. The released predecessor is
+intact, `engr migrate` moves it forward, and it is what the published release
+wrote — so an old record is a migration away rather than lost. A workspace
+mid-migration says so and asks you to resume. A generation this build has never
+heard of is neither — do not offer migration for it, and do not go looking for
+an older binary to bridge with.
 
 If engr reports that an object's integrity has failed, every ordinary change to
 it is refused — the record was edited outside an admission path, and letting
@@ -78,8 +79,8 @@ the tool stops you typing it yourself, which is exactly why this is on you:
 > conversation.** Not to finish a task, not to unblock yourself, not because the
 > change is obviously right.
 
-If you confirm your own proposal, its `admission: human` becomes a lie no later
-reader can detect. Use `--agent` for autonomous work; do not impersonate the
+If you confirm your own proposal, its `admitted.by = human` becomes a lie no
+later reader can detect. Use `--agent` for autonomous work; do not impersonate the
 Human path to avoid Rule Review.
 
 ## The loop
@@ -206,7 +207,7 @@ deliberate:
   engr will not escalate on your behalf — not that the mutation is forbidden. A
   human can still raise the same change and decide, having seen the review.
 - In the **Backlog**, it does not stop you. Unresolved work is worth keeping, so
-  the entry goes in marked `rule_review { attempts, limit }` — which is a
+  the entry goes in marked `review_exhaustion { attempts, limit }` — which is a
   standing note that this went in without a passing review, not a free pass.
   **Consuming** a Backlog point is the exception: that destroys unresolved work,
   so it needs a review that actually passed.
@@ -220,7 +221,7 @@ history.
 
 ## Reading the record
 
-At the start of engineering work, run `engr ls --stale`. It lists **sections that
+At the start of engineering work, run `engr ls --verify`. It lists **sections that
 no longer verify cleanly** — a moved basis, a rewritten reference, wording that
 was tampered with, or a dependency that will not load — and it marks the ones
 belonging to objects nobody is looking at, which is where that goes unnoticed.
@@ -262,9 +263,24 @@ Objects are addressed by unique id prefix, like a git commit. A uuidv7 prefix is
 a timestamp, so objects created close together need more characters; engr widens
 the abbreviation for you.
 
-## When a section is marked
+## When an object or a section is marked
 
-`show` marks six things, and tells you what to do about each:
+`show` answers two questions, and the first one is about the object as a whole.
+Its `integrity` has four states, and three of them mean stop:
+
+| `integrity` | What happened |
+| --- | --- |
+| `ok` | The seals verify and the projection is what its own admitted history produced |
+| `tampered` | The stored bytes do not match their own seal |
+| `divergent` | They match it, and **no admitted Event produced them** — something rewrote and resealed the record. `engr repair` restores what history proves |
+| `unreplayable` | The admitted history cannot be replayed at all, so nothing can check the projection. This is damage to the EventStore, and `repair` is *not* the answer — there is nothing to restore from |
+
+`divergent` is the one no seal can find, which is why it is worth knowing about:
+a hash recomputed over edited bytes verifies perfectly, and only the record of
+admissions shows that nobody admitted them. `engr show` and `engr verify` both
+fail on all three.
+
+Then, per section, `show` marks seven things and tells you what to do about each:
 
 | Marking | What happened |
 | --- | --- |
@@ -277,7 +293,8 @@ the abbreviation for you.
 | `refs moved` / `stale_refs` | One or more selected dependency fields moved through an admission path |
 
 The first five are a different kind of problem from the last two, and they are
-not something to work around. **Stop and tell the human.** Either someone edited
+not something to work around — as is any object `integrity` other than `ok`.
+**Stop and tell the human.** Either someone edited
 the stored file directly rather than going through the gate, or authority this
 wording rests on — or the replacement it points forward to — has vanished. So
 either nothing about that wording was agreed to by anyone, or what was agreed
@@ -304,7 +321,7 @@ head across sessions. It goes in the backlog, which needs no confirmation:
 ```bash
 engr backlog ls                          # what is still unresolved
 engr backlog show <id>                   # points, subjects, outcomes so far
-engr backlog new --topic "..." --text "the unresolved point"
+engr backlog new --title "..." --text "the unresolved point"
 engr backlog add <id> --text "another point in the same topic"
 engr backlog revise <id> --section 2 --text "sharpened"
 engr backlog merge <id> --into 2 --section 5 --text "one point after all"
@@ -335,7 +352,7 @@ no predecessor to supply.
 
 Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
-Past the ceiling, an ordinary edit still goes in and is marked `rule_review`, so
+Past the ceiling, an ordinary edit still goes in and is marked `review_exhaustion`, so
 say the real number: the point is kept either way, and an honest one tells the
 next reader what it went in on. **Consume, merge and rename are the
 exceptions**, and past the ceiling they simply do not happen. Consume and merge
@@ -482,7 +499,7 @@ Backlog is what is not decided. Work is what is being done on one Object.
 ```bash
 engr collection ls                       # plans, and how many members need attention
 engr collection show <id>                # the plan, its schedule, its members in order
-engr collection new --name "Q3 authentication" \
+engr collection new q3-auth --title "Q3 authentication" \
                     --description "..." --start 2026-07-01 --end 2026-09-30
 engr collection add <id> --target engr:obj:<object> --order 10 \
                          --priority high --reason "Blocks the rest of this plan"
@@ -695,13 +712,14 @@ selected values. A Section cannot directly reference itself.
 ## Committing
 
 Objects and admitted history live in the repository. **Remind the human to
-commit `.engr/objects`, `.engr/events`, `.engr/rules`, `.engr/backlog`,
+commit `.engr/objects`, `.engr/eventstore`, `.engr/rules`, `.engr/backlog`,
 `.engr/work` and `.engr/collections`.**
 
 All six. Rules, Work and Collections are non-authoritative, but git is the only
 history they have — an uncommitted policy, plan or handoff is simply lost, and
-losing it silently is worse than never writing it. `.engr/candidates` is the one
-directory that must never be committed, and `.gitignore` already excludes it.
+losing it silently is worse than never writing it. `.engr/local` is the one
+directory that must never be committed — it holds the writer lock and every live
+challenge code — and `.gitignore` already excludes it.
 
 This is a safety rule, not a convenience. The hash that proves a section was not
 edited sits in the same file as the section — so it catches a careless edit and

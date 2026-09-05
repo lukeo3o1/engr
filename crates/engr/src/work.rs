@@ -178,8 +178,28 @@ pub fn path(root: &Path, subject: &Subject) -> PathBuf {
 /// Every "is there one" in this module goes through here, so a sidecar cannot be
 /// absent to one caller and present to another — which is what `exists()` and
 /// `symlink_metadata` would otherwise disagree about for a broken link.
-pub fn exists(root: &Path, subject: &Subject) -> bool {
-    std::fs::symlink_metadata(path(root, subject)).is_ok()
+///
+/// **Three answers, not two.** `is_ok()` was the second version of this
+/// question and kept the first one's flaw: it reads `PermissionDenied`, `EIO`
+/// and every other stat failure as absence. Absence is what lets the final
+/// Backlog Section be consumed and its parent item removed, so failing to
+/// establish it there would leave execution memory behind for a subject that no
+/// longer exists — the orphan the guard exists to prevent. Not knowing is not
+/// the same as no, and only `NotFound` is no.
+///
+/// The containment boundary comes first for the same reason, and it was the
+/// third version's flaw: stat'ing the final path alone answers about whatever
+/// the path leads to, so an intermediate `work/…` link whose target is missing
+/// answered `NotFound` — established absence, through a redirection nobody
+/// established at all — and the destructive consume then went ahead.
+pub fn exists(root: &Path, subject: &Subject) -> Result<bool> {
+    let path = path(root, subject);
+    store::contained(&path)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(tool_error(path.display(), error)),
+    }
 }
 
 /// Whether agents may keep going on their own.
@@ -268,7 +288,8 @@ pub struct Item {
     /// anchor. A commit that a rebase made unreachable is a dead signpost, not a
     /// corrupt sidecar, and an item can be done with no commit at all.
     ///
-    /// Required, and may be empty, for the same reason the lists above are.
+    /// Omitted when empty, for the same reason the lists above are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<String>,
 }
 
@@ -301,12 +322,15 @@ pub struct Work {
     /// handoff note or a conversation keeps meaning the same step even after
     /// item 3 is pruned.
     pub next_item_id: u64,
-    /// Required, and may be empty. Not `#[serde(default)]`: an omitted list and
-    /// an empty one would be the same sidecar written two ways, and a stored
-    /// shape the write path can never produce is a shadow schema that only ever
-    /// gets discovered by something depending on it.
+    /// Omitted when empty, per the canonical omission rule: an absent optional,
+    /// an empty array and an empty object are all written the same way, which is
+    /// not at all. An omitted list and an empty one would otherwise be the same
+    /// sidecar written two ways.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<Blocker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<Item>,
 }
 
@@ -531,7 +555,7 @@ pub fn ids(root: &Path) -> Result<Vec<Subject>> {
     let mut found = Vec::new();
     for (folder, make) in SUBJECTS {
         let dir = root_dir(root).join(folder);
-        if !dir.is_dir() {
+        if !store::namespace(&dir)? {
             continue;
         }
         let mut here = Vec::new();
@@ -551,7 +575,7 @@ pub fn ids(root: &Path) -> Result<Vec<Subject>> {
 pub fn load(root: &Path, subject: &Subject) -> Result<Work> {
     let path = path(root, subject);
     ensure!(
-        exists(root, subject),
+        exists(root, subject)?,
         EXIT_NOT_FOUND,
         "no work recorded for {} {}",
         subject.noun(),
@@ -601,42 +625,6 @@ pub fn load(root: &Path, subject: &Subject) -> Result<Work> {
     Ok(work)
 }
 
-/// Decode predecessor bytes already captured by coordinated migration.
-pub(crate) fn decode_for_migration(path: &Path, subject: &Subject, text: &str) -> Result<Work> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
-    let work: Work = serde_json::from_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    work.validate()?;
-    // The path is the sidecar subject. `Work` does not duplicate that id, so the
-    // caller supplies it and validates that against its plan. Both subject
-    // kinds are UUIDv7, so one validator answers for both.
-    crate::model::validate_object_id(subject.id()).map_err(|error| {
-        Error::new(
-            EXIT_SCHEMA,
-            format!(
-                "{}: work sidecar subject {:?} is invalid: {}",
-                path.display(),
-                subject.id(),
-                error.message
-            ),
-        )
-    })?;
-    Ok(work)
-}
-
-/// Validate a staged Work artifact as a current resource before publication.
-pub(crate) fn decode_current_staged(path: &Path, subject: &Subject, text: &str) -> Result<Work> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    store::check_canonical_bytes(path, text, &value)?;
-    let work = decode_for_migration(path, subject, text)?;
-    store::check_current_resource_shape(path, text, &work)?;
-    check_canonical_work(path, &work)?;
-    Ok(work)
-}
-
 /// The current writer's one representation for each Work collection.
 pub(crate) fn canonicalize_work(work: &mut Work) -> Result<()> {
     crate::proof::canonical_set(&mut work.dependencies, "work dependency")?;
@@ -664,7 +652,7 @@ fn check_canonical_work(path: &Path, work: &Work) -> Result<()> {
 /// Absence means only that engr holds no operational memory for this subject —
 /// the ordinary state of most subjects, and never an error.
 pub fn find(root: &Path, subject: &Subject) -> Result<Option<Work>> {
-    if !exists(root, subject) {
+    if !exists(root, subject)? {
         return Ok(None);
     }
     load(root, subject).map(Some)
@@ -772,7 +760,7 @@ pub fn start(
     locked(root, attempt, || {
         require_subject(root, subject)?;
         ensure!(
-            !exists(root, subject),
+            !exists(root, subject)?,
             EXIT_INVARIANT,
             "{} {subject} already has work recorded; change it rather than starting again",
             subject.noun()
@@ -810,7 +798,7 @@ pub fn remove(root: &Path, subject: &Subject, attempt: Attempt) -> Result<Remove
     locked(root, attempt, || {
         let work = load(root, subject)?;
         let path = path(root, subject);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+        crate::store::remove_durably(&path)?;
         Ok(Removed {
             was_paused: work.state == State::Paused,
         })

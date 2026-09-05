@@ -38,6 +38,22 @@ pub struct RefDrift {
     /// `verify` already treated it as a failure while this surface called it
     /// drift was one workspace state with two verdicts.
     pub target_missing: bool,
+    /// The target seals correctly and is not what its own admitted history
+    /// produced.
+    ///
+    /// A failure, and its own flag. Without one it fell through to ordinary
+    /// drift: `forged()` stayed false, `show` exited 0, the advice line said the
+    /// target "no longer exists" when it is right there, and JSON reported
+    /// `stale_refs` — while `verify` failed on the same state. A new dependency
+    /// answer has to be carried all the way to the surfaces or the surfaces go
+    /// on describing the state they were written for.
+    pub target_history_divergent: bool,
+    /// The target's own admitted history will not replay.
+    ///
+    /// Kept apart from [`Self::target_history_divergent`] for the reason the
+    /// Verify contract keeps them apart: that one is repairable and this one has
+    /// nothing to repair from.
+    pub target_history_unreplayable: bool,
     /// Selected semantic fields that changed for a selective Ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moved_fields: Vec<String>,
@@ -72,6 +88,18 @@ impl SectionStatus {
             && self.replacement.is_none()
     }
 
+    /// A Section standing on a target nothing admitted, or on one whose own
+    /// history will not replay.
+    ///
+    /// Both are failures, and neither is drift. Drift asks a person whether this
+    /// wording still holds; these say the thing being depended on is not
+    /// established at all.
+    pub fn stands_on_unadmitted(&self) -> bool {
+        self.drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent || drift.target_history_unreplayable)
+    }
+
     /// A Section standing on semantics that are not what was admitted.
     pub fn stands_on_tampered(&self) -> bool {
         self.drifted.iter().any(|drift| drift.target_tampered)
@@ -95,6 +123,7 @@ impl SectionStatus {
     pub fn forged(&self) -> bool {
         self.tampered
             || self.stands_on_tampered()
+            || self.stands_on_unadmitted()
             || self.stands_on_unreadable()
             || self.stands_on_missing()
             || self.replacement.is_some()
@@ -106,6 +135,20 @@ impl SectionStatus {
         }
         if self.stands_on_tampered() {
             return "REF TAMPERED";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "REF UNADMITTED";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "REF HISTORY BROKEN";
         }
         if self.stands_on_unreadable() {
             return "REF UNREADABLE";
@@ -131,6 +174,20 @@ impl SectionStatus {
         if self.stands_on_tampered() {
             return "ref_tampered";
         }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "ref_unadmitted";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "ref_history_broken";
+        }
         if self.stands_on_unreadable() {
             return "ref_unreadable";
         }
@@ -153,21 +210,69 @@ impl SectionStatus {
 ///
 /// A hash that cannot be recomputed counts as a mismatch: the alternative is
 /// reporting content we could not check as sound.
-fn section_tampered(object: &Object, section: &crate::model::Section) -> bool {
-    if object.sha256.is_some() {
-        return crate::integrity::check_section_seal(section, &section.sha256).is_err();
-    }
-    section
-        .recomputed_sha256()
-        .map(|now| now != section.sha256)
-        .unwrap_or(true)
+fn section_tampered(_object: &Object, section: &crate::model::Section) -> bool {
+    crate::integrity::check_section_seal(section).is_err()
 }
 
 fn object_tampered(object: &Object) -> bool {
-    object
-        .sha256
-        .as_deref()
-        .is_some_and(|seal| crate::integrity::check_object_integrity(object, seal).is_err())
+    crate::integrity::check_object_integrity(object).is_err()
+}
+
+/// Whether this projection is the value its own admitted history produced, and
+/// if not, which of the two faults it is.
+///
+/// The question no seal can answer, because seals are recomputed from the bytes
+/// on disk: an out-of-band edit that was also resealed verifies perfectly, so
+/// integrity says `ok` about a record nothing admitted.
+///
+/// Reserved for explicit assessment (show and ls --verify). Navigation
+/// listings read projections only and mark unchecked rows instead of claiming
+/// that matching seals prove admission.
+fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFault> {
+    ops::history_fault(root, object).ok().flatten()
+}
+
+/// What is wrong with the Object itself, above anything about its Sections.
+///
+/// **Three answers, in the evaluator's own order.** The aggregate seal first,
+/// because bytes that do not match their own seal establish nothing about what
+/// history produced; then what that history says. Explicit assessment asks
+/// this before it asks about a Section, because an Object that is wrong at this
+/// level makes every row under it wrong in the same way — and each of them used
+/// to answer some part of it with `ok`.
+///
+/// One word per state, cased for the surface that prints it, and the word is the
+/// one the JSON `integrity` member already uses: a reader who has seen
+/// `"integrity": "divergent"` must not have to learn a second name for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectFault {
+    /// The stored bytes do not match their own aggregate seal.
+    Tampered,
+    /// They match it, and no admitted Event ever produced them.
+    Divergent,
+    /// The history cannot be replayed, so there is nothing to compare against.
+    Unreplayable,
+}
+
+impl ObjectFault {
+    /// The prose label, beside `REF UNADMITTED` and its neighbours.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tampered => "OBJECT TAMPERED",
+            Self::Divergent => "OBJECT DIVERGENT",
+            Self::Unreplayable => "OBJECT UNREPLAYABLE",
+        }
+    }
+}
+
+fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
+    if object_tampered(object) {
+        return Some(ObjectFault::Tampered);
+    }
+    match history_fault(root, object)? {
+        crate::ops::HistoryFault::Divergent(_) => Some(ObjectFault::Divergent),
+        crate::ops::HistoryFault::Unreplayable(_) => Some(ObjectFault::Unreplayable),
+    }
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -200,8 +305,15 @@ pub fn width(root: &Path) -> usize {
         .unwrap_or(8)
 }
 
+// Navigation must not discover identities by reading the EventStore.
+fn projection_width(root: &Path) -> usize {
+    store::object_ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(8)
+}
+
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let (object, section) = match reference.target_identity() {
+    let (object, section) = match crate::dependency::parse_target(reference.target()) {
         Ok(identity) => identity,
         Err(_) => {
             return RefDrift {
@@ -213,6 +325,8 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
                 target_tampered: false,
                 target_unreadable: true,
                 target_missing: false,
+                target_history_divergent: false,
+                target_history_unreplayable: false,
                 moved_fields: Vec::new(),
                 integrity_side: None,
             }
@@ -232,106 +346,72 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         .and_then(|target| target.section(section).ok().cloned());
     let target_missing = target.is_none() && !target_unreadable;
 
-    if let Ref::Selective(selective) = reference {
-        let current_integrity_failed = target_object.as_ref().is_some_and(|target| {
-            target.sha256.as_deref().map_or(true, |seal| {
-                crate::integrity::check_object_integrity(target, seal).is_err()
-            })
-        });
-        let evaluated = target_object
-            .as_ref()
-            .and_then(|target| target.sha256.as_deref().map(|seal| (target, seal)))
-            .map(|(target, seal)| crate::dependency::evaluate(root, target, seal, selective));
-        if evaluated.as_ref().is_some_and(Result::is_err) {
-            target_unreadable = true;
-        }
-        let state = evaluated.and_then(Result::ok);
-        let moved_fields = match &state {
-            Some(crate::dependency::Dependency::Drifted { fields }) => fields
-                .iter()
-                .map(|field| field.as_str().to_owned())
-                .collect(),
-            _ => Vec::new(),
-        };
-        let target_tampered = matches!(
-            state,
-            Some(crate::dependency::Dependency::TargetIntegrityFailure)
-        );
-        let target_missing =
-            matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
-        let target_unreadable = target_unreadable
-            || matches!(
-                state,
-                Some(
-                    crate::dependency::Dependency::ProvenanceUnavailable
-                        | crate::dependency::Dependency::SchemaMismatch
-                        | crate::dependency::Dependency::DigestInvalid
-                )
-            );
-        let lookback =
-            (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
-                format!(
-                    "git show {}:{}/objects/{}.json",
-                    short(selective.commit()),
-                    store::DIR,
-                    object
-                )
-            });
-        return RefDrift {
-            object,
-            section,
-            confirmed_sha256: selective.digest().to_owned(),
-            current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
-                .then(|| selective.digest().to_owned()),
-            lookback,
-            target_tampered,
-            target_unreadable,
-            target_missing,
-            moved_fields,
-            integrity_side: target_tampered.then_some(if current_integrity_failed {
-                "current"
-            } else {
-                "historical"
-            }),
-        };
-    }
-    let legacy = reference
-        .as_legacy()
-        .expect("the selective case returned above");
-    let target_tampered = target_object
+    let current_integrity_failed = target_object
         .as_ref()
-        .zip(target.as_ref())
-        .is_some_and(|(object, section)| section_tampered(object, section));
-    // Recomputed from the target's actual content, not read off its stored
-    // seal. The seal is a claim about what was admitted; it is not the
-    // content, and a file rewritten outside admission keeps the old seal while
-    // saying something else. Reporting the seal here made the two verdicts
-    // agree by accident — "was X, now X" for a section whose wording had
-    // changed — because the value being compared was the very value that had
-    // not moved. Content identity decides drift; the seal decides tampering.
-    let current = target.and_then(|section| section.recomputed_sha256().ok());
-    let moved = current.as_deref() != Some(legacy.sha256.as_str());
-    // Worth offering whenever the target is not what was pinned, whether it was
-    // revised through admission or rewritten behind it.
-    let lookback = (current.is_some() && (moved || target_tampered)).then(|| {
+        .is_some_and(|target| crate::integrity::check_object_integrity(target).is_err());
+    let evaluated = target_object
+        .as_ref()
+        .map(|target| crate::dependency::evaluate(root, target, reference));
+    if evaluated.as_ref().is_some_and(Result::is_err) {
+        target_unreadable = true;
+    }
+    let state = evaluated.and_then(Result::ok);
+    let moved_fields = match &state {
+        Some(crate::dependency::Dependency::Drifted { fields }) => fields
+            .iter()
+            .map(|field| field.as_str().to_owned())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let target_tampered = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetIntegrityFailure)
+    );
+    let target_history_divergent = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryDivergent)
+    );
+    let target_history_unreplayable = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryUnreplayable)
+    );
+    let target_missing =
+        matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
+    let target_unreadable = target_unreadable
+        || matches!(
+            state,
+            Some(
+                crate::dependency::Dependency::ProvenanceUnavailable
+                    | crate::dependency::Dependency::SchemaMismatch
+                    | crate::dependency::Dependency::DigestInvalid
+            )
+        );
+    let lookback = (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
         format!(
             "git show {}:{}/objects/{}.json",
-            short(&legacy.commit),
+            short(reference.commit()),
             store::DIR,
-            legacy.object
+            object
         )
     });
     RefDrift {
-        object: legacy.object.clone(),
-        section: legacy.section,
-        confirmed_sha256: legacy.sha256.clone(),
-        current_sha256: current,
+        object,
+        section,
+        confirmed_sha256: reference.digest().to_owned(),
+        current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
+            .then(|| reference.digest().to_owned()),
         lookback,
         target_tampered,
         target_unreadable,
         target_missing,
-        moved_fields: Vec::new(),
-        integrity_side: None,
+        target_history_divergent,
+        target_history_unreplayable,
+        moved_fields,
+        integrity_side: target_tampered.then_some(if current_integrity_failed {
+            "current"
+        } else {
+            "historical"
+        }),
     }
 }
 
@@ -344,8 +424,8 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
         .map(|section| {
             let basis = section
                 .based_on
-                .as_deref()
-                .and_then(|commit| git::distance(root, commit))
+                .as_ref()
+                .and_then(|basis| git::distance(root, &basis.commit))
                 .filter(git::Distance::moved);
             let drifted = section
                 .refs
@@ -468,6 +548,19 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 "!!         this Object was never committed, so there is nothing to compare against\n",
             ),
         }
+    } else {
+        match history_fault(root, object) {
+            Some(ops::HistoryFault::Divergent(what)) => out.push_str(&format!(
+                "!!         Object {what} is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair\n"
+            )),
+            // A different fault and a different answer: there is nothing to
+            // restore from, so sending a reader to `repair` would be sending
+            // them to a path that refuses.
+            Some(ops::HistoryFault::Unreplayable(why)) => out.push_str(&format!(
+                "!!         Object history cannot be replayed, so nothing can check this projection: {why}\n"
+            )),
+            None => {}
+        }
     }
     // The canonical reference, on the screen you land on when you want to name
     // this object to something else. Every reference-taking flag wants this
@@ -493,18 +586,22 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push('\n');
         render_content(&mut out, &section.content);
         render_relations(&mut out, &section.relations);
-        if let Some(commit) = &section.based_on {
+        if let Some(basis) = &section.based_on {
             out.push_str(&format!(
-                "    based_on {}   admitted {}\n",
-                short(commit),
-                section.admitted_at
+                "    based_on {}   admitted {} by {}\n",
+                short(&basis.commit),
+                section.admitted.at,
+                section.admitted.by.as_str()
             ));
         } else {
-            out.push_str(&format!("    admitted {}\n", section.admitted_at));
+            out.push_str(&format!(
+                "    admitted {} by {}\n",
+                section.admitted.at,
+                section.admitted.by.as_str()
+            ));
         }
         for reference in &section.refs {
-            let (target, target_section) = reference
-                .target_identity()
+            let (target, target_section) = crate::dependency::parse_target(reference.target())
                 .unwrap_or_else(|_| ("invalid".to_owned(), 0));
             out.push_str(&format!(
                 "    refs     {} §{}\n",
@@ -519,7 +616,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         if status.tampered {
             out.push_str(&format!(
                 "    !!       persisted Section does not match the seal admitted at {}\n",
-                section.admitted_at
+                section.admitted.at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
                 Some(commit) => out.push_str(&format!(
@@ -558,7 +655,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 "    advice   {} commits and {} files have changed since {}; check this still holds\n",
                 distance.commits,
                 distance.files.len(),
-                short(section.based_on.as_deref().unwrap_or("")),
+                section.based_on.as_ref().map(|basis| short(&basis.commit)).unwrap_or(""),
             ));
         }
         for drift in &status.drifted {
@@ -591,6 +688,27 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 // "gone" would send someone to recreate a file that is right
                 // there. The protocol names those words as the ones malformed
                 // authority must never be reported in.
+                // Both of these are right there and readable; "gone" would send
+                // a reader to recreate something that exists, and the work is on
+                // the target rather than here. They are separated from each
+                // other for the reason the Verify contract separates them: one
+                // has an admitted value to be restored to and the other does
+                // not, so only one of them may name `repair`.
+                _ if drift.target_history_divergent => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} is not what its own history produced; repair {} before trusting this\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        abbrev(&drift.object, w)
+                    ));
+                }
+                _ if drift.target_history_unreplayable => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} has history that will not replay; nothing can be restored from it\n",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
+                }
                 _ if drift.target_missing => {
                     out.push_str(&format!(
                         "    advice   {} §{} no longer exists; what this section stood on is gone
@@ -630,12 +748,12 @@ struct JsonSection<'a> {
     #[serde(skip_serializing_if = "<[Supplement]>::is_empty")]
     content: &'a [Supplement],
     status: &'static str,
-    based_on: Option<&'a str>,
+    based_on: Option<&'a crate::semantics::BasedOn>,
     refs: &'a [Ref],
     #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
     relations: &'a [Relation],
-    sha256: &'a str,
-    admitted_at: &'a str,
+    digest: &'a str,
+    admitted: &'a crate::semantics::Admitted,
     #[serde(skip_serializing_if = "Option::is_none")]
     basis_commits_behind: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -671,7 +789,7 @@ struct JsonObject<'a> {
     attention: bool,
     rev: u64,
     integrity: &'static str,
-    sha256: Option<&'a str>,
+    digest: &'a str,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
 }
@@ -696,11 +814,11 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 text: &section.text,
                 content: &section.content,
                 status: status.key(),
-                based_on: section.based_on.as_deref(),
+                based_on: section.based_on.as_ref(),
                 refs: &section.refs,
                 relations: &section.relations,
-                sha256: &section.sha256,
-                admitted_at: &section.admitted_at,
+                digest: &section.digest,
+                admitted: &section.admitted,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),
@@ -715,12 +833,19 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         state: object.state.as_str(),
         attention: object.needs_attention(),
         rev: object.rev,
-        integrity: if object_tampered(object) {
-            "tampered"
-        } else {
-            "ok"
+        // Four answers, because there are four states and three of them used to
+        // be reported as `ok`. `tampered` is bytes that do not match their own
+        // seal. `divergent` is bytes that match it and that no admitted Event
+        // ever produced — the projection is what is wrong, and `repair` restores
+        // it. `unreplayable` is the opposite: the EventStore cannot be replayed
+        // at all, so there is nothing to restore from and nothing to check
+        // against.
+        integrity: match history_fault(root, object) {
+            _ if object_tampered(object) => "tampered",
+            Some(fault) => fault.key(),
+            None => "ok",
         },
-        sha256: object.sha256.as_deref(),
+        digest: &object.digest,
         summary: JsonSummary {
             sections: tally.total,
             ok: tally.ok,
@@ -736,11 +861,9 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
 /// One line per object, stable columns, never wrapped — so `grep`, `awk` and
 /// `fzf` all compose with it.
 pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment = assess(root, object);
-        let tally = counts(&assessment);
         let hits = keyword.map(|needle| matching_sections(object, needle));
         if let Some(hits) = &hits {
             if hits.is_empty()
@@ -753,21 +876,21 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
             }
         }
         let note = match &hits {
-            Some(hits) if !hits.is_empty() => hits
-                .iter()
-                .map(|id| format!("§{id}"))
-                .collect::<Vec<_>>()
-                .join(" "),
+            Some(hits) if !hits.is_empty() => {
+                hits.iter()
+                    .map(|id| format!("§{id}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    + " unchecked"
+            }
             _ if object_tampered(object) => "object tampered".to_owned(),
-            _ if tally.tampered > 0 => format!("{} tampered", tally.tampered),
-            _ if tally.attention > 0 => format!("{} stale", tally.attention),
-            _ => "ok".to_owned(),
+            _ => "unchecked".to_owned(),
         };
         out.push_str(&format!(
             "{}  {:<20}  {:>2} sections  {:<12}  {}\n",
             abbrev(&object.id, w),
             classification(object),
-            tally.total,
+            object.sections.len(),
             note,
             object.title
         ));
@@ -804,32 +927,20 @@ pub fn tampered_count(objects: &[Object]) -> usize {
         .sum()
 }
 
-/// One line per section, so grep can reach the text.
-///
-/// Every row carries its own trust status, immediately before the wording.
-/// This is the surface the Skill recommends for searching before a decision, so
-/// a hit here is something an agent is about to act on — and wording that was
-/// forged, or that stands on authority which was, must not arrive looking
-/// exactly like wording a human confirmed. A count on stderr did not do that
-/// job: it says how many, never which, and it is the first thing a pipe drops.
-///
-/// The status sits before the text rather than after it because the text is the
-/// only field that can contain spaces; anything following it is not a column.
+/// One line per stored section. The unchecked marker travels through pipes:
+/// seals can expose damage cheaply, but cannot establish admission or freshness.
 pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
-        let aggregate_tampered = object_tampered(object);
+        let tampered = object_tampered(object);
         for section in &object.sections {
-            let status = if aggregate_tampered {
+            let status = if tampered {
                 "object_tampered"
+            } else if section_tampered(object, section) {
+                "tampered"
             } else {
-                assessment
-                    .iter()
-                    .find(|(id, _)| *id == section.id)
-                    .map(|(_, status)| status.key())
-                    .unwrap_or("ok")
+                "unchecked"
             };
             out.push_str(&format!(
                 "{} §{:<3} {:<20}  {:<14}  {}\n",
@@ -844,24 +955,21 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     out
 }
 
-/// Which sections cannot be trusted, named rather than counted.
-///
-/// "3 sections do not match their hashes" tells a reader that something is
-/// wrong and nothing about where, which turns a warning into a chore. The
-/// listing above already marks each row; this is for the caller that wants to
-/// say so once, loudly, on the stream a pipe does not swallow.
+/// Cheap seal failures only; dependency and history checks belong to assessment.
 pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
-    let w = width(root);
+    let w = projection_width(root);
     let mut found = Vec::new();
     for object in objects {
-        for (id, status) in assess(root, object) {
-            if status.forged() {
-                found.push(format!(
-                    "{} §{id} {}",
-                    abbrev(&object.id, w),
-                    status.label()
-                ));
-            }
+        let tampered = object_tampered(object);
+        for section in &object.sections {
+            let label = if tampered {
+                "OBJECT TAMPERED"
+            } else if section_tampered(object, section) {
+                "TAMPERED"
+            } else {
+                continue;
+            };
+            found.push(format!("{} §{} {label}", abbrev(&object.id, w), section.id));
         }
     }
     found
@@ -957,7 +1065,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
     for item in items {
         if let Some(needle) = keyword {
             let needle = needle.to_lowercase();
-            let hit = item.topic.to_lowercase().contains(&needle)
+            let hit = item.title.to_lowercase().contains(&needle)
                 || item
                     .sections
                     .iter()
@@ -982,7 +1090,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
             item.sections.len(),
             note,
             to_the_second(item.updated_at()),
-            item.topic
+            item.title
         ));
     }
     out
@@ -996,7 +1104,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
 pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     let w = backlog_width(root);
     let mut out = String::from(STAGING_BANNER);
-    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.topic));
+    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.title));
     out.push_str(&format!(
         "{} unresolved   updated {}\n",
         item.sections.len(),
@@ -1031,6 +1139,16 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
         // place a resuming agent is most likely to conclude the opposite.
         if !section.produced.is_empty() {
             out.push_str("             (already admitted; this point is still unresolved)\n");
+        }
+        // The marker exists so an exhausted review is not silent, and until now
+        // it was reachable only from `--format json`. The wording standing here
+        // is wording no passing review allowed; a reader of the human surface is
+        // exactly who needs to know that.
+        if let Some(review) = section.review_exhaustion {
+            out.push_str(&format!(
+                "    exhausted attempt {} against a ceiling of {}; this wording stands without a passing review\n",
+                review.attempts, review.limit
+            ));
         }
     }
     out
@@ -1089,7 +1207,7 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
     serde_json::to_string_pretty(&JsonBacklogItem {
         id: &item.id,
         reference: backlog_reference(&item.id),
-        topic: &item.topic,
+        topic: &item.title,
         // Structured output travels furthest from the banner, so the boundary
         // has to be a field rather than a line somebody printed once.
         authority: "unconfirmed_staging",
@@ -1118,10 +1236,30 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
 /// at, whose basis has since moved. Outside the attention set is exactly where
 /// drift goes unnoticed — which is why this reads the derived class rather than
 /// `open`/`closed`, and so covers an accepted design and a mitigated risk too.
-pub fn render_stale(root: &Path, objects: &[Object]) -> String {
+pub fn render_ls_verify(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
     for object in objects {
+        // One row for the Object's own fault, not one per Section: the thing
+        // that is wrong is the Object, and repeating it under every §id would
+        // say it is several separate problems. `§-` keeps the columns, and is
+        // the only row an Object with no Sections left could have.
+        if let Some(fault) = object_fault(root, object) {
+            let unwatched = !object.needs_attention();
+            out.push_str(&format!(
+                "{} {}  {:<20}  §-  {}{}\n",
+                if unwatched { "⚠" } else { "·" },
+                abbrev(&object.id, w),
+                classification(object),
+                fault.label(),
+                if unwatched {
+                    " — nobody is looking at this one"
+                } else {
+                    ""
+                }
+            ));
+            continue;
+        }
         for (id, status) in assess(root, object) {
             if status.is_ok() {
                 continue;
@@ -1242,7 +1380,7 @@ fn subject_title(root: &Path, subject: &work::Subject) -> String {
             .map(|object| object.title)
             .unwrap_or_default(),
         work::Subject::Backlog(id) => backlog::load(root, id)
-            .map(|item| item.topic)
+            .map(|item| item.title)
             .unwrap_or_default(),
     }
 }
@@ -1390,7 +1528,7 @@ fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
     let id = uuid.to_string();
     match parsed.kind() {
         crate::reference::ResourceKind::Backlog => match backlog::load(root, &id) {
-            Ok(item) => format!("unresolved  {}", item.topic),
+            Ok(item) => format!("unresolved  {}", item.title),
             Err(error) if error.code == crate::EXIT_NOT_FOUND => {
                 "gone (consumed or removed)".to_owned()
             }
@@ -1434,7 +1572,7 @@ pub fn render_collection_ls(root: &Path, collections: &[collection::Collection])
             item.state.as_str(),
             item.members.len(),
             attention,
-            item.name
+            item.title
         ));
     }
     out
@@ -1466,7 +1604,7 @@ pub fn render_collection_show(root: &Path, item: &collection::Collection) -> Str
         item.id,
         item.id,
         item.state.as_str(),
-        item.name
+        item.title
     ));
     if let Some(schedule) = &item.schedule {
         let mut parts = Vec::new();
@@ -1522,7 +1660,7 @@ pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
         // The same field Backlog and Work carry, for the same reason: structured
         // output leaves the screen that would otherwise have said so.
         "authority": "planning",
-        "name": item.name,
+        "title": item.title,
         "description": item.description,
         "state": item.state.as_str(),
         "schedule": item.schedule,
@@ -1577,13 +1715,13 @@ fn comparable_projection(object: &Object) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(object)
         .map_err(|error| Error::new(crate::EXIT_SCHEMA, format!("comparing: {error}")))?;
     if let Some(map) = value.as_object_mut() {
-        map.remove("sha256");
+        map.remove("digest");
         if let Some(sections) = map.get_mut("sections").and_then(|s| s.as_array_mut()) {
             let mut keyed = serde_json::Map::new();
             for mut section in sections.drain(..) {
                 let id = section.get("id").and_then(serde_json::Value::as_u64);
                 if let Some(entry) = section.as_object_mut() {
-                    entry.remove("sha256");
+                    entry.remove("digest");
                     entry.remove("id");
                 }
                 let at = id
