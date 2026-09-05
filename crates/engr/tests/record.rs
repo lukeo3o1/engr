@@ -156,8 +156,12 @@ fn reconcile_applies_an_event_the_projection_missed() {
     let object_before = std::fs::read(&object_path).expect("raw object");
     let events_before = std::fs::read(&events_path).expect("events");
     let report = ops::verify(&root, &id).expect("verify raw projection");
-    assert!(!report.passed());
+    // Counted, and not a fault. The Event is admitted and the projection is
+    // derived from it; there is nothing here that repair could restore, and
+    // `repair` says so — so a failing verdict here would send a reader to a
+    // command that disagrees with it.
     assert_eq!(report.unprojected, 1);
+    assert!(report.passed());
     assert_eq!(
         std::fs::read(&object_path).expect("object after verify"),
         object_before
@@ -1852,5 +1856,56 @@ fn a_workspace_is_not_current_until_its_ignore_line_exists() {
     assert!(
         ignored_at <= activated_at,
         "the generation marker must be written last: ignore {ignored_at:?}, VERSION {activated_at:?}"
+    );
+}
+
+/// `verify` names a dependency that moved, and still passes.
+///
+/// Both halves are the finding. Passing is correct and deliberate: the target
+/// changed in a way somebody was entitled to change it, and whether this wording
+/// still holds is a judgement nothing can checksum — drift has never been an
+/// integrity failure. Saying *nothing* was the defect. `show` reported "refs
+/// moved" and `ls` reported "1 stale" at the same instant, so the one surface
+/// whose whole job is to answer "is this sound?" was the only one that did not
+/// mention the answer's soft spot, while its own help promised "plus
+/// dependencies".
+#[test]
+fn verify_names_a_dependency_that_moved_and_still_passes() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    admit(&root, payload(Act::Add, &target, "the original basis"));
+    let commit = commit_all(&root, "record target");
+
+    let source = new_object(&root, "the source");
+    let mut with_ref = payload(Act::Add, &source, "rests on the basis");
+    set_refs(&mut with_ref, vec![text_ref(&root, &target, 1, &commit)]);
+    admit(&root, with_ref);
+
+    let clean = ops::verify(&root, &source).expect("verify");
+    assert!(clean.passed());
+    assert!(clean.drifted.is_empty(), "nothing has moved yet");
+
+    admit(
+        &root,
+        payload(Act::Revise(1), &target, "the basis, restated differently"),
+    );
+
+    let moved = ops::verify(&root, &source).expect("verify after the target moved");
+    assert!(
+        moved.passed(),
+        "drift is a judgement, not an integrity failure"
+    );
+    assert_eq!(moved.drifted.len(), 1, "and it is reported all the same");
+    assert_eq!(moved.drifted[0].section, 1);
+    assert_eq!(moved.drifted[0].target, target);
+    assert_eq!(moved.drifted[0].target_section, 1);
+    assert_eq!(
+        moved.drifted[0]
+            .fields
+            .iter()
+            .map(|field| field.as_str())
+            .collect::<Vec<_>>(),
+        vec!["text"],
+        "named down to the selected field that moved"
     );
 }

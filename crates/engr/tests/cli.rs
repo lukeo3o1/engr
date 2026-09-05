@@ -429,10 +429,14 @@ fn workspace_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     all
 }
 
-/// The released predecessor is readable, refuses mutation by name, and moves
-/// forward only through a confirmed migration.
+/// The released predecessor answers no command but `migrate`, says so in those
+/// words, and moves forward only through a confirmed one.
+///
+/// The loop below is the evidence for the wording: three of the five refusals it
+/// collects are reads. A message calling the workspace "read-only" described the
+/// opposite of what this test was already proving.
 #[test]
-fn the_predecessor_is_readable_but_requires_a_confirmed_migration_to_mutate() {
+fn the_predecessor_answers_nothing_but_a_confirmed_migration() {
     let (_temp, root) = common::released();
     let root = root.as_path();
 
@@ -587,13 +591,24 @@ fn migrating_a_current_workspace_is_a_refusal_not_a_rewrite() {
 }
 
 /// A crash between the durable append and the projection is reported before it
-/// is repaired, and reporting it writes nothing.
+/// is repaired, reporting it writes nothing, and it is **not** a failure.
 ///
 /// The two halves are different surfaces on purpose. `verify` states what the
-/// record is — a projection that does not reflect its own admitted history —
-/// and takes no lock and touches no file, so a diagnostic never becomes a
-/// mutation. `show` is the surface that repairs, under the writer lock, and
-/// what it repairs to is exactly what the Events say.
+/// record is and takes no lock and touches no file, so a diagnostic never
+/// becomes a mutation. `show` is the surface that repairs, under the writer
+/// lock, and what it repairs to is exactly what the Events say.
+///
+/// The verdict is PASS, and that is the correction rather than a relaxation.
+/// Nothing here is lost or unadmitted: the Events are admitted, the projection
+/// is derived from them, and the next read finishes the job. Calling it FAIL put
+/// three surfaces into contradiction — `verify` said the record was broken,
+/// `show` silently fixed it, and `repair`, the recovery `verify` sends people
+/// to, correctly answered that there was nothing to repair. A verification that
+/// fails where the repair path says the object is sound is telling the reader to
+/// do something the tool then refuses.
+///
+/// So both halves are asserted: the tail is *named* on the surface whose job is
+/// to say what the record is, and the surface that writes says that it wrote.
 #[test]
 fn a_crash_tail_is_reported_before_it_is_repaired() {
     let workspace = TempDir::new().expect("temp dir");
@@ -646,13 +661,15 @@ fn a_crash_tail_is_reported_before_it_is_repaired() {
         std::fs::remove_file(&lock_path).expect("remove old writer lock");
     }
 
-    // Reported, in the words of what is actually wrong.
+    // Reported, in the words of what is actually there, and passing — because an
+    // admitted Event the projection has not caught up to is an unfinished
+    // admission, not a damaged record.
     let verified = run_engr(root, &["verify", id]);
-    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
-    assert!(String::from_utf8_lossy(&verified.stdout).contains("FAIL"));
+    assert_eq!(verified.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("PASS"));
     assert!(
-        String::from_utf8_lossy(&verified.stdout).contains("1 events are not reflected"),
-        "verify must not call the raw projection synchronized: {}",
+        String::from_utf8_lossy(&verified.stdout).contains("unprojected — 1 admitted event"),
+        "verify must still name the tail it is passing over: {}",
         String::from_utf8_lossy(&verified.stdout)
     );
     // And reporting it moved nothing, took no lock, and rendered the wording
@@ -673,6 +690,17 @@ fn a_crash_tail_is_reported_before_it_is_repaired() {
         );
     }
 
+    // And the recovery `verify` would have sent a reader to agrees with it. This
+    // is the contradiction the test exists to keep closed, and it is asserted
+    // after the no-write checks above because `repair` is a gate command and
+    // takes the writer lock even to refuse.
+    let repair_says = run_engr(root, &["repair", id]);
+    assert!(
+        String::from_utf8_lossy(&repair_says.stderr).contains("nothing to repair"),
+        "repair and verify must not disagree about the same object: {}",
+        String::from_utf8_lossy(&repair_says.stderr)
+    );
+
     // Repaired by the surface that is allowed to write, and to exactly what the
     // admitted history says.
     let shown = run_engr(root, &["show", id]);
@@ -684,6 +712,15 @@ fn a_crash_tail_is_reported_before_it_is_repaired() {
     assert!(
         String::from_utf8_lossy(&shown.stdout).contains("recovered confirmed wording"),
         "show must render the confirmed recovery tail"
+    );
+    // The surface that writes says that it wrote. A read command rewriting the
+    // authority file in silence is how the disagreement above stayed invisible:
+    // the answer changed between two `verify` runs and nothing named the write
+    // that changed it, or the dirty working tree it left.
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("reconciled 1 admitted event"),
+        "show must say it applied the tail: {}",
+        String::from_utf8_lossy(&shown.stdout)
     );
     let repaired = store::load_object(root, id).expect("repaired projection");
     assert_eq!(repaired.rev, 2);
@@ -6330,4 +6367,168 @@ fn a_resealed_projection_is_repaired_back_to_what_history_proves() {
         "history that cannot rebuild the Object is not repairable"
     );
     std::fs::write(&events, stream).expect("restore");
+}
+
+/// `repair` takes the id every other command prints.
+///
+/// It was the one command that took its argument raw, so it alone refused the
+/// short form `ls` and `show` display — on the recovery path, reached only when
+/// something is already wrong, and named explicitly by the refusals that send a
+/// reader here.
+#[test]
+fn repair_takes_the_short_id_every_other_command_prints() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "an object to damage"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    // Damage it the way an out-of-band edit does: change the wording, leave the
+    // seal behind.
+    let path = store::object_path(root, &id);
+    let text = std::fs::read_to_string(&path).expect("object");
+    std::fs::write(
+        &path,
+        text.replace("an object to damage", "edited elsewhere"),
+    )
+    .expect("edit outside an admission path");
+
+    // Taken from what `ls` actually printed rather than sliced to a guessed
+    // width: the short form is as wide as the workspace needs it to be, and the
+    // claim is about the id a reader copies off the screen.
+    let listed = run_engr(root, &["ls", "--all"]);
+    let rendered = String::from_utf8_lossy(&listed.stdout).to_string();
+    let short = rendered
+        .split_whitespace()
+        .next()
+        .expect("ls prints an id")
+        .to_owned();
+    assert!(
+        short.len() < id.len() && id.starts_with(&short),
+        "ls must print a proper prefix of the id, not the whole thing: {rendered}"
+    );
+
+    let repaired = run_engr(root, &["repair", &short]);
+    assert!(
+        repaired.status.success(),
+        "repair must accept the id its own diagnostics print: {}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&repaired.stdout).contains("CONFIRM"),
+        "and reach the gate: {}",
+        String::from_utf8_lossy(&repaired.stdout)
+    );
+
+    // And an ambiguous or absent prefix is still a resolution failure rather
+    // than a UUID complaint.
+    let missing = run_engr(root, &["repair", "01a00000-00"]);
+    assert!(!missing.status.success());
+}
+
+/// An exhausted Backlog review is announced where a person will see it.
+///
+/// The marker exists so a soft admission is not silent, and it was silent
+/// anyway: it reached `--format json` and nothing else, so the moment it
+/// happened printed `revised §1` and exit 0 like any other mutation, and the
+/// text surface that renders the point never mentioned it afterwards. The Object
+/// domain announces the same condition on the screen that admits it.
+#[test]
+fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::write(
+        store::engr_dir(root).join("rules").join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: 1\n---\n\nGo round once.\n",
+    )
+    .expect("write the rule");
+
+    let made = run_engr(
+        root,
+        &["backlog", "new", "--title", "a topic", "--text", "a point"],
+    );
+    assert!(
+        made.status.success(),
+        "backlog new: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let id = engr::backlog::ids(root).expect("backlog ids")[0].clone();
+
+    let listed = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
+    let document: Value =
+        serde_json::from_slice(&listed.stdout).expect("backlog show --format json");
+    let token = document["sections"][0]["expect"]
+        .as_str()
+        .expect("the point's expect token")
+        .to_owned();
+
+    // Past the ceiling the rule set, which is what makes this exhausted.
+    let revised = run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "1",
+            "--text",
+            "wording no passing review allowed",
+            "--expect",
+            &token,
+            "--attempt",
+            "3",
+        ],
+    );
+    assert!(
+        revised.status.success(),
+        "an exhausted Backlog mutation is still admitted: {}",
+        String::from_utf8_lossy(&revised.stderr)
+    );
+    let said = String::from_utf8_lossy(&revised.stdout).to_string();
+    assert!(
+        said.contains("admitted on attempt 3 against a ceiling of 1"),
+        "the moment it happens must say so: {said}"
+    );
+
+    // And it keeps saying so on the surface a person reads afterwards, not only
+    // on the machine-readable one.
+    let shown = run_engr(root, &["backlog", "show", &id]);
+    let rendered = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(
+        rendered.contains("exhausted attempt 3 against a ceiling of 1"),
+        "and the rendered point must carry it: {rendered}"
+    );
+
+    // A later mutation inside the ceiling clears it, and the surface follows.
+    let listed = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
+    let document: Value = serde_json::from_slice(&listed.stdout).expect("json again");
+    let token = document["sections"][0]["expect"]
+        .as_str()
+        .expect("token")
+        .to_owned();
+    let again = run_engr(
+        root,
+        &[
+            "backlog",
+            "revise",
+            &id,
+            "--section",
+            "1",
+            "--text",
+            "reviewed wording",
+            "--expect",
+            &token,
+            "--attempt",
+            "1",
+        ],
+    );
+    assert!(again.status.success());
+    assert!(!String::from_utf8_lossy(&again.stdout).contains("ceiling"));
+    let shown = run_engr(root, &["backlog", "show", &id]);
+    assert!(!String::from_utf8_lossy(&shown.stdout).contains("exhausted"));
 }

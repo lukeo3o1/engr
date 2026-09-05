@@ -56,7 +56,13 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Verify Object and Section integrity plus dependencies
+    /// Check Object and Section integrity, and report dependencies that moved
+    ///
+    /// Integrity is what fails: a seal that no longer matches its wording, a
+    /// projection admitted history never produced, a dependency that cannot be
+    /// read. A dependency that merely *moved* is reported and does not fail —
+    /// the target changed in a way somebody was entitled to change it, and
+    /// whether this wording still holds is a judgement nothing can checksum.
     Verify { object: Option<String> },
     /// Propose restoring an Object whose stored integrity has failed
     ///
@@ -64,6 +70,7 @@ enum Command {
     /// proves. It carries no changes of its own: confirm it, then make any
     /// wanted change the normal way.
     Repair {
+        /// The object to restore. Any unique id prefix
         object: String,
         #[arg(long)]
         json: bool,
@@ -868,6 +875,11 @@ fn main() {
 /// the record shows both acts instead of one that quietly did both.
 fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
     store::require_current(root)?;
+    // Through the same resolver as every other object argument. This was the
+    // one command that took the string raw, so it alone refused the short id
+    // `ls` and `show` print — on the recovery path, reached only when something
+    // is already wrong, and named by the very refusals that send a reader here.
+    let object = &resolve_object_argument(root, "repair", object)?;
     let prepared = gate::prepare_repair(root, object)?;
     if json {
         // Both sides, not just the candidate. The candidate binds only what is
@@ -982,13 +994,28 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             engr::Confirmed::Migration(report) => {
-                println!(
-                    "MIGRATED   {}  {} objects, {} sections, generation {}",
-                    store::engr_dir(&root).display(),
-                    report.objects.len(),
-                    report.sections,
-                    engr::WORKSPACE_GENERATION
-                );
+                // Two outcomes, and they must not read alike. The retry after a
+                // crash between `VERSION` and the sweep publishes nothing — the
+                // record is already this generation's, and may have moved on
+                // since. Printing the migration line there stated that a
+                // migration had just happened, with the plan's section count
+                // rather than the workspace's, which is the reading that made
+                // retyping the code look safe in the first place.
+                if report.already_complete {
+                    println!(
+                        "COMPLETE   {}  already generation {}; nothing was migrated, and the spent migration's leftovers are retired",
+                        store::engr_dir(&root).display(),
+                        engr::WORKSPACE_GENERATION
+                    );
+                } else {
+                    println!(
+                        "MIGRATED   {}  {} objects, {} sections, generation {}",
+                        store::engr_dir(&root).display(),
+                        report.objects.len(),
+                        report.sections,
+                        engr::WORKSPACE_GENERATION
+                    );
+                }
                 Ok(())
             }
         },
@@ -1020,10 +1047,27 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 ops::effective(&root, &id)?
             };
+            // Reconciliation rewrites the Object file, and a read command that
+            // writes must say so. Silence here meant `verify` could fail on a
+            // crash tail, a `show` could clear it, and nothing in between named
+            // the write that changed the answer — or the dirty working tree it
+            // left behind.
+            let caught_up = stored
+                .as_ref()
+                .ok()
+                .map_or(0, |stored| object.rev.saturating_sub(stored.rev));
             if format == Format::Json {
                 println!("{}", view::render_show_json(&root, &object)?);
             } else {
                 print!("{}", view::render_show(&root, &object));
+                if caught_up > 0 {
+                    println!(
+                        "note       reconciled {} admitted {} the stored projection was behind; it is now rev {}",
+                        caught_up,
+                        if caught_up == 1 { "event" } else { "events" },
+                        object.rev
+                    );
+                }
             }
             // `show` asserts about one object, so a broken one must not exit 0
             // and let `set -e` carry on. `ls` surveys, and keeps exiting 0.
@@ -1135,6 +1179,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 &review.prepared(|| Ok(vec![backlog::Precondition::section_absent(root, &id)?]))?,
             )?;
             println!("added §{section}");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Revise {
@@ -1148,6 +1193,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Subjects {
@@ -1163,6 +1209,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 .prepared(|| Ok(vec![backlog::Precondition::section(root, &id, section)?]))?;
             backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Merge {
@@ -1189,6 +1236,7 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
                 })?,
             )?;
             println!("merged §{section} into §{into}");
+            warn_exhausted(root, &id, into);
             Ok(())
         }
         Backlog::Produced {
@@ -2749,10 +2797,36 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 broken.reason
             );
         }
+        // Reported, and deliberately not a failure — the same line `show` and
+        // `ls` already draw. What was missing was `verify` drawing it at all: a
+        // PASS that never mentions a moved dependency reads as "nothing here
+        // needs your attention", which is the one thing it cannot mean.
+        for moved in &report.drifted {
+            println!(
+                "          §{} stands on {} §{}, which moved: {} — a judgement, not an integrity failure",
+                moved.section,
+                shorten(&moved.target, width),
+                moved.target_section,
+                moved
+                    .fields
+                    .iter()
+                    .map(|field| field.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // A note, in the same register as `uncommitted`, and for the same
+        // reason: it is worth knowing and it is not a failure. These Events are
+        // admitted; the projection is derived from them and has not caught up.
+        // Saying "not reflected in the sections" read as damage and sent people
+        // to `repair`, which then correctly told them there was nothing to
+        // repair.
         if report.unprojected > 0 {
             println!(
-                "          {} events are not reflected in the sections",
-                report.unprojected
+                "          unprojected — {} admitted {} the stored projection has not caught up to; the next read applies {}",
+                report.unprojected,
+                if report.unprojected == 1 { "event" } else { "events" },
+                if report.unprojected == 1 { "it" } else { "them" }
             );
         }
         if report.uncommitted == Some(true) {
@@ -2764,6 +2838,34 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
         return Err(Error::new(engr::EXIT_INVARIANT, "verification failed"));
     }
     Ok(())
+}
+
+/// Say out loud that this mutation was admitted on an exhausted review.
+///
+/// The marker is persisted so an exhausted review is not silent, and it was
+/// silent anyway: only `--format json` carried it, so the moment it happened
+/// printed `revised §2` and exit 0 like any other. The Object domain announces
+/// the same condition on the screen that admits it, and this is the same
+/// condition.
+///
+/// Read back from what was stored rather than from the verdict in hand, so the
+/// line reports the marker that is actually on the point.
+fn warn_exhausted(root: &Path, id: &str, section: u64) {
+    let Ok(item) = backlog::load(root, id) else {
+        return;
+    };
+    let Some(review) = item
+        .sections
+        .iter()
+        .find(|one| one.id == section)
+        .and_then(|one| one.review_exhaustion)
+    else {
+        return;
+    };
+    println!(
+        "note       admitted on attempt {} against a ceiling of {}; no passing review allowed this wording",
+        review.attempts, review.limit
+    );
 }
 
 fn warn_uncommitted(root: &Path, id: &str) {
@@ -3677,9 +3779,26 @@ fn render_migration(root: &Path, proposed: &engr::migration::Proposed) -> String
     ));
     out.push_str(
         "The predecessor's own event history is discarded rather than translated: each Object\n\
-         gets one object.migrated.v1 bootstrap at revision 1. Any pending candidate is not\n\
-         migrated and must be prepared again.\n",
+         gets one object.migrated.v1 bootstrap at revision 1.\n",
     );
+    // Named, not alluded to. "Any pending candidate is not migrated" is a
+    // sentence about the contract, and a reader cannot tell from it whether
+    // their own workspace has one. These are unrecoverable and are not among
+    // the files counted above.
+    if proposed.discarded_candidates.is_empty() {
+        out.push_str("No Human-Gate question is pending, so none is discarded.\n");
+    } else {
+        out.push_str(&format!(
+            "{} pending Human-Gate question{} will be DISCARDED and must be prepared again: {}\n",
+            proposed.discarded_candidates.len(),
+            if proposed.discarded_candidates.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            proposed.discarded_candidates.join(", ")
+        ));
+    }
     out.push_str(&format!(
         "\nType this exactly to confirm:  CONFIRM {}\n",
         proposed.challenge

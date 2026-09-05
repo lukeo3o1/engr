@@ -607,6 +607,42 @@ pub struct Proposed {
     /// Whether this run re-rendered an existing staged plan rather than deriving
     /// a new one.
     pub resumed: bool,
+    /// Predecessor Human-Gate questions this migration will discard, by code.
+    ///
+    /// The screen said "any pending candidate is not migrated" — a sentence
+    /// about the contract, which a reader cannot tell from a sentence about
+    /// their workspace. These are unrecoverable: a prepared question is somebody
+    /// part-way through a decision, it is not among the files the plan counts,
+    /// and after this it is gone. Naming them is the difference between
+    /// disclosing a consequence and mentioning that one is possible.
+    ///
+    /// Deliberately outside [`MigrationSubject`], which is the frozen question
+    /// and whose digest is a published contract. This is the workspace as it
+    /// stands when the screen is drawn, and it is re-probed on the resumed path
+    /// for the same reason.
+    pub discarded_candidates: Vec<String>,
+}
+
+/// The predecessor Human-Gate questions still pending, by code.
+///
+/// Absence of the directory is absence of questions; anything else about it is
+/// not something to guess at, so this asks on the same three-way terms as every
+/// other probe and reports nothing it could not establish.
+fn pending_predecessor_candidates(root: &Path) -> Result<Vec<String>> {
+    let dir = store::engr_dir(root).join("candidates");
+    if !store::namespace(&dir)? {
+        return Ok(Vec::new());
+    }
+    let mut codes = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
+        let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(code) = name.strip_suffix(".json") {
+            codes.push(code.to_owned());
+        }
+    }
+    codes.sort();
+    Ok(codes)
 }
 
 /// Prepare the migration and mint the Challenge that admits it.
@@ -690,6 +726,7 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
                     challenge: manifest.challenge,
                     subject: manifest.subject,
                     resumed: true,
+                    discarded_candidates: pending_predecessor_candidates(root)?,
                 });
             }
             Some(why) => {
@@ -743,6 +780,7 @@ fn prepare_locked(root: &Path) -> Result<Proposed> {
         challenge: challenge.id,
         subject,
         resumed: false,
+        discarded_candidates: pending_predecessor_candidates(root)?,
     })
 }
 
@@ -818,6 +856,16 @@ fn stage(root: &Path, manifest: &Manifest) -> Result<()> {
 pub struct Report {
     pub objects: Vec<String>,
     pub sections: usize,
+    /// This run published nothing: the transaction was already complete, and
+    /// all that remained was to retire its leftovers.
+    ///
+    /// **The counts above are the plan's, and on this path they are not the
+    /// workspace's.** The crash state this path exists for leaves `VERSION`
+    /// written beside a stage that has not been swept, so anything admitted
+    /// since is already in the record and outside the plan. Reporting the plan's
+    /// numbers as a migration result is what made retyping the code look like
+    /// the thing to do — the destructive reading this path was built to refuse.
+    pub already_complete: bool,
 }
 
 /// Apply the migration a human has just confirmed.
@@ -1049,6 +1097,7 @@ fn already_applied(root: &Path, challenge: &crate::confirmation::Challenge) -> R
             .iter()
             .map(|planned| planned.sections as usize)
             .sum(),
+        already_complete: true,
     })
 }
 
@@ -1428,6 +1477,7 @@ fn finish(
     Ok(Report {
         objects: ids,
         sections,
+        already_complete: false,
     })
 }
 
@@ -1993,9 +2043,34 @@ fn exclude_local_from_git(root: &Path) -> Result<()> {
     store::write_text(&path, &text)
 }
 
+/// Exactly what the released `engr init` wrote.
+///
+/// Kept as bytes rather than as a description, because it is used to decide
+/// whether the file on disk is engr's own output or something a person has since
+/// made theirs — and "close enough" is not an answer to that question.
+const PREDECESSOR_GITIGNORE: &str = "\
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. events/ is safe to commit too: the challenge codes in it have
+# already been spent, and a spent code resolves to nothing.
+#
+# These two are local only:
+#   lock         a mutex for this machine, nothing to share
+#   candidates/  each file is named after a *live* challenge code
+/lock
+/candidates/
+";
+
 /// The predecessor's `.gitignore` named `lock` and `candidates/`, which this
-/// generation does not have. One line replaces both, and it is added rather than
-/// the file being rewritten: an ignore file is a person's, not engr's.
+/// generation does not have.
+///
+/// **Two cases, because "an ignore file is a person's, not engr's" is only half
+/// true.** Appending `/local/` to whatever is there is right for a file somebody
+/// has edited. It was wrong for the common case: an untouched predecessor file
+/// is engr's own output, and leaving it produced a generation-1 workspace whose
+/// tracked documentation describes `events/`, `lock` and `candidates/` — three
+/// paths this generation does not have — and disagrees with what `init` writes
+/// for the same generation. Engr may retire the lines engr wrote; it may not
+/// touch anybody else's, so the replacement happens only on a byte-exact match.
 fn ensure_local_ignored(root: &Path) -> Result<()> {
     let path = store::engr_dir(root).join(".gitignore");
     // Through the containment boundary and the atomic publisher, like every
@@ -2009,6 +2084,9 @@ fn ensure_local_ignored(root: &Path) -> Result<()> {
     } else {
         String::new()
     };
+    if text == PREDECESSOR_GITIGNORE {
+        return store::write_text(&path, store::GITIGNORE);
+    }
     if text.lines().any(|line| line.trim() == "/local/") {
         return Ok(());
     }

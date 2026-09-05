@@ -298,7 +298,7 @@ pub enum WorkspaceFormat {
 /// One line, because there is one local directory. Every earlier layout grew
 /// this list each time something local was added, and every workspace created
 /// before that addition kept the shorter list.
-const GITIGNORE: &str = "\
+pub(crate) const GITIGNORE: &str = "\
 # The record lives in objects/ — commit that; it is where earlier wording is
 # recovered from. eventstore/ is safe to commit too: any challenge codes in it
 # have already been spent, and a spent code resolves to nothing.
@@ -486,13 +486,22 @@ pub(crate) fn predecessor_bootstrap(root: &Path) -> Result<Option<u32>> {
     Ok(Some(format.version))
 }
 
+/// Refuse anything but `migrate` on a predecessor workspace.
+///
+/// **Not "read-only".** It said that, and then refused `ls`, `show` and `verify`
+/// — which are reads, and are the three things somebody meeting this message is
+/// most likely to try next. Reading a predecessor would mean interpreting its
+/// bytes under a contract they were not written to, so nothing here is available
+/// until the generation moves; `migrate` is the only command this workspace
+/// answers, and the message now says so rather than describing a permission the
+/// workspace does not have.
 pub fn require_current(root: &Path) -> Result<()> {
     match validate_format(root)? {
         WorkspaceFormat::Current => Ok(()),
         WorkspaceFormat::Predecessor => Err(Error::new(
             EXIT_SCHEMA,
             format!(
-                "the released predecessor workspace is read-only here; this engr writes generation {}. Run `engr migrate` before mutation",
+                "this is the released predecessor workspace, and this engr reads and writes generation {} only — no command works here, reads included. Run `engr migrate` first",
                 crate::WORKSPACE_GENERATION
             ),
         )),

@@ -269,18 +269,35 @@ fn the_readable_fixture_is_the_history_it_was_taken_from() {
     assert_eq!(checked, 10);
 }
 
-/// The released bootstrap is recognized as the predecessor, and is read-only
-/// until an explicit migration.
+/// The released bootstrap is recognized as the predecessor, and answers nothing
+/// but `migrate` until one is confirmed.
+///
+/// **Not "read-only", and the message must not say so.** It did, and then
+/// refused `ls`, `show` and `verify` — the three things somebody meeting it is
+/// most likely to try next, and all three reads. Reading a predecessor would
+/// mean interpreting its bytes under a contract they were not written to, so
+/// nothing is available here; describing that as a write restriction sent a
+/// reader looking for the reads that were supposedly still allowed.
 #[test]
-fn a_released_workspace_reads_as_the_predecessor_and_writes_nothing() {
+fn a_released_workspace_reads_as_the_predecessor_and_answers_nothing_but_migrate() {
     let (_temp, root) = released();
     assert_eq!(
         store::validate_format(&root).expect("recognized"),
         WorkspaceFormat::Predecessor
     );
-    let error = store::require_current(&root).expect_err("read-only until migrated");
+    let error = store::require_current(&root).expect_err("nothing but migrate until migrated");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("engr migrate"), "{}", error.message);
+    assert!(
+        !error.message.contains("read-only"),
+        "the refusal must not claim reads are what is unavailable: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("reads included"),
+        "and must say plainly that they are: {}",
+        error.message
+    );
 
     // And no current-generation read pretends to answer for it.
     let error = store::load_object(&root, AUTHORITY).expect_err("not a current Object");
@@ -3024,5 +3041,160 @@ fn the_published_ignore_line_is_not_written_through_a_link() {
     assert_eq!(
         store::validate_format(&root).expect("current"),
         WorkspaceFormat::Current
+    );
+}
+
+/// A migrated workspace documents its own generation, not the one it came from.
+///
+/// The predecessor's `.gitignore` names `lock` and `candidates/` and explains
+/// that `events/` is safe to commit. None of those exist here. Appending
+/// `/local/` and leaving the rest produced a generation-1 workspace whose
+/// tracked documentation described the predecessor's layout — and disagreed with
+/// what `init` writes for the same generation, from the same binary.
+///
+/// Asserted against `init` rather than against a copy of the text, because the
+/// claim is that the two agree, and a test holding its own third copy would go
+/// on passing while they drifted apart.
+#[test]
+fn a_migrated_workspace_documents_its_own_generation() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+    migrate(root);
+
+    let fresh = TempDir::new().expect("temp dir");
+    store::init(fresh.path()).expect("init a workspace of the same generation");
+
+    assert_eq!(
+        read(&store::engr_dir(root).join(".gitignore")),
+        read(&store::engr_dir(fresh.path()).join(".gitignore")),
+        "a migrated workspace and an initialised one must document the same layout"
+    );
+    let ignore = read(&store::engr_dir(root).join(".gitignore"));
+    for gone in ["/lock", "/candidates/"] {
+        assert!(
+            !ignore.lines().any(|line| line.trim() == gone),
+            "the migrated ignore file still names {gone}, which this generation does not have:\n{ignore}"
+        );
+    }
+    assert!(ignore.lines().any(|line| line.trim() == "/local/"));
+}
+
+/// And an ignore file somebody has made theirs is still only added to.
+///
+/// The replacement is licensed by engr having written every byte of it. One
+/// edited line is enough to withdraw that licence: the file is a person's, the
+/// only thing engr needs from it is `/local/`, and rewriting the rest would
+/// discard whatever they were keeping.
+#[test]
+fn an_edited_ignore_file_is_added_to_rather_than_replaced() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+    let path = store::engr_dir(root).join(".gitignore");
+    let mine = format!("{}\n# and this line is mine\n/scratch/\n", read(&path));
+    write(&path, &mine);
+
+    migrate(root);
+
+    let after = read(&path);
+    assert!(
+        after.starts_with(&mine),
+        "an edited ignore file must be preserved exactly:\n{after}"
+    );
+    assert!(
+        after.lines().any(|line| line.trim() == "/local/"),
+        "and still gain the one line engr needs:\n{after}"
+    );
+}
+
+/// The screen names the pending questions the migration will discard.
+///
+/// "Any pending candidate is not migrated" is a sentence about the contract, and
+/// a reader cannot tell from it whether their own workspace has one. A prepared
+/// question is somebody part-way through a decision; it is unrecoverable, it is
+/// not among the files the plan counts, and after this it is gone.
+#[test]
+fn the_migration_screen_names_the_questions_it_will_discard() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+
+    // Nothing pending is said as plainly as something pending.
+    let empty = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .arg("migrate")
+        .output()
+        .expect("preflight");
+    let rendered = String::from_utf8_lossy(&empty.stdout).to_string();
+    assert!(
+        rendered.contains("No Human-Gate question is pending"),
+        "{rendered}"
+    );
+
+    // The released build stored its pending questions as `candidates/<code>.json`.
+    let candidates = store::engr_dir(root).join("candidates");
+    std::fs::create_dir_all(&candidates).expect("candidates dir");
+    for code in ["ABC234", "XYZ789"] {
+        write(&candidates.join(format!("{code}.json")), "{}\n");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .arg("migrate")
+        .output()
+        .expect("preflight again");
+    let rendered = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        rendered.contains("2 pending Human-Gate questions will be DISCARDED"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ABC234, XYZ789"), "{rendered}");
+}
+
+/// The retry after the documented crash window does not claim a migration ran.
+///
+/// `finish` writes `VERSION` and then sweeps, so a crash between them leaves a
+/// workspace that is already current beside a spent Challenge and its stage,
+/// both still readable. Retyping the code is the natural recovery, and the
+/// answer must not be the migration success line: nothing is migrated here, and
+/// the counts belong to the plan rather than to a record that may well have
+/// moved on since.
+#[test]
+fn a_completed_migration_answered_again_does_not_report_a_migration() {
+    let (_temp, root) = released();
+    let root = root.as_path();
+    let proposed = engr::migration::prepare(root).expect("prepare the migration");
+    interrupt_at(root, "challenge", &proposed.challenge);
+
+    // The window itself: current generation, stage and question still there.
+    assert!(store::version_path(root).exists());
+    assert!(store::challenge_path(root, &proposed.challenge)
+        .expect("challenge path")
+        .exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .arg("confirm")
+        .arg(format!("CONFIRM {}", proposed.challenge))
+        .output()
+        .expect("answer the spent code");
+    assert!(
+        output.status.success(),
+        "the retry must converge: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        said.contains("COMPLETE") && said.contains("nothing was migrated"),
+        "the retry must not read as a migration: {said}"
+    );
+    assert!(
+        !said.contains("MIGRATED"),
+        "and must not print the migration line at all: {said}"
+    );
+    assert!(
+        !said.contains("sections"),
+        "nor the plan's counts, which are not this workspace's: {said}"
     );
 }

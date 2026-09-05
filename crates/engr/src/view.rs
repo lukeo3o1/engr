@@ -1020,6 +1020,16 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
         if !section.produced.is_empty() {
             out.push_str("             (already admitted; this point is still unresolved)\n");
         }
+        // The marker exists so an exhausted review is not silent, and until now
+        // it was reachable only from `--format json`. The wording standing here
+        // is wording no passing review allowed; a reader of the human surface is
+        // exactly who needs to know that.
+        if let Some(review) = section.review_exhaustion {
+            out.push_str(&format!(
+                "    exhausted attempt {} against a ceiling of {}; this wording stands without a passing review\n",
+                review.attempts, review.limit
+            ));
+        }
     }
     out
 }

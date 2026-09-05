@@ -171,7 +171,7 @@ person is asked to assent to and is what a Challenge subject carries; the
 | `section.update` | `section.updated.v1` | `section`, `value` | Replaces that section's value; id unchanged |
 | `section.merge` | `section.merged.v1` | `merge`, `value` | Destination keeps its id and takes the admitted wording; sources are consumed |
 | `section.delete` | `section.deleted.v1` | `section` | Removes the section |
-| `change_state` | `object.state_changed.v1` | `state` | Moves the object's state within its type's lifecycle |
+| `change_state` | `object.state_changed.v1` | `state` | Moves an **untyped** object between `open` and `closed` — the whole of this command |
 | `classify` | `object.classified.v1` | `type?`, `state` | Sets both, explicitly |
 | `supersede` | `object.superseded.v1` | `value` | Appends the reason, records the replacement, `state` → `superseded` |
 | `repair` | `object.repaired.v1` | — | Restores the projection admitted history derives; changes no semantics |
@@ -366,9 +366,19 @@ v0 defines **no transition graph**. Any destination is reachable when it is vali
 for the destination type and the invariants below still hold. An invented
 lifecycle sequence would be a process the protocol has no authority to impose.
 
-Closing and reopening are `change_state` like any other move, and remain narrow:
-`open` and `closed` are the untyped vocabulary, so on a typed object they have no
-meaning and MUST be refused.
+Closing and reopening **are** `change_state` — not one use of it among others,
+but the only one. `open` and `closed` are the untyped vocabulary, so on a typed
+object they have no meaning and MUST be refused; and a typed object therefore
+moves state through `classify`, which restates the type alongside the destination
+state. That is not an omission to be filled in later. A typed lifecycle move is a
+statement about what the object is as well as where it stands, and there is no
+transition graph to make the type inferable from the destination — `accepted`
+belongs to both `design` and `decision`, and `superseded` to both — so a
+state-only command for a typed object would have to either guess the type or
+carry it, and carrying it is `classify`.
+
+Describing `change_state` as moving a state "within its type's lifecycle" said
+the opposite, and named a command no implementation offers.
 
 ### Attention
 

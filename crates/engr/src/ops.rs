@@ -362,6 +362,20 @@ pub(crate) fn reconcile_locked(root: &Path, id: &str) -> Result<Object> {
     Ok(object)
 }
 
+/// A section here is intact, and a selected fact it depends on has moved.
+///
+/// Reported, never a failure. The distinction `verify` draws is between what
+/// cannot be true — a broken seal, a projection nothing admitted — and what a
+/// person has to decide, and drift is the second. Saying nothing about it was
+/// how a PASS came to mean less than the reader took it to mean.
+#[derive(Debug)]
+pub struct Drifted {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+    pub fields: Vec<crate::dependency::SemanticField>,
+}
+
 /// A section here is sound, but a section it explicitly leans on is not.
 #[derive(Debug)]
 pub struct StandsOnTampered {
@@ -475,6 +489,22 @@ pub struct Report {
     pub standing_on_missing: Vec<StandsOnMissing>,
     pub standing_on_unreadable: Vec<StandsOnUnreadable>,
     pub broken_replacements: Vec<BrokenReplacement>,
+    /// Selected facts a Ref depends on that have moved since it was made.
+    ///
+    /// Outside `passed()` on purpose: see [`Drifted`].
+    pub drifted: Vec<Drifted>,
+    /// Durable Events this projection has not caught up to yet.
+    ///
+    /// **Not a fault, and `passed()` deliberately ignores it.** This is the
+    /// recoverable crash tail [`history_consistent`] describes: the Events are
+    /// admitted, the projection is derived, and [`reconcile`] applies them. A
+    /// projection *behind* its history has lost nothing — the next read finishes
+    /// the admission. Counting it as a verification failure put three surfaces
+    /// into contradiction, because `show` reconciles the same state and `repair`
+    /// correctly reports there is nothing to repair; a `verify` that fails where
+    /// `repair` says the object is sound is telling the reader to do something
+    /// the tool then refuses. It is still reported, because an unfinished
+    /// admission is worth knowing about.
     pub unprojected: usize,
     pub projection_missing: bool,
     /// How the stored projection and its own admitted history fail to agree.
@@ -498,7 +528,6 @@ impl Report {
             && self.broken_replacements.is_empty()
             && !self.projection_missing
             && self.history.is_none()
-            && self.unprojected == 0
     }
 }
 
@@ -546,6 +575,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let mut standing_on_missing = Vec::new();
     let mut standing_on_unreadable = Vec::new();
     let mut broken_replacements = Vec::new();
+    let mut drifted = Vec::new();
     for section in &object.sections {
         // An authoritative forward link, checked here because nothing else
         // rechecks it after admission. The gate proves the target exists when
@@ -640,8 +670,20 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                         reason: format!("selective reference cannot be verified: {state:?}"),
                     });
                 }
-                crate::dependency::Dependency::Unchanged
-                | crate::dependency::Dependency::Drifted { .. } => {}
+                // Drift is not an integrity failure and never has been: the
+                // target moved in a way somebody is entitled to move it, and
+                // whether this section still holds is a judgement, not a
+                // checksum. But `verify` said nothing at all about it while
+                // `show` said "refs moved" and `ls` said "1 stale" — so the one
+                // surface whose whole job is to answer "is this sound?" was the
+                // one that never mentioned the answer's only soft spot.
+                crate::dependency::Dependency::Drifted { fields } => drifted.push(Drifted {
+                    section: section.id,
+                    target: target_id.clone(),
+                    target_section: target_section_id,
+                    fields,
+                }),
+                crate::dependency::Dependency::Unchanged => {}
             }
         }
     }
@@ -655,6 +697,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         standing_on_missing,
         standing_on_unreadable,
         broken_replacements,
+        drifted,
         unprojected: events
             .iter()
             .filter(|event| event.rev > projection_rev)
