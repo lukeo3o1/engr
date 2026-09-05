@@ -376,6 +376,19 @@ pub struct Drifted {
     pub fields: Vec<crate::dependency::SemanticField>,
 }
 
+/// A section here leans on a target that seals perfectly and is not what its own
+/// admitted history produced.
+///
+/// A failure, and kept apart from tampering for the reason the whole
+/// history-consistency rule exists: the seals pass, so "damaged" is the wrong
+/// word. What is wrong is that nothing admitted the value being depended on.
+#[derive(Debug)]
+pub struct StandsOnDivergent {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+}
+
 /// A section here is sound, but a section it explicitly leans on is not.
 #[derive(Debug)]
 pub struct StandsOnTampered {
@@ -486,6 +499,8 @@ pub struct Report {
     pub object_tampered: bool,
     pub tampered: Vec<u64>,
     pub standing_on_tampered: Vec<StandsOnTampered>,
+    /// Sections here that lean on a target nothing admitted. See [`StandsOnDivergent`].
+    pub standing_on_divergent: Vec<StandsOnDivergent>,
     pub standing_on_missing: Vec<StandsOnMissing>,
     pub standing_on_unreadable: Vec<StandsOnUnreadable>,
     pub broken_replacements: Vec<BrokenReplacement>,
@@ -523,6 +538,7 @@ impl Report {
         !self.object_tampered
             && self.tampered.is_empty()
             && self.standing_on_tampered.is_empty()
+            && self.standing_on_divergent.is_empty()
             && self.standing_on_missing.is_empty()
             && self.standing_on_unreadable.is_empty()
             && self.broken_replacements.is_empty()
@@ -572,6 +588,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     };
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
+    let mut standing_on_divergent = Vec::new();
     let mut standing_on_missing = Vec::new();
     let mut standing_on_unreadable = Vec::new();
     let mut broken_replacements = Vec::new();
@@ -677,6 +694,17 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                         target_section: target_section_id,
                     });
                 }
+                // Its own line, because it is its own fault. The target's seals
+                // pass, so calling this tampering would be wrong; and the
+                // target's own `verify` already reports it, so what is being
+                // added here is that *this* Object is standing on it.
+                crate::dependency::Dependency::TargetHistoryDivergent => {
+                    standing_on_divergent.push(StandsOnDivergent {
+                        section: section.id,
+                        target: target_id.clone(),
+                        target_section: target_section_id,
+                    });
+                }
                 state @ (crate::dependency::Dependency::ProvenanceUnavailable
                 | crate::dependency::Dependency::SchemaMismatch
                 | crate::dependency::Dependency::DigestInvalid) => {
@@ -711,6 +739,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         object_tampered,
         tampered,
         standing_on_tampered,
+        standing_on_divergent,
         standing_on_missing,
         standing_on_unreadable,
         broken_replacements,

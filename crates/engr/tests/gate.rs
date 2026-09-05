@@ -3024,3 +3024,99 @@ fn a_repair_is_admitted_over_a_history_whose_later_events_consume_earlier_ones()
     );
     assert!(ops::verify(&root, &id).expect("verify").passed());
 }
+
+/// A Ref cannot borrow authority from a target that seals perfectly and is not
+/// what its own history produced.
+///
+/// **Two Objects, because that is where the hole was.** A source's own
+/// admission-predecessor check already refuses a divergent *self*, so a
+/// same-Object fixture is caught for the wrong reason and proves nothing. Here A
+/// is the target and B is the source: A is admitted and committed, then one
+/// field of A's stored Section is changed and both seals are recomputed. A's
+/// EventStore and the pinned commit are untouched.
+///
+/// The forged field is deliberately one the Ref does **not** select. Nothing
+/// about drift or staleness can see it: the selected `text` still equals what
+/// the commit holds, every seal passes, and B's own history is impeccable —
+/// which is exactly why B's verification reported nothing. The sharpest instance
+/// of the same hole is promoting a Section from `agent` to `human`, where the
+/// Human-only Ref rule then reads the forged door; the check closes it wherever
+/// the divergence lies, because it asks about the target rather than about which
+/// field moved.
+#[test]
+fn a_reference_cannot_borrow_authority_from_a_resealed_target() {
+    let (_dir, root) = workspace();
+    let target = new_object(&root, "the target");
+    let source = new_object(&root, "the source");
+    admit(&root, payload(Act::Add, &target, "depended upon"));
+    let commit = commit_all(&root, "record the target");
+    let good_ref = text_ref(&root, &target, 1, &commit);
+
+    // Sound first, so what follows is a statement about the forgery rather than
+    // about the fixture.
+    let mut sound_use = payload(Act::Add, &source, "depends on the target");
+    edit(&mut sound_use, |content| {
+        content.refs = vec![good_ref.clone()];
+    });
+    let prepared =
+        gate::prepare(&root, sound_use.clone()).expect("a sound target is referenceable");
+    gate::discard(&root, prepared.candidate.code()).expect("discard");
+
+    let sound = store::load_object(&root, &target).expect("target");
+    let forged = {
+        let mut forged = sound.clone();
+        forged.sections[0].header = Some("a heading nobody admitted".to_owned());
+        forged.sections[0] = engr::integrity::sealed_section(&forged.sections[0]).expect("seal");
+        forged.reseal().expect("reseal");
+        forged
+    };
+    save_raw(&root, &forged).expect("put the forgery on disk");
+    engr::integrity::check_object_integrity(&forged).expect("the forgery vouches for itself");
+    assert!(
+        !ops::verify(&root, &target).expect("verify").passed(),
+        "the target's own verification sees it, and always did"
+    );
+
+    // 1. Preparation refuses it, and says what is wrong with the target.
+    let mut against_forged = payload(Act::Add, &source, "depends on a forged target");
+    edit(&mut against_forged, |content| {
+        content.refs = vec![good_ref.clone()];
+    });
+    let error = gate::prepare(&root, against_forged).expect_err("a forgery is not authority");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("admitted history"),
+        "the refusal names the target's own fault: {error}"
+    );
+
+    // 2. And so does confirmation, when the target is forged after the question
+    // was prepared against a sound one.
+    save_raw(&root, &sound).expect("restore");
+    let prepared =
+        gate::prepare(&root, sound_use.clone()).expect("prepared against a sound target");
+    save_raw(&root, &forged).expect("forge it again before the answer");
+    let error = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect_err("the target moved out of band between the question and the answer");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("admitted history"),
+        "and confirmation says the same thing: {error}"
+    );
+
+    // 3. A Ref admitted while the target was sound stops reporting the source as
+    // sound once the target is forged under it.
+    save_raw(&root, &sound).expect("restore for the admission");
+    admit(&root, sound_use);
+    assert!(ops::verify(&root, &source).expect("verify").passed());
+    save_raw(&root, &forged).expect("forge it after the fact");
+    let report = ops::verify(&root, &source).expect("verify");
+    assert!(
+        !report.passed(),
+        "a source standing on a forged target is not sound"
+    );
+    assert_eq!(report.standing_on_divergent.len(), 1);
+    assert!(
+        report.standing_on_tampered.is_empty(),
+        "and it is not tampering, because the seals pass"
+    );
+}

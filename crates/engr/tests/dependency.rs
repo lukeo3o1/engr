@@ -651,24 +651,141 @@ mod against_a_workspace {
     }
 
     /// A workspace holding one Object with one Section, committed.
+    ///
+    /// **The Object comes with the admitted history that produces it**, as a
+    /// migration bootstrap — the one Event that can state a whole Object at
+    /// once. It used to be a hand-written projection with no EventStore at all,
+    /// and a target like that is now refused where a Ref reads it: a dependency
+    /// is a claim about authority, and a projection nothing admitted has none.
+    /// Every test below therefore starts from a target that is coherent, and
+    /// the ones that break it do so on purpose.
     fn workspace() -> (TempDir, PathBuf, Object, String) {
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path().to_path_buf();
         git(&root, &["init", "-q"]);
         engr::store::init(&root).expect("init");
 
-        let mut object =
-            Object::new(object_id(), "the append boundary".to_owned()).expect("object");
-        object.rev = 1;
-        object.next_section_id = 2;
         let mut section = section();
         section.admitted.by = Admission::Human;
-        object.sections = vec![sealed_section(&section).expect("seal")];
-        let object = resealed(&object);
-        save_raw(&root, &object).expect("save");
+        let object = bootstrapped(
+            &root,
+            &object_id(),
+            "the append boundary",
+            2,
+            vec![engr::model::SnapshotSection {
+                id: section.id,
+                value: SectionValue::new(
+                    section.admitted.clone(),
+                    Content {
+                        header: section.header.clone(),
+                        role: section.role,
+                        text: section.text.clone(),
+                        content: section.content.clone(),
+                        based_on: section.based_on.clone(),
+                        refs: section.refs.clone(),
+                        relations: section.relations.clone(),
+                    },
+                ),
+            }],
+        );
 
         let commit = commit_all(&root, "record");
         (dir, root, object, commit)
+    }
+
+    /// Put an Object on disk together with the history that derives it.
+    ///
+    /// A `object.migrated.v1` snapshot, projected rather than hand-assembled, so
+    /// the stored projection is what its own admitted history produced by
+    /// construction instead of by a test author remembering to keep the two in
+    /// step.
+    fn bootstrapped(
+        root: &Path,
+        id: &str,
+        title: &str,
+        next_section_id: u64,
+        sections: Vec<engr::model::SnapshotSection>,
+    ) -> Object {
+        let bootstrap = engr::model::Event::sealed(
+            id,
+            engr::model::new_id(),
+            engr::model::Action::ObjectMigrated {
+                snapshot: Box::new(engr::model::Snapshot {
+                    title: title.to_owned(),
+                    object_type: None,
+                    state: engr::semantics::State::Open,
+                    next_section_id,
+                    sections,
+                }),
+            },
+            1,
+            engr::model::EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+        )
+        .expect("a migration bootstrap is a valid record");
+        let path = engr::store::events_path(root, id);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("eventstore dir");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                engr::proof::canonical_bytes(&bootstrap, "event").expect("canonical")
+            ),
+        )
+        .expect("write the bootstrap");
+
+        let mut object = Object::new(id.to_owned(), String::new()).expect("object");
+        object.rev = 0;
+        object.reseal().expect("seal");
+        engr::model::project(&mut object, &bootstrap).expect("the bootstrap projects");
+        object.reseal().expect("reseal the projection");
+        save_raw(root, &object).expect("save");
+        object
+    }
+
+    /// Move the target the way an admission moves it: append the Event, project
+    /// it, save what the projection produced.
+    ///
+    /// A test that changed the target in memory and resealed it was describing a
+    /// revision "through the gate" while writing something no gate could
+    /// produce, and a Ref's authority check now refuses exactly that. Going
+    /// through the record instead costs three lines and makes the fixture mean
+    /// what its name says.
+    fn advanced(root: &Path, object: &Object, action: engr::model::Action) -> Object {
+        let event = engr::model::Event::sealed(
+            &object.id,
+            engr::model::new_id(),
+            action,
+            object.rev + 1,
+            engr::model::EventAdmission::human("2026-08-24T00:00:00Z", "TEST24"),
+        )
+        .expect("a sealed event");
+        let path = engr::store::events_path(root, &object.id);
+        let mut stream = std::fs::read_to_string(&path).expect("existing history");
+        stream.push_str(&engr::proof::canonical_bytes(&event, "event").expect("canonical"));
+        stream.push('\n');
+        std::fs::write(&path, stream).expect("append");
+
+        let mut next = object.clone();
+        engr::model::project(&mut next, &event).expect("the event projects");
+        next.reseal().expect("reseal the projection");
+        save_raw(root, &next).expect("save");
+        next
+    }
+
+    /// The value a Section holds now, as an Event carries it.
+    fn value_of(section: &Section) -> SectionValue {
+        SectionValue::new(
+            section.admitted.clone(),
+            Content {
+                header: section.header.clone(),
+                role: section.role,
+                text: section.text.clone(),
+                content: section.content.clone(),
+                based_on: section.based_on.clone(),
+                refs: section.refs.clone(),
+                relations: section.relations.clone(),
+            },
+        )
     }
 
     /// Recompute every Section seal and then the aggregate, after a test
@@ -777,9 +894,17 @@ mod against_a_workspace {
         let reference =
             admit(&root, &object, 1, &[SemanticField::Text], &commit).expect("admitted");
 
-        let mut moved = object.clone();
-        moved.sections[0].text = "revised through the gate".to_owned();
-        let moved = resealed(&moved);
+        let mut revised = object.sections[0].clone();
+        revised.text = "revised through the gate".to_owned();
+        let moved = advanced(
+            &root,
+            &object,
+            engr::model::Action::SectionUpdated {
+                section: 1,
+                value: value_of(&revised),
+                becomes: None,
+            },
+        );
 
         assert_eq!(
             evaluate(&root, &moved, &reference).expect("evaluate"),
@@ -801,9 +926,19 @@ mod against_a_workspace {
     #[test]
     fn a_reference_stale_at_birth_is_refused() {
         let (_dir, root, object, commit) = workspace();
-        let mut object = resealed(&object);
-        object.sections[0].text = "moved since the commit".to_owned();
-        let object = resealed(&object);
+        let mut revised = object.sections[0].clone();
+        revised.text = "moved since the commit".to_owned();
+        // Through the record, because a Ref reads its target as authority and a
+        // projection nothing admitted has none.
+        let object = advanced(
+            &root,
+            &object,
+            engr::model::Action::SectionUpdated {
+                section: 1,
+                value: value_of(&revised),
+                becomes: None,
+            },
+        );
 
         let refused = admit(&root, &object, 1, &[SemanticField::Text], &commit)
             .expect_err("text already differs from the pinned commit");
@@ -842,10 +977,22 @@ mod against_a_workspace {
         let tampered = commit_all(&root, "tampered");
 
         // Current state agrees with what the tampered history says, which is
-        // exactly the case that used to slip through: nothing looks stale.
-        let mut current = object.clone();
-        current.sections[0].text = "hand edited in history".to_owned();
-        let current = resealed(&current);
+        // exactly the case that used to slip through: nothing looks stale. The
+        // agreement is reached **through the record**, so the current side is
+        // sound and the only thing wrong here is the commit being pinned — which
+        // is what this test is about. Hand-editing the current side too would
+        // make it refuse for the other reason and prove nothing about this one.
+        let mut revised = object.sections[0].clone();
+        revised.text = "hand edited in history".to_owned();
+        let current = advanced(
+            &root,
+            &object,
+            engr::model::Action::SectionUpdated {
+                section: 1,
+                value: value_of(&revised),
+                becomes: None,
+            },
+        );
 
         let refused = admit(&root, &current, 1, &[SemanticField::Text], &tampered)
             .expect_err("the pinned commit holds a section that fails its own seal");
@@ -1025,6 +1172,12 @@ mod against_a_workspace {
         // mismatch: there is nothing there to have misread.
         std::fs::remove_dir_all(root.join(".engr")).expect("remove");
         let bare = commit_all(&root, "no workspace");
+        // Put the workspace back before asking. The claim under test is about
+        // the *pinned commit* holding no workspace; leaving the current one
+        // deleted would also take away the target's own history, which a Ref's
+        // authority check reads — and then the answer would be about the wrong
+        // absence.
+        git(&root, &["checkout", &commit, "--", ".engr"]);
         let pinned_at_bare = SelectiveRef::stored(
             reference.target(),
             reference.fields().to_vec(),
@@ -1157,11 +1310,15 @@ mod against_a_workspace {
             Dependency::Unchanged
         );
 
-        // Remove the Section and reseal, the way a supported transition would.
-        let mut without = current.clone();
-        without.sections.clear();
-        without.rev += 1;
-        let without = resealed(&without);
+        // Removed the way a supported transition removes it: through the record.
+        let without = advanced(
+            &root,
+            &current,
+            engr::model::Action::SectionDeleted {
+                section: 1,
+                becomes: None,
+            },
+        );
         engr::integrity::check_object_integrity(&without)
             .expect("the object still vouches for itself");
 
@@ -1227,10 +1384,14 @@ mod against_a_workspace {
 
         // The same removal done properly is still refused, but as what it is:
         // there is genuinely no such Section to reference.
-        let mut removed = current.clone();
-        removed.sections.clear();
-        removed.rev += 1;
-        let removed = resealed(&removed);
+        let removed = advanced(
+            &root,
+            &current,
+            engr::model::Action::SectionDeleted {
+                section: 1,
+                becomes: None,
+            },
+        );
         let refused = admit(&root, &removed, 1, &[SemanticField::Text], &commit)
             .expect_err("nothing to reference");
         assert_eq!(
@@ -1303,21 +1464,32 @@ mod against_a_workspace {
             evaluate(&root, &current, &reference).expect("evaluate"),
         ));
 
-        // The selected field moved, through a transition the Object vouches for.
-        let mut moved = current.clone();
-        moved.sections[0].text = "wording that is not what was pinned".to_owned();
-        moved.rev += 1;
-        let moved = resealed(&moved);
+        // The selected field moved, through a transition the record carries.
+        let mut revised = current.sections[0].clone();
+        revised.text = "wording that is not what was pinned".to_owned();
+        let moved = advanced(
+            &root,
+            &current,
+            engr::model::Action::SectionUpdated {
+                section: 1,
+                value: value_of(&revised),
+                becomes: None,
+            },
+        );
         answers.push((
             "drifted",
             evaluate(&root, &moved, &reference).expect("evaluate"),
         ));
 
-        // The target is gone, through a transition the Object still vouches for.
-        let mut removed = current.clone();
-        removed.sections.clear();
-        removed.rev += 1;
-        let removed = resealed(&removed);
+        // The target is gone, through a transition the record carries.
+        let removed = advanced(
+            &root,
+            &moved,
+            engr::model::Action::SectionDeleted {
+                section: 1,
+                becomes: None,
+            },
+        );
         answers.push((
             "target missing",
             evaluate(&root, &removed, &reference).expect("evaluate"),
@@ -1330,6 +1502,20 @@ mod against_a_workspace {
         answers.push((
             "target integrity failure",
             evaluate(&root, &tampered, &reference).expect("evaluate"),
+        ));
+
+        // The same edit, resealed. Every seal now passes and the target is still
+        // not what its own history produced — the state no integrity check can
+        // reach, and the one a Ref could previously depend on without anything
+        // downstream questioning it.
+        let mut resealed_forgery = current.clone();
+        resealed_forgery.sections[0].text = "wording nobody admitted, sealed".to_owned();
+        let resealed_forgery = resealed(&resealed_forgery);
+        engr::integrity::check_object_integrity(&resealed_forgery)
+            .expect("the forgery vouches for itself, which is the point");
+        answers.push((
+            "target history divergent",
+            evaluate(&root, &resealed_forgery, &reference).expect("evaluate"),
         ));
 
         // The recorded commit resolves to nothing.
@@ -1371,7 +1557,11 @@ mod against_a_workspace {
                 );
             }
         }
-        assert_eq!(answers.len(), 6, "six of the seven states, by construction");
+        assert_eq!(
+            answers.len(),
+            7,
+            "seven of the eight states, by construction"
+        );
     }
 }
 

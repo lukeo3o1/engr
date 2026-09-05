@@ -1722,23 +1722,26 @@ work sidecar
 ├── summary?              the shortest useful checkpoint
 ├── updated_at            RFC3339
 ├── next_item_id          monotonic, never reset
-├── dependencies[]        required, may be empty; targets are unique
+├── dependencies[]?       omitted when empty; targets are unique
 │   ├── target            required, engr:obj:<id> | engr:backlog:<id>
 │   └── reason?           <= 200 scalars
-├── blockers[]            required, may be empty
+├── blockers[]?           omitted when empty
 │   ├── reason?           <= 200 scalars
 │   └── target?           engr:obj:<id> | engr:backlog:<id>
 │   (at least one of the two MUST be present)
-└── items[]               required, may be empty
+└── items[]?              omitted when empty
     ├── id                integer, never reused
     ├── text              <= 160 scalars
     ├── state             pending | active | done
     ├── result?           <= 240 scalars
-    └── commits[]         required, may be empty; unique full Git object ids
+    └── commits[]?        omitted when empty; unique full Git object ids
 ```
 
-The four lists are **required and may be empty**: an omitted list and an empty
-one MUST NOT be two spellings of the same sidecar. More generally, a stored
+The four lists are **omitted when empty**, like every other empty collection in
+this generation: an absent optional, an empty array and an empty object are all
+written the same way, which is not at all. So an omitted list and an explicit
+empty one are not two spellings of the same sidecar — the second is not a
+spelling this generation has, and a reader refuses it. More generally, a stored
 sidecar MUST be held to exactly what the write path can produce — a reader that
 accepts shapes the API refuses is a second, larger schema that only ever gets
 discovered by something that came to depend on it. A fault in a stored file is a

@@ -461,6 +461,22 @@ pub enum Dependency {
     Drifted { fields: Vec<SemanticField> },
     /// The current parent Object or target Section fails its own integrity.
     TargetIntegrityFailure,
+    /// The current target seals perfectly and is not what its own admitted
+    /// history produced.
+    ///
+    /// **Its own state, and not [`Self::TargetIntegrityFailure`].** Seals are
+    /// recomputed from the bytes on disk, so an out-of-band edit that was also
+    /// resealed satisfies every one of them; what it cannot satisfy is the
+    /// target's own EventStore. Reporting it as an integrity failure would say
+    /// the bytes are damaged, when what is wrong is that nothing ever admitted
+    /// them — the same distinction [`crate::ops::HistoryFault`] exists to keep.
+    ///
+    /// A dependency is a claim about *authority*, so this has to be decidable
+    /// here rather than only by the target's own `verify`. Without it, flipping
+    /// a Section's `admitted.by` to `human` and resealing produced a target that
+    /// a Human Section could reference and that a dependent Object's own
+    /// verification called sound.
+    TargetHistoryDivergent,
     /// The current target Section is gone, after a transition the Object's own
     /// integrity still vouches for.
     ///
@@ -760,6 +776,16 @@ pub fn admit(
     // merely missing target, and #13 keeps invalid distinct from absent
     // precisely so that cannot happen.
     crate::integrity::check_object_integrity(current)?;
+    // And the same question `evaluate` asks, refused rather than classified:
+    // this is the admission path, and a Ref admitted against a target nothing
+    // ever admitted would carry that target's forged authority forward as an
+    // ordinary dependency.
+    if let Some(fault) = crate::ops::history_fault(root, current)? {
+        return Err(Error::new(
+            EXIT_INVARIANT,
+            format!("reference target {}", fault.message(&current.id)),
+        ));
+    }
     let now = section_of(current, section)?;
     // 3.
     let fields = canonical_fields(fields)?;
@@ -843,6 +869,22 @@ pub fn evaluate(root: &Path, current: &Object, reference: &SelectiveRef) -> Resu
     // reported as what it is.
     if crate::integrity::check_object_integrity(current).is_err() {
         return Ok(Dependency::TargetIntegrityFailure);
+    }
+    // And immediately after it, the question no seal answers: is this target
+    // what its own admitted history produced?
+    //
+    // **Here, because this is the shared boundary every consumer of a Ref's
+    // authority passes through.** `ops::effective` deliberately hands back a
+    // divergent projection so a reader can be shown what is wrong with it, and
+    // that is right for a diagnostic and wrong for everything else — the gate
+    // read the target's `admitted.by` off it, and a dependent Object's own
+    // verification asked only about seals. Flipping a Section to `human` and
+    // resealing therefore produced authority a Human Section could reference
+    // and that nothing downstream would question. A Ref is a claim about
+    // authority, so the check belongs where authority is read rather than in
+    // each place that reads it.
+    if crate::ops::history_fault(root, current)?.is_some() {
+        return Ok(Dependency::TargetHistoryDivergent);
     }
     // Ruled on #35 (`5395844059`): the current target being gone is its own
     // state. It is not integrity failure, not drift, and not a raw NOT_FOUND

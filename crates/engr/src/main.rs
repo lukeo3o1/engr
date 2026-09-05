@@ -2767,6 +2767,19 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
         // Said separately from tampering, and from each other. "Not there" and
         // "will not load" are different problems with different answers, and
         // both used to be silence.
+        // Said in its own words rather than folded into "tampered". The target's
+        // seals pass; what it cannot show is that anything admitted the value
+        // being depended on, and the reader's move is against the target rather
+        // than against this Object.
+        for stood in &report.standing_on_divergent {
+            println!(
+                "          §{} stands on {} §{}, which seals correctly and is not what its own history produced; repair {} first",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section,
+                shorten(&stood.target, width)
+            );
+        }
         for stood in &report.standing_on_missing {
             println!(
                 "          §{} stands on {} §{}, which is not there",

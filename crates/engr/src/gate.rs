@@ -1969,6 +1969,27 @@ fn validate_refs(root: &Path, payload: &Payload, admitted_by: Admission) -> Resu
                 error
             }
         })?;
+        // Before a single value is read off it. `ops::effective` hands back a
+        // divergent projection on purpose so a reader can be shown what is wrong
+        // with it, and the next line reads `admitted.by` off exactly that — so a
+        // Section flipped to `human` and resealed was authority a Human Section
+        // could reference. `dependency::admit` refuses this too, and would have
+        // caught it a few lines later, but the refusal a reader gets should name
+        // the forged authority rather than the dependency that leans on it.
+        //
+        // Only once the seals pass, and that order is the same one `evaluate`
+        // keeps: a target edited out of band and left unsealed is reported as
+        // tampered, by the integrity classification below, because that is what
+        // is wrong with it. This answers the case no seal can — the edit that
+        // was resealed — so asking it first would relabel every tampered target.
+        if crate::integrity::check_object_integrity(&target).is_ok() {
+            if let Some(fault) = ops::history_fault(root, &target)? {
+                return Err(Error::new(
+                    EXIT_INVARIANT,
+                    format!("reference target {}", fault.message(&target_id)),
+                ));
+            }
+        }
         let section = target.section(target_section_id)?;
         if admitted_by == Admission::Human {
             ensure!(
