@@ -1,0 +1,80 @@
+﻿$ engr-fixed ls --all   # cwd=r4/dep-c
+--- stdout ---
+01a05e55-74  open                   1 sections  object divergent  Migration continuity audit
+01a05e55-e6  closed                 2 sections  1 tampered    Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-fixed ls --sections   # cwd=r4/dep-c
+--- stdout ---
+01a05e55-74 禮2   open                  object_divergent  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  ok              The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  ok              Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  ok              A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- stderr ---
+!! 1 of these sections cannot be trusted; run: engr verify
+!!   01a05e55-74 禮2 OBJECT DIVERGENT
+--- exit 0 ---
+
+$ engr-fixed ls --stale   # cwd=r4/dep-c
+--- stdout ---
+繚 01a05e55-74  open                  禮-  OBJECT DIVERGENT
+??01a05e55-e6  closed                禮2  REF UNADMITTED ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-fixed repair 01a05e55-74   # cwd=r4/dep-b3
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section 禮99 does not exist
+--- exit 5 ---
+
+$ engr-fixed backlog add 01a072c3 --text no expect token given   # cwd=r4/project
+--- stderr ---
+error: this needs --expect: run `engr backlog show 01a072c3-6602-7db1-9d70-12ae25bf28bc --format json` and pass back the topic's `expect.add`
+--- exit 2 ---
+
+$ engr-fixed backlog revise 01a072c3 --section 1 --text no expect token given   # cwd=r4/project
+--- stderr ---
+error: this needs --expect: run `engr backlog show 01a072c3-6602-7db1-9d70-12ae25bf28bc --format json` and pass back 禮1's own `expect`
+--- exit 2 ---
+
+$ engr-fixed backlog show 01a072c3 --format json   # cwd=r4/project
+--- stdout ---
+{
+  "id": "01a072c3-6602-7db1-9d70-12ae25bf28bc",
+  "reference": "engr:backlog:01m1sc6sg2fprstw0jnrjvya5w",
+  "topic": "renamed properly",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-05T18:10:26.416198341Z",
+  "expect": {
+    "rename": "f167ab6ca11473a999fe49bb5978d815bfababb9140e5a145eeb2f5870a53bd1",
+    "add": "44b387bd84e0a65843e6af3f4eaff146c95e3324e09f06bba49b494630863dc9"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1sc6sg2fprstw0jnrjvya5w:1",
+      "expect": "0acd54804c11c765ea490e4cbd017900a93cfb547996606b13e73899570e0a5c",
+      "id": 1,
+      "text": "The point this topic starts with.",
+      "updated_at": "2026-09-05T18:10:03.393829183Z"
+    },
+    {
+      "reference": "engr:backlog:01m1sc6sg2fprstw0jnrjvya5w:2",
+      "expect": "09a8289985afe6508e727735baaa94cff45cc67b6bfde77d2bb5a4eb097194a5",
+      "id": 2,
+      "text": "the topic-level add token, which is what add actually wants",
+      "updated_at": "2026-09-05T18:10:26.416198341Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-fixed backlog add 01a072c3 --text the point token, which the message no longer names --expect 0acd54804c11c765ea490e4cbd017900a93cfb547996606b13e73899570e0a5c   # cwd=r4/project
+--- stderr ---
+error: --expect was 禮1's own `expect`; this operation binds the topic's `expect.add`, so read that value and pass it back
+--- exit 2 ---
+
+$ engr-fixed backlog add 01a072c3 --text the token the message named --expect 44b387bd84e0a65843e6af3f4eaff146c95e3324e09f06bba49b494630863dc9   # cwd=r4/project
+--- stdout ---
+added 禮3
+--- exit 0 ---

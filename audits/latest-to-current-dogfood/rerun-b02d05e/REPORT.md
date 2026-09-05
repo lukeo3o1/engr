@@ -257,3 +257,27 @@ The pattern the last four rounds have shown holds here too, and it is worth
 saying explicitly: every finding in this report is a surface that describes one
 state in the words of another. That is the same shape as rounds 27, 28 and 29,
 one more level out.
+
+## Addendum: all four are fixed at `d3be38a`, and each was re-observed
+
+Recorded here rather than left to the next run, because a fix that was only
+reasoned about is what this audit exists to refuse. `transcripts/27-fixes-observed.txt`
+and `evidence/barrier-switch-fixed.txt` are a release build of the fix run against
+the same workspaces this report was written from.
+
+| | Then | Now |
+|---|---|---|
+| **F-1** | one sentence for six operations, and the two topic-level ones were sent to the point's token and answered with staleness | `pass back the topic's `expect.add`` / `pass back §1's own `expect``, and the wrong level is `--expect was §1's own `expect`; this operation binds the topic's `expect.add`` at exit 2 |
+| **F-2** | `ls --all` → `ok` | `object divergent`; `ls --sections` → `object_divergent`; the alarm → `!! 01a05e55-74 §2 OBJECT DIVERGENT`; `ls --stale` → `01a05e55-74 §- OBJECT DIVERGENT` |
+| **F-3** | `verifies and is what its admitted history produced, so there is nothing to repair` | `admitted history cannot be replayed: section §99 does not exist`, exit 5 |
+| **F-4** | `MIGRATED`, exit 0, the differing bytes gone without a word | `MIGRATED` plus `note objects/01a05e55-74….json had changed since this migration was confirmed; the confirmed plan was published over it` |
+
+The re-run of the barrier sweep is worth reading for one thing this report could
+not measure: at `kill@860ms` the barrier is installed and **no** stream is
+published yet, and the source check still refuses. So the barrier alone never
+bought the skip — the first published stream did, exactly as the code said, and
+that is the instant the note now speaks at.
+
+**The head has moved, so this report is now evidence about a head that no longer
+exists.** That is the fourth time in a row, and the gate is what it always was:
+a clean-room run against the final head that comes back finding nothing.
