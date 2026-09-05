@@ -1,0 +1,274 @@
+﻿$ engr-current verify   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          current Object integrity failed
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          禮1 content does not match its recorded hash
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+!!         Object integrity failed; current authority changed outside a supported transition
+!!         git show 6d1e059f:.engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? TAMPERED
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the quickest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+    !!       persisted Section does not match the seal admitted at 2026-09-01T18:58:35.490520943Z
+    !!       git show 6d1e059f:.engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- stderr ---
+error: 01a05e55-e62b-75c3-8b32-6c388dec4c4b: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-current prepare --revise 1 --object 01a05e55-e6 --text an ordinary mutation on a damaged object   # cwd=r2/checkpoints/repair-seal
+--- stderr ---
+error: section 1 was sealed as 1:75a6e4c922042915fea0d88b8d9d056054358715dfd1977f890b86ae63a337d6 and its current contents seal as 1:8bd9d0db3217ad1e66fa8d9a5174232607b88bf1acd71fc0529f7864d91a4d42
+--- exit 5 ---
+
+$ engr-current repair --help   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+Propose restoring an Object whose stored integrity has failed
+
+Prepares a Human candidate that restores exactly what admitted history proves. It carries no changes of its own: confirm it, then make any wanted change the normal way.
+
+Usage: engr-current repair [OPTIONS] <OBJECT>
+
+Arguments:
+  <OBJECT>
+          
+
+Options:
+      --json
+          
+
+      --root <ROOT>
+          Workspace root. Defaults to the nearest ancestor containing .engr
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- exit 0 ---
+
+$ engr-current repair --object 01a05e55-e6   # cwd=r2/checkpoints/repair-seal
+--- stderr ---
+error: unexpected argument '--object' found
+
+  tip: to pass '--object' as a value, use '-- --object'
+
+Usage: engr-current repair [OPTIONS] <OBJECT>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current repair 01a05e55-e6   # cwd=r2/checkpoints/repair-seal
+--- stderr ---
+error: object id "01a05e55-e6" is not a UUID
+--- exit 4 ---
+
+$ engr-current verify 01a05e55-e6   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          current Object integrity failed
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          禮1 content does not match its recorded hash
+          uncommitted ??git holds no record of the current wording yet
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-e6 --help   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+Show one object: its sections, and how much each can be trusted
+
+Usage: engr-current show [OPTIONS] <OBJECT>
+
+Arguments:
+  <OBJECT>  
+
+Options:
+      --format <FORMAT>  [default: text] [possible values: text, json]
+      --root <ROOT>      Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help             Print help
+--- exit 0 ---
+
+$ engr-current repair 01a05e55-e62b-75c3-8b32-6c388dec4c4b   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+Challenge  repair
+Object     01a05e55-e6  Evidence rules for this audit
+Integrity  the stored record does not verify
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  禮1.text
+    stored   A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the quickest way to produce a green audit is to grade the source instead of the program.
+    restore  A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM FRA8JK
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM FRA8JK   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+CONFIRMED  01a05e55-e6  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r2/checkpoints/repair-seal
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   2 ok   rev 2
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/repair-history
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          3 events are not reflected in the sections
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r2/checkpoints/repair-history
+--- stdout ---
+01a05e55-74  design/superseded  Migration continuity audit
+3 sections   3 ok   rev 4
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+
+?? 禮3 [supersession] ?? ok
+The continuity question is settled; the release readiness record carries it forward.
+    relation superseded_by -> engr:obj:01m1pp57hbfegt61kkrff5np4m
+    based_on 6d1e059f   admitted 2026-09-04T17:06:53.392798774Z by human
+--- exit 0 ---
+
+$ engr-current prepare --revise 1 --object 01a05e55-74 --text an ordinary mutation on a rewound object   # cwd=r2/checkpoints/repair-history
+--- stderr ---
+error: section.updated.v1 requires an object that needs attention, and superseded does not; classify it into draft | proposed first
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r2/checkpoints/repair-history
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+01a06d62-9e  decision/accepted      0 sections  ok            Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74 --format json   # cwd=r2/checkpoints/repair-history
+--- stdout ---
+{
+  "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+  "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9",
+  "title": "Migration continuity audit",
+  "type": "design",
+  "state": "superseded",
+  "attention": false,
+  "rev": 4,
+  "integrity": "ok",
+  "digest": "1:d2f7aff4d4ba503c148d003ee77b7235c96084ce6b77f046139325f53bc5f147",
+  "summary": {
+    "sections": 3,
+    "ok": 3,
+    "tampered": 0,
+    "attention": 0
+  },
+  "sections": [
+    {
+      "id": 1,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:1",
+      "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.",
+      "status": "ok",
+      "based_on": {
+        "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+      },
+      "refs": [],
+      "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:57:48.683149208Z"
+      }
+    },
+    {
+      "id": 2,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:2",
+      "text": "Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.",
+      "status": "ok",
+      "based_on": null,
+      "refs": [],
+      "digest": "1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:59:19.709593096Z"
+      }
+    },
+    {
+      "id": 3,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:3",
+      "role": "supersession",
+      "text": "The continuity question is settled; the release readiness record carries it forward.",
+      "status": "ok",
+      "based_on": {
+        "commit": "6d1e059fa815c5345357fc8e98892cb58bdc3878"
+      },
+      "refs": [],
+      "relations": [
+        {
+          "type": "superseded_by",
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1pp57hbfegt61kkrff5np4m"
+          }
+        }
+      ],
+      "digest": "1:0c821122871b503a225784077b6de7361108b220b851a77ed9d128b43a663996",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-04T17:06:53.392798774Z"
+      }
+    }
+  ]
+}
+--- exit 0 ---

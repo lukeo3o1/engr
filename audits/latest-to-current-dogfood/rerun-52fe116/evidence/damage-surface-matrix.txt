@@ -1,0 +1,15 @@
+﻿dmg-a   ls                               exit 0   silent
+dmg-a   ls --all                         exit 0   damage reported
+dmg-a   show 01a05e55-e6                 exit 5   damage reported
+dmg-a   show 01a05e55-e6 --format json   exit 5   damage reported
+dmg-a   verify                           exit 5   damage reported
+dmg-b   ls                               exit 0   silent
+dmg-b   ls --all                         exit 0   silent
+dmg-b   show 01a05e55-74                 exit 0   silent
+dmg-b   show 01a05e55-74 --format json   exit 0   damage reported
+dmg-b   verify                           exit 0   silent
+dmg-c   ls                               exit 0   silent
+dmg-c   ls --all                         exit 0   silent
+dmg-c   show 01a05e55-e6                 exit 5   damage reported
+dmg-c   show 01a05e55-e6 --format json   exit 5   damage reported
+dmg-c   verify                           exit 5   damage reported

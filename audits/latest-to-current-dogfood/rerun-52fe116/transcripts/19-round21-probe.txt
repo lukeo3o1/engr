@@ -1,0 +1,46 @@
+﻿$ engr-current ls --all   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current prepare --add --object 01a05e55-74 --text ADMITTED AFTER PUBLICATION: this wording exists only in revision 2 and must survive any migration retry.   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Based on   91b4bae4
+Admission  human; time assigned on confirmation
+
+ADMITTED AFTER PUBLICATION: this wording exists only in revision 2 and must survive any migration retry.
+
+Type this exactly to confirm:  CONFIRM AHT7N5
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM AHT7N5   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM AMKRH4   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+MIGRATED   /audit/r2/checkpoints/r21-probe/.engr  3 objects, 7 sections, generation 1
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+01a05e55-74  open                   3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/r21-probe
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---

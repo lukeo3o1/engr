@@ -1,0 +1,165 @@
+﻿$ engr-current collection --help   # cwd=r2/project
+--- stdout ---
+Planning metadata: what is grouped together. Nothing here is confirmed
+
+Usage: engr-current collection [OPTIONS] <COMMAND>
+
+Commands:
+  new       Start a plan under an id you choose
+  ls        List plans
+  show      Show one plan, its schedule and its members
+  rename    Replace the title
+  describe  Replace the description. Omit --text to clear it
+  state     Declare where the plan stands
+  schedule  Replace the schedule. Give none of the dates to clear it
+  add       Put something in the plan
+  rm        Take something out of the plan
+  order     Rank a member, or omit --order to unrank it
+  priority  Set a member's priority, or omit --priority to clear it
+  delete    Delete the whole plan. Only on explicit human direction
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --attempt <N>  Which attempt of your own review this is, counted from 1. Needed only where a project rule governs collection [default: 1]
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current collection new release-2026 --title Baseline v1 release --description What has to be settled before the generation ships.   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be settled before the generation ships.
+
+no members
+--- exit 0 ---
+
+$ engr-current collection schedule release-2026 --start 2026-09-01 --target 2026-09-20 --end 2026-09-30   # cwd=r2/project
+--- stderr ---
+error: unexpected argument '--target' found
+
+  tip: a similar argument exists: '--target-date'
+
+Usage: engr-current collection schedule <--start <START>|--end <END>|--target-date <TARGET_DATE>> <COLLECTION>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1pp57hbfegt61kkrff5np4m   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be settled before the generation ships.
+
+  --  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      settled     Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be settled before the generation ships.
+
+  --  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      attention   Predecessor fixture construction
+  --  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      settled     Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current collection schedule release-2026 --start 2026-09-30 --end 2026-09-01   # cwd=r2/project
+--- stderr ---
+error: a schedule that starts on 2026-09-30 cannot end on 2026-09-01
+--- exit 2 ---
+
+$ engr-current collection schedule release-2026 --start 2026-09-01 --target-date 2026-09-20 --end 2026-09-30   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  --  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      attention   Predecessor fixture construction
+  --  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      settled     Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current collection order release-2026 --target engr:obj:01m1pp57hbfegt61kkrff5np4m --order 10   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      settled     Release readiness for the storage generation
+  --  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      attention   Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current collection priority release-2026 --target engr:obj:01m1pp57hbfegt61kkrff5np4m --priority high --reason Gates the release.   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      [high] settled     Release readiness for the storage generation
+      Gates the release.
+  --  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      attention   Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1pp57hbfegt61kkrff5np4m   # cwd=r2/project
+--- stderr ---
+error: obj:01m1pp57hbfegt61kkrff5np4m is already in this collection
+--- exit 5 ---
+
+$ engr-current collection order release-2026 --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --order 10   # cwd=r2/project
+--- stderr ---
+error: two members are both ranked 10, so the order says nothing at that point
+--- exit 4 ---
+
+$ engr-current collection state release-2026 --state completed   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1pp57hbfegt61kkrff5np4m
+      [high] settled     Release readiness for the storage generation
+      Gates the release.
+  --  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+      attention   Predecessor fixture construction
+--- exit 0 ---

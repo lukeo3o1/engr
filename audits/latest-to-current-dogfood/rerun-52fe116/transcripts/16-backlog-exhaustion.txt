@@ -1,0 +1,81 @@
+﻿$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-05T04:11:31.501233458Z",
+  "expect": {
+    "rename": "5cb08b0b2e56c4a74a22533525b621300419a434d969980bdd883d6db02bc553",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "4f55e281c235bfc48e9981add5d09c396c2ff810792f9b3b6565d50074e355b1",
+      "id": 2,
+      "text": "Whether the surfaces should agree with each other: the migrated .gitignore against what init writes, and repair's id argument against every other command's.",
+      "updated_at": "2026-09-05T04:11:31.501233458Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog revise 01a06d70 --section 2 --text Whether the surfaces should agree with each other, and whether that is one question or three. --expect 4f55e281c235bfc48e9981add5d09c396c2ff810792f9b3b6565d50074e355b1 --attempt 4   # cwd=r2/project
+--- stdout ---
+revised 禮2
+--- exit 0 ---
+
+$ engr-current backlog show 01a06d70   # cwd=r2/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a06d70  Open questions from the 52fe116 re-run
+1 unresolved   updated 2026-09-05T04:13:57Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+?? 禮2 ?? unresolved
+Whether the surfaces should agree with each other, and whether that is one question or three.
+    updated  2026-09-05T04:13:57Z
+--- exit 0 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-05T04:13:57.458817783Z",
+  "expect": {
+    "rename": "d1be128d647c0169fb5274ef0999b47576e10192028cfd43205f471e0d247354",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "8563212b2f480a9c43d3bb079a6151c058737796033d5ca964c25095a9b386d8",
+      "id": 2,
+      "text": "Whether the surfaces should agree with each other, and whether that is one question or three.",
+      "updated_at": "2026-09-05T04:13:57.458817783Z",
+      "review_exhaustion": {
+        "attempts": 4,
+        "limit": 3
+      }
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog ls   # cwd=r2/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a06d70   1 unresolved  -             2026-09-05T04:13:57Z  Open questions from the 52fe116 re-run
+--- exit 0 ---
+
+$ engr-current backlog revise 01a06d70 --section 2 --text Whether the surfaces should agree with each other: gitignore, repair's id argument, and the verify/show split. --expect 8563212b2f480a9c43d3bb079a6151c058737796033d5ca964c25095a9b386d8 --attempt 1   # cwd=r2/project
+--- stdout ---
+revised 禮2
+--- exit 0 ---

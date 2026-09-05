@@ -1,0 +1,68 @@
+﻿$ engr-current verify   # cwd=r2/checkpoints/probe4
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          3 events are not reflected in the sections
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r2/checkpoints/probe4
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+!!         Object sections is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+FORGED: the migrator may invent facts, and the audit accepts them.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-current repair 01a05e55-74eb-7370-b771-0008bd71d149   # cwd=r2/checkpoints/probe4
+--- stdout ---
+Challenge  repair
+Object     01a05e55-74
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  next_section_id
+    stored   3
+    restore  4
+  rev
+    stored   1
+    restore  4
+  禮1.text
+    stored   FORGED: the migrator may invent facts, and the audit accepts them.
+    restore  The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+  禮3
+    stored   (absent)
+    restore  {"admitted":{"at":"2026-09-04T17:06:53.392798774Z","by":"human"},"based_on":{"commit":"6d1e059fa815c5345357fc8e98892cb58bdc3878"},"header":"Superseded","relations":[{"target":{"kind":"engr","ref":"obj:01m1pp57hbfegt61kkrff5np4m"},"type":"superseded_by"}],"role":"supersession","text":"The continuity question is settled; the release readiness record carries it forward."}
+  state
+    stored   open
+    restore  superseded
+  type
+    stored   (absent)
+    restore  design
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM ZKF2EC
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZKF2EC   # cwd=r2/checkpoints/probe4
+--- stdout ---
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

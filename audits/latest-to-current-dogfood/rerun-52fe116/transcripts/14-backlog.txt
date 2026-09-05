@@ -1,0 +1,299 @@
+﻿$ engr-current backlog --help   # cwd=r2/project
+--- stdout ---
+Unresolved staging. Nothing here is confirmed
+
+Usage: engr-current backlog [OPTIONS] <COMMAND>
+
+Commands:
+  new       Start a topic under a title, with its first unresolved point
+  ls        List unresolved topics
+  show      Show one topic: its unresolved points, subjects and produced outcomes
+  rename    Replace the title. Does not touch section activity
+  add       Add another unresolved point to a topic
+  revise    Reword an unresolved point
+  subjects  Replace what an unresolved point concerns
+  merge     Consolidate unresolved points into one of them
+  produced  Record durable knowledge this point produced. Does not resolve it
+  consume   Consume a resolved point. The topic goes when its last one does
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current backlog new --title Open questions from the 52fe116 re-run --text Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.   # cwd=r2/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a06d70  Open questions from the 52fe116 re-run
+1 unresolved   updated 2026-09-04T17:21:28Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+?? 禮1 ?? unresolved
+Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.
+    updated  2026-09-04T17:21:28Z
+--- exit 0 ---
+
+$ engr-current backlog add --help   # cwd=r2/project
+--- stdout ---
+Add another unresolved point to a topic
+
+Usage: engr-current backlog add [OPTIONS] <--text <TEXT>|--text-file <TEXT_FILE>> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --text <TEXT>                     Wording, inline
+      --text-file <TEXT_FILE>           Wording, from a file
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+--- exit 0 ---
+
+$ engr-current backlog add 01a06d70 --text Whether the migrated .gitignore should be rewritten to the generation-1 text.   # cwd=r2/project
+--- stderr ---
+error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+--- exit 2 ---
+
+$ engr-current backlog add 01a06d70 --text Whether repair should take an id prefix like every other command.   # cwd=r2/project
+--- stderr ---
+error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+--- exit 2 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-04T17:21:28.022735637Z",
+  "expect": {
+    "rename": "a09459d3615bf2870911caec17917d01847bc52e5c66fe4fcfeb8ef227efdeb3",
+    "add": "717b58f7885f1f8ab359f6efbdc1c3ba220acb8dd85e30dcbc06d0700900e715"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:1",
+      "expect": "84216e64da78d943c06bd7568a1f18fe518958cc1881e9998bdc9d6fb7c96047",
+      "id": 1,
+      "text": "Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.",
+      "updated_at": "2026-09-04T17:21:28.022735637Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a06d70 --text Whether the migrated .gitignore should be rewritten to the generation-1 text. --expect 717b58f7885f1f8ab359f6efbdc1c3ba220acb8dd85e30dcbc06d0700900e715   # cwd=r2/project
+--- stdout ---
+added 禮2
+--- exit 0 ---
+
+$ engr-current backlog add 01a06d70 --text stale token attempt --expect 717b58f7885f1f8ab359f6efbdc1c3ba220acb8dd85e30dcbc06d0700900e715   # cwd=r2/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-04T17:21:59.060028775Z",
+  "expect": {
+    "rename": "746a27888f24272b78498b335864a5f06d5bc0824bec4c92b5a3830bbf7de949",
+    "add": "8227c5ad247ea43437bf6043a166b6074cd19537e0053012d28281fd5e69beae"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:1",
+      "expect": "84216e64da78d943c06bd7568a1f18fe518958cc1881e9998bdc9d6fb7c96047",
+      "id": 1,
+      "text": "Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.",
+      "updated_at": "2026-09-04T17:21:28.022735637Z"
+    },
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "11af3cb932afc689efddf3ac44d8276d7e881ae1f84dba50663dca0b0e24af63",
+      "id": 2,
+      "text": "Whether the migrated .gitignore should be rewritten to the generation-1 text.",
+      "updated_at": "2026-09-04T17:21:59.060028775Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a06d70 --text Whether repair should take an id prefix like every other command. --expect 8227c5ad247ea43437bf6043a166b6074cd19537e0053012d28281fd5e69beae --subject engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c   # cwd=r2/project
+--- stdout ---
+added 禮3
+--- exit 0 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-04T17:22:19.156019149Z",
+  "expect": {
+    "rename": "3c819e2e1a42e621923f53335ac37775cc8023b66a706bf1c02dbaf1abc46d07",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:1",
+      "expect": "84216e64da78d943c06bd7568a1f18fe518958cc1881e9998bdc9d6fb7c96047",
+      "id": 1,
+      "text": "Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.",
+      "updated_at": "2026-09-04T17:21:28.022735637Z"
+    },
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "11af3cb932afc689efddf3ac44d8276d7e881ae1f84dba50663dca0b0e24af63",
+      "id": 2,
+      "text": "Whether the migrated .gitignore should be rewritten to the generation-1 text.",
+      "updated_at": "2026-09-04T17:21:59.060028775Z"
+    },
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:3",
+      "expect": "3d7e479e5b440f4cfbbfc7e17f8b9894dcb580a8f94b8a0491d2a2c9f4414eee",
+      "id": 3,
+      "text": "Whether repair should take an id prefix like every other command.",
+      "updated_at": "2026-09-04T17:22:19.156019149Z",
+      "subjects": [
+        {
+          "kind": "engr",
+          "ref": "obj:01m1f5bvj6fa8sgfztf6s9fc8c"
+        }
+      ]
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog produced --help   # cwd=r2/project
+--- stdout ---
+Record durable knowledge this point produced. Does not resolve it
+
+Usage: engr-current backlog produced [OPTIONS] --section <SECTION> --target <ENGR_REF> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --root <ROOT>        Workspace root. Defaults to the nearest ancestor containing .engr
+      --section <SECTION>  
+      --target <ENGR_REF>  The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+      --forget             Take the outcome back off: the bookkeeping was wrong, not the record
+      --attempt <N>        Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>     The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help               Print help
+--- exit 0 ---
+
+$ engr-current backlog merge --help   # cwd=r2/project
+--- stdout ---
+Consolidate unresolved points into one of them
+
+Usage: engr-current backlog merge [OPTIONS] --into <SECTION> --section <SECTION> <--text <TEXT>|--text-file <TEXT_FILE>> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --into <SECTION>                  The point that survives, keeping its id and taking the merged wording
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --section <SECTION>               The point merged into it. It is removed, and its id not reused
+      --text <TEXT>                     Wording, inline
+      --text-file <TEXT_FILE>           Wording, from a file
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+--- exit 0 ---
+
+$ engr-current backlog consume --help   # cwd=r2/project
+--- stdout ---
+Consume a resolved point. The topic goes when its last one does
+
+Usage: engr-current backlog consume [OPTIONS] --section <SECTION> <ITEM>
+
+Arguments:
+  <ITEM>  
+
+Options:
+      --root <ROOT>        Workspace root. Defaults to the nearest ancestor containing .engr
+      --section <SECTION>  The point being judged resolved
+      --attempt <N>        Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>     The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help               Print help
+--- exit 0 ---
+
+$ engr-current backlog produced 01a06d70 --section 1 --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --expect 84216e64da78d943c06bd7568a1f18fe518958cc1881e9998bdc9d6fb7c96047   # cwd=r2/project
+--- stdout ---
+禮1 produced engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c; still unresolved
+--- exit 0 ---
+
+$ engr-current backlog merge 01a06d70 --into 2 --section 3 --text Whether the surfaces should agree with each other: the migrated .gitignore against what init writes, and repair's id argument against every other command's. --expect 11af3cb932afc689efddf3ac44d8276d7e881ae1f84dba50663dca0b0e24af63 --expect 3d7e479e5b440f4cfbbfc7e17f8b9894dcb580a8f94b8a0491d2a2c9f4414eee   # cwd=r2/project
+--- stdout ---
+merged 禮3 into 禮2
+--- exit 0 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-05T04:11:31.501233458Z",
+  "expect": {
+    "rename": "39150b3b290944a9f95f1c507bc19cb54dc491341568f7c2b34bd923665394dc",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:1",
+      "expect": "5c3e23a21632acdab4607bd310a716f3123235ed693d60688f0510e16aa2060c",
+      "id": 1,
+      "text": "Whether verify should fail on a reconcilable crash tail, given that show silently reconciles it.",
+      "updated_at": "2026-09-05T04:11:07.097541437Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1f5bvj6fa8sgfztf6s9fc8c"
+          }
+        }
+      ]
+    },
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "4f55e281c235bfc48e9981add5d09c396c2ff810792f9b3b6565d50074e355b1",
+      "id": 2,
+      "text": "Whether the surfaces should agree with each other: the migrated .gitignore against what init writes, and repair's id argument against every other command's.",
+      "updated_at": "2026-09-05T04:11:31.501233458Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog consume 01a06d70 --section 1 --expect 5c3e23a21632acdab4607bd310a716f3123235ed693d60688f0510e16aa2060c   # cwd=r2/project
+--- stdout ---
+consumed 禮1
+--- exit 0 ---

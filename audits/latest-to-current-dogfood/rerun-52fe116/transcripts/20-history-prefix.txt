@@ -1,0 +1,28 @@
+﻿$ engr-current migrate   # cwd=r2/checkpoints/purge-prefix
+--- stdout ---
+Challenge  migration
+Workspace  /audit/r2/checkpoints/purge-prefix/.engr
+From       engr-workspace version 1
+To         generation 1
+
+01a05e55-74  rev 4 -> 1  2 sections  Migration continuity audit
+01a05e55-e6  rev 4 -> 1  2 sections  Evidence rules for this audit
+01a05e55-ee  rev 6 -> 1  3 sections  Predecessor fixture construction
+
+7 predecessor files will be read, converted, and replaced.
+The predecessor's own event history is discarded rather than translated: each Object
+gets one object.migrated.v1 bootstrap at revision 1. Any pending candidate is not
+migrated and must be prepared again.
+
+Type this exactly to confirm:  CONFIRM 9H2B82
+--- exit 0 ---
+
+$ engr-current migrate   # cwd=r2/checkpoints/purge-gap
+--- stderr ---
+error: /audit/r2/checkpoints/purge-gap/.engr/events/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: predecessor rev 4 does not immediately follow rev 2
+--- exit 4 ---
+
+$ engr-current confirm CONFIRM 9H2B82   # cwd=r2/checkpoints/purge-prefix
+--- stdout ---
+MIGRATED   /audit/r2/checkpoints/purge-prefix/.engr  3 objects, 7 sections, generation 1
+--- exit 0 ---

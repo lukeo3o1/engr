@@ -1,0 +1,95 @@
+﻿===== baseline (uninterrupted) =====
+inventory: 4ebd6433c11d1e71b11720f88a22831bd2f6b39e3ba08e1711c890c1af38b935
+event admitted.at: 2026-09-05T04:17:07.083323119Z 
+events per stream: 1 1 1 
+
+===== interrupted at 780ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t780/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t780/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: d4c25a3ca6ebaf5c853c8a9b085686a44ab0de8a21dd47245a4b4d2b70283137
+event admitted.at: 2026-09-05T04:17:55.509679688Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 840ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t840/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t840/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: 2de3bce79474e637838ff1e338c116caa4b0bbd94c59d8875fb2904e08217280
+event admitted.at: 2026-09-05T04:17:18.119678832Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 870ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t870/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t870/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: 5f9e2abaf1def7a6d76489f67644ccd6ef5730fc26dea10270ccb1bc626e8e73
+event admitted.at: 2026-09-05T04:17:20.841826342Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 960ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t960/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t960/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: 12ac2f35429bd53ef12e847ba816e465071afb92defd76288b8e4d1c45038ae6
+event admitted.at: 2026-09-05T04:17:29.386816861Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 990ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t990/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t990/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: 49d7d00c9a58752dc43d8cb99cf77001a2c62b198d3d9335c77873405e37649e
+event admitted.at: 2026-09-05T04:17:32.483209519Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1010ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1010/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: e88338145381b1d64471944b4b5d3a6cbe01d0b97ba6c8175749515fdbc367ef
+event admitted.at: 2026-09-05T04:17:35.43623412Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1030ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting AMKRH4
+inventory: 1e6856ffde734a5de33e0118129d7ef8d849e1a08eafa9bb1fe12cc61bba00e8
+event admitted.at: 2026-09-05T04:17:38.332134644Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 

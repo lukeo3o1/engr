@@ -1,0 +1,142 @@
+﻿$ engr-current ls --all   # cwd=r2/checkpoints/rewind-probe
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+01a06d62-9e  decision/accepted      0 sections  ok            Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/rewind-probe
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          3 events are not reflected in the sections
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r2/checkpoints/rewind-probe
+--- stdout ---
+01a05e55-74  design/superseded  Migration continuity audit
+3 sections   3 ok   rev 4
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+
+?? 禮3 [supersession] ?? ok
+The continuity question is settled; the release readiness record carries it forward.
+    relation superseded_by -> engr:obj:01m1pp57hbfegt61kkrff5np4m
+    based_on 6d1e059f   admitted 2026-09-04T17:06:53.392798774Z by human
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/probe1
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          3 events are not reflected in the sections
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r2/checkpoints/probe1
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+01a06d62-9e  decision/accepted      0 sections  ok            Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74   # cwd=r2/checkpoints/probe1
+--- stdout ---
+01a05e55-74  design/superseded  Migration continuity audit
+3 sections   3 ok   rev 4
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+
+?? 禮3 [supersession] ?? ok
+The continuity question is settled; the release readiness record carries it forward.
+    relation superseded_by -> engr:obj:01m1pp57hbfegt61kkrff5np4m
+    based_on 6d1e059f   admitted 2026-09-04T17:06:53.392798774Z by human
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/probe1
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current repair 01a05e55-74eb-7370-b771-0008bd71d149   # cwd=r2/checkpoints/probe2
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+--- exit 5 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text a mutation prepared while the stored projection is behind its own history   # cwd=r2/checkpoints/probe3
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   ae9f467e
+Admission  human; time assigned on confirmation
+
+a mutation prepared while the stored projection is behind its own history
+
+Type this exactly to confirm:  CONFIRM W78CMA
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM W78CMA   # cwd=r2/checkpoints/probe3
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current show 01a05e55-ee   # cwd=r2/checkpoints/probe3
+--- stdout ---
+01a05e55-ee  open  Predecessor fixture construction
+4 sections   4 ok   rev 4
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+?? 禮1 ?? ok
+The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+    based_on 1dae5f46   admitted 2026-09-01T18:58:38.654174165Z by human
+
+?? 禮4 ?? ok
+Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+    admitted 2026-09-01T18:59:23.885618829Z by human
+
+?? 禮5 ?? ok
+A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+    admitted 2026-09-01T18:59:40.546412285Z by human
+
+?? 禮6 ?? ok
+a mutation prepared while the stored projection is behind its own history
+    based_on ae9f467e   admitted 2026-09-04T17:16:18.027339777Z by human
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/checkpoints/probe3
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  4 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- exit 0 ---

@@ -1,0 +1,40 @@
+﻿$ engr-current prepare --add --object 01a05e55-ee --text Rule drift after preparation must invalidate the pending question, observed in transcript 13.   # cwd=r2/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:8632428f008f36e8241a42cee762d2a50678bc5fd974e05c33e1cfe00a85b236 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text Rule drift after preparation must invalidate the pending question, observed in transcript 13. --review 1:8632428f008f36e8241a42cee762d2a50678bc5fd974e05c33e1cfe00a85b236 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r2/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   ae9f467e
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:8632428f008f36e8241a42cee762d2a50678bc5fd974e05c33e1cfe00a85b236
+Rules      audit-scope, evidence-discipline
+
+Rule drift after preparation must invalidate the pending question, observed in transcript 13.
+
+Type this exactly to confirm:  CONFIRM 67YPLV
+--- exit 0 ---
+
+$ engr-current rules ls   # cwd=r2/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  object
+    based on README.md (current)
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 67YPLV   # cwd=r2/project
+--- stderr ---
+error: the Rule Review material moved after challenge 67YPLV was prepared
+--- exit 5 ---
+
+$ engr-current confirm CONFIRM 67YPLV   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 7
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

@@ -1,5 +1,12 @@
 # latest → current dogfood audit
 
+> **This report is about destination `a77887b`.** The head moved 16 commits to
+> `52fe116` and was re-run against the same predecessor input; see
+> [`rerun-52fe116/REPORT.md`](rerun-52fe116/REPORT.md). That run closes the seven
+> areas marked NOT RUN below, confirms F4 and F6 fixed, finds F1, F3 and F5 still
+> standing, and adds eight findings of its own. Where the two disagree, the
+> re-run is the current one.
+
 **Question.** Could an AI coding agent reasonably start using the published
 `latest` engr as its engineering memory, later upgrade to the PR #67 / #66
 design without losing or misrepresenting knowledge or provenance, and continue

@@ -1,0 +1,118 @@
+﻿$ engr-current rules --help   # cwd=r2/project
+--- stdout ---
+Project rules an agent must read before a semantic mutation
+
+Usage: engr-current rules [OPTIONS] <COMMAND>
+
+Commands:
+  ls    What rules exist, and what they govern
+  show  One rule in full, with its bases resolved to what must be read
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current rules ls   # cwd=r2/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  object
+    based on README.md (current)
+--- exit 0 ---
+
+$ engr-current rules show audit-scope   # cwd=r2/project
+--- stdout ---
+Rule       audit-scope
+Governs    backlog, object
+Review     3 attempts; on_exhaustion = human_confirmation
+Based on   nothing outside the rule itself
+
+
+Every assertion admitted into this record must be about the migration audit
+itself: what was run, what was observed, and what that observation licenses.
+Wording that generalises beyond the transcripts is out of scope and must be
+refused.
+--- exit 0 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text The 52fe116 re-run reproduced the migration byte-for-byte on objects/, observed in transcripts 03 and 04.   # cwd=r2/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:8890a1ad25db49e7f9056e2857724b1ea6f1cd4b311448b0700a7a4a8b528830 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text The 52fe116 re-run reproduced the migration byte-for-byte on objects/, observed in transcripts 03 and 04. --agent --review 1:8890a1ad25db49e7f9056e2857724b1ea6f1cd4b311448b0700a7a4a8b528830 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r2/project
+--- stderr ---
+error: this review was of something else; review the current subject and attest to 1:ace58238c9e83993cc20ce7477cdf1200bb0bf96fd64227e4c3323d7d63b5819
+--- exit 5 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text The 52fe116 re-run reproduced the migration byte-for-byte on objects/, observed in transcripts 03 and 04. --agent --review 1:ace58238c9e83993cc20ce7477cdf1200bb0bf96fd64227e4c3323d7d63b5819 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r2/project
+--- stdout ---
+ADMITTED   01a05e55-ee  section.created.v1  rev 4  agent
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current --add --object 01a05e55-ee --text Migration is safe in general and needs no further evidence.   # cwd=r2/project
+--- stderr ---
+error: unexpected argument '--add' found
+
+Usage: engr-current [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text Migration is safe in general and needs no further evidence.   # cwd=r2/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:280116fd520dd73199e59029b5f1aa1ce1d1588e3029dc21f4c19c26fe1c0997 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text Migration is safe in general and needs no further evidence. --review 1:280116fd520dd73199e59029b5f1aa1ce1d1588e3029dc21f4c19c26fe1c0997 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 2 --review-result failed --review-explanation The wording generalises past the transcripts, which audit-scope refuses; a human must decide whether to admit it anyway.   # cwd=r2/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   ae9f467e
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:280116fd520dd73199e59029b5f1aa1ce1d1588e3029dc21f4c19c26fe1c0997
+Rules      audit-scope, evidence-discipline
+Reason     The wording generalises past the transcripts, which audit-scope refuses; a human must decide whether to admit it anyway.
+
+Migration is safe in general and needs no further evidence.
+
+Type this exactly to confirm:  CONFIRM U56G4U
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM U56G4U   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text The audit concludes that all future migrations will also be correct.   # cwd=r2/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:8d9c1f1bf42507ac4acf4e6d92c76215b52a81798abd65ddf67a8dff834c04ab and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a05e55-ee --text The audit concludes that all future migrations will also be correct. --review 1:8d9c1f1bf42507ac4acf4e6d92c76215b52a81798abd65ddf67a8dff834c04ab --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 4 --review-result exhausted --review-explanation Four rewrites could not bring the wording inside audit-scope; the agent has stopped and is asking a human.   # cwd=r2/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   ae9f467e
+Admission  human; time assigned on confirmation
+Review     EXHAUSTED at attempt 4 ??confirming this admits work no passing review allowed
+Digest     1:8d9c1f1bf42507ac4acf4e6d92c76215b52a81798abd65ddf67a8dff834c04ab
+Rules      audit-scope, evidence-discipline
+Reason     Four rewrites could not bring the wording inside audit-scope; the agent has stopped and is asking a human.
+
+The audit concludes that all future migrations will also be correct.
+
+Type this exactly to confirm:  CONFIRM ZE59H6
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZE59H6   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 6
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

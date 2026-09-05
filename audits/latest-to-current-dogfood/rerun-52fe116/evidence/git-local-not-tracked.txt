@@ -1,0 +1,20 @@
+=== .git/info/exclude ===
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+# engr: a live challenge code is a filename here, and it is meant for one
+# person. Added while a migration was prepared; the migrated workspace
+# carries the same rule in its own tracked .gitignore.
+/.engr/local/
+
+=== git status --porcelain (must be empty) ===
+(end)
+
+=== git check-ignore ===
+.git/info/exclude:10:/.engr/local/	.engr/local/challenges/AMKRH4.json
+
+=== untracked visible to git add -A ===
+(end)

@@ -1,0 +1,23 @@
+﻿$ engr-latest --version   # cwd=r2/project
+--- stdout ---
+engr latest (unknown)
+--- exit 0 ---
+
+$ engr-current --version   # cwd=r2/project
+--- stdout ---
+engr latest (52fe1162)
+--- exit 0 ---
+
+$ engr-latest ls --all   # cwd=r2/project
+--- stdout ---
+01a05e55-74  open     2 sections  ok            Migration continuity audit
+01a05e55-e6  closed   2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open     3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-latest verify   # cwd=r2/project
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- exit 0 ---

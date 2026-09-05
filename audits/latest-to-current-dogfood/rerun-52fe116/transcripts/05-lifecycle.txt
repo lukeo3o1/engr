@@ -1,0 +1,212 @@
+﻿$ engr-current prepare --classify --object 01a05e55-74 --type design --state draft   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-74  Migration continuity audit
+Type       design
+State      draft
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 3XXPSL
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 3XXPSL   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-74 --state proposed   # cwd=r2/project
+--- stderr ---
+error: the following required arguments were not provided:
+  <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+Usage: engr-current prepare --object <OBJECT> --state <STATE> <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current prepare --classify --object 01a05e55-74 --type design --state identified   # cwd=r2/project
+--- stderr ---
+error: a design cannot be identified; it is one of draft | proposed | accepted | rejected | superseded
+--- exit 2 ---
+
+$ engr-current prepare --classify --object 01a05e55-74 --type design --state proposed   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-74  Migration continuity audit
+Type       design
+State      proposed
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 4G3YLX
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 4G3YLX   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.classified.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --close --object 01a05e55-ee   # cwd=r2/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      closed
+Attention  no ??it leaves the default listing
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM 2H5H93
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 2H5H93   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --close --object 01a05e55-74   # cwd=r2/project
+--- stderr ---
+error: a design cannot be closed; it is one of draft | proposed | accepted | rejected | superseded
+--- exit 5 ---
+
+$ engr-current prepare --classify --object 01a05e55-ee --untyped --state open   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM CTGHUK
+--- exit 0 ---
+
+$ engr-current prepare --close --object 01a05e55-e6   # cwd=r2/project
+--- stderr ---
+error: 01a05e55-e62b-75c3-8b32-6c388dec4c4b is already closed, so there is nothing to confirm
+--- exit 5 ---
+
+$ engr-current candidate   # cwd=r2/project
+--- stdout ---
+CTGHUK   object.classified.v1 01a05e55-ee pending  2026-09-04T17:05:35.690648428Z
+--- exit 0 ---
+
+$ engr-current candidate --help   # cwd=r2/project
+--- stdout ---
+List candidates awaiting confirmation, or show one in full
+
+Usage: engr-current candidate [OPTIONS] [CODE]
+
+Arguments:
+  [CODE]  Challenge code. Omit to list everything pending
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current candidate CTGHUK   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM CTGHUK
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM CTGHUK   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r2/project
+--- stdout ---
+01a05e55-74  design/proposed        2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current prepare --new --text Release readiness for the storage generation   # cwd=r2/project
+--- stdout ---
+Challenge  create
+Object     01a06d62-9e
+
+Release readiness for the storage generation
+
+Type this exactly to confirm:  CONFIRM YAHZTU
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM YAHZTU   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a06d62-9e  object.created.v1  rev 1
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a06d62-9e --type decision --state proposed   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a06d62-9e  Release readiness for the storage generation
+Type       decision
+State      proposed
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM ABV7PB
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ABV7PB   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a06d62-9e  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a06d62-9e --type decision --state accepted   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a06d62-9e  Release readiness for the storage generation
+Type       decision
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 2DGSKW
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 2DGSKW   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a06d62-9e  object.classified.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a06d62-9e --type risk --state identified   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a06d62-9e  Release readiness for the storage generation
+Type       risk
+State      identified
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM KZRX76
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM KZRX76   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a06d62-9e  object.classified.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
