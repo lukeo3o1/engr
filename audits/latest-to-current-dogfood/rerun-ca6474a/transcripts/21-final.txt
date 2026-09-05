@@ -1,0 +1,20 @@
+﻿$ engr-current verify   # cwd=r3/project
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+01a0715e-1e  PASS  4 sections  Crash-tail dependency probe
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r3/project
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  closed                 3 sections  ok            Predecessor fixture construction
+01a0715e-1e  decision/proposed      4 sections  ok            Crash-tail dependency probe
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r3/checkpoints/tail
+--- stderr ---
+error: /audit/r3/checkpoints/tail/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: unknown variant `not-a-state`, expected one of `open`, `closed`, `draft`, `proposed`, `accepted`, `rejected`, `superseded`, `identified`, `mitigated`, `invalidated`
+--- exit 4 ---

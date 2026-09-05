@@ -1,0 +1,47 @@
+﻿$ engr-current prepare --classify --object 01a05e55-74 --type design --state draft   # cwd=r3/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-74  Migration continuity audit
+Type       design
+State      draft
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM Y5UWY5
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM Y5UWY5   # cwd=r3/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a05e55-74 --type design --state identified   # cwd=r3/project
+--- stderr ---
+error: a design cannot be identified; it is one of draft | proposed | accepted | rejected | superseded
+--- exit 2 ---
+
+$ engr-current prepare --close --object 01a05e55-74   # cwd=r3/project
+--- stderr ---
+error: a design cannot be closed; it is one of draft | proposed | accepted | rejected | superseded
+--- exit 5 ---
+
+$ engr-current prepare --close --object 01a05e55-ee   # cwd=r3/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      closed
+Attention  no ??it leaves the default listing
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM PXGFCY
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM PXGFCY   # cwd=r3/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

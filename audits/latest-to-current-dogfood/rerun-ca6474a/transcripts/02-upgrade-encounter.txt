@@ -1,0 +1,14 @@
+﻿$ engr-current ls   # cwd=r3/project
+--- stderr ---
+error: this is the released predecessor workspace, and this engr reads and writes generation 1 only ??no command works here, reads included. Run `engr migrate` first
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74   # cwd=r3/project
+--- stderr ---
+error: this is the released predecessor workspace, and this engr reads and writes generation 1 only ??no command works here, reads included. Run `engr migrate` first
+--- exit 4 ---
+
+$ engr-current verify   # cwd=r3/project
+--- stderr ---
+error: this is the released predecessor workspace, and this engr reads and writes generation 1 only ??no command works here, reads included. Run `engr migrate` first
+--- exit 4 ---

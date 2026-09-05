@@ -1,0 +1,42 @@
+﻿$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-05T11:48:44.23520027Z",
+  "expect": {
+    "rename": "9b01f7ec33ffcab312b6d20f2e9aadafaf4f2b005c16287c8ef3e122115d5be9",
+    "add": "c57b00df8896b574f517501d731c8ad26d66fdf0c36b0a2b23618a943d8c1b60"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "393eb651772cdcaf21b6a1b09b77bdcc1b347808110a6e7e3fd24f498b071747",
+      "id": 1,
+      "text": "Whether the two surfaces should agree about what verify is answering about.",
+      "updated_at": "2026-09-05T11:48:44.23520027Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1rnw7nvev8t44x4kv5tb00t"
+          }
+        }
+      ]
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog consume 01a07165 --section 1 --expect 393eb651772cdcaf21b6a1b09b77bdcc1b347808110a6e7e3fd24f498b071747   # cwd=r3/project
+--- stdout ---
+consumed 禮1, and the topic with it ??nothing else was unresolved
+--- exit 0 ---
+
+$ engr-current backlog ls   # cwd=r3/project
+--- stdout ---
+nothing unresolved
+--- exit 0 ---
