@@ -1,0 +1,134 @@
+﻿===== baseline (uninterrupted) =====
+inventory: 8d139812230087eef682c639f194b209acffdaeec27a0a3810c46f6644f9c940
+event admitted.at: 2026-09-05T17:45:58.843501563Z 
+events per stream: 1 1 1 
+
+===== interrupted at 500ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t500/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t500/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 6806df95e1203d3c0ecfa05073dea58e19ad51012a695a968bf4eb8ed0f4de9e
+event admitted.at: 2026-09-05T17:46:40.40075863Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 800ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t800/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t800/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 1e1a1bce9a4a0c433590b8dbe060850c8afd1d2ded6d5a2ebd039adb2121856a
+event admitted.at: 2026-09-05T17:46:05.390338688Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 4e43fec06836be46d7db85fc844dbab3d7cea1ae3b45a56df95051f0ebb834c2
+event admitted.at: 2026-09-05T17:46:08.23452467Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 044f348d012bdb4569281d86ae67fb9113192a26b6f0d30caceb0b8ac87ab9da
+event admitted.at: 2026-09-05T17:46:11.186038849Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 980ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t980/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t980/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: b252f3d3be6ed0273c4879160592d230e6be704fc086e035ff8551148d85ecce
+event admitted.at: 2026-09-05T17:46:14.157693932Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1000ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1000/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1000/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 7c8ccff5fa22362b0b62b5058266fdebd70e786565d93955e74a70ebc864ebe1
+event admitted.at: 2026-09-05T17:46:17.285551804Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1020ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=0 : COMPLETE   crash-runs/t1020/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 4a174e7dd92893f84c5bb2ae7d81af841b8956bbf3875413d94b1127c1d49b9e
+event admitted.at: 2026-09-05T17:46:20.337651232Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1040ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 15e1042f6cf9344b8e7c0f4ef1130457ff4d91d3a7abb76053d6b91c948c1e33
+event admitted.at: 2026-09-05T17:46:23.419189985Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1060ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 62a21939a2fb5f67a493e4ebf8188887e8153de8c76534e501fae99a2a8f6f1d
+event admitted.at: 2026-09-05T17:46:26.548446459Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting FBR8Z2
+inventory: 3bf10b51445458f1f3b2d2c9c45aa5b7dc048b1021c7912ac7ee432e9d9b3ad4
+event admitted.at: 2026-09-05T17:46:29.688163511Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 

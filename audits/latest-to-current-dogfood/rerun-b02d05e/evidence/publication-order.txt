@@ -1,0 +1,5 @@
+﻿kill@855  ms barrier=up    published_streams=3/3  object files still predecessor-shaped=1 destination-shaped=2
+kill@860  ms barrier=up    published_streams=3/3  object files still predecessor-shaped=2 destination-shaped=1
+kill@865  ms barrier=down  published_streams=3/3  object files still predecessor-shaped=0 destination-shaped=3
+kill@870  ms barrier=up    published_streams=3/3  object files still predecessor-shaped=1 destination-shaped=2
+kill@880  ms barrier=up    published_streams=3/3  object files still predecessor-shaped=0 destination-shaped=3

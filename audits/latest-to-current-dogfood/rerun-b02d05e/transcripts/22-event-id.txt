@@ -1,0 +1,14 @@
+﻿$ engr-current verify   # cwd=r4/evid
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+--- stderr ---
+error: /audit/r4/evid/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A072AD-5C50-7A41-8308-CD4006DC4DCF" must be a canonical UUIDv7
+--- exit 4 ---
+
+$ engr-current show 01a05e55-ee   # cwd=r4/evid
+--- stderr ---
+error: /audit/r4/evid/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A072AD-5C50-7A41-8308-CD4006DC4DCF" must be a canonical UUIDv7
+--- exit 4 ---

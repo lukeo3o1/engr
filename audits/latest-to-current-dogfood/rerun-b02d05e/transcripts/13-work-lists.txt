@@ -1,0 +1,44 @@
+﻿$ engr-current work --help   # cwd=r4/project
+--- stdout ---
+Execution memory an agent keeps for an Object. Nothing here is confirmed
+
+Usage: engr-current work [OPTIONS] <COMMAND>
+
+Commands:
+  start     Begin keeping execution memory. The subject is engr:obj:<id> or engr:backlog:<id>
+  ls        List the subjects with execution memory
+  show      Show one subject's execution memory
+  summary   Replace the checkpoint. Omit --text to clear it
+  pause     Suspend autonomous execution. Only on explicit human direction
+  resume    Resume it. Only on explicit human direction
+  rm        Stop keeping execution memory. Deleting paused work says so
+  depend    Record something this work relies on
+  undepend  Drop a dependency
+  block     Record a condition preventing useful progress
+  unblock   Clear a blocker by its position
+  item      The steps of the current decomposition
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --attempt <N>  Which attempt of your own review this is, counted from 1. Needed only where a project rule governs work [default: 1]
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current work start engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/wk
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-74
+State      active
+Updated    2026-09-05T17:43:57Z
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 0 ---
+
+$ engr-current work show engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/wk
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-74
+State      active
+Updated    2026-09-05T17:43:57Z
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 0 ---

@@ -1,0 +1,32 @@
+﻿===== the prepared state =====
+wd/.engr/local/challenges/:
+FBR8Z2.json
+
+wd/.engr/local/migration/:
+manifest.json
+
+===== unlink what the interruption unlinks =====
+left behind: wd/.engr/local wd/.engr/local/challenges wd/.engr/local/migration 
+files: 1
+
+===== does a read describe it as the predecessor again? =====
+error: this is the released predecessor workspace, and this engr reads and writes generation 1 only — no command works here, reads included. Run `engr migrate` first
+ls exit=0
+
+===== and does migrate mint a fresh code rather than pointing at the one that is gone? =====
+migrate exit=0
+1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM S8SEZR
+new code: S8SEZR  (old: FBR8Z2)
+FRESH: the spent code was not reused
+
+===== and the old code is refused =====
+error: no challenge awaiting FBR8Z2
+exit=0
+
+===== an orphan stage: a destination with no manifest and no challenge =====
+error: orph/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+ls exit=0
+migrate exit=4
+error: this workspace is not the released predecessor, so there is nothing to migrate

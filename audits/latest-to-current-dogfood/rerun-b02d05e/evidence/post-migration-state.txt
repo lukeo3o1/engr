@@ -1,0 +1,49 @@
+﻿--- predecessor files that must be gone ---
+.engr/format.json  gone
+.engr/lock  gone
+.engr/candidates  gone
+.engr/events  gone
+--- the migrated .engr/.gitignore ---
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. eventstore/ is safe to commit too: any challenge codes in it
+# have already been spent, and a spent code resolves to nothing.
+#
+# local/ is this machine's alone: the writer lock, live challenges whose
+# filenames are their codes, and a resumable migration plan.
+/local/
+--- what a fresh init writes, for comparison ---
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. eventstore/ is safe to commit too: any challenge codes in it
+# have already been spent, and a spent code resolves to nothing.
+#
+# local/ is this machine's alone: the writer lock, live challenges whose
+# filenames are their codes, and a resumable migration plan.
+/local/
+--- diff (empty means identical) ---
+IDENTICAL
+--- every migrated Event's admitted.at ---
+2026-09-05T17:32:19.717807644Z
+2026-09-05T17:32:19.717807644Z
+2026-09-05T17:32:19.717807644Z
+pre-confirm  wallclock: 2026-09-05T17:32:12.545554740Z
+post-confirm wallclock: 2026-09-05T17:32:21.440823807Z
+--- each Event's type and rev ---
+rev=1 type=object.migrated.v1
+rev=1 type=object.migrated.v1
+rev=1 type=object.migrated.v1
+type=object.migrated.v1
+type=object.migrated.v1
+type=object.migrated.v1
+--- git status of the migrated workspace ---
+ M .engr/.gitignore
+ D .engr/events/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+ D .engr/events/01a05e55-e62b-75c3-8b32-6c388dec4c4b.jsonl
+ D .engr/events/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+ D .engr/format.json
+ M .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+ M .engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+ M .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+?? .engr/VERSION
+?? .engr/eventstore/
+--- and nothing under local/ is visible ---
+NOT VISIBLE TO GIT (correct)

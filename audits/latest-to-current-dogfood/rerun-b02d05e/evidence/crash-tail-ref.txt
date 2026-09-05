@@ -1,0 +1,22 @@
+﻿prepared: QFRFDK
+CONFIRMED  01a05e55-ee  section.created.v1  rev 2
+-- the crash: the projection goes back to rev 1, the Event stays --
+stored refs in the projection: 0
+events in the stream         : 2
+-- and the target is made unreadable --
+-- verify must still check the dependency the tail admitted --
+01a05e55-ee  FAIL  3 sections  Predecessor fixture construction
+          §6 stands on 01a05e55-74 §1, which will not load: ct/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: unknown variant `not-a-state`, expected one of `open`, `closed`, `draft`, `proposed`, `accepted`, `rejected`, `superseded`, `identified`, `mitigated`, `invalidated`
+          unprojected — 1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted — git holds no record of the current wording yet
+error: verification failed
+exit=5
+
+-- and show, at the same instant --
+Wording that depends on the audit object, admitted just before the crash.
+    admitted 2026-09-05T18:09:10.60968173Z by human
+    refs     01a05e55-74 §1
+    advice   01a05e55-74 §1 is there and will not load; what this section stands on cannot be read
+note       reconciled 1 admitted event the stored projection was behind; it is now rev 2
+error: current Object integrity failed or 1 sections are not what was admitted; run: engr verify
+exit=0

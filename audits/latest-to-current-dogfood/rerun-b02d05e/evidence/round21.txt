@@ -1,0 +1,31 @@
+﻿landed in round 21's window at 1010ms: VERSION written, Challenge still on disk, stage still on disk
+--- the workspace reads as current, and the spent question is still there ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+ls exit=0
+FBR8Z2.json
+stage: still on disk
+
+--- move it on by one admitted revision, the way a day's work would ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 2
+record hash before retyping the spent code: e41b85935caf1c82b581de412283028fe1723a995915f483be8dd8c16f194a2e
+
+--- now retype the code the screen is still showing ---
+COMPLETE   r21/w/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+exit=0
+record hash after : e41b85935caf1c82b581de412283028fe1723a995915f483be8dd8c16f194a2e
+IDENTICAL: not one byte of the record moved
+
+--- and the workspace still verifies ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-ee  PASS  4 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+verify exit=0
+--- leftovers ---
+challenges
+lock
+stage: retired

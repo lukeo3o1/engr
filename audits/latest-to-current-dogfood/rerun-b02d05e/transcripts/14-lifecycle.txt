@@ -1,0 +1,142 @@
+﻿$ engr-current prepare --object 01a05e55-ee --classify --type risk --state accepted   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       risk
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 7LHKFU
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type decision --state identified   # cwd=r4/project
+--- stderr ---
+error: a decision cannot be identified; it is one of proposed | accepted | rejected | superseded
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type design --state draft   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       design
+State      draft
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM L63GGH
+(candidate 7LHKFU was superseded by this one)
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM L63GGH   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type design --state accepted   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       design
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM CYX8ED
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM CYX8ED   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type risk --state identified   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       risk
+State      identified
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM PYPLLG
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM PYPLLG   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type risk --state mitigated   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       risk
+State      mitigated
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM FX775J
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM FX775J   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --untyped --state accepted   # cwd=r4/project
+--- stderr ---
+error: an untyped object cannot be accepted; it is one of open | closed
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --untyped --state open   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM BW5HA5
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM BW5HA5   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 6
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --close   # cwd=r4/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      closed
+Attention  no ??it leaves the default listing
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM E6D2KU
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM E6D2KU   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 7
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --close   # cwd=r4/project
+--- stderr ---
+error: 01a05e55-ee46-7a91-983f-fa79b297b10c is already closed, so there is nothing to confirm
+--- exit 5 ---

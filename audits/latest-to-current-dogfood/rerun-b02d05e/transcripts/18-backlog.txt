@@ -1,0 +1,90 @@
+﻿$ engr-current backlog --help   # cwd=r4/project
+--- stdout ---
+Unresolved staging. Nothing here is confirmed
+
+Usage: engr-current backlog [OPTIONS] <COMMAND>
+
+Commands:
+  new       Start a topic under a title, with its first unresolved point
+  ls        List unresolved topics
+  show      Show one topic: its unresolved points, subjects and produced outcomes
+  rename    Replace the title. Does not touch section activity
+  add       Add another unresolved point to a topic
+  revise    Reword an unresolved point
+  subjects  Replace what an unresolved point concerns
+  merge     Consolidate unresolved points into one of them
+  produced  Record durable knowledge this point produced. Does not resolve it
+  consume   Consume a resolved point. The topic goes when its last one does
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current backlog new --help   # cwd=r4/project
+--- stdout ---
+Start a topic under a title, with its first unresolved point
+
+Usage: engr-current backlog new [OPTIONS] --title <TITLE> <--text <TEXT>|--text-file <TEXT_FILE>>
+
+Options:
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --title <TITLE>                   
+      --text <TEXT>                     Wording, inline
+      --text-file <TEXT_FILE>           Wording, from a file
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+--- exit 0 ---
+
+$ engr-current backlog new --title Open questions this run raised --text Whether ls should mark an Object whose projection is not what its history produced.   # cwd=r4/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a072b6  Open questions this run raised
+1 unresolved   updated 2026-09-05T17:55:54Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+?? 禮1 ?? unresolved
+Whether ls should mark an Object whose projection is not what its history produced.
+    updated  2026-09-05T17:55:54Z
+--- exit 0 ---
+
+$ engr-current backlog show 01a072b6 --format json   # cwd=r4/project
+--- stdout ---
+{
+  "id": "01a072b6-7348-7951-9419-753991d9556c",
+  "reference": "engr:backlog:01m1sbcwt8f58s86bn768xjnbc",
+  "topic": "Open questions this run raised",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-05T17:55:54.823994612Z",
+  "expect": {
+    "rename": "eb37dec7cf984cee63a6db4b71011110787daa813f59a29e221de0ea994d94eb",
+    "add": "bec89e3564bd00d1b466aa116b258e1d7b74e0a1353714859e31c525df5bc935"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1sbcwt8f58s86bn768xjnbc:1",
+      "expect": "472cfbf7091aa4e924a98d44289773c90e183f8133580f331d15026b445ab332",
+      "id": 1,
+      "text": "Whether ls should mark an Object whose projection is not what its history produced.",
+      "updated_at": "2026-09-05T17:55:54.823994612Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a072b6 --text Whether repair should say what verify says about the same object. --expect bec89e3564bd00d1b466aa116b258e1d7b74e0a1353714859e31c525df5bc935 --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/project
+--- stdout ---
+added 禮2
+--- exit 0 ---
+
+$ engr-current backlog add 01a072b6 --text stale token attempt --expect bec89e3564bd00d1b466aa116b258e1d7b74e0a1353714859e31c525df5bc935   # cwd=r4/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---

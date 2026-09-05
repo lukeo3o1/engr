@@ -1,0 +1,58 @@
+﻿$ engr-current collection --help   # cwd=r4/project
+--- stdout ---
+Planning metadata: what is grouped together. Nothing here is confirmed
+
+Usage: engr-current collection [OPTIONS] <COMMAND>
+
+Commands:
+  new       Start a plan under an id you choose
+  ls        List plans
+  show      Show one plan, its schedule and its members
+  rename    Replace the title
+  describe  Replace the description. Omit --text to clear it
+  state     Declare where the plan stands
+  schedule  Replace the schedule. Give none of the dates to clear it
+  add       Put something in the plan
+  rm        Take something out of the plan
+  order     Rank a member, or omit --order to unrank it
+  priority  Set a member's priority, or omit --priority to clear it
+  delete    Delete the whole plan. Only on explicit human direction
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --attempt <N>  Which attempt of your own review this is, counted from 1. Needed only where a project rule governs collection [default: 1]
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current collection add --help   # cwd=r4/project
+--- stdout ---
+Put something in the plan
+
+Usage: engr-current collection add [OPTIONS] --target <ENGR_REF> <COLLECTION>
+
+Arguments:
+  <COLLECTION>  
+
+Options:
+      --root <ROOT>          Workspace root. Defaults to the nearest ancestor containing .engr
+      --target <ENGR_REF>    engr:obj:<id> or engr:backlog:<id>
+      --order <ORDER>        Intended sequencing. Omit to leave it unranked
+      --priority <PRIORITY>  [possible values: low, normal, high]
+      --reason <REASON>      Why it has that priority in this plan
+  -h, --help                 Print help
+--- exit 0 ---
+
+$ engr-current collection rm release-2026 --target engr:obj:01m1sb6ksjfz0t81h8hmhk53bq   # cwd=r4/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+no members
+--- exit 0 ---
