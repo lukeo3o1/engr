@@ -3120,3 +3120,61 @@ fn a_reference_cannot_borrow_authority_from_a_resealed_target() {
         "and it is not tampering, because the seals pass"
     );
 }
+
+/// `repair` must not answer a broken Event tail by calling the Object sound.
+///
+/// Eligibility asks [`ops::history_fault`], and that question is about the
+/// prefix at `rev <= object.rev` — deliberately, because a durable tail the
+/// projection has not caught up to is the recovery buffer working rather than a
+/// fault. A tail that cannot be applied at all is outside the question, so it
+/// came back `None`, and the refusal that fired said the Object "verifies and is
+/// what its admitted history produced". `verify`, `show` and `ls` were all
+/// refusing that exact workspace at the same instant.
+///
+/// The order is the fix: `ops::provable` replays the whole history and is where
+/// the comment always said unreplayable history is refused, so it is asked
+/// before the question that sees a prefix. Nothing here is about repair doing
+/// more; it is about it not making a claim.
+#[test]
+fn repair_does_not_call_an_unreplayable_tail_sound() {
+    let (_temp, root) = workspace();
+    let id = new_object(&root, "a tail that cannot be applied");
+    admit(
+        &root,
+        common::payload(Act::Add, &id, content("the wording")),
+    );
+    let stored = store::load_object(&root, &id).expect("object");
+    let mut events = store::load_events(&root, &id).expect("events");
+    assert_eq!(stored.rev, events.len() as u64, "the projection is current");
+
+    // Correctly sealed, correctly framed, revision-contiguous — and it deletes a
+    // Section that does not exist, so replay refuses it. Every read surface
+    // fails on this workspace; the question is what `repair` says.
+    events.push(unadmitted_human_event(
+        &id,
+        common::payload(Act::Delete(99), &id, content("")),
+        stored.rev + 1,
+    ));
+    write_raw_events(&root, &id, &events);
+
+    assert!(
+        ops::verify(&root, &id).is_err(),
+        "the premise: the read surfaces refuse this workspace"
+    );
+    let error = gate::prepare_repair(&root, &id).expect_err("and so must repair");
+    assert!(
+        !error.message.contains("nothing to repair"),
+        "a claim of soundness is the one answer this must never give: {error}"
+    );
+    assert!(
+        error.message.contains("cannot be replayed"),
+        "and it names the fault it found: {error}"
+    );
+
+    // The control, on the same construction: with the tail removed, the Object
+    // really is sound and `repair` says exactly that.
+    events.pop();
+    write_raw_events(&root, &id, &events);
+    let sound = gate::prepare_repair(&root, &id).expect_err("nothing to repair");
+    assert!(sound.message.contains("nothing to repair"), "{sound}");
+}

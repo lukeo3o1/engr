@@ -248,6 +248,23 @@ is the other direction: a projection asserting something no admitted Event ever
 said. Verification MUST report it, and `repair` — never an ordinary mutation —
 is the one path that reconstructs a divergent projection.
 
+**Every surface that says how far an Object can be trusted MUST report it, not
+only the deep one.** A listing is entitled to be terse and is not entitled to be
+wrong: `ok` about a projection nothing admitted is the same claim `verify` makes
+when it passes, in the surface a reader meets first and the one an agent reaches
+for before acting. Cost is the reason it gets left out — the question replays a
+history, and a listing would rather read projections alone — and cost is not a
+reason to answer a question wrongly. A surface that cannot afford the question
+MUST NOT answer it: the choice is to ask, or to stop claiming soundness.
+
+**And the prefix rule below is a rule about reconciliation, not a rule about
+eligibility.** `repair` decides whether there is anything to repair, and that
+question is asked of the *whole* history: a tail that cannot be applied at all is
+not a recovery buffer, and an eligibility check that sees only the prefix
+concludes the Object is sound while every read surface is refusing the workspace.
+An implementation MUST establish that history replays before it reports that a
+projection is what history produced.
+
 The two can hold at once, and that case is the one that matters most:
 **reconciliation MUST establish history-consistency before it applies or saves a
 recoverable tail.** Reconciliation starts from the stored projection, so
@@ -1485,6 +1502,16 @@ another, or bind §1 and consume §5, and the guarantee fails exactly where it
 looks satisfied. Which is the wrong answer to report first, so the mismatch MUST
 be distinguishable from staleness — "you prepared against something else" is a
 different problem from "what you prepared against moved".
+
+**The same distinction governs the two levels a token can come from.** The table
+above binds either the topic or a point, so the read surface offers both: tokens
+for the topic-level operations, and one on each point. An implementation MUST
+name the one *this* operation binds when it asks for a token, and MUST NOT
+report a token from the other level as staleness. Both halves matter, and they
+fail together: guidance that names the point for an operation binding the topic
+sends a caller to the wrong value, and answering that value with "what you read
+is not what is there now" tells them to read it again — which returns the same
+token, because nothing has moved.
 
 An add binds the id it will **receive**, not merely that some id is absent.
 Another writer can take that id and consume it: the id reads as absent again
@@ -3006,6 +3033,19 @@ names anything else is refused rather than adopted.
 Nothing has been published while that comparison is being made, so the
 transaction stays withdrawable there and only becomes forward-only once the
 predecessor is shut out.
+
+**Once publication has begun the comparison stops being a refusal, and MUST NOT
+stop being a report.** One published stream is what decides that it has begun,
+and at that instant the Object projections it has not reached are still exactly
+their own bytes — so "there is nothing left to compare" is true of the files
+publication has already written and of no others. An implementation MUST NOT
+refuse here: publication cannot be undone, a qualified response cannot unpublish
+it, and a resume that will not finish leaves a half-migrated record with no way
+forward, which is worse than what it would be protecting. What it MUST do is say
+so — naming every source file it wrote over that was not the bytes the migration
+was confirmed over — because those bytes are gone afterwards and nothing in the
+result records that they were ever different. Only the released build is locked
+out by the barrier; an editor, a script or a restored backup is not.
 
 Answering the migration's own code is the one thing that must stay reachable
 while the stage exists, because resolving the workspace *is* a confirmation. So

@@ -1177,6 +1177,18 @@ fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
     // below rather than here: repair restores what history derives, so where
     // history derives nothing there is nothing to restore *from*, and that is a
     // different damage class.
+    //
+    // **Which is why `provable` is asked first.** It was not, and the order was
+    // the whole defect: `history_fault` asks only about the prefix at
+    // `rev <= object.rev`, so a correctly sealed, correctly framed,
+    // revision-contiguous tail that cannot be applied is outside its question
+    // and comes back `None`. Eligibility then reached the sentence below and
+    // told the reader the Object "verifies and is what its admitted history
+    // produced" — while `verify`, `show` and `ls` were all refusing that exact
+    // workspace at exit 4. A claim of soundness is the one answer this path must
+    // never give about a state the other surfaces call broken, so the question
+    // that sees the whole history is asked before the one that sees a prefix.
+    let before = ops::provable(root, id)?;
     ensure!(
         crate::integrity::check_stored_object_integrity(&stored).is_err()
             || matches!(
@@ -1187,7 +1199,6 @@ fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
         "{id} verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path"
     );
 
-    let before = ops::provable(root, id)?;
     let payload = Payload::new(id, Action::ObjectRepaired {});
     let at = now();
     {

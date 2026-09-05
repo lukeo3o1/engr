@@ -3427,3 +3427,95 @@ fn the_ignore_escape_covers_what_git_treats_as_pattern_syntax() {
         assert_eq!(engr::git::escape_ignore_literal(&raw), escaped, "{raw}");
     }
 }
+
+/// Publication that has already begun still says what it wrote over.
+///
+/// The source comparison is skipped once publication has demonstrably begun, and
+/// the reasoning is that there is nothing left to compare — the predecessor is
+/// already being overwritten. That is true of the files publication has reached
+/// and of no others: the witness is *one* published stream, and at that instant
+/// the Object projections are still exactly their own bytes. A predecessor that
+/// moved was therefore published over in silence, at exit 0, with `verify`
+/// reporting PASS afterwards and the bytes gone.
+///
+/// It reports rather than refuses, and that is deliberate. Refusing here would
+/// wedge the workspace: publication has begun, a qualified `no` cannot unpublish
+/// it, and a resume that will not finish leaves a half-migrated record with no
+/// way forward. What was missing was never the refusal — it was saying anything.
+///
+/// The state is built rather than raced, but it is the same state: interrupt
+/// after the destination is staged, publish one stream exactly as publication
+/// would, and let something write to a projection publication has not reached.
+/// The barrier is up by then, so that something is not the released build — and
+/// an editor, a script or a restored backup still is.
+#[test]
+fn publication_names_the_predecessor_it_wrote_over() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "destination", &proposed.challenge);
+
+    // Publication writes the Event streams first. One of them, copied from the
+    // stage exactly as publication copies it, is the witness that buys the skip.
+    let staged = store::engr_dir(&root)
+        .join("local")
+        .join("migration")
+        .join("destination")
+        .join("eventstore")
+        .join(format!("{MODEL}.jsonl"));
+    let published = store::events_path(&root, MODEL);
+    std::fs::create_dir_all(published.parent().expect("parent")).expect("eventstore dir");
+    write(&published, &read(&staged));
+
+    // And a projection publication has not reached moves under it.
+    rename_as_the_released_build_would(&root, AUTHORITY, "written after the plan was confirmed");
+    let before = predecessor_object(&root, AUTHORITY)["title"].clone();
+    assert_eq!(before, "written after the plan was confirmed");
+
+    let confirmed = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect("publication finishes rather than wedging the workspace");
+    let engr::Confirmed::Migration(report) = confirmed else {
+        panic!("a migration confirmation reports a migration");
+    };
+    assert_eq!(
+        report.published_over,
+        vec![format!("objects/{AUTHORITY}.json")],
+        "the one file that was not what the migration was confirmed over is named"
+    );
+    assert!(store::version_path(&root).exists(), "and it did publish");
+    assert_ne!(
+        ops::effective(&root, AUTHORITY).expect("migrated").title,
+        "written after the plan was confirmed",
+        "the confirmed plan is what was published, which is why saying so matters"
+    );
+}
+
+/// The same resume, with nothing written under it, says nothing.
+///
+/// A note that fires on an ordinary crash recovery would be noise, and noise is
+/// how a real one gets scrolled past.
+#[test]
+fn publication_that_wrote_over_nothing_says_nothing() {
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_at(&root, "destination", &proposed.challenge);
+    let staged = store::engr_dir(&root)
+        .join("local")
+        .join("migration")
+        .join("destination")
+        .join("eventstore")
+        .join(format!("{MODEL}.jsonl"));
+    let published = store::events_path(&root, MODEL);
+    std::fs::create_dir_all(published.parent().expect("parent")).expect("eventstore dir");
+    write(&published, &read(&staged));
+
+    let confirmed = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect("an ordinary resume");
+    let engr::Confirmed::Migration(report) = confirmed else {
+        panic!("a migration confirmation reports a migration");
+    };
+    assert!(
+        report.published_over.is_empty(),
+        "nothing moved, so nothing is named: {:?}",
+        report.published_over
+    );
+}

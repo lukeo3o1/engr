@@ -225,14 +225,80 @@ fn object_tampered(object: &Object) -> bool {
 /// on disk: an out-of-band edit that was also resealed verifies perfectly, so
 /// integrity says `ok` about a record nothing admitted.
 ///
-/// Asked on `show` and deliberately not on `ls`. It replays the Object's whole
-/// history, which is affordable for the one Object somebody is reading and is
-/// not for a listing — and the listing already sends a reader to `verify` for
-/// the deep question. Unlike a Ref that has drifted, there is no reading of
-/// either fault under which the record is fine, so a surface an agent reads
-/// before acting must not print `ok` over one.
+/// Asked by every surface that says how much an Object can be trusted, `ls`
+/// included. It was once asked only on `show`, on the reasoning that replaying
+/// a whole history is affordable for the one Object somebody is reading and not
+/// for a listing — but the sentence after it, in this same comment, is the one
+/// that decides: there is no reading of either fault under which the record is
+/// fine, so a surface an agent reads before acting must not print `ok` over one.
+/// `ls` is the first surface an agent reaches for, and it was the last one still
+/// answering `ok` about a projection nothing admitted while `verify` and `show`
+/// both exited 5 on it. The cost is real — a listing now reads each Object's
+/// stream as well as its projection, which is what `verify` already does — and
+/// it buys the only thing this column is for.
 fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFault> {
     ops::history_fault(root, object).ok().flatten()
+}
+
+/// What is wrong with the Object itself, above anything about its Sections.
+///
+/// **Three answers, in the evaluator's own order.** The aggregate seal first,
+/// because bytes that do not match their own seal establish nothing about what
+/// history produced; then what that history says. Every listing surface asks
+/// this before it asks about a Section, because an Object that is wrong at this
+/// level makes every row under it wrong in the same way — and each of them used
+/// to answer some part of it with `ok`.
+///
+/// One word per state, cased for the surface that prints it, and the word is the
+/// one the JSON `integrity` member already uses: a reader who has seen
+/// `"integrity": "divergent"` must not have to learn a second name for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectFault {
+    /// The stored bytes do not match their own aggregate seal.
+    Tampered,
+    /// They match it, and no admitted Event ever produced them.
+    Divergent,
+    /// The history cannot be replayed, so there is nothing to compare against.
+    Unreplayable,
+}
+
+impl ObjectFault {
+    /// The `ls` note column, beside `object tampered`.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Tampered => "object tampered",
+            Self::Divergent => "object divergent",
+            Self::Unreplayable => "object unreplayable",
+        }
+    }
+
+    /// The `ls --sections` status column, which is snake_case throughout.
+    fn row(self) -> &'static str {
+        match self {
+            Self::Tampered => "object_tampered",
+            Self::Divergent => "object_divergent",
+            Self::Unreplayable => "object_unreplayable",
+        }
+    }
+
+    /// The prose label, beside `REF UNADMITTED` and its neighbours.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tampered => "OBJECT TAMPERED",
+            Self::Divergent => "OBJECT DIVERGENT",
+            Self::Unreplayable => "OBJECT UNREPLAYABLE",
+        }
+    }
+}
+
+fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
+    if object_tampered(object) {
+        return Some(ObjectFault::Tampered);
+    }
+    match history_fault(root, object)? {
+        crate::ops::HistoryFault::Divergent(_) => Some(ObjectFault::Divergent),
+        crate::ops::HistoryFault::Unreplayable(_) => Some(ObjectFault::Unreplayable),
+    }
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -830,13 +896,14 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
                 continue;
             }
         }
+        let fault = object_fault(root, object);
         let note = match &hits {
             Some(hits) if !hits.is_empty() => hits
                 .iter()
                 .map(|id| format!("§{id}"))
                 .collect::<Vec<_>>()
                 .join(" "),
-            _ if object_tampered(object) => "object tampered".to_owned(),
+            _ if fault.is_some() => fault.expect("checked").note().to_owned(),
             _ if tally.tampered > 0 => format!("{} tampered", tally.tampered),
             _ if tally.attention > 0 => format!("{} stale", tally.attention),
             _ => "ok".to_owned(),
@@ -898,10 +965,10 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     let mut out = String::new();
     for object in objects {
         let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
-        let aggregate_tampered = object_tampered(object);
+        let fault = object_fault(root, object);
         for section in &object.sections {
-            let status = if aggregate_tampered {
-                "object_tampered"
+            let status = if let Some(fault) = fault {
+                fault.row()
             } else {
                 assessment
                     .iter()
@@ -932,6 +999,21 @@ pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
     let w = width(root);
     let mut found = Vec::new();
     for object in objects {
+        // An Object-level fault is every row's fault. Asking only the Sections
+        // meant a broken aggregate seal — which the listing beside this already
+        // prints on every row — was counted as nothing to warn about, and a
+        // projection nothing admitted was not looked at at all.
+        if let Some(fault) = object_fault(root, object) {
+            for section in &object.sections {
+                found.push(format!(
+                    "{} §{} {}",
+                    abbrev(&object.id, w),
+                    section.id,
+                    fault.label()
+                ));
+            }
+            continue;
+        }
         for (id, status) in assess(root, object) {
             if status.forged() {
                 found.push(format!(
@@ -1210,6 +1292,26 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
     for object in objects {
+        // One row for the Object's own fault, not one per Section: the thing
+        // that is wrong is the Object, and repeating it under every §id would
+        // say it is several separate problems. `§-` keeps the columns, and is
+        // the only row an Object with no Sections left could have.
+        if let Some(fault) = object_fault(root, object) {
+            let unwatched = !object.needs_attention();
+            out.push_str(&format!(
+                "{} {}  {:<20}  §-  {}{}\n",
+                if unwatched { "⚠" } else { "·" },
+                abbrev(&object.id, w),
+                classification(object),
+                fault.label(),
+                if unwatched {
+                    " — nobody is looking at this one"
+                } else {
+                    ""
+                }
+            ));
+            continue;
+        }
         for (id, status) in assess(root, object) {
             if status.is_ok() {
                 continue;

@@ -6799,3 +6799,204 @@ fn every_read_surface_reports_a_dependency_that_is_not_established() {
         "and the two surfaces agree about which fault it is"
     );
 }
+
+/// Every listing surface says an Object is not what its history produced.
+///
+/// `ls` was the last one that did not. `verify` exits 5 on a resealed
+/// out-of-band edit, `show` prints the fault and exits 5, and the JSON surface
+/// answers `"integrity": "divergent"` — and the listing, which is the cheapest
+/// command and the first one an agent reaches for, printed `ok` in the same
+/// column that says `object tampered` for a broken seal. `ok` is not true of
+/// this state under any reading: nothing admitted those bytes.
+///
+/// The cost is real and is the reason it was left out: a listing now reads each
+/// Object's stream as well as its projection. That is what `verify` already
+/// does, and it is what this column is for.
+#[test]
+fn every_listing_surface_says_a_divergent_object_is_not_ok() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(
+        root,
+        &["prepare", "--new", "--text", "listed before acting"],
+    );
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "the wording that was admitted",
+            ],
+        ),
+    );
+
+    let row = |args: &[&str]| -> String {
+        let out = run_engr(root, args);
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|line| line.contains(&id[..8]))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(row(&["ls", "--all"]).contains(" ok "), "the premise");
+    assert!(row(&["ls", "--sections"]).contains(" ok "), "the premise");
+    assert!(
+        String::from_utf8_lossy(&run_engr(root, &["ls", "--stale"]).stdout).contains("all ok"),
+        "the premise"
+    );
+
+    let object = store::load_object(root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(root, &resealed.object).expect("put it on disk");
+
+    let listed = row(&["ls", "--all"]);
+    assert!(listed.contains("object divergent"), "{listed}");
+    let sections = row(&["ls", "--sections"]);
+    assert!(sections.contains("object_divergent"), "{sections}");
+    // The alarm counts what cannot be trusted, and every row under a divergent
+    // Object is exactly that. It was silent here, and silent for a broken
+    // aggregate seal too — the surface beside it marked every row and the count
+    // that summarises them found nothing to say.
+    let alarm = run_engr(root, &["ls", "--sections"]);
+    assert!(
+        String::from_utf8_lossy(&alarm.stderr).contains("OBJECT DIVERGENT"),
+        "{}",
+        String::from_utf8_lossy(&alarm.stderr)
+    );
+    let stale = String::from_utf8_lossy(&run_engr(root, &["ls", "--stale"]).stdout).to_string();
+    assert!(!stale.contains("all ok"), "{stale}");
+    assert!(stale.contains("OBJECT DIVERGENT"), "{stale}");
+
+    // And the other object-level fault keeps its own name, because a reader sent
+    // to `repair` for a state repair cannot restore has been sent nowhere.
+    let mut tampered = resealed.object.clone();
+    tampered.title = "edited and not resealed".to_owned();
+    save_raw(root, &tampered).expect("put it on disk");
+    assert!(row(&["ls", "--all"]).contains("object tampered"));
+    assert!(row(&["ls", "--sections"]).contains("object_tampered"));
+}
+
+/// `--expect` is two levels, and the refusal must name the one this operation
+/// binds.
+///
+/// One sentence served all six operations — "read the point, and pass its expect
+/// value back" — and it is the wrong value for the two that bind the topic. A
+/// caller who followed it got the *stale* refusal, which says somebody else
+/// moved the world; re-reading hands back the same token, so the advice closed a
+/// loop. `PROTOCOL.md` already requires the two to be distinguishable for the
+/// neighbouring case: "you prepared against something else" is a different
+/// problem from "what you prepared against moved".
+#[test]
+fn the_expect_refusal_names_the_token_this_operation_binds() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let started = run_engr(
+        root,
+        &[
+            "backlog",
+            "new",
+            "--title",
+            "two levels of expect",
+            "--text",
+            "the point this topic starts with",
+        ],
+    );
+    assert!(started.status.success());
+    let id = engr::backlog::ids(root).expect("ids").remove(0);
+    let offered = engr::backlog::offered_tokens(root, &id).expect("tokens");
+    let token = |name: &str| -> String {
+        offered
+            .iter()
+            .find(|(binding, _)| binding.contains(name))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("no {name} token"))
+    };
+
+    for (args, names) in [
+        (vec!["backlog", "add", &id, "--text", "x"], "expect.add"),
+        (
+            vec!["backlog", "rename", &id, "--title", "x"],
+            "expect.rename",
+        ),
+        (
+            vec!["backlog", "revise", &id, "--section", "1", "--text", "x"],
+            "§1's own",
+        ),
+    ] {
+        let refused = run_engr(root, &args);
+        assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE), "{args:?}");
+        let said = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(said.contains(names), "{args:?}: {said}");
+    }
+
+    // The wrong level is a usage problem, not staleness, and saying which token
+    // was passed is the only thing that gets the caller anywhere.
+    let wrong = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "x",
+            "--expect",
+            &token("§1's own"),
+        ],
+    );
+    assert_eq!(wrong.status.code(), Some(engr::EXIT_USAGE));
+    let said = String::from_utf8_lossy(&wrong.stderr).to_string();
+    assert!(said.contains("§1's own"), "{said}");
+    assert!(said.contains("the topic's `expect.add`"), "{said}");
+    assert!(!said.contains("not what is there now"), "{said}");
+
+    // The token it names works, and a token that really is stale still reports
+    // staleness — the distinction is the point, so both halves are pinned.
+    let added = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "x",
+            "--expect",
+            &token("expect.add"),
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let stale = run_engr(
+        root,
+        &[
+            "backlog",
+            "add",
+            &id,
+            "--text",
+            "y",
+            "--expect",
+            &token("expect.add"),
+        ],
+    );
+    assert_eq!(stale.status.code(), Some(engr::EXIT_STALE));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("not what is there now"));
+}

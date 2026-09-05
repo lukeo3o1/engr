@@ -981,6 +981,34 @@ impl Precondition {
         ))
     }
 
+    /// Which `expect` value this operation binds, spelled the way
+    /// `backlog show --format json` spells it.
+    ///
+    /// **Two levels, and one sentence for both was wrong for two of the six
+    /// operations.** `rename` and `add` bind the topic, whose tokens are members
+    /// of the item-level `expect` object; the other four bind a point, whose
+    /// token is on that point's own row. Telling every caller to read the point
+    /// and pass its value sent the two topic-level ones to the wrong token —
+    /// and the refusal they then got was the *stale* one, which says somebody
+    /// else moved the world. Re-reading produces the same value, so the advice
+    /// closed a loop: wrong instruction, then the reader blamed for following
+    /// it.
+    pub fn binding(&self) -> String {
+        match self {
+            Self::Item { .. } => "the topic's `expect.rename`".to_owned(),
+            Self::SectionAbsent { .. } => "the topic's `expect.add`".to_owned(),
+            Self::Section { section, .. } => format!("§{}'s own `expect`", section.id),
+            Self::Merge { sections, .. } => format!(
+                "the own `expect` of each of {}, one --expect per point",
+                sections
+                    .iter()
+                    .map(|section| format!("§{}", section.id))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+        }
+    }
+
     /// The item this precondition is about.
     pub fn item(&self) -> &str {
         match self {
@@ -1339,6 +1367,33 @@ fn edit<T>(
         save(root, &item)?;
         Ok(outcome)
     })
+}
+
+/// Every `expect` value this item currently offers, each named the way the JSON
+/// surface names it.
+///
+/// Only ever used to explain a refusal. A caller who passed a real token from
+/// the wrong level has not read anything stale, and answering them with "what
+/// you read is not what is there now" is both false and unactionable: re-reading
+/// hands back the same value. Naming which token they passed, and which one this
+/// operation binds, is the difference between a loop and a fix.
+pub fn offered_tokens(root: &Path, item: &str) -> Result<Vec<(String, String)>> {
+    let loaded = load(root, item)?;
+    let mut offered = vec![
+        (
+            Precondition::of_item(&loaded).binding(),
+            Precondition::of_item(&loaded).token()?,
+        ),
+        (
+            Precondition::of_add(&loaded).binding(),
+            Precondition::of_add(&loaded).token()?,
+        ),
+    ];
+    for section in &loaded.sections {
+        let precondition = Precondition::of_section(&loaded, section.id)?;
+        offered.push((precondition.binding(), precondition.token()?));
+    }
+    Ok(offered)
 }
 
 pub fn create(

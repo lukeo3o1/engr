@@ -912,6 +912,14 @@ pub struct Report {
     /// numbers as a migration result is what made retyping the code look like
     /// the thing to do — the destructive reading this path was built to refuse.
     pub already_complete: bool,
+    /// Predecessor files this publication wrote over that were not the bytes the
+    /// migration was confirmed over. See [`source_moved_under_publication`].
+    ///
+    /// Empty on every ordinary migration, including every resumed one that got
+    /// back before publication began — that route refuses instead. A non-empty
+    /// list is not a failure of this transaction; it is the one thing about it a
+    /// person cannot find out afterwards, because the bytes it names are gone.
+    pub published_over: Vec<String>,
 }
 
 /// Apply the migration a human has just confirmed.
@@ -1024,18 +1032,20 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
         // and cannot state that the source was checked before it went up. Using
         // it as the skip condition meant a forged, stale or simply absent
         // bootstrap was enough to skip the comparison entirely.
+        let mut published_over = Vec::new();
         if !published_yet(root, &ready)? {
             check_source_unmoved(root, &subject, &challenge.id)?;
             lock_out_predecessor(root, &challenge.id)?;
         } else {
             check_barrier_binds(root, &challenge.id)?;
+            published_over = source_moved_under_publication(root, &subject, &ready)?;
         }
         let sections = subject
             .objects
             .iter()
             .map(|one| one.sections as usize)
             .sum();
-        return finish(root, challenge, ready, sections);
+        return finish(root, challenge, ready, sections, published_over);
     }
 
     // Re-derive from the predecessor as it stands now, and require it to be the
@@ -1096,7 +1106,10 @@ fn apply_locked(root: &Path, challenge: &crate::confirmation::Challenge) -> Resu
     stop_for_test(Stage::BeforeBarrier, &challenge.id)?;
     lock_out_predecessor(root, &challenge.id)?;
     stop_for_test(Stage::AfterDestination, &challenge.id)?;
-    finish(root, challenge, ready, sections)
+    // The route that derives the destination here has just required the whole
+    // predecessor to be exactly what was confirmed, so nothing can have been
+    // written over.
+    finish(root, challenge, ready, sections, Vec::new())
 }
 
 /// A migration Challenge answered again after its own transaction completed.
@@ -1144,6 +1157,9 @@ fn already_applied(root: &Path, challenge: &crate::confirmation::Challenge) -> R
             .map(|planned| planned.sections as usize)
             .sum(),
         already_complete: true,
+        // This path publishes nothing, so there is nothing it could have written
+        // over.
+        published_over: Vec::new(),
     })
 }
 
@@ -1406,6 +1422,55 @@ fn published_yet(root: &Path, ready: &[(String, String, String)]) -> Result<bool
 /// The bootstrap is the one intentional exception, because this transaction may
 /// have replaced it with its own barrier; it is checked as that, bound to this
 /// Challenge, rather than skipped.
+/// Predecessor files that are still their own bytes, and are not the bytes the
+/// human confirmed this migration over.
+///
+/// **Asked once publication has begun, where [`check_source_unmoved`] is not.**
+/// The skip is bought by `published_yet`, and its justification is that the
+/// source is already being overwritten and there is nothing left to compare.
+/// That is true of the files publication has reached and not of the others: at
+/// the instant the first stream lands, one or more predecessor Object files are
+/// still exactly their own bytes, and an out-of-band change to one of those was
+/// published over in silence, at exit 0, with `verify` then reporting PASS.
+///
+/// It reports rather than refuses, and that is the whole design. Refusing here
+/// would wedge the workspace: publication has begun, the qualified `no` cannot
+/// unpublish it, and a resume that will not finish leaves a half-migrated record
+/// with no way forward — worse than the thing being fixed. What was missing was
+/// never the refusal; it was saying anything at all.
+///
+/// Only the Object files, and only in one direction. A predecessor stream that
+/// is gone is publication removing it; a file that is absent is one publication
+/// has already handled; and a file whose bytes are exactly what this transaction
+/// staged for that Object is one it has already written. Everything else that
+/// differs from the pinned digest is something else's writing, and is named.
+fn source_moved_under_publication(
+    root: &Path,
+    subject: &MigrationSubject,
+    ready: &[(String, String, String)],
+) -> Result<Vec<String>> {
+    let mut moved = Vec::new();
+    for (id, staged_object, _) in ready {
+        let path = store::object_path(root, id);
+        if !source_exists(&path)? {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|error| tool_error(path.display(), error))?;
+        if &text == staged_object {
+            continue;
+        }
+        let relative = relative_to_engr(root, &path)?;
+        let Some(pinned) = subject.source.get(&relative) else {
+            moved.push(relative);
+            continue;
+        };
+        if &crate::digest::SOURCE.emit(sha256_of(&text))?.to_string() != pinned {
+            moved.push(relative);
+        }
+    }
+    Ok(moved)
+}
+
 fn check_source_unmoved(root: &Path, subject: &MigrationSubject, challenge: &str) -> Result<()> {
     check_barrier_binds(root, challenge)?;
     let bootstrap = relative_to_engr(root, &bootstrap_path(root))?;
@@ -1508,6 +1573,7 @@ fn finish(
     challenge: &crate::confirmation::Challenge,
     ready: Vec<(String, String, String)>,
     sections: usize,
+    published_over: Vec<String>,
 ) -> Result<Report> {
     publish(root, &ready)?;
     let ids = ready.iter().map(|(id, _, _)| id.clone()).collect();
@@ -1524,6 +1590,7 @@ fn finish(
         objects: ids,
         sections,
         already_complete: false,
+        published_over,
     })
 }
 
