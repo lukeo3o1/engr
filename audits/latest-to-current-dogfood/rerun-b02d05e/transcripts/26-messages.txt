@@ -1,0 +1,68 @@
+﻿$ engr-current repair 01a05e55-74   # cwd=r4/dep-c2
+--- stdout ---
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record does not verify
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  禮1
+    stored   (absent)
+    restore  {"admitted":{"at":"2026-09-01T18:57:48.683149208Z","by":"human"},"based_on":{"commit":"1dae5f46717a8967662236f69694bf4ee9ef76d8"},"text":"The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."}
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM MAP7T8
+--- exit 0 ---
+
+$ engr-current backlog new --title A topic for the expect message --text The point this topic starts with.   # cwd=r4/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a072c3  A topic for the expect message
+1 unresolved   updated 2026-09-05T18:10:03Z
+engr:backlog:01m1sc6sg2fprstw0jnrjvya5w
+
+?? 禮1 ?? unresolved
+The point this topic starts with.
+    updated  2026-09-05T18:10:03Z
+--- exit 0 ---
+
+$ engr-current backlog add 01a072 --text no expect token given   # cwd=r4/project
+--- stderr ---
+error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+--- exit 2 ---
+
+$ engr-current backlog show 01a072c3 --format json   # cwd=r4/project
+--- stdout ---
+{
+  "id": "01a072c3-6602-7db1-9d70-12ae25bf28bc",
+  "reference": "engr:backlog:01m1sc6sg2fprstw0jnrjvya5w",
+  "topic": "A topic for the expect message",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-05T18:10:03.393829183Z",
+  "expect": {
+    "rename": "e253a5b143dd1f59624db1c4799670bc001eec8b81da173078379e4c53462cdc",
+    "add": "25133d43d7e2cf1a81f28846b19c2da2f8fdb36ba84d0765e8f1f6eb15e35bd1"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1sc6sg2fprstw0jnrjvya5w:1",
+      "expect": "51d4c3bd9d9d9dc7521f92e86de9c611a667602ae7f760832324427bb0f78c3c",
+      "id": 1,
+      "text": "The point this topic starts with.",
+      "updated_at": "2026-09-05T18:10:03.393829183Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a072c3 --text following the message literally: the point's own token --expect 51d4c3bd9d9d9dc7521f92e86de9c611a667602ae7f760832324427bb0f78c3c   # cwd=r4/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+
+$ engr-current backlog add 01a072c3 --text the topic-level add token, which is what add actually wants --expect 25133d43d7e2cf1a81f28846b19c2da2f8fdb36ba84d0765e8f1f6eb15e35bd1   # cwd=r4/project
+--- stdout ---
+added 禮2
+--- exit 0 ---

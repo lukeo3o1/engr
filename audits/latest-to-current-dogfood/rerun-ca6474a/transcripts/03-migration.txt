@@ -1,0 +1,38 @@
+﻿$ engr-current migrate   # cwd=r3/project
+--- stdout ---
+Challenge  migration
+Workspace  /audit/r3/project/.engr
+From       engr-workspace version 1
+To         generation 1
+
+01a05e55-74  rev 4 -> 1  2 sections  Migration continuity audit
+01a05e55-e6  rev 4 -> 1  2 sections  Evidence rules for this audit
+01a05e55-ee  rev 6 -> 1  3 sections  Predecessor fixture construction
+
+7 predecessor files will be read, converted, and replaced.
+The predecessor's own event history is discarded rather than translated: each Object
+gets one object.migrated.v1 bootstrap at revision 1.
+1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM ZKRZWR
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZZZZZZ   # cwd=r3/project
+--- stderr ---
+error: no challenge awaiting ZZZZZZ
+--- exit 3 ---
+
+$ engr-current confirm confirm zkrzwr   # cwd=r3/project
+--- stderr ---
+error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+--- exit 2 ---
+
+$ engr-current confirm ZKRZWR   # cwd=r3/project
+--- stderr ---
+error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+--- exit 2 ---
+
+$ engr-current confirm CONFIRM ZKRZWR   # cwd=r3/project
+--- stdout ---
+MIGRATED   /audit/r3/project/.engr  3 objects, 7 sections, generation 1
+--- exit 0 ---

@@ -1,0 +1,311 @@
+﻿$ engr-current work --help   # cwd=r2/project
+--- stdout ---
+Execution memory an agent keeps for an Object. Nothing here is confirmed
+
+Usage: engr-current work [OPTIONS] <COMMAND>
+
+Commands:
+  start     Begin keeping execution memory. The subject is engr:obj:<id> or engr:backlog:<id>
+  ls        List the subjects with execution memory
+  show      Show one subject's execution memory
+  summary   Replace the checkpoint. Omit --text to clear it
+  pause     Suspend autonomous execution. Only on explicit human direction
+  resume    Resume it. Only on explicit human direction
+  rm        Stop keeping execution memory. Deleting paused work says so
+  depend    Record something this work relies on
+  undepend  Drop a dependency
+  block     Record a condition preventing useful progress
+  unblock   Clear a blocker by its position
+  item      The steps of the current decomposition
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --attempt <N>  Which attempt of your own review this is, counted from 1. Needed only where a project rule governs work [default: 1]
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current work start engr:backlog:01m1pq13eqf9garmj49kmbcx9v   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      active
+Updated    2026-09-05T04:12:08Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+--- exit 0 ---
+
+$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-05T04:11:31.501233458Z",
+  "expect": {
+    "rename": "5cb08b0b2e56c4a74a22533525b621300419a434d969980bdd883d6db02bc553",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "4f55e281c235bfc48e9981add5d09c396c2ff810792f9b3b6565d50074e355b1",
+      "id": 2,
+      "text": "Whether the surfaces should agree with each other: the migrated .gitignore against what init writes, and repair's id argument against every other command's.",
+      "updated_at": "2026-09-05T04:11:31.501233458Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog consume 01a06d70 --section 2 --expect 4f55e281c235bfc48e9981add5d09c396c2ff810792f9b3b6565d50074e355b1   # cwd=r2/project
+--- stderr ---
+error: this was the last unresolved point, so resolving it removes the item ??but it still has execution memory, which cannot outlive what it belongs to. Discard it with `engr work rm engr:backlog:01m1pq13eqf9garmj49kmbcx9v` and consume again, or record what it was for first
+--- exit 5 ---
+
+$ engr-current work item --help   # cwd=r2/project
+--- stdout ---
+The steps of the current decomposition
+
+Usage: engr-current work item [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add a step
+  revise  Reword a step
+  state   Move a step's progress
+  result  Record what a step produced. Omit --text to clear it
+  commit  Point a step at a commit, as navigation rather than proof
+  rm      Prune a step. Its id is not reused
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current work summary engr:backlog:01m1pq13eqf9garmj49kmbcx9v --text Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      active
+Updated    2026-09-05T04:12:28Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+--- exit 0 ---
+
+$ engr-current work item add engr:backlog:01m1pq13eqf9garmj49kmbcx9v --text Reproduce the verify/show disagreement with file hashes   # cwd=r2/project
+--- stdout ---
+work item 1
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      active
+Updated    2026-09-05T04:12:38Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+  1. pending  Reproduce the verify/show disagreement with file hashes
+--- exit 0 ---
+
+$ engr-current work item add engr:backlog:01m1pq13eqf9garmj49kmbcx9v --text Check whether ls ever reports a stale projection   # cwd=r2/project
+--- stdout ---
+work item 2
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      active
+Updated    2026-09-05T04:12:39Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+  1. pending  Reproduce the verify/show disagreement with file hashes
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work depend engr:backlog:01m1pq13eqf9garmj49kmbcx9v --target engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --reason The rewind probes were taken from this object's stream.   # cwd=r2/project
+--- stderr ---
+error: unexpected argument '--target' found
+
+  tip: to pass '--target' as a value, use '-- --target'
+
+Usage: engr-current work depend <SUBJECT|--on <ENGR_REF>|--reason <REASON>>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current work block engr:backlog:01m1pq13eqf9garmj49kmbcx9v --reason Waiting on a ruling about whether verify should fail on a reconcilable tail.   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      blocked
+Updated    2026-09-05T04:12:41Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. pending  Reproduce the verify/show disagreement with file hashes
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work depend engr:backlog:01m1pq13eqf9garmj49kmbcx9v --on engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c --reason The rewind probes were taken from this object's stream.   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      blocked
+Updated    2026-09-05T04:12:53Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. pending  Reproduce the verify/show disagreement with file hashes
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work item state engr:backlog:01m1pq13eqf9garmj49kmbcx9v --item 1 --state done   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      blocked
+Updated    2026-09-05T04:12:54Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. done     Reproduce the verify/show disagreement with file hashes
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work item result engr:backlog:01m1pq13eqf9garmj49kmbcx9v --item 1 --text Isolated: show persists the reconciliation, verify does not.   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      blocked
+Updated    2026-09-05T04:12:55Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. done     Reproduce the verify/show disagreement with file hashes
+     -> Isolated: show persists the reconciliation, verify does not.
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work pause --help   # cwd=r2/project
+--- stdout ---
+Suspend autonomous execution. Only on explicit human direction
+
+Usage: engr-current work pause [OPTIONS] <SUBJECT>
+
+Arguments:
+  <SUBJECT>  
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current work pause engr:backlog:01m1pq13eqf9garmj49kmbcx9v   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      paused
+Updated    2026-09-05T04:13:12Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+           a human stopped this; do not resume it on your own
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. done     Reproduce the verify/show disagreement with file hashes
+     -> Isolated: show persists the reconciliation, verify does not.
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work ls   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+01a06d70  backlog   paused     1 open  2026-09-05T04:13:12Z  Open questions from the 52fe116 re-run
+--- exit 0 ---
+
+$ engr-current work resume engr:backlog:01m1pq13eqf9garmj49kmbcx9v   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      blocked
+Updated    2026-09-05T04:13:36Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. done     Reproduce the verify/show disagreement with file hashes
+     -> Isolated: show persists the reconciliation, verify does not.
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work pause engr:backlog:01m1pq13eqf9garmj49kmbcx9v   # cwd=r2/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a06d70
+State      paused
+Updated    2026-09-05T04:13:37Z
+engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+           a human stopped this; do not resume it on your own
+
+Two surface-consistency questions remain open; the verify/show disagreement is written up in the report.
+
+Depends on
+  engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+    The rewind probes were taken from this object's stream.
+
+Blocked by
+  [0] Waiting on a ruling about whether verify should fail on a reconcilable tail.
+
+  1. done     Reproduce the verify/show disagreement with file hashes
+     -> Isolated: show persists the reconciliation, verify does not.
+  2. pending  Check whether ls ever reports a stale projection
+--- exit 0 ---
+
+$ engr-current work rm engr:backlog:01m1pq13eqf9garmj49kmbcx9v   # cwd=r2/project
+--- stdout ---
+no execution memory for backlog item engr:backlog:01m1pq13eqf9garmj49kmbcx9v
+that work was paused; a human's stop signal went with it
+--- exit 0 ---

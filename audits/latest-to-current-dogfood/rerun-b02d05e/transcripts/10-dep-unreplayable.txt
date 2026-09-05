@@ -1,0 +1,96 @@
+﻿$ engr-current verify   # cwd=r4/dep-b
+--- stderr ---
+error: /audit/r4/dep-b/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: the last event record has no delimiter after it, so this history is truncated
+--- exit 4 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/dep-b
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? REF UNREADABLE
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+    advice   01a05e55-74 禮1 is there and will not load; what this section stands on cannot be read
+--- stderr ---
+error: current Object integrity failed or 1 sections are not what was admitted; run: engr verify
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r4/dep-b
+--- stderr ---
+error: /audit/r4/dep-b/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: the last event record has no delimiter after it, so this history is truncated
+--- exit 4 ---
+
+$ engr-current verify   # cwd=r4/dep-b2
+--- stderr ---
+error: /audit/r4/dep-b2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json exists but its append-only Event history is missing
+--- exit 4 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/dep-b2
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? REF UNREADABLE
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+    advice   01a05e55-74 禮1 is there and will not load; what this section stands on cannot be read
+--- stderr ---
+error: current Object integrity failed or 1 sections are not what was admitted; run: engr verify
+--- exit 5 ---
+
+$ engr-current verify   # cwd=r4/dep-b3
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/dep-b3
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? REF UNREADABLE
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+    advice   01a05e55-74 禮1 is there and will not load; what this section stands on cannot be read
+--- stderr ---
+error: current Object integrity failed or 1 sections are not what was admitted; run: engr verify
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r4/dep-b3
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current repair 01a05e55-74   # cwd=r4/dep-b3
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r4/dep-b3
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current repair 01a05e55-74   # cwd=r4/dep-b
+--- stderr ---
+error: /audit/r4/dep-b/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: the last event record has no delimiter after it, so this history is truncated
+--- exit 4 ---

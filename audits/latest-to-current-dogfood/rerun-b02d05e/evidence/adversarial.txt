@@ -1,0 +1,20 @@
+﻿===== integrity =====
+object tamper (title)              mutated  exit=5   01a05e55-74  open  Migration continuity AUDIT|2 sections   2 ok   rev 1|!!         Object integrity failed; current authority changed outsid
+section tamper (text)              mutated  exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit|          current Object integrity failed|          its sections is not what its a
+event tamper (rev)                 mutated  exit=4   error: adv/w/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl:1: event 01a072ad-5b3c-7e22-aad9-8aafa7c41989 does not matc
+event moved to another stream      mutated  exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: ad
+truncated object file              mutated  exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: EOF while parsing a string at line 1 column 120
+truncated event file               mutated  exit=4   error: adv/w/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: the last event record has no delimiter after it, so this h
+malformed JSON                     mutated  exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+duplicate JSON key                 mutated  exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these 
+noncanonical JSON (reordered)      mutated  exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these 
+unknown member added               mutated  exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these 
+filename != embedded id            mutated  exit=4   error: adv/w/.engr/objects/01a05e55-0000-7000-8000-000000000000.json exists but its append-only Event history is missing
+
+===== references =====
+invalid Ref digest                 mutated  exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-
+Ref repointed to another section   mutated  exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-
+Ref target commit unavailable      mutated  exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-
+Ref target raw UUID (old dialect)  mutated  exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: ad
+Ref fields list emptied            mutated  exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: ad
+Ref fields gains an unknown field  mutated  exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: ad

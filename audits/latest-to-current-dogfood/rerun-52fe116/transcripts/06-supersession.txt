@@ -1,0 +1,79 @@
+﻿$ engr-current prepare --supersede 01a06d62-9e --object 01a05e55-ee --text Replaced by the release readiness record.   # cwd=r2/project
+--- stderr ---
+error: an untyped object cannot be superseded; it is one of open | closed
+--- exit 5 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a05e55-74 --text self supersession   # cwd=r2/project
+--- stderr ---
+error: an object cannot supersede itself
+--- exit 5 ---
+
+$ engr-current prepare --supersede 01a06d62-9e --object 01a05e55-74 --text The continuity question is settled; the release readiness record carries it forward. --header Superseded   # cwd=r2/project
+--- stdout ---
+Challenge  supersede
+Object     01a05e55-74  Migration continuity audit
+Header     Superseded
+Role       supersession
+Relation   superseded_by -> engr:obj:01m1pp57hbfegt61kkrff5np4m
+Based on   6d1e059f
+Admission  human; time assigned on confirmation
+State      superseded ??this object leaves the default listing, and the relation above is where a reader is sent instead
+
+The continuity question is settled; the release readiness record carries it forward.
+
+Type this exactly to confirm:  CONFIRM ZFN3Y6
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZFN3Y6   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.superseded.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a06d62-9e --type decision --state accepted   # cwd=r2/project
+--- stdout ---
+Challenge  classify
+Object     01a06d62-9e  Release readiness for the storage generation
+Type       decision
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM WN7NYZ
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM WN7NYZ   # cwd=r2/project
+--- stdout ---
+CONFIRMED  01a06d62-9e  object.classified.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a06d62-9e --text cycle attempt   # cwd=r2/project
+--- stderr ---
+error: that replacement closes a supersession cycle back onto 01a06d62-9e2b-7ba1-a306-73c3de5ad894
+--- exit 5 ---
+
+$ engr-current ls   # cwd=r2/project
+--- stdout ---
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r2/project
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+01a06d62-9e  decision/accepted      0 sections  ok            Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/project
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---

@@ -1,0 +1,33 @@
+﻿===== dirty git basis =====
+exit=5
+error: source files have uncommitted changes; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on
+-- explicit --no-based-on is accepted instead --
+exit=0
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+
+===== stale / superseded Challenge on the current generation =====
+prepared A=D8J6T2
+prepared B=MSGNNN
+-- answer B first --
+CONFIRMED  01a05e55-74  section.created.v1  rev 2
+-- now answer the superseded A --
+exit=3 : error: no challenge awaiting D8J6T2
+-- and how does the screen describe A? --
+error: no challenge awaiting D8J6T2
+
+===== selective Ref drift: selected vs unselected fields =====
+-- the migrated Ref selects based_on, refs, text; it does not select header --
+CONFIRMED  01a05e55-74  section.updated.v1  rev 3
+-- unselected field changed: is the dependent Section still ok? --
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          §2 stands on 01a05e55-74 §1, which moved: based_on — a judgement, not an integrity failure
+-- now change a SELECTED field (text) on the same target --
+CONFIRMED  01a05e55-74  section.updated.v1  rev 4
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          §2 stands on 01a05e55-74 §1, which moved: based_on, text — a judgement, not an integrity failure
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction

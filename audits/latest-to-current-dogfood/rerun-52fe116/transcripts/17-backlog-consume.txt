@@ -1,0 +1,29 @@
+﻿$ engr-current backlog show 01a06d70 --format json   # cwd=r2/project
+--- stdout ---
+{
+  "id": "01a06d70-8dd7-7a60-ac52-444ce8b6753b",
+  "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v",
+  "topic": "Open questions from the 52fe116 re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 4,
+  "updated_at": "2026-09-05T04:14:29.518021561Z",
+  "expect": {
+    "rename": "54b954c7268ec2ee7b3f065f41cc32826f739f239f9fd7ee8c8505c202559262",
+    "add": "4db68b8cdbd6a7adf6fce34a25a62db124f4b11ab3c9a6f280964b378841b60a"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1pq13eqf9garmj49kmbcx9v:2",
+      "expect": "8e336b3925a517d51303439d43aaeb392c24d34459d2e0c9649b0ae1518653de",
+      "id": 2,
+      "text": "Whether the surfaces should agree with each other: gitignore, repair's id argument, and the verify/show split.",
+      "updated_at": "2026-09-05T04:14:29.518021561Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog consume 01a06d70 --section 2 --expect 8e336b3925a517d51303439d43aaeb392c24d34459d2e0c9649b0ae1518653de   # cwd=r2/project
+--- stdout ---
+consumed 禮2, and the topic with it ??nothing else was unresolved
+--- exit 0 ---

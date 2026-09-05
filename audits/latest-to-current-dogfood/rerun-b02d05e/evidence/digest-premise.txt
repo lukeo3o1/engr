@@ -1,0 +1,25 @@
+=== object 01a05e55-74eb-7370-b771-0008bd71d149 ===
+section 1: stored=1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6 computed=1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6 MATCH
+section 2: stored=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 computed=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 MATCH
+object   : stored=1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1 computed=1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1 MATCH
+=== object 01a05e55-e62b-75c3-8b32-6c388dec4c4b ===
+section 1: stored=1:75a6e4c922042915fea0d88b8d9d056054358715dfd1977f890b86ae63a337d6 computed=1:75a6e4c922042915fea0d88b8d9d056054358715dfd1977f890b86ae63a337d6 MATCH
+section 2: stored=1:144f5ab32b53704c1c5adb4fe5780a61639e6d88d5285c3e970c5c1f3b6d7535 computed=1:144f5ab32b53704c1c5adb4fe5780a61639e6d88d5285c3e970c5c1f3b6d7535 MATCH
+object   : stored=1:dbbc5739f386821860a767e08252661b190eedfad25469eb71bbc78c6559ef3c computed=1:dbbc5739f386821860a767e08252661b190eedfad25469eb71bbc78c6559ef3c MATCH
+=== object 01a05e55-ee46-7a91-983f-fa79b297b10c ===
+section 1: stored=1:9643c259e6d917aac97b25fb78d08e63dc5a4096accf294a4c1b520f5364ee72 computed=1:9643c259e6d917aac97b25fb78d08e63dc5a4096accf294a4c1b520f5364ee72 MATCH
+section 4: stored=1:f249ef269a11a0ce47bf476e0decf2924a352774d11b0292876f64870761b8d4 computed=1:f249ef269a11a0ce47bf476e0decf2924a352774d11b0292876f64870761b8d4 MATCH
+section 5: stored=1:cdca9ab844a8bc02ee749517ee09bb8bdd72eeb5b7a44e940a80c21d53303544 computed=1:cdca9ab844a8bc02ee749517ee09bb8bdd72eeb5b7a44e940a80c21d53303544 MATCH
+object   : stored=1:5503c3d978b62a7d366327edf5300feb6dd732e14c24c31c94782186e7a056bb computed=1:5503c3d978b62a7d366327edf5300feb6dd732e14c24c31c94782186e7a056bb MATCH
+=== stream 01a05e55-74eb-7370-b771-0008bd71d149 ===
+event 1: stored=1:dbd1dd79e0eb59 computed=1:dbd1dd79e0eb59 MATCH
+=== stream 01a05e55-e62b-75c3-8b32-6c388dec4c4b ===
+event 1: stored=1:d3ac4df21088b0 computed=1:d3ac4df21088b0 MATCH
+=== stream 01a05e55-ee46-7a91-983f-fa79b297b10c ===
+event 1: stored=1:57dc002762904c computed=1:57dc002762904c MATCH
+preimage : {"commit":"221a5db38924d39449ed1c76a3beddf11e302113","fields":["based_on","refs","text"],"target":"obj:01m1f5ax7bedrbew8012yq3ma9:1","values":{"based_on":{"commit":"1dae5f46717a8967662236f69694bf4ee9ef76d8"},"refs":null,"text":"The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."}}
+fields   : ["based_on","refs","text"]
+values   : {"based_on":{"commit":"1dae5f46717a8967662236f69694bf4ee9ef76d8"},"refs":null,"text":"The question is not whether the mi...
+stored   : 1:088da847d1e83ef0d8d6d610e91ca0abe562eb92aab7214a673c19cf429d7fda
+computed : 1:088da847d1e83ef0d8d6d610e91ca0abe562eb92aab7214a673c19cf429d7fda
+MATCH

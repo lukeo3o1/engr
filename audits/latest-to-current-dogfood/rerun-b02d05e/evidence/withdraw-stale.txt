@@ -1,0 +1,30 @@
+﻿staged: manifest=yes destination=yes challenge=yes
+
+===== move the source under the staged plan =====
+-- resuming the staged plan --
+MIGRATED   ws/w/.engr  3 objects, 7 sections, generation 1
+confirm exit=0
+-- and preparing again --
+error: this workspace is not the released predecessor, so there is nothing to migrate
+migrate exit=0
+after: manifest=no destination=no challenges=
+
+===== interrupt that withdrawal across a sweep =====
+kill@20  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@40  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@60  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@80  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@120 ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@200 ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration

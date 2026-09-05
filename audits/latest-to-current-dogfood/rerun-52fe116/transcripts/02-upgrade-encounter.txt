@@ -1,0 +1,44 @@
+﻿$ engr-current ls   # cwd=r2/project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current ls --all   # cwd=r2/project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74   # cwd=r2/project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current verify   # cwd=r2/project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current migrate --help   # cwd=r2/project
+--- stdout ---
+Explicitly upgrade the released predecessor workspace to generation 1
+
+Usage: engr-current migrate [OPTIONS]
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current verify --help   # cwd=r2/project
+--- stdout ---
+Verify Object and Section integrity plus dependencies
+
+Usage: engr-current verify [OPTIONS] [OBJECT]
+
+Arguments:
+  [OBJECT]  
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---

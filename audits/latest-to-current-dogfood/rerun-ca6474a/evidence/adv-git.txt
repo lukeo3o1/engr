@@ -1,0 +1,21 @@
+﻿===== linked worktree: does the local exclude land where git reads it? =====
+linked worktree .git is a file: gitdir: /audit/r3/advg/main/.git/worktrees/linked
+-- preparing a migration inside the linked worktree --
+prepared: CONFIRM KNMR6J
+-- where did the exclusion go? --
+per-worktree admin dir  : absent (correct)
+common dir info/exclude : 1 matching lines
+-- is the live challenge visible to git from inside the worktree? --
+NOT VISIBLE TO GIT (correct)
+-- and it still confirms from there --
+MIGRATED   advg/linked/.engr  3 objects, 7 sections, generation 1
+still NOT VISIBLE after publication
+
+===== dirty git basis =====
+error: source files have uncommitted changes; choose a committed basis with --based-on or explicitly choose no repository basis with --no-based-on
+exit=0
+-- and with an explicit basis it is accepted --
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Based on   none (explicit)
+Admission  human; time assigned on confirmation

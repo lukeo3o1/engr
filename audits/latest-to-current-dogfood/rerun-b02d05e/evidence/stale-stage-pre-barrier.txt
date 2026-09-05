@@ -1,0 +1,41 @@
+﻿landed at 820ms: destination staged, and the released build still works here
+format.json: {"format":"engr-workspace","version":1}
+
+===== a day's work, admitted through the released tool's own Human Gate =====
+(candidate 8TTSM6 was superseded by this one)
+CONFIRMED  01a05e55-74  section.added  rev 5
+note       commit .engr/objects and .engr/events to preserve history and look-back
+exit=0
+-- and it is in the predecessor record --
+
+── §3 ── ok
+Admitted with the released tool after the migration crashed, and before anyone resumed it.
+    confirmed 2026-09-05T18:05:39.336983503Z
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+
+===== later, somebody resumes the migration =====
+error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIRM FBR8Z2 no"` — and prepare it again over the workspace as it now stands
+exit=0
+
+===== is the admitted work in the migrated record? =====
+GONE: the resume published a stage that predates it
+docker : error: ss2/w/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+At line:1 char:302
++ ... tch {} } }; docker run --rm -v "D:\lukeo3o1\engr-audit:/audit" engr-r ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: ss2/w/.e...e` to resume it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: ss2/w/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+verify exit=4
+
+-- what the predecessor held just before the resume --
+1
+-- and whether any of it is recoverable afterwards --
+01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+01a05e55-e62b-75c3-8b32-6c388dec4c4b.jsonl
+01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+ss2/w/.engr/events/01a05e55-74eb-7370-b771-0008bd71d149.jsonl:1
+ss2/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json:1

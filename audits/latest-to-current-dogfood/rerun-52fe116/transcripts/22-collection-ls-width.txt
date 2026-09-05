@@ -1,0 +1,64 @@
+﻿$ engr-current collection new release-2026 --title Baseline v1 release   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+no members
+--- exit 0 ---
+
+$ engr-current collection ls   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+release-  open        0 members   0 need attention  Baseline v1 release
+--- exit 0 ---
+
+$ engr-current collection new a --title Short id   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection a
+Reference  engr:collection:a
+State      open
+Name       Short id
+
+no members
+--- exit 0 ---
+
+$ engr-current collection ls   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+release-  open        0 members   0 need attention  Baseline v1 release
+a  open        0 members   0 need attention  Short id
+--- exit 0 ---
+
+$ engr-current collection show release-   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+no members
+--- exit 0 ---
+
+$ engr-current collection new release-2027 --title Next generation   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2027
+Reference  engr:collection:release-2027
+State      open
+Name       Next generation
+
+no members
+--- exit 0 ---
+
+$ engr-current collection ls   # cwd=r2/scratch/fresh-init
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+release-2026  open        0 members   0 need attention  Baseline v1 release
+release-2027  open        0 members   0 need attention  Next generation
+a  open        0 members   0 need attention  Short id
+--- exit 0 ---

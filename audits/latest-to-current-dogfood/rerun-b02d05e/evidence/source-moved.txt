@@ -1,0 +1,20 @@
+﻿===== a) the source moves before anything is staged =====
+staged destination: no
+source digest: 1fcdfd198e9f552597a1461f3f51b69c6005842faf9a49386f3b64b030361b8e -> f6a89526c6b9c692fa69628382a424b2cd6cb5081cd8fe5d3e4e41f71fb1ba13
+the frozen subject says: "objects/01a05e55-74eb-7370-b771-0008bd71d149.json":"1:1fcdfd198e9f552597a1461f3f51b69c6005842faf9a49386f3b64b030361b8e"
+error: 01a05e55-74eb-7370-b771-0008bd71d149: predecessor Object projection is not exactly derivable from admitted history
+confirm exit=0
+title on disk now: Migration continuity audit (edited under the plan)
+
+===== b) the source moves after a crash left the destination staged =====
+staged destination: yes
+MIGRATED   sm/b/.engr  3 objects, 7 sections, generation 1
+confirm exit=0
+-- did the edit survive, or was it published over? --
+Migration continuity audit
+-- and what does the record say now? --
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted — git holds no record of the current wording yet
+verify exit=0

@@ -1,0 +1,49 @@
+﻿$ engr-current ls --all   # cwd=r2/project
+--- stdout ---
+01a05e55-74  design/superseded      3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   7 sections  ok            Predecessor fixture construction
+01a06d62-9e  decision/accepted      0 sections  ok            Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/project
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  7 sections  Predecessor fixture construction
+01a06d62-9e  PASS  0 sections  Release readiness for the storage generation
+--- exit 0 ---
+
+$ engr-current collection ls   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+release-  completed   2 members   1 need attention  Baseline v1 release
+--- exit 0 ---
+
+$ engr-current rules ls   # cwd=r2/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  object
+    based on README.md (current)
+--- exit 0 ---
+
+$ engr-current collection new release-2027 --title The generation after this one   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2027
+Reference  engr:collection:release-2027
+State      open
+Name       The generation after this one
+
+no members
+--- exit 0 ---
+
+$ engr-current collection ls   # cwd=r2/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+release-2027  open        0 members   0 need attention  The generation after this one
+release-2026  completed   2 members   1 need attention  Baseline v1 release
+--- exit 0 ---

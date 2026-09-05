@@ -1,0 +1,20 @@
+﻿$ engr-current work ls   # cwd=r4/wk
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+01a05e55  obj       active     0 open  2026-09-05T17:43:57Z  Migration continuity audit
+--- exit 0 ---
+
+$ engr-current work rm engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/wk
+--- stdout ---
+no execution memory for object engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 0 ---
+
+$ engr-current work rm engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/wk
+--- stderr ---
+error: no work recorded for object engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 3 ---
+
+$ engr-current work show engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r4/wk
+--- stderr ---
+error: no work recorded for object engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 3 ---

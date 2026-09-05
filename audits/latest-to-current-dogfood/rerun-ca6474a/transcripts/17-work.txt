@@ -1,0 +1,93 @@
+﻿$ engr-current work start engr:backlog:01m1rpb2hkesgv27ef8400xqpm   # cwd=r3/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      active
+Updated    2026-09-05T11:48:55Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+--- exit 0 ---
+
+$ engr-current backlog consume 01a07165 --section 1 --expect 393eb651772cdcaf21b6a1b09b77bdcc1b347808110a6e7e3fd24f498b071747   # cwd=r3/project
+--- stderr ---
+error: this was the last unresolved point, so resolving it removes the item ??but it still has execution memory, which cannot outlive what it belongs to. Discard it with `engr work rm engr:backlog:01m1rpb2hkesgv27ef8400xqpm` and consume again, or record what it was for first
+--- exit 5 ---
+
+$ engr-current work item add engr:backlog:01m1rpb2hkesgv27ef8400xqpm --text Re-observe every fix with the release build   # cwd=r3/project
+--- stdout ---
+work item 1
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      active
+Updated    2026-09-05T11:49:07Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+  1. pending  Re-observe every fix with the release build
+--- exit 0 ---
+
+$ engr-current work item state engr:backlog:01m1rpb2hkesgv27ef8400xqpm --item 1 --state done   # cwd=r3/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      active
+Updated    2026-09-05T11:49:08Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+  1. done     Re-observe every fix with the release build
+--- exit 0 ---
+
+$ engr-current work block engr:backlog:01m1rpb2hkesgv27ef8400xqpm --reason Waiting on a ruling about the section count   # cwd=r3/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      blocked
+Updated    2026-09-05T11:49:09Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+Blocked by
+  [0] Waiting on a ruling about the section count
+
+  1. done     Re-observe every fix with the release build
+--- exit 0 ---
+
+$ engr-current work depend engr:backlog:01m1rpb2hkesgv27ef8400xqpm --on engr:obj:01m1rnw7nvev8t44x4kv5tb00t --reason The probe object is where the tail lives.   # cwd=r3/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      blocked
+Updated    2026-09-05T11:49:10Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+Depends on
+  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+    The probe object is where the tail lives.
+
+Blocked by
+  [0] Waiting on a ruling about the section count
+
+  1. done     Re-observe every fix with the release build
+--- exit 0 ---
+
+$ engr-current work pause engr:backlog:01m1rpb2hkesgv27ef8400xqpm   # cwd=r3/project
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Backlog    01a07165
+State      paused
+Updated    2026-09-05T11:49:11Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+           a human stopped this; do not resume it on your own
+
+Depends on
+  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+    The probe object is where the tail lives.
+
+Blocked by
+  [0] Waiting on a ruling about the section count
+
+  1. done     Re-observe every fix with the release build
+--- exit 0 ---
+
+$ engr-current work rm engr:backlog:01m1rpb2hkesgv27ef8400xqpm   # cwd=r3/project
+--- stdout ---
+no execution memory for backlog item engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+that work was paused; a human's stop signal went with it
+--- exit 0 ---

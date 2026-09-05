@@ -1,0 +1,62 @@
+﻿$ engr-current prepare --object 01a05e55-74 --revise 2 --no-based-on --text A revision admitted so the stream has a second event to keep.   # cwd=r4/dep-b4
+--- stdout ---
+Challenge  section.update 禮2
+Object     01a05e55-74  Migration continuity audit
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+
+--- previous
++++ candidate
+@@ -1 +1 @@
+-Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+\ No newline at end of file
++A revision admitted so the stream has a second event to keep.
+\ No newline at end of file
+
+Type this exactly to confirm:  CONFIRM LAKQQ8
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM LAKQQ8   # cwd=r4/dep-b4
+--- stdout ---
+CONFIRMED  01a05e55-74  section.updated.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r4/dep-b4
+--- stderr ---
+error: /audit/r4/dep-b4/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: non-empty Event history starts at revision 1, not 2
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74   # cwd=r4/dep-b4
+--- stderr ---
+error: /audit/r4/dep-b4/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: non-empty Event history starts at revision 1, not 2
+--- exit 4 ---
+
+$ engr-current repair 01a05e55-74   # cwd=r4/dep-b4
+--- stderr ---
+error: /audit/r4/dep-b4/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: non-empty Event history starts at revision 1, not 2
+--- exit 4 ---
+
+$ engr-current ls --all   # cwd=r4/dep-b4
+--- stderr ---
+error: /audit/r4/dep-b4/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: non-empty Event history starts at revision 1, not 2
+--- exit 4 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/dep-b4
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? REF UNREADABLE
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+    advice   01a05e55-74 禮1 is there and will not load; what this section stands on cannot be read
+--- stderr ---
+error: current Object integrity failed or 1 sections are not what was admitted; run: engr verify
+--- exit 5 ---

@@ -1,0 +1,22 @@
+﻿--- git status --porcelain (must be empty) ---
+--- .git/info/exclude ---
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+# engr: a live challenge code is a filename here, and it is meant for one
+# person. Added while a migration was prepared; the migrated workspace
+# carries the same rule in its own tracked .gitignore.
+/.engr/local/
+--- git check-ignore -v on the live challenge ---
+.git/info/exclude:10:/.engr/local/	.engr/local/challenges/FBR8Z2.json
+check-ignore exit=0
+--- git status --untracked-files=all, anything under local/ ---
+NOT VISIBLE TO GIT (correct)
+--- the frozen subject ---
+{"created_at":"2026-09-05T17:31:30.263686297Z","digest":"1:38a72f558fe53d12643ec7ea8e91adc2247da222fcf1be64b093c92b06c53c5d","generator":{"fingerprint":"1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd","version":"latest (b02d05ee)"},"id":"FBR8Z2","subject":{"data":{"from":{"format":"engr-workspace","version":1},"objects":[{"digest":"1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1","object":"01a05e55-74eb-7370-b771-0008bd71d149","predecessor_rev":4,"sections":2,"title":"Migration continuity audit"},{"digest":"1:dbbc5739f386821860a767e08252661b190eedfad25469eb71bbc78c6559ef3c","object":"01a05e55-e62b-75c3-8b32-6c388dec4c4b","predecessor_rev":4,"sections":2,"title":"Evidence rules for this audit"},{"digest":"1:5503c3d978b62a7d366327edf5300feb6dd732e14c24c31c94782186e7a056bb","object":"01a05e55-ee46-7a91-983f-fa79b297b10c","predecessor_rev":6,"sections":3,"title":"Predecessor fixture construction"}],"source":{"events/01a05e55-74eb-7370-b771-0008bd71d149.jsonl":"1:7bdfc4a8f5ce23b6d46601ca238c3553366bcd19eaf4372ab7ee5b5e78370386","events/01a05e55-e62b-75c3-8b32-6c388dec4c4b.jsonl":"1:840bc79c625a350d97e94cf307a6d61a298d081e2125aff6b86a60a1d3d5e4ff","events/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl":"1:eb15c83108aac076c2ea3784f52bedaca099a8521e09abcc304effdf4969396e","format.json":"1:b3bc0f709034a0e7bc37da1e2c8329ceb96c467e34bbefd44b4890f04597e3b5","objects/01a05e55-74eb-7370-b771-0008bd71d149.json":"1:1fcdfd198e9f552597a1461f3f51b69c6005842faf9a49386f3b64b030361b8e","objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json":"1:c7689c03970fdeba9809c545b9e56b512760e1170c3f1864f54e09a9474fba1c","objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json":"1:2a802ed9bd5c0cdd59f1c56cb1438c99705a8825a046ce8972806aafbfecfa1a"},"to":1},"type":"migration"}}
+--- staged destination must not exist yet ---
+absent (correct)
+manifest.json

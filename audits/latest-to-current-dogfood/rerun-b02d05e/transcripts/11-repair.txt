@@ -1,0 +1,67 @@
+﻿$ engr-current repair 01a05e55-74   # cwd=r4/dep-a
+--- stdout ---
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  禮1.header
+    stored   A heading nobody ever admitted
+    restore  (absent)
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM U2ZKYY
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          禮2 stands on 01a05e55-74 禮1, which seals correctly and is not what its own history produced; repair 01a05e55-74 first
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current repair 01a05e55-74   # cwd=r4/dep-a
+--- stdout ---
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  禮1.header
+    stored   A heading nobody ever admitted
+    restore  (absent)
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM LAYCBF
+(candidate U2ZKYY was superseded by this one)
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM LAYCBF   # cwd=r4/dep-a
+--- stdout ---
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---

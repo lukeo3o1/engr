@@ -1,0 +1,8 @@
+﻿===== the sidecar the write path produces =====
+{"next_item_id":1,"state":"active","updated_at":"2026-09-05T17:43:57.378978618Z"}
+as written (four lists omitted)                exit=0   EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says|Object     01a05e55-74|State      a
+explicit dependencies: []                      exit=4   error: /audit/r4/wk/.engr/work/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is not in the exact
+explicit blockers: []                          exit=4   error: /audit/r4/wk/.engr/work/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is not in the exact
+explicit items: []                             exit=4   error: /audit/r4/wk/.engr/work/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is not in the exact
+item with explicit commits: []                 exit=4   error: /audit/r4/wk/.engr/work/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is not in the exact
+item with commits omitted (must LOAD)          exit=0   EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says|Object     01a05e55-74|State      a

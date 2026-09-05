@@ -1,0 +1,169 @@
+﻿$ engr-current init   # cwd=r2/scratch/fresh-init
+--- stdout ---
+initialised /audit/r2/scratch/fresh-init/.engr
+git          ok
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r2/project
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r2/project
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---
+
+$ engr-current --help   # cwd=r2/project
+--- stdout ---
+Engineering records with explicit Human or reviewed Agent authority
+
+Usage: engr-current [OPTIONS] <COMMAND>
+
+Commands:
+  init        Create a workspace in the current directory
+  migrate     Explicitly upgrade the released predecessor workspace to generation 1
+  protocol    Print the protocol this build implements
+  prepare     Prepare a Human change, or admit a reviewed Agent change
+  candidate   List candidates awaiting confirmation, or show one in full
+  confirm     Admit a candidate. The response must be exactly `CONFIRM <code>`
+  ls          List objects. Only the ones needing attention unless --all
+  show        Show one object: its sections, and how much each can be trusted
+  verify      Verify Object and Section integrity plus dependencies
+  repair      Propose restoring an Object whose stored integrity has failed
+  work        Execution memory an agent keeps for an Object. Nothing here is confirmed
+  collection  Planning metadata: what is grouped together. Nothing here is confirmed
+  backlog     Unresolved staging. Nothing here is confirmed
+  rules       Project rules an agent must read before a semantic mutation
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+  -V, --version      Print version
+--- exit 0 ---
+
+$ engr-current prepare --help   # cwd=r2/project
+--- stdout ---
+Prepare a Human change, or admit a reviewed Agent change
+
+Usage: engr-current prepare [OPTIONS] <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+Options:
+      --new
+          Propose a new object
+      --root <ROOT>
+          Workspace root. Defaults to the nearest ancestor containing .engr
+      --rename
+          Replace the object's title
+      --add
+          Propose a new section
+      --revise <SECTION>
+          Replace the wording of a section
+      --merge <DESTINATION>
+          Consolidate sections into this surviving destination
+      --sources <SECTIONS>
+          Sections consumed by --merge
+      --delete <SECTION>
+          Remove a section
+      --close
+          Declare an untyped object finished. Not a spelling of --classify: it is its own action, and it refuses an object nobody is looking at
+      --reopen
+          Take a finished untyped object back up
+      --classify
+          Declare what this object is and what state it is in. Both are explicit
+      --supersede <OBJECT>
+          Replace this object with another, confirming the state, the replacement and the reason together
+      --object <OBJECT>
+          The object to act on. Any unique id prefix. Omit only with --new
+      --type <TYPE>
+          Destination type. With --classify, or on a settled object with --add, --revise, --merge, --delete or --rename, to do both in one confirmation [possible values: design, decision, risk]
+      --untyped
+          Destination is an untyped object. Same two uses as --type
+      --state <STATE>
+          Destination state, valid for the destination type [possible values: open, closed, draft, proposed, accepted, rejected, superseded, identified, mitigated, invalidated]
+      --text <TEXT>
+          Wording, inline
+      --text-file <TEXT_FILE>
+          Wording, from a file
+      --header <HEADER>
+          A short label for the section, for navigation. Part of what a reference can depend on, so changing it is a change to the assertion
+      --role <ROLE>
+          What this section asserts, semantically [possible values: decision, risk, supersession, acceptance_criterion]
+      --content <TYPE> <BODY>
+          A bounded literal excerpt, as code.<tag> or data.<tag> and a body. Repeatable; order is significant
+      --content-file <TYPE> <PATH>
+          The same, with the body read from a file
+      --implemented-by-file <PATH>
+          A repository file that implements this assertion
+      --implemented-by-symbol <PATH> <SYMBOL>
+          A source symbol that implements this assertion
+      --implemented-at <REVISION>
+          Committed revision to pin implemented_by targets at. Defaults to HEAD only while the path itself is clean
+      --based-on <BASED_ON>
+          Committed repository basis. Defaults to HEAD only when source is clean
+      --no-based-on
+          Record that this wording has no repository basis
+      --ref <OBJECT:SECTION> <FIELDS>
+          A section this wording depends on, followed by comma-separated semantic fields
+      --oversize
+          Retry a proposal a size threshold already refused once
+      --agent
+          Admit directly through Agent Rule Review instead of minting a Human challenge
+      --review <DIGEST>
+          ReviewDigest surfaced by the first governed attempt
+      --reviewed-rule <RULE>
+          Rule id actually reviewed. Repeat for the complete surfaced set
+      --review-attempt <N>
+          Which attempt of the continuous review sequence this is [default: 1]
+      --review-result <RESULT>
+          Agent-attested outcome of reviewing the exact mutation [possible values: passed, failed, exhausted]
+      --review-explanation <TEXT>
+          Exact explanation shown when a Human is asked to override
+      --json
+          
+  -h, --help
+          Print help
+--- exit 0 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r2/project
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- exit 0 ---
+
+$ engr-current show 01a05e55-ee   # cwd=r2/project
+--- stdout ---
+01a05e55-ee  open  Predecessor fixture construction
+3 sections   3 ok   rev 1
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+?? 禮1 ?? ok
+The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+    based_on 1dae5f46   admitted 2026-09-01T18:58:38.654174165Z by human
+
+?? 禮4 ?? ok
+Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+    admitted 2026-09-01T18:59:23.885618829Z by human
+
+?? 禮5 ?? ok
+A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+    admitted 2026-09-01T18:59:40.546412285Z by human
+--- exit 0 ---

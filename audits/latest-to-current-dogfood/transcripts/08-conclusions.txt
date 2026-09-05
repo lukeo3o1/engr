@@ -1,0 +1,120 @@
+﻿$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Migration continuity --role decision --text Continuity holds. Object and Section identities survived unchanged, including ids retired by a pre-migration merge, which are still not reused: next_section_id 8 over sections 1,4,5,6,7. Historical Section admitted.at kept the predecessor confirmed_at, while every object.migrated.v1 carried the actual confirmation instant. Evidence: transcripts 03-migration and 04-post-migration, inventories under evidence/.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:216c7cf70947f8f17317e8e3de0161e506d12531199758c926e16d6487b87179 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Migration continuity --role decision --text Continuity holds. Object and Section identities survived unchanged, including ids retired by a pre-migration merge, which are still not reused: next_section_id 8 over sections 1,4,5,6,7. Historical Section admitted.at kept the predecessor confirmed_at, while every object.migrated.v1 carried the actual confirmation instant. Evidence: transcripts 03-migration and 04-post-migration, inventories under evidence/. --review 1:216c7cf70947f8f17317e8e3de0161e506d12531199758c926e16d6487b87179 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Header     Migration continuity
+Role       decision
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:216c7cf70947f8f17317e8e3de0161e506d12531199758c926e16d6487b87179
+Rules      audit-scope, evidence-discipline
+
+Continuity holds. Object and Section identities survived unchanged, including ids retired by a pre-migration merge, which are still not reused: next_section_id 8 over sections 1,4,5,6,7. Historical Section admitted.at kept the predecessor confirmed_at, while every object.migrated.v1 carried the actual confirmation instant. Evidence: transcripts 03-migration and 04-post-migration, inventories under evidence/.
+
+Type this exactly to confirm:  CONFIRM NC4J2L
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM NC4J2L   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Crash and resume --role decision --text A migration interrupted by SIGKILL is resumable and truthful. Killing the confirming process across a swept window produced four distinct intermediate states; each refused every read with a message naming the resume command, each resumed to a complete generation-1 workspace, each ended with exactly one Event per stream, and each verified. A run killed after staging and resumed six seconds later kept the original confirmation instant 19:15:57.362 rather than minting a new one, and its objects/ was byte-identical to an uninterrupted migration. Evidence: transcript 07-crash-resume, evidence/crash-sweep.txt.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:57b00427c3ef4d39185d11bc8d68fe381902aa8f5f9bed19040bbd4b40941894 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Crash and resume --role decision --text A migration interrupted by SIGKILL is resumable and truthful. Killing the confirming process across a swept window produced four distinct intermediate states; each refused every read with a message naming the resume command, each resumed to a complete generation-1 workspace, each ended with exactly one Event per stream, and each verified. A run killed after staging and resumed six seconds later kept the original confirmation instant 19:15:57.362 rather than minting a new one, and its objects/ was byte-identical to an uninterrupted migration. Evidence: transcript 07-crash-resume, evidence/crash-sweep.txt. --review 1:57b00427c3ef4d39185d11bc8d68fe381902aa8f5f9bed19040bbd4b40941894 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Header     Crash and resume
+Role       decision
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:57b00427c3ef4d39185d11bc8d68fe381902aa8f5f9bed19040bbd4b40941894
+Rules      audit-scope, evidence-discipline
+
+A migration interrupted by SIGKILL is resumable and truthful. Killing the confirming process across a swept window produced four distinct intermediate states; each refused every read with a message naming the resume command, each resumed to a complete generation-1 workspace, each ended with exactly one Event per stream, and each verified. A run killed after staging and resumed six seconds later kept the original confirmation instant 19:15:57.362 rather than minting a new one, and its objects/ was byte-identical to an uninterrupted migration. Evidence: transcript 07-crash-resume, evidence/crash-sweep.txt.
+
+Type this exactly to confirm:  CONFIRM UL7XPA
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM UL7XPA   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Adversarial surface --role risk --text Every tampering, truncation, non-canonical JSON, cross-stream Event move, bad Ref digest and forbidden YAML construct was refused with a specific non-zero exit. The superseded raw-UUID Ref spelling is refused too, so the compact reference identity is a real boundary and not only an emitter convention. Evidence: evidence/adversarial.txt and evidence/adv-yaml.txt.   # cwd=project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:bb1b76ff9968dca692c27ebb6d53abb1292996c19f151816cdcfa75b137780de and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-74 --add --no-based-on --header Adversarial surface --role risk --text Every tampering, truncation, non-canonical JSON, cross-stream Event move, bad Ref digest and forbidden YAML construct was refused with a specific non-zero exit. The superseded raw-UUID Ref spelling is refused too, so the compact reference identity is a real boundary and not only an emitter convention. Evidence: evidence/adversarial.txt and evidence/adv-yaml.txt. --review 1:bb1b76ff9968dca692c27ebb6d53abb1292996c19f151816cdcfa75b137780de --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Header     Adversarial surface
+Role       risk
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:bb1b76ff9968dca692c27ebb6d53abb1292996c19f151816cdcfa75b137780de
+Rules      audit-scope, evidence-discipline
+
+Every tampering, truncation, non-canonical JSON, cross-stream Event move, bad Ref digest and forbidden YAML construct was refused with a specific non-zero exit. The superseded raw-UUID Ref spelling is refused too, so the compact reference identity is a real boundary and not only an emitter convention. Evidence: evidence/adversarial.txt and evidence/adv-yaml.txt.
+
+Type this exactly to confirm:  CONFIRM SEPGS9
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM SEPGS9   # cwd=project
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 6
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect 39417f78c3e3029ba054e77c47494931daf2a701c8e73fef39e9026f835036f8 --text verify says PASS and exit 0 on an Object whose selective Ref has drifted, while ls says "1 stale" and show says "refs moved" at the same moment. verify's own help promises "Object and Section integrity plus dependencies". An agent using verify as its health gate learns nothing about drift.   # cwd=project
+--- stdout ---
+added 禮3
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect 814461983285dd50ba51cab8027a2f134f07c057c2f787a7bc7cd8a0a48cdbed --text backlog add's refusal tells the agent to run engr backlog show <item> --json, but that flag does not exist; the working form is --format json. The very next error message gets it right, so the two disagree.   # cwd=project
+--- stdout ---
+added 禮4
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect a6f1d8dc18f71f41b98f2df978a65279ee49392669ecbd85e7a36bd63cae476b --text engr migrate --help says it upgrades a predecessor workspace 	o v3, while the generation it writes is 1 and .engr/VERSION says 1.   # cwd=project
+--- stdout ---
+added 禮5
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect d026c0aa883181433f1abb5062a91ac03265af22c382ad06c9c02e8a54050841 --text The error refusing a predecessor workspace calls it ead-only here, but ls, show and verify are all refused on it. Nothing is readable; only the next step is discoverable.   # cwd=project
+--- stdout ---
+added 禮6
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect 70ad076d69c58ba9c6b6e217ac522247c9a9d19eb3567569d98d8115b6ed3ff5 --text Migration leaves the predecessor's now-dead .engr/lock behind; the generation-1 lock is .engr/local/lock. Harmless and untracked, but it is a file the new layout does not define.   # cwd=project
+--- stdout ---
+added 禮7
+--- exit 0 ---
+
+$ engr-current backlog add 01a05e5e --expect db2ef088c45d459f0d376498612626d32c73c21f1f8c93ad507444822036fec0 --text Flag names for the same idea differ across domains: backlog produced --target, work depend --on, collection add --target with --reason. An agent has to re-learn the shape per domain.   # cwd=project
+--- stdout ---
+added 禮8
+--- exit 0 ---
+
+$ engr-current backlog ls   # cwd=project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a05e5e   8 unresolved  1 produced    2026-09-01T19:21:59Z  Open questions from the upgrade audit
+--- exit 0 ---
+

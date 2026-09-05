@@ -1,0 +1,19 @@
+﻿$ engr-current verify 01a0715e-1e   # cwd=r3/checkpoints/forged-tail
+--- stdout ---
+01a0715e-1e  FAIL  0 sections  FORGED: the migrator may invent facts
+          its title is not what its admitted history produced; it was changed outside an admission path
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted ??git holds no record of the current wording yet
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a0715e-1e   # cwd=r3/checkpoints/forged-tail
+--- stdout ---
+01a0715e-1e  open  FORGED: the migrator may invent facts
+0 sections   0 ok   rev 1
+!!         Object title is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair
+engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+--- stderr ---
+error: 01a0715e-1ebb-76d1-a213-a49ecba5801a: its title is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---

@@ -1,0 +1,27 @@
+﻿topic-level add   : f3c1be39edaba9d8f555e60ab914e0aa18bf8eb0c801678356dde4f6e66b58b5
+topic-level rename: 8b8143d876c38a1d4f4654b5f6170104008a11dc00fb1893e007ef4a371fc0ac
+point 1           : 51d4c3bd9d9d9dc7521f92e86de9c611a667602ae7f760832324427bb0f78c3c
+
+===== what each operation says when the token is missing =====
+backlog rename (topic-level)                   
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+backlog add (topic-level)                      
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+backlog revise (point-level)                   
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+backlog subjects (point-level)                 
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+backlog produced (point-level)                 
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+backlog consume (point-level)                  
+  exit=2   error: this needs --expect: run `engr backlog show <item> --format json`, read the point, and pass its expect value back
+
+===== and what happens if a reader follows that advice literally =====
+rename, given the point's token                
+  exit=6   error: what you read is not what is there now; read it again and review the current wording
+add, given the point's token                   
+  exit=6   error: what you read is not what is there now; read it again and review the current wording
+revise, given the topic's add token            
+  exit=6   error: what you read is not what is there now; read it again and review the current wording
+rename, given the topic's rename token         
+  exit=0   renamed 01a072c3

@@ -1,0 +1,27 @@
+﻿===== 1. a Ref that exists only in the durable tail =====
+docker : error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+At line:1 char:302
++ ... tch {} } }; docker run --rm -v "D:\lukeo3o1\engr-audit:/audit" engr-r ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: the resp...lse on the line:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+-- now the crash: the projection goes back, the Event stays --
+stored sections: 3, stream events: 1
+-- and the target is made unreadable --
+-- verify must still check the dependency the tail admitted --
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          §2 stands on 01a05e55-74 §1, which will not load: tp/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: unknown variant `not-a-state`, expected one of `open`, `closed`, `draft`, `proposed`, `accepted`, `rejected`, `superseded`, `identified`, `mitigated`, `invalidated`
+          uncommitted — git holds no record of the current wording yet
+error: verification failed
+exit=0
+
+===== 2. a purged predecessor prefix is legal; a gap is not =====
+the stream has 6 events
+prefix purged, 4 left; migrating:
+
+Type this exactly to confirm:  CONFIRM 49FX99
+exit=0
+gap made, 3 left; migrating:
+error: tpg/.engr/events/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl: predecessor rev 4 does not immediately follow rev 2
+exit=0

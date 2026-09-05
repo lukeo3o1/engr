@@ -1,0 +1,23 @@
+﻿$ engr-latest --help   # cwd=r4/checkpoints/pre-confirm
+--- stdout ---
+Engineering records whose every word a human confirmed
+
+Usage: engr-latest [OPTIONS] <COMMAND>
+
+Commands:
+  init       Create a workspace in the current directory
+  migrate    Explicitly upgrade a recognized legacy v0 workspace
+  protocol   Print the protocol this build implements
+  prepare    Put a change up for a human to confirm
+  candidate  List candidates awaiting confirmation, or show one in full
+  confirm    Admit a candidate. The response must be exactly `CONFIRM <code>`
+  ls         List objects. Only open ones unless --all
+  show       Show one object: its sections, and how much each can be trusted
+  verify     Recompute section hashes
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+  -V, --version      Print version
+--- exit 0 ---

@@ -1,0 +1,20 @@
+﻿before the barrier     kill@790   staged=yes barrier=not yet   confirm exit=5   edit_survived=1
+                       error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published
+before the barrier     kill@800   staged=yes barrier=not yet   confirm exit=5   edit_survived=1
+                       error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published
+before the barrier     kill@810   staged=yes barrier=not yet   confirm exit=5   edit_survived=1
+                       error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published
+before the barrier     kill@820   staged=yes barrier=not yet   confirm exit=5   edit_survived=1
+                       error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published
+after the barrier      kill@860   staged=yes barrier=installed confirm exit=0   edit_survived=0
+0
+                       MIGRATED   bs/w/.engr  3 objects, 7 sections, generation 1
+after the barrier      kill@880   staged=yes barrier=installed confirm exit=0   edit_survived=0
+0
+                       MIGRATED   bs/w/.engr  3 objects, 7 sections, generation 1
+after the barrier      kill@900   staged=yes barrier=installed confirm exit=0   edit_survived=0
+0
+                       MIGRATED   bs/w/.engr  3 objects, 7 sections, generation 1
+after the barrier      kill@950   staged=yes barrier=installed confirm exit=0   edit_survived=0
+0
+                       MIGRATED   bs/w/.engr  3 objects, 7 sections, generation 1

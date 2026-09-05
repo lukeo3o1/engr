@@ -1,0 +1,87 @@
+﻿$ engr-current prepare --help   # cwd=r4/dep-a
+--- stdout ---
+Prepare a Human change, or admit a reviewed Agent change
+
+Usage: engr-current prepare [OPTIONS] <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+Options:
+      --new
+          Propose a new object
+      --root <ROOT>
+          Workspace root. Defaults to the nearest ancestor containing .engr
+      --rename
+          Replace the object's title
+      --add
+          Propose a new section
+      --revise <SECTION>
+          Replace the wording of a section
+      --merge <DESTINATION>
+          Consolidate sections into this surviving destination
+      --sources <SECTIONS>
+          Sections consumed by --merge
+      --delete <SECTION>
+          Remove a section
+      --close
+          Declare an untyped object finished. Not a spelling of --classify: it is its own action, and it refuses an object nobody is looking at
+      --reopen
+          Take a finished untyped object back up
+      --classify
+          Declare what this object is and what state it is in. Both are explicit
+      --supersede <OBJECT>
+          Replace this object with another, confirming the state, the replacement and the reason together
+      --object <OBJECT>
+          The object to act on. Any unique id prefix. Omit only with --new
+      --type <TYPE>
+          Destination type. With --classify, or on a settled object with --add, --revise, --merge, --delete or --rename, to do both in one confirmation [possible values: design, decision, risk]
+      --untyped
+          Destination is an untyped object. Same two uses as --type
+      --state <STATE>
+          Destination state, valid for the destination type [possible values: open, closed, draft, proposed, accepted, rejected, superseded, identified, mitigated, invalidated]
+      --text <TEXT>
+          Wording, inline
+      --text-file <TEXT_FILE>
+          Wording, from a file
+      --header <HEADER>
+          A short label for the section, for navigation. Part of what a reference can depend on, so changing it is a change to the assertion
+      --role <ROLE>
+          What this section asserts, semantically [possible values: decision, risk, supersession, acceptance_criterion]
+      --content <TYPE> <BODY>
+          A bounded literal excerpt, as code.<tag> or data.<tag> and a body. Repeatable; order is significant
+      --content-file <TYPE> <PATH>
+          The same, with the body read from a file
+      --implemented-by-file <PATH>
+          A repository file that implements this assertion
+      --implemented-by-symbol <PATH> <SYMBOL>
+          A source symbol that implements this assertion
+      --implemented-at <REVISION>
+          Committed revision to pin implemented_by targets at. Defaults to HEAD only while the path itself is clean
+      --based-on <BASED_ON>
+          Committed repository basis. Defaults to HEAD only when source is clean
+      --no-based-on
+          Record that this wording has no repository basis
+      --ref <OBJECT:SECTION> <FIELDS>
+          A section this wording depends on, followed by comma-separated semantic fields
+      --oversize
+          Retry a proposal a size threshold already refused once
+      --agent
+          Admit directly through Agent Rule Review instead of minting a Human challenge
+      --review <DIGEST>
+          ReviewDigest surfaced by the first governed attempt
+      --reviewed-rule <RULE>
+          Rule id actually reviewed. Repeat for the complete surfaced set
+      --review-attempt <N>
+          Which attempt of the continuous review sequence this is [default: 1]
+      --review-result <RESULT>
+          Agent-attested outcome of reviewing the exact mutation [possible values: passed, failed, exhausted]
+      --review-explanation <TEXT>
+          Exact explanation shown when a Human is asked to override
+      --json
+          
+  -h, --help
+          Print help
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text This wording depends on a target nothing ever admitted. --ref 01a05e55-74:1 text   # cwd=r4/dep-a
+--- stderr ---
+error: reference target 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---

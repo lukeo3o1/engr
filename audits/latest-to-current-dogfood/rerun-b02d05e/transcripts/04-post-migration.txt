@@ -1,0 +1,32 @@
+﻿$ engr-current ls --all   # cwd=r4/project
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r4/project
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/project
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- exit 0 ---

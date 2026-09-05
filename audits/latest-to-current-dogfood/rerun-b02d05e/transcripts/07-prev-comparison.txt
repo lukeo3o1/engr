@@ -1,0 +1,22 @@
+﻿$ engr-prev ls --all   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-prev verify   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-prev ls --stale   # cwd=r4/dep-a
+--- stdout ---
+all ok
+--- exit 0 ---

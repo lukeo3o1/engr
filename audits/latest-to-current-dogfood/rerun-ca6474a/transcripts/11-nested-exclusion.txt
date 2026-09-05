@@ -1,0 +1,17 @@
+﻿$ engr-current migrate   # cwd=r3/checkpoints/nested/outer/project[1]
+--- stdout ---
+Challenge  migration
+Workspace  /audit/r3/checkpoints/nested/outer/project[1]/.engr
+From       engr-workspace version 1
+To         generation 1
+
+01a05e55-7  rev 4 -> 1  2 sections  Migration continuity audit
+01a05e55-e  rev 6 -> 1  3 sections  Predecessor fixture construction
+
+5 predecessor files will be read, converted, and replaced.
+The predecessor's own event history is discarded rather than translated: each Object
+gets one object.migrated.v1 bootstrap at revision 1.
+No Human-Gate question is pending, so none is discarded.
+
+Type this exactly to confirm:  CONFIRM 8L8JLN
+--- exit 0 ---

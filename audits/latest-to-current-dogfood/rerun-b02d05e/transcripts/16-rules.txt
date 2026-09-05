@@ -1,0 +1,80 @@
+﻿$ engr-current rules ls   # cwd=r4/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  collection, object, work
+--- exit 0 ---
+
+$ engr-current rules show audit-scope   # cwd=r4/project
+--- stdout ---
+Rule       audit-scope
+Governs    backlog, object
+Review     3 attempts; on_exhaustion = human_confirmation
+Based on   nothing outside the rule itself
+
+
+Wording admitted during this audit MUST say what was observed, in this run, on
+this build. A sentence about what the implementation would do is out of scope
+for the record and belongs in the report.
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The crash sweep was observed at ten instants; see evidence/crash-sweep.txt.   # cwd=r4/project
+--- stderr ---
+error: section.created.v1 requires an object that needs attention, and closed does not; reopen it first
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-ee --reopen   # cwd=r4/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:46db4f52e796443604fa6389b8a7bc14b60ef101043a5858d59fc4af54b19971 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --reopen --review 1:46db4f52e796443604fa6389b8a7bc14b60ef101043a5858d59fc4af54b19971 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r4/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+Review     passed
+Digest     1:46db4f52e796443604fa6389b8a7bc14b60ef101043a5858d59fc4af54b19971
+Rules      audit-scope, evidence-discipline
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM 6UQA7M
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 6UQA7M   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 8
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migration completed and everything looked fine.   # cwd=r4/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:a4b2250107e98366d2157bc36d5ac05e4812072cbfc2003e3fdc2f64b43279cf and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migration completed and everything looked fine. --review 1:a4b2250107e98366d2157bc36d5ac05e4812072cbfc2003e3fdc2f64b43279cf --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 2 --review-result failed --review-explanation The wording names no transcript, which evidence-discipline requires.   # cwd=r4/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:a4b2250107e98366d2157bc36d5ac05e4812072cbfc2003e3fdc2f64b43279cf
+Rules      audit-scope, evidence-discipline
+Reason     The wording names no transcript, which evidence-discipline requires.
+
+The migration completed and everything looked fine.
+
+Type this exactly to confirm:  CONFIRM N8LMZN
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM N8LMZN   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 9
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

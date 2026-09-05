@@ -1,0 +1,18 @@
+﻿===== integrity =====,
+object tamper (title)              exit=5   01a05e55-74  open  Migration continuity AUDIT|2 sections   2 ok   rev 1|!!         Object integrity failed; current authority changed outside a suppor
+section tamper (text)              exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit|          current Object integrity failed|          its sections is not what its admitted hi
+event tamper (rev)                 exit=4   error: adv/w/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl:1: event 01a06fca-ac84-7a42-bee2-dff84f2aabcb does not match its own 
+event moved to another stream      exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: adv/w/.engr/
+truncated object file              exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: EOF while parsing a string at line 1 column 120
+truncated event file               exit=4   error: adv/w/.engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl: the last event record has no delimiter after it, so this history is 
+malformed JSON                     exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+duplicate JSON key                 exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these are not th
+noncanonical JSON (reordered)      exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these are not th
+unknown member added               exit=4   error: adv/w/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: a current resource is persisted as its canonical JCS bytes, and these are not th
+filename != embedded id            exit=4   error: adv/w/.engr/objects/01a05e55-0000-7000-8000-000000000000.json exists but its append-only Event history is missing
+
+===== references =====
+invalid Ref digest                 exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-e6  FAIL  
+Ref repointed to another section   exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-e6  FAIL  
+Ref target commit unavailable      exit=5   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|01a05e55-e6  FAIL  
+Ref target raw UUID (old dialect)  exit=4   01a05e55-74  PASS  2 sections  Migration continuity audit|          uncommitted — git holds no record of the current wording yet|error: adv/w/.engr/

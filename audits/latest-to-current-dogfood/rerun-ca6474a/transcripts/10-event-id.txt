@@ -1,0 +1,9 @@
+﻿$ engr-current verify 01a0715e-1e   # cwd=r3/checkpoints/evid
+--- stderr ---
+error: /audit/r3/checkpoints/evid/.engr/eventstore/objects/01a0715e-1ebb-76d1-a213-a49ecba5801a.jsonl:3: event id "01A0715E-869D-78D0-8BDE-4AE53B47358B" must be a canonical UUIDv7
+--- exit 4 ---
+
+$ engr-current show 01a0715e-1e   # cwd=r3/checkpoints/evid
+--- stderr ---
+error: /audit/r3/checkpoints/evid/.engr/eventstore/objects/01a0715e-1ebb-76d1-a213-a49ecba5801a.jsonl:3: event id "01A0715E-869D-78D0-8BDE-4AE53B47358B" must be a canonical UUIDv7
+--- exit 4 ---

@@ -1,0 +1,22 @@
+﻿$ engr-current prepare --add --object 01a05e55-74 --text ADMITTED AFTER PUBLICATION: this wording exists only in revision 2 and must survive any migration retry.   # cwd=r3/checkpoints/r21
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-74  Migration continuity audit
+Based on   91b4bae4
+Admission  human; time assigned on confirmation
+
+ADMITTED AFTER PUBLICATION: this wording exists only in revision 2 and must survive any migration retry.
+
+Type this exactly to confirm:  CONFIRM E7PNJK
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM E7PNJK   # cwd=r3/checkpoints/r21
+--- stdout ---
+CONFIRMED  01a05e55-74  section.created.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZKRZWR   # cwd=r3/checkpoints/r21
+--- stdout ---
+COMPLETE   /audit/r3/checkpoints/r21/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+--- exit 0 ---

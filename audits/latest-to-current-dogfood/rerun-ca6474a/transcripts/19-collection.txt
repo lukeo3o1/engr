@@ -1,0 +1,126 @@
+﻿$ engr-current collection new release-2026 --title Baseline v1 release --description What has to be settled before the generation ships.   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be settled before the generation ships.
+
+no members
+--- exit 0 ---
+
+$ engr-current collection schedule release-2026 --start 2026-09-30 --end 2026-09-01   # cwd=r3/project
+--- stderr ---
+error: a schedule that starts on 2026-09-30 cannot end on 2026-09-01
+--- exit 2 ---
+
+$ engr-current collection schedule release-2026 --start 2026-09-01 --target-date 2026-09-20 --end 2026-09-30   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+no members
+--- exit 0 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1rnw7nvev8t44x4kv5tb00t   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  --  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+      attention   Crash-tail dependency probe
+--- exit 0 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1rnw7nvev8t44x4kv5tb00t   # cwd=r3/project
+--- stderr ---
+error: obj:01m1rnw7nvev8t44x4kv5tb00t is already in this collection
+--- exit 5 ---
+
+$ engr-current collection add release-2026 --target engr:obj:01m1f5bshbeq1rpckc726yrk2b   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+  --  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+      attention   Crash-tail dependency probe
+--- exit 0 ---
+
+$ engr-current collection order release-2026 --target engr:obj:01m1rnw7nvev8t44x4kv5tb00t --order 10   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+      attention   Crash-tail dependency probe
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+--- exit 0 ---
+
+$ engr-current collection order release-2026 --target engr:obj:01m1f5bshbeq1rpckc726yrk2b --order 10   # cwd=r3/project
+--- stderr ---
+error: two members are both ranked 10, so the order says nothing at that point
+--- exit 4 ---
+
+$ engr-current collection priority release-2026 --target engr:obj:01m1rnw7nvev8t44x4kv5tb00t --priority high --reason Gates the release.   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+      [high] attention   Crash-tail dependency probe
+      Gates the release.
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+--- exit 0 ---
+
+$ engr-current collection state release-2026 --state completed   # cwd=r3/project
+--- stdout ---
+PLANNING ??agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be settled before the generation ships.
+
+  10  engr:obj:01m1rnw7nvev8t44x4kv5tb00t
+      [high] attention   Crash-tail dependency probe
+      Gates the release.
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+--- exit 0 ---

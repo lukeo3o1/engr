@@ -1,0 +1,22 @@
+﻿===== verify, whole workspace =====
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          §2 stands on 01a05e55-74 §1, which moved: based_on, text — a judgement, not an integrity failure
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+exit=0
+
+===== verify, just the object whose ref moved =====
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          §2 stands on 01a05e55-74 §1, which moved: based_on, text — a judgement, not an integrity failure
+exit=0
+
+===== show, same object, same moment =====
+── §2 ── refs moved
+    refs     01a05e55-74 §1
+    advice   01a05e55-74 §1 changed selected fields: based_on, text
+
+===== ls =====
+01a05e55-74  open                   3 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  1 stale       Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction

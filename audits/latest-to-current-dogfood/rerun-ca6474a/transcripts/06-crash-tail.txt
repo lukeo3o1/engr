@@ -1,0 +1,59 @@
+﻿$ engr-current prepare --new --text Crash-tail dependency probe   # cwd=r3/project
+--- stdout ---
+Challenge  create
+Object     01a0715e-1e
+
+Crash-tail dependency probe
+
+Type this exactly to confirm:  CONFIRM Y7NRVA
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM Y7NRVA   # cwd=r3/project
+--- stdout ---
+CONFIRMED  01a0715e-1e  object.created.v1  rev 1
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --add --object 01a0715e-1e --text This wording stands on the continuity question. --ref obj:01m1f5ax7bedrbew8012yq3ma9:1 text   # cwd=r3/project
+--- stderr ---
+error: --ref "obj:01m1f5ax7bedrbew8012yq3ma9:1": section must be a number
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a0715e-1e --text This wording stands on the continuity question. --ref 01a05e55-74:1 text   # cwd=r3/project
+--- stdout ---
+Challenge  section.create
+Object     01a0715e-1e  Crash-tail dependency probe
+Based on   00bf6ccb
+Ref        01a05e55-74 禮1  fields text  digest 1:5d75c2f5  commit 00bf6ccb
+Admission  human; time assigned on confirmation
+
+This wording stands on the continuity question.
+
+Type this exactly to confirm:  CONFIRM 8A263D
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 8A263D   # cwd=r3/project
+--- stdout ---
+CONFIRMED  01a0715e-1e  section.created.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current verify 01a0715e-1e   # cwd=r3/checkpoints/tail
+--- stdout ---
+01a0715e-1e  PASS  0 sections  Crash-tail dependency probe
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+--- exit 0 ---
+
+$ engr-current repair 01a0715e-1e   # cwd=r3/checkpoints/tail
+--- stderr ---
+error: 01a0715e-1ebb-76d1-a213-a49ecba5801a verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+--- exit 5 ---
+
+$ engr-current verify 01a0715e-1e   # cwd=r3/checkpoints/tail
+--- stdout ---
+01a0715e-1e  FAIL  0 sections  Crash-tail dependency probe
+          禮1 stands on 01a05e55-74 禮1, which will not load: /audit/r3/checkpoints/tail/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: unknown variant `not-a-state`, expected one of `open`, `closed`, `draft`, `proposed`, `accepted`, `rejected`, `superseded`, `identified`, `mitigated`, `invalidated`
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+--- stderr ---
+error: verification failed
+--- exit 5 ---

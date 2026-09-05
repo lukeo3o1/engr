@@ -1,0 +1,16 @@
+=== the exclusion engr wrote ===
+# carries the same rule in its own tracked .gitignore.
+/project\[1\]/.engr/local/
+
+=== the live challenge on disk ===
+8L8JLN.json
+
+=== git check-ignore, asked of the actual path ===
+.git/info/exclude:10:/project\[1\]/.engr/local/	project[1]/.engr/local/challenges/8L8JLN.json
+exit=0
+
+=== anything git add -A would stage ===
+(end)
+
+=== control: the unescaped pattern hides nothing ===
+git check-ignore exit=1 (no match), and status lists the live code

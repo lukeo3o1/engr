@@ -1,0 +1,225 @@
+﻿===== start, and the sidecar the write path produces =====
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:32Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+exit=0
+{"next_item_id":1,"state":"active","updated_at":"2026-09-05T17:57:32.89698714Z"}
+
+===== items =====
+work item 1
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:33Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+  1. pending  Re-observe the ls column against a divergent object
+exit=0
+work item 2
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:33Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+  1. pending  Re-observe the ls column against a divergent object
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:33Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+  1. done     Re-observe the ls column against a divergent object
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:34Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:34Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+
+===== dependencies and blockers =====
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      active
+Updated    2026-09-05T17:57:34Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      blocked
+Updated    2026-09-05T17:57:35Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      blocked
+Updated    2026-09-05T17:57:35Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Measured at b02d05e and at ca6474a; the gap is pre-existing.
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      blocked
+Updated    2026-09-05T17:57:35Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Measured at b02d05e and at ca6474a; the gap is pre-existing.
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+
+===== the sidecar on disk, with every list populated =====
+{"blockers":[{"reason":"Waiting on a ruling about which surface moves."}],"dependencies":[{"reason":"The replacement object is where the answer lands.","target":{"kind":"engr","ref":"obj:01m1sb6ksjfz0t81h8hmhk53bq"}}],"items":[{"commits":["28e10b900490160327d602c46f118b659f4850ac"],"id":1,"result":"ls says ok where verify exits 5; measured against ca6474a too","state":"done","text":"Re-observe the ls column against a divergent object"},{"id":2,"state":"pending","text":"Ask the reviewer which surface should move"}],"next_item_id":3,"state":"active","summary":"Measured at b02d05e and at ca6474a; the gap is pre-existing.","updated_at":"2026-09-05T17:57:35.618490747Z"}
+
+===== pause and resume =====
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      paused
+Updated    2026-09-05T17:57:36Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+           a human stopped this; do not resume it on your own
+
+Measured at b02d05e and at ca6474a; the gap is pre-existing.
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      blocked
+Updated    2026-09-05T17:57:36Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Measured at b02d05e and at ca6474a; the gap is pre-existing.
+
+Depends on
+  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+    The replacement object is where the answer lands.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+
+===== the interlock: consume the last point while Work exists =====
+docker : error: this was the last unresolved point, so resolving it removes the item — but it still has execution memor
+y, which cannot outlive what it belongs to. Discard it with `engr work rm engr:backlog:01m1sbcwt8f58s86bn768xjnbc` and 
+consume again, or record what it was for first
+At line:1 char:302
++ ... tch {} } }; docker run --rm -v "D:\lukeo3o1\engr-audit:/audit" -e HOM ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: this was...t was for first:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+exit=5
+
+===== drop the execution memory, then consume =====
+exit=2
+error: unexpected argument '--position' found
+
+  tip: to pass '--position' as a value, use '-- --position'
+
+Usage: engr-current work unblock <SUBJECT|--index <INDEX>>
+
+For more information, try '--help'.
+EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says
+Backlog    01a072b6
+State      blocked
+Updated    2026-09-05T17:57:37Z
+engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+
+Measured at b02d05e and at ca6474a; the gap is pre-existing.
+
+Blocked by
+  [0] Waiting on a ruling about which surface moves.
+
+  1. done     Re-observe the ls column against a divergent object
+     -> ls says ok where verify exits 5; measured against ca6474a too
+     28e10b90
+  2. pending  Ask the reviewer which surface should move
+exit=0
+no execution memory for backlog item engr:backlog:01m1sbcwt8f58s86bn768xjnbc
+exit=0
+consumed §1, and the topic with it — nothing else was unresolved
+exit=0
+nothing unresolved
+exit=0
+backlog files left: 0; work files left: 0

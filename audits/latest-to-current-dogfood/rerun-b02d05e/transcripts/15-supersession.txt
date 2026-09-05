@@ -1,0 +1,114 @@
+﻿$ engr-current prepare --supersede 01a05e55-ee --object 01a05e55-ee --text a section that supersedes its own object   # cwd=r4/project
+--- stderr ---
+error: an untyped object cannot be superseded; it is one of open | closed
+--- exit 5 ---
+
+$ engr-current prepare --new --text Continuity carried forward   # cwd=r4/project
+--- stdout ---
+Challenge  create
+Object     01a072b3-4f
+
+Continuity carried forward
+
+Type this exactly to confirm:  CONFIRM 8B9JMH
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 8B9JMH   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a072b3-4f  object.created.v1  rev 1
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r4/project
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  closed                 3 sections  ok            Predecessor fixture construction
+01a072b3-4f  open                   0 sections  ok            Continuity carried forward
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a05e55-74 --type design --state proposed   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-74  Migration continuity audit
+Type       design
+State      proposed
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM A2DJ2A
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM A2DJ2A   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a05e55-74 --text a section that supersedes its own object   # cwd=r4/project
+--- stderr ---
+error: an object cannot supersede itself
+--- exit 5 ---
+
+$ engr-current prepare --supersede 01a072b3-4f --object 01a05e55-74 --text The continuity question is settled; the replacement carries it forward. --header Superseded   # cwd=r4/project
+--- stdout ---
+Challenge  supersede
+Object     01a05e55-74  Migration continuity audit
+Header     Superseded
+Role       supersession
+Relation   superseded_by -> engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+Based on   28e10b90
+Admission  human; time assigned on confirmation
+State      superseded ??this object leaves the default listing, and the relation above is where a reader is sent instead
+
+The continuity question is settled; the replacement carries it forward.
+
+Type this exactly to confirm:  CONFIRM 92TXPJ
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 92TXPJ   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.superseded.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a072b3-4f --type decision --state accepted   # cwd=r4/project
+--- stdout ---
+Challenge  classify
+Object     01a072b3-4f  Continuity carried forward
+Type       decision
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 4AJPBW
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 4AJPBW   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a072b3-4f  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a072b3-4f --text a cycle back to the object this one replaced   # cwd=r4/project
+--- stderr ---
+error: that replacement closes a supersession cycle back onto 01a072b3-4f32-7fc1-a406-288d23328d77
+--- exit 5 ---
+
+$ engr-current ls   # cwd=r4/project
+--- stdout ---
+no objects
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r4/project
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+01a072b3-4f  PASS  0 sections  Continuity carried forward
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---

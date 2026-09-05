@@ -1,0 +1,167 @@
+﻿===== new =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be true before the merge.
+
+no members
+exit=0
+
+===== members, order and priority =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+exit=0
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+  20  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+-- the same target again, with different metadata --
+docker : error: obj:01m1sb6ksjfz0t81h8hmhk53bq is already in this collection
+At line:1 char:302
++ ... tch {} } }; docker run --rm -v "D:\lukeo3o1\engr-audit:/audit" engr-r ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: obj:01m1...this collection:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+exit=5
+-- a second member at a rank that is taken --
+error: two members are both ranked 10, so the order says nothing at that point
+exit=4
+
+===== schedule =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      open
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+  20  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+-- an end before its start --
+error: a schedule that starts on 2026-09-30 cannot end on 2026-09-01
+exit=2
+
+===== state, and the file on disk =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+  20  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+  20  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+{"description":"What has to be true before the merge.","id":"release-2026","members":[{"order":10,"priority":{"level":"high","reason":"Gates the merge."},"target":{"kind":"engr","ref":"obj:01m1sb6ksjfz0t81h8hmhk53bq"}},{"order":20,"target":{"kind":"engr","ref":"obj:01m1f5bshbeq1rpckc726yrk2b"}}],"schedule":{"end":"2026-09-30","start":"2026-09-01","target":"2026-09-20"},"state":"completed","title":"Baseline v1 release"}
+
+===== an id the grammar refuses =====
+error: collection id "Release 2026" is not canonical; the grammar is [a-z0-9][a-z0-9-]{0,31}
+exit=2
+error: collection id "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" is not canonical; the grammar is [a-z0-9][a-z0-9-]{0,31
+}
+exit=2
+
+===== unrank, clear priority, remove =====
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      [high] settled     Continuity carried forward
+      Gates the merge.
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      settled     Continuity carried forward
+  --  engr:obj:01m1f5bshbeq1rpckc726yrk2b
+      settled     Evidence rules for this audit
+exit=0
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      settled     Continuity carried forward
+exit=0
+PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean
+Collection release-2026
+Reference  engr:collection:release-2026
+State      completed
+Name       Baseline v1 release
+Schedule   start 2026-09-01  end 2026-09-30  target 2026-09-20
+
+What has to be true before the merge.
+
+  10  engr:obj:01m1sb6ksjfz0t81h8hmhk53bq
+      settled     Continuity carried forward
+exit=0
+{"description":"What has to be true before the merge.","id":"release-2026","members":[{"order":10,"target":{"kind":"engr","ref":"obj:01m1sb6ksjfz0t81h8hmhk53bq"}}],"schedule":{"end":"2026-09-30","start":"2026-09-01","target":"2026-09-20"},"state":"completed","title":"Baseline v1 release"}

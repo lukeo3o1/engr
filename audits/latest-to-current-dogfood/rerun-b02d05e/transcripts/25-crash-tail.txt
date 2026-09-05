@@ -1,0 +1,4 @@
+﻿$ engr-current prepare --object 01a05e55-e6 --add --no-based-on --text Wording that depends on the audit object, admitted just before the crash. --ref 01a05e55-74:1 text   # cwd=r4/tp
+--- stderr ---
+error: /audit/r4/tp/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: unknown variant `not-a-state`, expected one of `open`, `closed`, `draft`, `proposed`, `accepted`, `rejected`, `superseded`, `identified`, `mitigated`, `invalidated`
+--- exit 4 ---

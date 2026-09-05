@@ -1,0 +1,24 @@
+﻿$ engr-current migrate --help   # cwd=r4/wd
+--- stdout ---
+Explicitly upgrade the released predecessor workspace to generation 1
+
+Usage: engr-current migrate [OPTIONS]
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---
+
+$ engr-current candidate --help   # cwd=r4/wd
+--- stdout ---
+List candidates awaiting confirmation, or show one in full
+
+Usage: engr-current candidate [OPTIONS] [CODE]
+
+Arguments:
+  [CODE]  Challenge code. Omit to list everything pending
+
+Options:
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+  -h, --help         Print help
+--- exit 0 ---

@@ -1,0 +1,40 @@
+﻿crashed with: VERSION=no  format.json=yes  staged_dest=yes  challenge=yes
+
+===== the released build still works here =====
+docker : error: ss/w/.engr/format.json: not an engr workspace
+At line:1 char:302
++ ... tch {} } }; docker run --rm -v "D:\lukeo3o1\engr-audit:/audit" engr-r ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: ss/w/.en... engr workspace:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+exit=4
+
+===== so a day's work goes in through its own Human Gate =====
+error: ss/w/.engr/format.json: not an engr workspace
+error: ss/w/.engr/format.json: not an engr workspace
+exit=0
+-- it is really in the predecessor record --
+0
+error: ss/w/.engr/format.json: not an engr workspace
+predecessor object digest: 1fcdfd198e9f552597a1461f3f51b69c6005842faf9a49386f3b64b030361b8e
+
+===== now resume the migration that was already staged =====
+MIGRATED   ss/w/.engr  3 objects, 7 sections, generation 1
+exit=0
+
+===== is the admitted work still there? =====
+GONE: the resume published a stage that predates it
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+ls exit=0
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+verify exit=0
+-- and the old history that would have proved it --
+(predecessor events discarded)

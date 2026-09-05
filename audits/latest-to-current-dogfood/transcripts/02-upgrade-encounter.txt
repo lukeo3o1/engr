@@ -1,0 +1,20 @@
+﻿$ engr-current ls   # cwd=project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current ls --all   # cwd=project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74eb-7370-b771-0008bd71d149   # cwd=project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+
+$ engr-current verify   # cwd=project
+--- stderr ---
+error: the released predecessor workspace is read-only here; this engr writes generation 1. Run `engr migrate` before mutation
+--- exit 4 ---
+

@@ -1,0 +1,217 @@
+﻿$ engr-current verify   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          禮2 stands on 01a05e55-74 禮1, which seals correctly and is not what its own history produced; repair 01a05e55-74 first
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current verify 01a05e55-e6   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          禮2 stands on 01a05e55-74 禮1, which seals correctly and is not what its own history produced; repair 01a05e55-74 first
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? REF UNADMITTED
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+    advice   01a05e55-74 禮1 is not what its own history produced; repair 01a05e55-74 before trusting this
+--- stderr ---
+error: 禮2 stands on 01a05e55-74 禮1, which is not what its own admitted history produced; repair 01a05e55-74 first
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  1 tampered    Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+!!         Object sections is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-current ls --sections   # cwd=r4/dep-a
+--- stdout ---
+01a05e55-74 禮1   open                  ok              The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+01a05e55-74 禮2   open                  ok              Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  ok              The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  ok              Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  ok              A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-current ls --all --format json   # cwd=r4/dep-a
+--- stderr ---
+error: unexpected argument '--format' found
+
+  tip: to pass '--format' as a value, use '-- --format'
+
+Usage: engr-current ls <KEYWORD|--all|--sections|--stale>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current show 01a05e55-e6 --format json   # cwd=r4/dep-a
+--- stdout ---
+{
+  "id": "01a05e55-e62b-75c3-8b32-6c388dec4c4b",
+  "reference": "engr:obj:01m1f5bshbeq1rpckc726yrk2b",
+  "title": "Evidence rules for this audit",
+  "state": "closed",
+  "attention": false,
+  "rev": 1,
+  "integrity": "ok",
+  "digest": "1:dbbc5739f386821860a767e08252661b190eedfad25469eb71bbc78c6559ef3c",
+  "summary": {
+    "sections": 2,
+    "ok": 1,
+    "tampered": 1,
+    "attention": 0
+  },
+  "sections": [
+    {
+      "id": 1,
+      "reference": "engr:obj:01m1f5bshbeq1rpckc726yrk2b:1",
+      "text": "A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.",
+      "status": "ok",
+      "based_on": null,
+      "refs": [],
+      "digest": "1:75a6e4c922042915fea0d88b8d9d056054358715dfd1977f890b86ae63a337d6",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:58:35.490520943Z"
+      }
+    },
+    {
+      "id": 2,
+      "reference": "engr:obj:01m1f5bshbeq1rpckc726yrk2b:2",
+      "text": "Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.",
+      "status": "ref_unadmitted",
+      "based_on": {
+        "commit": "221a5db38924d39449ed1c76a3beddf11e302113"
+      },
+      "refs": [
+        {
+          "target": "obj:01m1f5ax7bedrbew8012yq3ma9:1",
+          "fields": [
+            "based_on",
+            "refs",
+            "text"
+          ],
+          "commit": "221a5db38924d39449ed1c76a3beddf11e302113",
+          "digest": "1:088da847d1e83ef0d8d6d610e91ca0abe562eb92aab7214a673c19cf429d7fda"
+        }
+      ],
+      "digest": "1:144f5ab32b53704c1c5adb4fe5780a61639e6d88d5285c3e970c5c1f3b6d7535",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:59:03.17893552Z"
+      },
+      "stale": [
+        {
+          "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+          "section": 1,
+          "confirmed_sha256": "1:088da847d1e83ef0d8d6d610e91ca0abe562eb92aab7214a673c19cf429d7fda",
+          "current_sha256": null,
+          "lookback": "git show 221a5db3:.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json",
+          "target_tampered": false,
+          "target_unreadable": false,
+          "target_missing": false,
+          "target_history_divergent": true,
+          "target_history_unreplayable": false
+        }
+      ]
+    }
+  ]
+}
+--- stderr ---
+error: 禮2 stands on 01a05e55-74 禮1, which is not what its own admitted history produced; repair 01a05e55-74 first
+--- exit 5 ---
+
+$ engr-current ls --stale   # cwd=r4/dep-a
+--- stdout ---
+??01a05e55-e6  closed                禮2  REF UNADMITTED ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74 --format json   # cwd=r4/dep-a
+--- stdout ---
+{
+  "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+  "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9",
+  "title": "Migration continuity audit",
+  "state": "open",
+  "attention": true,
+  "rev": 1,
+  "integrity": "divergent",
+  "digest": "1:88efde1b8634acfc2cf8dc9c05490dc8cb20ae213791c0d714103a5851b69e2b",
+  "summary": {
+    "sections": 2,
+    "ok": 2,
+    "tampered": 0,
+    "attention": 0
+  },
+  "sections": [
+    {
+      "id": 1,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:1",
+      "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.",
+      "status": "ok",
+      "based_on": {
+        "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+      },
+      "refs": [],
+      "digest": "1:ee4d1602b2ccd6a2bb875b78f0e5c248a2480a6a9b3c78f043f54ed0301946ba",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:57:48.683149208Z"
+      }
+    },
+    {
+      "id": 2,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:2",
+      "text": "Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.",
+      "status": "ok",
+      "based_on": null,
+      "refs": [],
+      "digest": "1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:59:19.709593096Z"
+      }
+    }
+  ]
+}
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---

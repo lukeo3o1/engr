@@ -1,0 +1,82 @@
+﻿===== baseline (uninterrupted) =====
+inventory: 958ceee5ef5d59227db307353c3c04abe498a136ca4ca75ad5325c4d80d40d47
+event admitted.at: 2026-09-05T11:36:57.168911388Z 
+events per stream: 1 1 1 
+
+===== interrupted at 300ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t300/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t300/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: 3eb07033f795a6251756a202fed5305c7743bbe531cd650c70da4579259cf890
+event admitted.at: 2026-09-05T11:37:41.8134212Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 800ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t800/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t800/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: bfe456cfe7ed09294daa8ca409ae18d57c9237e8a36fa8f7f4c4cba0eaca8d6c
+event admitted.at: 2026-09-05T11:37:44.810960346Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: 82b3887a1aebeef2cb225e20af5e6c27c150c3edd75d4a8b41711a962f482a04
+event admitted.at: 2026-09-05T11:37:08.384615218Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: cd495a64e3bb34ff63d39a462672df53bc2d41b7dca93b4921d823b349f63642
+event admitted.at: 2026-09-05T11:37:11.345506434Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1040ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1040/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1040/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: d8a50287557ae1940e797411933f0b9ed8620e35d040c585d7b3543c12c9de25
+event admitted.at: 2026-09-05T11:37:20.430793277Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  ok            Migration continuity audit
+-- resume: same code, again --
+confirm exit=0 : COMPLETE   crash-runs/t1080/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting ZKRZWR
+inventory: 2eb3211e7e92b0b2bd5afc9e72ddaa03656e09d7ee06c7f262d14fb20d0a1e09
+event admitted.at: 2026-09-05T11:37:26.687320281Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 

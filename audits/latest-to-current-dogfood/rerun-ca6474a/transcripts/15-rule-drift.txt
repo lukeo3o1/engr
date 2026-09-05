@@ -1,0 +1,40 @@
+﻿$ engr-current prepare --add --object 01a0715e-1e --text Rule drift after preparation must invalidate the pending question, observed in transcript 15.   # cwd=r3/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:2a308b7db35b5bac871eea8409ab92dc6f7ac129e3ccd56210e2eafe50c3c7e8 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --add --object 01a0715e-1e --text Rule drift after preparation must invalidate the pending question, observed in transcript 15. --review 1:2a308b7db35b5bac871eea8409ab92dc6f7ac129e3ccd56210e2eafe50c3c7e8 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r3/project
+--- stdout ---
+Challenge  section.create
+Object     01a0715e-1e  Crash-tail dependency probe
+Based on   00bf6ccb
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:2a308b7db35b5bac871eea8409ab92dc6f7ac129e3ccd56210e2eafe50c3c7e8
+Rules      audit-scope, evidence-discipline
+
+Rule drift after preparation must invalidate the pending question, observed in transcript 15.
+
+Type this exactly to confirm:  CONFIRM ENDKVB
+--- exit 0 ---
+
+$ engr-current rules ls   # cwd=r3/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  object
+    based on README.md (current)
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ENDKVB   # cwd=r3/project
+--- stderr ---
+error: the Rule Review material moved after challenge ENDKVB was prepared
+--- exit 5 ---
+
+$ engr-current confirm CONFIRM ENDKVB   # cwd=r3/project
+--- stdout ---
+CONFIRMED  01a0715e-1e  section.created.v1  rev 7
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

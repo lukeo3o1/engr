@@ -1,0 +1,240 @@
+﻿$ engr-current backlog new --title Open questions from the ca6474a re-run --text Whether verify should report the recovered section count when it reports a recovered dependency.   # cwd=r3/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07165  Open questions from the ca6474a re-run
+1 unresolved   updated 2026-09-05T11:47:55Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+?? 禮1 ?? unresolved
+Whether verify should report the recovered section count when it reports a recovered dependency.
+    updated  2026-09-05T11:47:55Z
+--- exit 0 ---
+
+$ engr-current backlog show --format json   # cwd=r3/project
+--- stderr ---
+error: the following required arguments were not provided:
+  <ITEM>
+
+Usage: engr-current backlog show --format <FORMAT> <ITEM>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-05T11:47:55.058984252Z",
+  "expect": {
+    "rename": "10d7e3259eb7f7e2268953dee89f501d41132ef6a0f48b08b50a61242ad05f11",
+    "add": "4538babecf79d03e8c4294ac58be0ffe1d2ed4bf42859c486b43bbc3642d8994"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "fa2283fd1fd05ed7de22a72c2ccf464b11b9a9b5f948aed68902ce45b4696ee0",
+      "id": 1,
+      "text": "Whether verify should report the recovered section count when it reports a recovered dependency.",
+      "updated_at": "2026-09-05T11:47:55.058984252Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog revise 01a07165 --section 1 --text Whether verify should report the recovered section count alongside a recovered dependency. --expect fa2283fd1fd05ed7de22a72c2ccf464b11b9a9b5f948aed68902ce45b4696ee0 --attempt 5   # cwd=r3/project
+--- stdout ---
+revised 禮1
+note       admitted on attempt 5 against a ceiling of 3; no passing review allowed this wording
+--- exit 0 ---
+
+$ engr-current backlog show 01a07165   # cwd=r3/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07165  Open questions from the ca6474a re-run
+1 unresolved   updated 2026-09-05T11:48:06Z
+engr:backlog:01m1rpb2hkesgv27ef8400xqpm
+
+?? 禮1 ?? unresolved
+Whether verify should report the recovered section count alongside a recovered dependency.
+    updated  2026-09-05T11:48:06Z
+    exhausted attempt 5 against a ceiling of 3; this wording stands without a passing review
+--- exit 0 ---
+
+$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-05T11:48:06.584717073Z",
+  "expect": {
+    "rename": "37cd576753f645765e4a1aaa3621627c1ebb0bf2e03e6b88b4ab627678936a02",
+    "add": "4538babecf79d03e8c4294ac58be0ffe1d2ed4bf42859c486b43bbc3642d8994"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "07f21ee9bca3b61c4bc4d57f805fd14a9dceef0d2a42be7da1010c077feb3a8d",
+      "id": 1,
+      "text": "Whether verify should report the recovered section count alongside a recovered dependency.",
+      "updated_at": "2026-09-05T11:48:06.584717073Z",
+      "review_exhaustion": {
+        "attempts": 5,
+        "limit": 3
+      }
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a07165 --text Whether ls should mark a projection behind its history. --expect 4538babecf79d03e8c4294ac58be0ffe1d2ed4bf42859c486b43bbc3642d8994 --subject engr:obj:01m1rnw7nvev8t44x4kv5tb00t   # cwd=r3/project
+--- stdout ---
+added 禮2
+--- exit 0 ---
+
+$ engr-current backlog add 01a07165 --text stale token attempt --expect 4538babecf79d03e8c4294ac58be0ffe1d2ed4bf42859c486b43bbc3642d8994   # cwd=r3/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+
+$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-05T11:48:20.057285493Z",
+  "expect": {
+    "rename": "0a24ab45a6b43253296404c9913025572ee38e90d543c441c8df932951eedbf9",
+    "add": "c57b00df8896b574f517501d731c8ad26d66fdf0c36b0a2b23618a943d8c1b60"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "07f21ee9bca3b61c4bc4d57f805fd14a9dceef0d2a42be7da1010c077feb3a8d",
+      "id": 1,
+      "text": "Whether verify should report the recovered section count alongside a recovered dependency.",
+      "updated_at": "2026-09-05T11:48:06.584717073Z",
+      "review_exhaustion": {
+        "attempts": 5,
+        "limit": 3
+      }
+    },
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:2",
+      "expect": "3f8d102fb54d3fa397c6aeb4864bc5d4a7cd23a480b3e6c4c015a114a878f84e",
+      "id": 2,
+      "text": "Whether ls should mark a projection behind its history.",
+      "updated_at": "2026-09-05T11:48:20.057285493Z",
+      "subjects": [
+        {
+          "kind": "engr",
+          "ref": "obj:01m1rnw7nvev8t44x4kv5tb00t"
+        }
+      ]
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog produced 01a07165 --section 1 --target engr:obj:01m1rnw7nvev8t44x4kv5tb00t --expect 07f21ee9bca3b61c4bc4d57f805fd14a9dceef0d2a42be7da1010c077feb3a8d   # cwd=r3/project
+--- stdout ---
+禮1 produced engr:obj:01m1rnw7nvev8t44x4kv5tb00t; still unresolved
+--- exit 0 ---
+
+$ engr-current backlog merge 01a07165 --into 1 --section 2 --text Whether the two surfaces should agree about what verify is answering about. --expect 07f21ee9bca3b61c4bc4d57f805fd14a9dceef0d2a42be7da1010c077feb3a8d --expect 3f8d102fb54d3fa397c6aeb4864bc5d4a7cd23a480b3e6c4c015a114a878f84e   # cwd=r3/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+
+$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-05T11:48:32.445881276Z",
+  "expect": {
+    "rename": "fbec772f53811d0f4f64f22e52020deac9d3491fbcbdac9529d7ef5e77f83fd0",
+    "add": "c57b00df8896b574f517501d731c8ad26d66fdf0c36b0a2b23618a943d8c1b60"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "07ff6920448478e6c3d912daea8e47717bdba77e2b53665ffb0beb15e33e785c",
+      "id": 1,
+      "text": "Whether verify should report the recovered section count alongside a recovered dependency.",
+      "updated_at": "2026-09-05T11:48:32.445881276Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1rnw7nvev8t44x4kv5tb00t"
+          }
+        }
+      ]
+    },
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:2",
+      "expect": "3f8d102fb54d3fa397c6aeb4864bc5d4a7cd23a480b3e6c4c015a114a878f84e",
+      "id": 2,
+      "text": "Whether ls should mark a projection behind its history.",
+      "updated_at": "2026-09-05T11:48:20.057285493Z",
+      "subjects": [
+        {
+          "kind": "engr",
+          "ref": "obj:01m1rnw7nvev8t44x4kv5tb00t"
+        }
+      ]
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog merge 01a07165 --into 1 --section 2 --text Whether the two surfaces should agree about what verify is answering about. --expect 07ff6920448478e6c3d912daea8e47717bdba77e2b53665ffb0beb15e33e785c --expect 3f8d102fb54d3fa397c6aeb4864bc5d4a7cd23a480b3e6c4c015a114a878f84e   # cwd=r3/project
+--- stdout ---
+merged 禮2 into 禮1
+--- exit 0 ---
+
+$ engr-current backlog show 01a07165 --format json   # cwd=r3/project
+--- stdout ---
+{
+  "id": "01a07165-8a33-7661-b11d-cf41000eded4",
+  "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm",
+  "topic": "Open questions from the ca6474a re-run",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-05T11:48:44.23520027Z",
+  "expect": {
+    "rename": "9b01f7ec33ffcab312b6d20f2e9aadafaf4f2b005c16287c8ef3e122115d5be9",
+    "add": "c57b00df8896b574f517501d731c8ad26d66fdf0c36b0a2b23618a943d8c1b60"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1rpb2hkesgv27ef8400xqpm:1",
+      "expect": "393eb651772cdcaf21b6a1b09b77bdcc1b347808110a6e7e3fd24f498b071747",
+      "id": 1,
+      "text": "Whether the two surfaces should agree about what verify is answering about.",
+      "updated_at": "2026-09-05T11:48:44.23520027Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1rnw7nvev8t44x4kv5tb00t"
+          }
+        }
+      ]
+    }
+  ]
+}
+--- exit 0 ---

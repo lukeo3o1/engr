@@ -1,0 +1,43 @@
+﻿$ engr-current migrate   # cwd=r2/project
+--- stdout ---
+Challenge  migration
+Workspace  /audit/r2/project/.engr
+From       engr-workspace version 1
+To         generation 1
+
+01a05e55-74  rev 4 -> 1  2 sections  Migration continuity audit
+01a05e55-e6  rev 4 -> 1  2 sections  Evidence rules for this audit
+01a05e55-ee  rev 6 -> 1  3 sections  Predecessor fixture construction
+
+7 predecessor files will be read, converted, and replaced.
+The predecessor's own event history is discarded rather than translated: each Object
+gets one object.migrated.v1 bootstrap at revision 1. Any pending candidate is not
+migrated and must be prepared again.
+
+Type this exactly to confirm:  CONFIRM AMKRH4
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ZZZZZZ   # cwd=r2/project
+--- stderr ---
+error: no challenge awaiting ZZZZZZ
+--- exit 3 ---
+
+$ engr-current confirm confirm amkrh4   # cwd=r2/project
+--- stderr ---
+error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+--- exit 2 ---
+
+$ engr-current confirm AMKRH4   # cwd=r2/project
+--- stderr ---
+error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+--- exit 2 ---
+
+$ engr-current confirm CONFIRM  AMKRH4   # cwd=r2/project
+--- stderr ---
+error: the response must be exactly `CONFIRM <code>`, with nothing else on the line
+--- exit 2 ---
+
+$ engr-current confirm CONFIRM AMKRH4   # cwd=r2/project
+--- stdout ---
+MIGRATED   /audit/r2/project/.engr  3 objects, 7 sections, generation 1
+--- exit 0 ---

@@ -1,0 +1,28 @@
+﻿instant            kill@780   staged=no
+instant            kill@800   staged=no
+instant            kill@820   barrier=not yet   streams=0/3  exit=5   edit_survived=1
+    error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIRM FBR8Z2 no"` — and prepare it again over the workspace as it now stands
+instant            kill@840   barrier=not yet   streams=0/3  exit=5   edit_survived=1
+    error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIRM FBR8Z2 no"` — and prepare it again over the workspace as it now stands
+instant            kill@860   barrier=installed streams=0/3  exit=5   edit_survived=1
+    error: the predecessor workspace moved after migration FBR8Z2 was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIRM FBR8Z2 no"` — and prepare it again over the workspace as it now stands
+instant            kill@880   barrier=installed streams=1/3  exit=0   edit_survived=0
+0
+    MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+    note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it
+instant            kill@900   barrier=installed streams=3/3  exit=0   edit_survived=0
+0
+    MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+    note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it
+instant            kill@920   barrier=installed streams=3/3  exit=0   edit_survived=0
+0
+    MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+    note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it
+instant            kill@940   barrier=installed streams=3/3  exit=0   edit_survived=0
+0
+    MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+    note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it
+instant            kill@960   barrier=installed streams=3/3  exit=0   edit_survived=0
+0
+    MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+    note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it

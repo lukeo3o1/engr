@@ -1,0 +1,30 @@
+﻿$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires.   # cwd=r4/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:a2934b5ad3d6177d39d56165a634d472409708d035537928c01475727f0be30e and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires. --review 1:a2934b5ad3d6177d39d56165a634d472409708d035537928c01475727f0be30e --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r4/project
+--- stderr ---
+error: this review was of something else; review the current subject and attest to 1:fda4ca36f0d48c29e60eff06c0ce0944fed13a09d1d3446bc6e1e1da8d0b08a6
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires. --review 1:a2934b5ad3d6177d39d56165a634d472409708d035537928c01475727f0be30e --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r4/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:a2934b5ad3d6177d39d56165a634d472409708d035537928c01475727f0be30e
+Rules      audit-scope, evidence-discipline
+
+A claim that names evidence/crash-sweep.txt, as evidence-discipline requires.
+
+Type this exactly to confirm:  CONFIRM PZNTLF
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM PZNTLF   # cwd=r4/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 10
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

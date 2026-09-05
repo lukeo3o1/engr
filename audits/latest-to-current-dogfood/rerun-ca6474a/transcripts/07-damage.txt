@@ -1,0 +1,83 @@
+﻿$ engr-current verify 01a05e55-e6   # cwd=r3/checkpoints/dmg-a
+--- stdout ---
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          current Object integrity failed
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          禮1 content does not match its recorded hash
+          uncommitted ??git holds no record of the current wording yet
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r3/checkpoints/dmg-a
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   1 ok   1 tampered   rev 1
+!!         Object integrity failed; current authority changed outside a supported transition
+!!         git show 413d7348:.engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? TAMPERED
+A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the quickest way to produce a green audit is to grade the source instead of the program.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+    !!       persisted Section does not match the seal admitted at 2026-09-01T18:58:35.490520943Z
+    !!       git show 413d7348:.engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- stderr ---
+error: 01a05e55-e62b-75c3-8b32-6c388dec4c4b: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-current verify 01a05e55-e6   # cwd=r3/checkpoints/dmg-c
+--- stdout ---
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          uncommitted ??git holds no record of the current wording yet
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-e6   # cwd=r3/checkpoints/dmg-c
+--- stdout ---
+01a05e55-e6  closed  Evidence rules for this audit
+2 sections   2 ok   rev 1
+!!         Object sections is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair
+engr:obj:01m1f5bshbeq1rpckc726yrk2b
+
+?? 禮1 ?? ok
+A scenario is PASS whenever the implementation was read and judged likely to behave correctly. Transcripts are optional.
+    admitted 2026-09-01T18:58:35.490520943Z by human
+
+?? 禮2 ?? ok
+Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+    based_on 221a5db3   admitted 2026-09-01T18:59:03.17893552Z by human
+    refs     01a05e55-74 禮1
+--- stderr ---
+error: 01a05e55-e62b-75c3-8b32-6c388dec4c4b: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-current repair 01a05e55-e6   # cwd=r3/checkpoints/dmg-c
+--- stdout ---
+Challenge  repair
+Object     01a05e55-e6  Evidence rules for this audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  禮1.text
+    stored   A scenario is PASS whenever the implementation was read and judged likely to behave correctly. Transcripts are optional.
+    restore  A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM WTRWCG
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM WTRWCG   # cwd=r3/checkpoints/dmg-c
+--- stdout ---
+CONFIRMED  01a05e55-e6  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

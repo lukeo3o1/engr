@@ -1,0 +1,16 @@
+﻿$ engr-latest --version   # cwd=r3/project
+--- stdout ---
+engr latest (unknown)
+--- exit 0 ---
+
+$ engr-current --version   # cwd=r3/project
+--- stdout ---
+engr latest (ca6474a3)
+--- exit 0 ---
+
+$ engr-latest verify   # cwd=r3/project
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- exit 0 ---
