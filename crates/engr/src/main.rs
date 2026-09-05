@@ -1071,10 +1071,39 @@ fn run(cli: Cli) -> Result<()> {
             }
             // `show` asserts about one object, so a broken one must not exit 0
             // and let `set -e` carry on. `ls` surveys, and keeps exiting 0.
-            let forged = view::assess(&root, &object)
+            let assessed = view::assess(&root, &object);
+            let forged = assessed
                 .iter()
                 .filter(|(_, status)| status.forged())
                 .count();
+            // A dependency this Object cannot trust is not a fault of this
+            // Object, and the refusal has to say so or a reader spends the round
+            // trip looking here. Named per Section, with the target and the
+            // recovery that target actually needs — `repair` only where there is
+            // an admitted value to restore to.
+            let width = view::width(&root);
+            let unadmitted: Vec<String> = assessed
+                .iter()
+                .flat_map(|(id, status)| status.drifted.iter().map(move |drift| (*id, drift)))
+                .filter_map(|(id, drift)| {
+                    if drift.target_history_divergent {
+                        Some(format!(
+                            "§{id} stands on {} §{}, which is not what its own admitted history produced; repair {} first",
+                            shorten(&drift.object, width),
+                            drift.section,
+                            shorten(&drift.object, width)
+                        ))
+                    } else if drift.target_history_unreplayable {
+                        Some(format!(
+                            "§{id} stands on {} §{}, whose own admitted history will not replay; nothing can be restored from it",
+                            shorten(&drift.object, width),
+                            drift.section
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // Same rule as `verify`: in a current workspace a missing aggregate
             // seal is a failure, not an absence of anything to check.
             let object_forged = engr::integrity::check_object_integrity(&object).is_err();
@@ -1086,9 +1115,10 @@ fn run(cli: Cli) -> Result<()> {
             if forged > 0 || object_forged || history.is_some() {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    match &history {
-                        Some(fault) => fault.message(&object.id),
-                        None => format!(
+                    match (&history, unadmitted.is_empty()) {
+                        (Some(fault), _) => fault.message(&object.id),
+                        (None, false) => unadmitted.join("; "),
+                        (None, true) => format!(
                             "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
                         ),
                     },
@@ -2778,6 +2808,18 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 shorten(&stood.target, width),
                 stood.target_section,
                 shorten(&stood.target, width)
+            );
+        }
+        // And the fault that establishes nothing gets its own words, without
+        // `repair` in them: replay failed, so there is no admitted value to
+        // restore, and the work is on the target's history rather than on its
+        // projection.
+        for stood in &report.standing_on_unreplayable {
+            println!(
+                "          §{} stands on {} §{}, whose own admitted history will not replay; nothing here can be restored from it",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section
             );
         }
         for stood in &report.standing_on_missing {

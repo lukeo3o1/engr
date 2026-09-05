@@ -38,6 +38,22 @@ pub struct RefDrift {
     /// `verify` already treated it as a failure while this surface called it
     /// drift was one workspace state with two verdicts.
     pub target_missing: bool,
+    /// The target seals correctly and is not what its own admitted history
+    /// produced.
+    ///
+    /// A failure, and its own flag. Without one it fell through to ordinary
+    /// drift: `forged()` stayed false, `show` exited 0, the advice line said the
+    /// target "no longer exists" when it is right there, and JSON reported
+    /// `stale_refs` — while `verify` failed on the same state. A new dependency
+    /// answer has to be carried all the way to the surfaces or the surfaces go
+    /// on describing the state they were written for.
+    pub target_history_divergent: bool,
+    /// The target's own admitted history will not replay.
+    ///
+    /// Kept apart from [`Self::target_history_divergent`] for the reason the
+    /// Verify contract keeps them apart: that one is repairable and this one has
+    /// nothing to repair from.
+    pub target_history_unreplayable: bool,
     /// Selected semantic fields that changed for a selective Ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moved_fields: Vec<String>,
@@ -72,6 +88,18 @@ impl SectionStatus {
             && self.replacement.is_none()
     }
 
+    /// A Section standing on a target nothing admitted, or on one whose own
+    /// history will not replay.
+    ///
+    /// Both are failures, and neither is drift. Drift asks a person whether this
+    /// wording still holds; these say the thing being depended on is not
+    /// established at all.
+    pub fn stands_on_unadmitted(&self) -> bool {
+        self.drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent || drift.target_history_unreplayable)
+    }
+
     /// A Section standing on semantics that are not what was admitted.
     pub fn stands_on_tampered(&self) -> bool {
         self.drifted.iter().any(|drift| drift.target_tampered)
@@ -95,6 +123,7 @@ impl SectionStatus {
     pub fn forged(&self) -> bool {
         self.tampered
             || self.stands_on_tampered()
+            || self.stands_on_unadmitted()
             || self.stands_on_unreadable()
             || self.stands_on_missing()
             || self.replacement.is_some()
@@ -106,6 +135,20 @@ impl SectionStatus {
         }
         if self.stands_on_tampered() {
             return "REF TAMPERED";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "REF UNADMITTED";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "REF HISTORY BROKEN";
         }
         if self.stands_on_unreadable() {
             return "REF UNREADABLE";
@@ -130,6 +173,20 @@ impl SectionStatus {
         }
         if self.stands_on_tampered() {
             return "ref_tampered";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "ref_unadmitted";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "ref_history_broken";
         }
         if self.stands_on_unreadable() {
             return "ref_unreadable";
@@ -221,6 +278,8 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
                 target_tampered: false,
                 target_unreadable: true,
                 target_missing: false,
+                target_history_divergent: false,
+                target_history_unreplayable: false,
                 moved_fields: Vec::new(),
                 integrity_side: None,
             }
@@ -261,6 +320,14 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         state,
         Some(crate::dependency::Dependency::TargetIntegrityFailure)
     );
+    let target_history_divergent = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryDivergent)
+    );
+    let target_history_unreplayable = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryUnreplayable)
+    );
     let target_missing =
         matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
     let target_unreadable = target_unreadable
@@ -290,6 +357,8 @@ fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
         target_tampered,
         target_unreadable,
         target_missing,
+        target_history_divergent,
+        target_history_unreplayable,
         moved_fields,
         integrity_side: target_tampered.then_some(if current_integrity_failed {
             "current"
@@ -572,6 +641,27 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 // "gone" would send someone to recreate a file that is right
                 // there. The protocol names those words as the ones malformed
                 // authority must never be reported in.
+                // Both of these are right there and readable; "gone" would send
+                // a reader to recreate something that exists, and the work is on
+                // the target rather than here. They are separated from each
+                // other for the reason the Verify contract separates them: one
+                // has an admitted value to be restored to and the other does
+                // not, so only one of them may name `repair`.
+                _ if drift.target_history_divergent => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} is not what its own history produced; repair {} before trusting this\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        abbrev(&drift.object, w)
+                    ));
+                }
+                _ if drift.target_history_unreplayable => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} has history that will not replay; nothing can be restored from it\n",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
+                }
                 _ if drift.target_missing => {
                     out.push_str(&format!(
                         "    advice   {} §{} no longer exists; what this section stood on is gone

@@ -461,6 +461,17 @@ pub enum Dependency {
     Drifted { fields: Vec<SemanticField> },
     /// The current parent Object or target Section fails its own integrity.
     TargetIntegrityFailure,
+    /// The target's own admitted history cannot be replayed at all.
+    ///
+    /// **Not [`Self::TargetHistoryDivergent`], and the difference is the
+    /// reader's next move.** Divergence establishes what history produced and
+    /// that the stored value is not it, so `repair` restores it. This
+    /// establishes nothing: the EventStore itself will not replay, so there is
+    /// no value to restore *from*, and sending somebody to a repair that then
+    /// refuses is worse than saying nothing. The Verify contract keeps the two
+    /// apart for exactly this reason; collapsing them here would have undone
+    /// that one consumer at a time.
+    TargetHistoryUnreplayable,
     /// The current target seals perfectly and is not what its own admitted
     /// history produced.
     ///
@@ -883,8 +894,14 @@ pub fn evaluate(root: &Path, current: &Object, reference: &SelectiveRef) -> Resu
     // and that nothing downstream would question. A Ref is a claim about
     // authority, so the check belongs where authority is read rather than in
     // each place that reads it.
-    if crate::ops::history_fault(root, current)?.is_some() {
-        return Ok(Dependency::TargetHistoryDivergent);
+    match crate::ops::history_fault(root, current)? {
+        Some(crate::ops::HistoryFault::Unreplayable(_)) => {
+            return Ok(Dependency::TargetHistoryUnreplayable)
+        }
+        Some(crate::ops::HistoryFault::Divergent(_)) => {
+            return Ok(Dependency::TargetHistoryDivergent)
+        }
+        None => {}
     }
     // Ruled on #35 (`5395844059`): the current target being gone is its own
     // state. It is not integrity failure, not drift, and not a raw NOT_FOUND

@@ -6592,3 +6592,177 @@ fn an_event_id_is_canonical_uuidv7_text_and_two_spellings_are_one_identity() {
         refused.message
     );
 }
+
+/// Every read surface says the same thing about a dependency that is not
+/// established, and says which kind it is.
+///
+/// A new dependency answer is not finished when `verify` reports it. `drift_for`
+/// had no mapping for it, so the value fell through to ordinary drift:
+/// `forged()` was false, `show` exited 0 on an Object standing on a forgery, the
+/// advice line said the target "no longer exists" when it is right there, JSON
+/// said `stale_refs`, and `ls --sections` left it out of the untrusted warning —
+/// while `verify` failed on the same workspace at the same moment. One state,
+/// two verdicts, and the quiet one is the one an agent reads before acting.
+///
+/// The two faults stay apart here as they do everywhere else: only the
+/// repairable one may say `repair`.
+#[test]
+fn every_read_surface_reports_a_dependency_that_is_not_established() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    git(root, &["init", "-q"]);
+
+    let target = prepare(root, &["prepare", "--new", "--text", "the target"]);
+    confirm(root, &target);
+    let target_id = target["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &target_id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "depended upon",
+        ],
+    );
+    confirm(root, &added);
+    git(root, &["add", "-A", "."]);
+    commit_as_test(root, "record the target");
+
+    let source = prepare(root, &["prepare", "--new", "--text", "the source"]);
+    confirm(root, &source);
+    let source_id = source["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let referencing = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &source_id,
+            "--add",
+            "--no-based-on",
+            "--text",
+            "stands on the target",
+            "--ref",
+            &format!("{target_id}:1"),
+            "text",
+        ],
+    );
+    confirm(root, &referencing);
+    assert!(
+        run_engr(root, &["verify", &source_id]).status.success(),
+        "the fixture starts sound"
+    );
+    assert!(run_engr(root, &["show", &source_id]).status.success());
+
+    let sound = store::load_object(root, &target_id).expect("target");
+
+    // (a) The target seals correctly and is not what its history produced.
+    let forged = {
+        let mut forged = sound.clone();
+        forged.sections[0].header = Some("a heading nobody admitted".to_owned());
+        forged.sections[0] = engr::integrity::sealed_section(&forged.sections[0]).expect("seal");
+        forged.reseal().expect("reseal");
+        forged
+    };
+    save_raw(root, &forged).expect("put the forgery on disk");
+
+    let verified = run_engr(root, &["verify", &source_id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    let report = String::from_utf8_lossy(&verified.stdout).to_string();
+    assert!(
+        report.contains("not what its own history produced"),
+        "{report}"
+    );
+
+    let shown = run_engr(root, &["show", &source_id]);
+    assert_eq!(
+        shown.status.code(),
+        Some(engr::EXIT_INVARIANT),
+        "show must not exit 0 on an Object standing on a forgery"
+    );
+    let said = String::from_utf8_lossy(&shown.stderr).to_string();
+    assert!(
+        said.contains("admitted history") && said.contains("repair"),
+        "and must point at the target's own fault: {said}"
+    );
+    let advice = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(
+        !advice.contains("no longer exists"),
+        "the target is right there: {advice}"
+    );
+
+    let json = run_engr(root, &["show", &source_id, "--format", "json"]);
+    assert_eq!(json.status.code(), Some(engr::EXIT_INVARIANT));
+    let document: Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(document["sections"][0]["status"], "ref_unadmitted");
+
+    let listed = run_engr(root, &["ls", "--sections"]);
+    assert!(listed.status.success(), "the survey keeps exiting 0");
+    assert!(
+        String::from_utf8_lossy(&listed.stderr).contains("REF UNADMITTED"),
+        "and warns: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+
+    // (b) The target's own history will not replay. Nothing here establishes
+    // what it should say, so nothing may send a reader to `repair`.
+    save_raw(root, &sound).expect("restore the target");
+    let events = store::load_events(root, &target_id).expect("events");
+    let impossible = engr::model::Event::sealed(
+        &target_id,
+        engr::model::new_id(),
+        engr::model::Action::SectionUpdated {
+            section: 9,
+            value: engr::model::SectionValue::new(
+                engr::semantics::Admitted::new(
+                    engr::semantics::Admission::Human,
+                    "2026-08-23T00:00:00Z",
+                ),
+                Content {
+                    text: "a revision of a section that never existed".to_owned(),
+                    ..Content::default()
+                },
+            ),
+            becomes: None,
+        },
+        2,
+        engr::model::EventAdmission::human("2026-08-23T00:00:00Z", "TEST23"),
+    )
+    .expect("a sealed, contiguous record");
+    let mut stream = engr::proof::canonical_bytes(&events[0], "Event").expect("canonical");
+    stream.push('\n');
+    stream.push_str(&engr::proof::canonical_bytes(&impossible, "Event").expect("canonical"));
+    stream.push('\n');
+    std::fs::write(store::events_path(root, &target_id), stream).expect("write the stream");
+
+    let verified = run_engr(root, &["verify", &source_id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    let report = String::from_utf8_lossy(&verified.stdout).to_string();
+    assert!(report.contains("will not replay"), "{report}");
+    assert!(
+        !report.contains("repair"),
+        "there is nothing to restore from: {report}"
+    );
+
+    let json = run_engr(root, &["show", &source_id, "--format", "json"]);
+    assert_eq!(json.status.code(), Some(engr::EXIT_INVARIANT));
+    let document: Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(document["sections"][0]["status"], "ref_history_broken");
+    let shown = run_engr(root, &["show", &source_id]);
+    let advice = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(advice.contains("will not replay"), "{advice}");
+    assert!(
+        !String::from_utf8_lossy(&shown.stderr).contains("repair"),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+}

@@ -389,6 +389,18 @@ pub struct StandsOnDivergent {
     pub target_section: u64,
 }
 
+/// A section here leans on a target whose own admitted history will not replay.
+///
+/// A failure, and not [`StandsOnDivergent`]: nothing here establishes what the
+/// target should say, so `repair` has nothing to restore from and must not be
+/// named as the way out.
+#[derive(Debug)]
+pub struct StandsOnUnreplayable {
+    pub section: u64,
+    pub target: String,
+    pub target_section: u64,
+}
+
 /// A section here is sound, but a section it explicitly leans on is not.
 #[derive(Debug)]
 pub struct StandsOnTampered {
@@ -501,6 +513,9 @@ pub struct Report {
     pub standing_on_tampered: Vec<StandsOnTampered>,
     /// Sections here that lean on a target nothing admitted. See [`StandsOnDivergent`].
     pub standing_on_divergent: Vec<StandsOnDivergent>,
+    /// Sections here that lean on a target whose history will not replay. See
+    /// [`StandsOnUnreplayable`].
+    pub standing_on_unreplayable: Vec<StandsOnUnreplayable>,
     pub standing_on_missing: Vec<StandsOnMissing>,
     pub standing_on_unreadable: Vec<StandsOnUnreadable>,
     pub broken_replacements: Vec<BrokenReplacement>,
@@ -539,6 +554,7 @@ impl Report {
             && self.tampered.is_empty()
             && self.standing_on_tampered.is_empty()
             && self.standing_on_divergent.is_empty()
+            && self.standing_on_unreplayable.is_empty()
             && self.standing_on_missing.is_empty()
             && self.standing_on_unreadable.is_empty()
             && self.broken_replacements.is_empty()
@@ -589,6 +605,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
     let mut tampered = Vec::new();
     let mut standing_on_tampered = Vec::new();
     let mut standing_on_divergent = Vec::new();
+    let mut standing_on_unreplayable = Vec::new();
     let mut standing_on_missing = Vec::new();
     let mut standing_on_unreadable = Vec::new();
     let mut broken_replacements = Vec::new();
@@ -705,6 +722,19 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                         target_section: target_section_id,
                     });
                 }
+                // And its own line again, for the fault that establishes
+                // nothing. Divergence says what history produced and that the
+                // stored value is not it, so `repair` is the answer; this says
+                // the history will not replay, so there is nothing to restore
+                // from and naming `repair` would send a reader to a command
+                // that refuses.
+                crate::dependency::Dependency::TargetHistoryUnreplayable => {
+                    standing_on_unreplayable.push(StandsOnUnreplayable {
+                        section: section.id,
+                        target: target_id.clone(),
+                        target_section: target_section_id,
+                    });
+                }
                 state @ (crate::dependency::Dependency::ProvenanceUnavailable
                 | crate::dependency::Dependency::SchemaMismatch
                 | crate::dependency::Dependency::DigestInvalid) => {
@@ -740,6 +770,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
         tampered,
         standing_on_tampered,
         standing_on_divergent,
+        standing_on_unreplayable,
         standing_on_missing,
         standing_on_unreadable,
         broken_replacements,
