@@ -682,14 +682,19 @@ pub fn verify(root: &Path, id: &str) -> Result<Report> {
                     continue;
                 }
             };
-            let Ok(_) = target.section(target_section_id) else {
-                standing_on_missing.push(StandsOnMissing {
-                    section: section.id,
-                    target: target_id.clone(),
-                    target_section: target_section_id,
-                });
-                continue;
-            };
+            // **The Section lookup is the evaluator's, not this walk's.** Asking
+            // it here and reporting absence answered the last question first: it
+            // skipped both integrity and history for every Ref whose target
+            // Section had vanished from the stored projection, so a Section
+            // removed by hand from an otherwise intact Object was reported as a
+            // supported deletion — "it is not there" — while `show`, which does
+            // go through the evaluator, said the target was not what its history
+            // produced and named `repair`. Both failed; they disagreed about
+            // which fault it was and what to do, and only one of them was right.
+            //
+            // The order the evaluator keeps is integrity, then history, then
+            // absence, and each of those means what the ruling says only when
+            // the ones before it have already been asked.
             let current_failed = crate::integrity::check_object_integrity(&target).is_err();
             match crate::dependency::evaluate(root, &target, reference)? {
                 crate::dependency::Dependency::TargetIntegrityFailure => {

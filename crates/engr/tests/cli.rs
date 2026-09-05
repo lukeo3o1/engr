@@ -6663,6 +6663,8 @@ fn every_read_surface_reports_a_dependency_that_is_not_established() {
     );
     assert!(run_engr(root, &["show", &source_id]).status.success());
 
+    let original_stream =
+        std::fs::read(store::events_path(root, &target_id)).expect("the target's history");
     let sound = store::load_object(root, &target_id).expect("target");
 
     // (a) The target seals correctly and is not what its history produced.
@@ -6764,5 +6766,36 @@ fn every_read_surface_reports_a_dependency_that_is_not_established() {
         !String::from_utf8_lossy(&shown.stderr).contains("repair"),
         "{}",
         String::from_utf8_lossy(&shown.stderr)
+    );
+
+    // (c) The Section is gone from the target's projection while its history
+    // still holds it. This used to be reported as absence, by a shortcut that
+    // asked "is the Section there?" before asking anything else — so `verify`
+    // said it "is not there" while `show`, which goes through the shared
+    // evaluator, said the target was not what its history produced. History can
+    // restore this Section, so it is divergence, and both surfaces say so.
+    std::fs::write(store::events_path(root, &target_id), &original_stream)
+        .expect("restore a replayable history");
+    let emptied = engr::integrity::mutate(&sound, |object| {
+        object.sections.clear();
+        Ok(())
+    })
+    .expect("reseal")
+    .object;
+    save_raw(root, &emptied).expect("remove the section by hand");
+
+    let verified = run_engr(root, &["verify", &source_id]);
+    assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
+    let report = String::from_utf8_lossy(&verified.stdout).to_string();
+    assert!(
+        report.contains("not what its own history produced"),
+        "a Section history can restore is not absence: {report}"
+    );
+    assert!(!report.contains("is not there"), "{report}");
+    let json = run_engr(root, &["show", &source_id, "--format", "json"]);
+    let document: Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(
+        document["sections"][0]["status"], "ref_unadmitted",
+        "and the two surfaces agree about which fault it is"
     );
 }

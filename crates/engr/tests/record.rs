@@ -555,15 +555,17 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     assert_eq!(report.standing_on_missing.len(), 1);
     assert!(report.standing_on_unreadable.is_empty());
 
-    // (c) the target loads, with its history, but the referenced section is not
-    // in it. The history goes back too: a projection with no admitted history at
-    // all is its own finding, and it would mask this one.
+    // (c) the section is gone from the projection and the history still holds
+    // it. **This is not absence.** It used to be reported as absence, because
+    // the walk asked "is the Section there?" before anything else and answered
+    // the last question first — so a Section removed by hand from an otherwise
+    // intact Object read as a supported deletion, while `show`, which goes
+    // through the shared evaluator, said the target was not what its history
+    // produced and named `repair`. Both failed and they disagreed about which
+    // fault it was. History can restore this Section, so divergence is what it
+    // is.
     std::fs::write(&history, &history_bytes).expect("restore history");
     write_raw(&path, &sound).expect("restore");
-    // Removed and resealed, not blanked: an Object with no Sections omits the
-    // member, and one that carries an empty list is refused as schema before
-    // anything asks which Sections it has. What is being pinned here is absence,
-    // so the target has to stay a valid Object that simply no longer holds it.
     let held = store::load_object(&root, &target).expect("target");
     let without = integrity::mutate(&held, |object| {
         object.sections.clear();
@@ -575,9 +577,52 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
     assert_eq!(
+        report.standing_on_divergent.len(),
+        1,
+        "history still holds the section, so this is divergence and repair is the way back"
+    );
+    assert!(report.standing_on_missing.is_empty());
+    // And the surface `show` renders from says the same thing at the same
+    // moment, which is the whole point of routing both through one evaluator.
+    let source_object = ops::effective(&root, &source).expect("source");
+    assert_eq!(
+        view::assess(&root, &source_object)[0].1.key(),
+        "ref_unadmitted"
+    );
+
+    // (d) the same removal, unsealed. Integrity is asked first and answers
+    // first: the aggregate no longer vouches for itself, which is a different
+    // fault from either absence or divergence.
+    let mut unsealed = without.clone();
+    unsealed.sections = held.sections.clone();
+    write_raw(&path, &unsealed).expect("write");
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(!report.passed());
+    assert_eq!(report.standing_on_tampered.len(), 1);
+    assert!(report.standing_on_divergent.is_empty());
+    assert!(report.standing_on_missing.is_empty());
+    let source_object = ops::effective(&root, &source).expect("source");
+    assert_eq!(
+        view::assess(&root, &source_object)[0].1.key(),
+        "ref_tampered"
+    );
+
+    // (e) the control: the section is genuinely gone, through the record. Now
+    // absence is absence, and it is the only one of the three that is.
+    write_raw(&path, &sound).expect("restore");
+    admit(&root, payload(Act::Delete(1), &target, ""));
+    let report = ops::verify(&root, &source).expect("verify still runs");
+    assert!(!report.passed());
+    assert_eq!(
         report.standing_on_missing.len(),
         1,
-        "a missing section is absence, like a missing object"
+        "removed through an admitted deletion, so there is nothing to restore"
+    );
+    assert!(report.standing_on_divergent.is_empty());
+    let source_object = ops::effective(&root, &source).expect("source");
+    assert_eq!(
+        view::assess(&root, &source_object)[0].1.key(),
+        "ref_missing"
     );
 }
 
