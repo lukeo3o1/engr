@@ -1079,6 +1079,13 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
             let stored = store::load_object(&root, &id);
+            // The record holds this Object and the file does not exist. Kept
+            // here rather than derived later, because everything below this line
+            // works on the value history rebuilt — whose seals pass and whose
+            // history produced it, by construction — and that value cannot be
+            // asked whether it was ever stored.
+            let projection_missing =
+                matches!(&stored, Err(error) if error.code == engr::EXIT_NOT_FOUND);
             // Reconciliation is only for a projection an admission could build
             // on. A seal that verifies is half of that; the other half is that
             // admitted history produced these bytes, because applying a tail
@@ -1163,13 +1170,23 @@ fn run(cli: Cli) -> Result<()> {
             // that would tell a script the opposite of what the reader was told,
             // and `verify` already fails the same Object.
             let history = ops::history_fault(&root, &object)?;
-            if forged > 0 || object_forged || history.is_some() {
+            // And the same rule again for the state no question asked of the
+            // value can reach. The screen above has just said this Object has no
+            // stored projection; `verify` fails the same workspace at the same
+            // instant. Exiting 0 underneath both would be the third surface
+            // disagreeing with the other two about one state.
+            if forged > 0 || object_forged || history.is_some() || projection_missing {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    match (&history, unadmitted.is_empty()) {
-                        (Some(fault), _) => fault.message(&object.id),
-                        (None, false) => unadmitted.join("; "),
-                        (None, true) => format!(
+                    match (&history, projection_missing, unadmitted.is_empty()) {
+                        (Some(fault), _, _) => fault.message(&object.id),
+                        (None, true, _) => format!(
+                            "{id}: the record holds this Object and no projection is stored for it; \
+                             what was shown is what admitted history produced. Write it back with: engr repair {}",
+                            shorten(&id, view::width(&root))
+                        ),
+                        (None, false, false) => unadmitted.join("; "),
+                        (None, false, true) => format!(
                             "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
                         ),
                     },
@@ -2271,6 +2288,19 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
         }
     };
     let stored = match store::load_object(root, id) {
+        // Absent is not unreadable, and a person deciding whether to answer this
+        // needs the difference: there is nothing here to compare the rebuild
+        // against, and nothing being overwritten either. Every Section below is
+        // what history alone says, and that is the whole of what will be
+        // written.
+        Err(error) if error.code == engr::EXIT_NOT_FOUND => {
+            return format!(
+                "Integrity  no projection is stored; admitted history is the only copy, and \
+                 confirming writes back its {} section(s) at rev {}\n",
+                provable.sections.len(),
+                provable.rev
+            )
+        }
         Ok(object) => object,
         Err(error) => {
             return format!(

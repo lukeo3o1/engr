@@ -36,13 +36,32 @@ fn missing_projection_is_addressable_for_assessment_but_not_in_navigation() {
     let projection = store::object_path(root, id);
     std::fs::remove_file(&projection).expect("remove projection");
 
+    // `show` still renders it — diagnosing the state is the whole point of the
+    // screen — and it no longer calls it sound. It used to print the wording,
+    // exit 0 and answer `"integrity": "ok"` about an Object with no stored
+    // bytes, while `verify` was failing the same workspace at the same instant.
     let shown = run_engr(root, &["show", id]);
-    assert!(
-        shown.status.success(),
+    assert_eq!(
+        shown.status.code(),
+        Some(engr::EXIT_INVARIANT),
         "show: {}",
         String::from_utf8_lossy(&shown.stderr)
     );
-    assert!(String::from_utf8_lossy(&shown.stdout).contains("history survives projection loss"));
+    let screen = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(screen.contains("history survives projection loss"));
+    assert!(
+        screen.contains("no stored projection"),
+        "the screen must say so: {screen:?}"
+    );
+    let advice = String::from_utf8_lossy(&shown.stderr).to_string();
+    assert!(
+        advice.contains("engr repair"),
+        "and name a recovery that exists: {advice:?}"
+    );
+    let json: Value =
+        serde_json::from_slice(&run_engr(root, &["show", id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(json["integrity"], "projection_missing");
 
     let verified = run_engr(root, &["verify", id]);
     assert_eq!(verified.status.code(), Some(engr::EXIT_INVARIANT));
@@ -143,6 +162,98 @@ fn missing_projection_is_addressable_for_assessment_but_not_in_navigation() {
     assert!(
         !projection.exists(),
         "and it must not recreate the projection it reported"
+    );
+
+    // The control, on the surface that just learned the distinction: a
+    // projection one revision *behind* its history is a healthy crash tail, and
+    // `show` says so with a note and exits 0. Collapsing the two into one word
+    // would have made the assertion above true for the wrong reason.
+    let behind = run_engr(root, &["show", &behind_id]);
+    assert!(
+        behind.status.success(),
+        "a projection that is behind is not a missing one: {}",
+        String::from_utf8_lossy(&behind.stderr)
+    );
+    let behind_json: Value =
+        serde_json::from_slice(&run_engr(root, &["show", &behind_id, "--format", "json"]).stdout)
+            .expect("json");
+    assert_eq!(behind_json["integrity"], "ok");
+}
+
+/// `repair` writes back a projection the record still holds and the disk does
+/// not.
+///
+/// It refused this state with `not found` — the same words an id nobody has
+/// gets — because eligibility loaded the stored Object with `?` before asking
+/// anything. So every trust surface named the fault and sent the reader to the
+/// one command that told them the Object did not exist. Absence is the plainest
+/// case `repair` has: history derives the whole projection and there is nothing
+/// to undo first.
+#[test]
+fn repair_writes_back_a_projection_that_is_gone() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--text", "the only copy"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "Wording that exists nowhere else once the file is gone.",
+            ],
+        ),
+    );
+    let projection = store::object_path(root, &id);
+    let sections_before = store::load_object(root, &id).expect("stored").sections;
+    std::fs::remove_file(&projection).expect("remove projection");
+
+    // `repair --json` reports both sides, so its document is not a bare
+    // candidate: the code is under `challenge`.
+    let prepared = prepare(root, &["repair", &id]);
+    let code = prepared["challenge"]["id"]
+        .as_str()
+        .or_else(|| prepared["challenge"].as_str())
+        .expect("challenge code");
+    let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert!(
+        confirmed.status.success(),
+        "confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+
+    assert!(projection.exists(), "the file must come back");
+    let restored = store::load_object(root, &id).expect("restored");
+    assert_eq!(
+        restored.sections, sections_before,
+        "and hold exactly the Sections the record already had"
+    );
+    // The aggregate is *not* byte-identical to what was removed, and must not
+    // be: a repair is admitted, so the Object is one revision further on than
+    // the creation and the section that preceded it, and its seal covers that.
+    // The Sections are the thing that has to survive.
+    assert_eq!(restored.rev, 3);
+    let verified = run_engr(root, &["verify", &id]);
+    assert!(
+        verified.status.success(),
+        "the workspace verifies again: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let stream = std::fs::read_to_string(store::events_path(root, &id)).expect("stream");
+    assert!(
+        stream.contains("object.repaired.v1"),
+        "and the recovery is in the record, not a silent write"
     );
 }
 

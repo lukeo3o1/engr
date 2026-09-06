@@ -269,6 +269,18 @@ a surface asked explicitly for an assessment MUST NOT return an affirmative
 health report in that state. A projection that is merely *behind* its history is
 a different state and MUST NOT be reported as a missing one.
 
+**Every surface that classifies an Object owes the same answer, and `show` is
+one of them.** It renders the reconstruction — diagnosing the state is what the
+screen is for — and it MUST say that nothing is stored, MUST NOT report
+`integrity` as `ok`, and MUST fail, because `verify` fails the same workspace at
+the same instant and a screen that reports a fault under a zero exit tells a
+script the opposite of what it told the reader. **And it MUST name a recovery
+that exists.** `repair` is that recovery: absent bytes are the plainest case it
+has, since admitted history derives the whole projection and there is nothing to
+undo first. An eligibility check that loads the stored Object before asking
+anything answers this state the way it answers an id nobody has — while every
+trust surface is naming the fault and sending the reader here.
+
 **And the prefix rule below is a rule about reconciliation, not a rule about
 eligibility.** `repair` decides whether there is anything to repair, and that
 question is asked of the *whole* history: a tail that cannot be applied at all is

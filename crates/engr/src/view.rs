@@ -241,11 +241,9 @@ fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFaul
 /// level makes every row under it wrong in the same way — and each of them used
 /// to answer some part of it with `ok`.
 ///
-/// One word per state, cased for the surface that prints it, and where the JSON
-/// `integrity` member has a name for the same state it is that name: a reader
-/// who has seen `"integrity": "divergent"` must not have to learn a second one.
-/// `ProjectionMissing` has no JSON twin, because it is a fact about storage
-/// rather than about what the bytes say; it borrows `verify`'s wording instead.
+/// One word per state, cased for the surface that prints it, and the JSON
+/// `integrity` member uses the same word: a reader who has seen
+/// `"integrity": "divergent"` must not have to learn a second name for it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ObjectFault {
     /// There are no stored bytes at all; what was assessed is the
@@ -269,6 +267,36 @@ impl ObjectFault {
             Self::Unreplayable => "OBJECT UNREPLAYABLE",
         }
     }
+
+    /// The machine word, for `show --format json`'s `integrity` member.
+    ///
+    /// The same classifier the listing uses, because the two surfaces answering
+    /// the same question with different vocabularies is how a reader ends up
+    /// believing they are different questions.
+    fn key(self) -> &'static str {
+        match self {
+            Self::ProjectionMissing => "projection_missing",
+            Self::Tampered => "tampered",
+            Self::Divergent => "divergent",
+            Self::Unreplayable => "unreplayable",
+        }
+    }
+}
+
+/// Whether the Object being rendered has any stored bytes at all.
+///
+/// Asked once, here, and by everything that classifies an Object: `show` used to
+/// answer `"integrity": "ok"` about a value it had rebuilt out of history
+/// because the file was gone, at the same instant `verify` was exiting 5 over
+/// the same workspace.
+///
+/// "Not established as a readable file", not "established absent": a path that
+/// is there and is not a regular file is not a projection either.
+fn projection_missing(root: &Path, object: &Object) -> bool {
+    !matches!(
+        store::resource_present(&store::object_path(root, &object.id)),
+        Ok(true)
+    )
 }
 
 fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
@@ -281,13 +309,7 @@ fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
     // on the one surface still entitled to discover such an Object, since cheap
     // navigation enumerates the files and cannot see it.
     //
-    // "Not established as a readable file", not "established absent": a path
-    // that is there and is not a regular file is not a projection either, and
-    // the listing that cannot tell must not be the one that says nothing.
-    if !matches!(
-        store::resource_present(&store::object_path(root, &object.id)),
-        Ok(true)
-    ) {
+    if projection_missing(root, object) {
         return Some(ObjectFault::ProjectionMissing);
     }
     if object_tampered(object) {
@@ -559,7 +581,15 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
-    if object_tampered(object) {
+    // Before the seal question, for the reason the classifier asks it first:
+    // these bytes were rebuilt out of history, so their seals pass and their
+    // history produced them, and both of the questions below would answer
+    // "fine" about a record with no projection at all.
+    if projection_missing(root, object) {
+        out.push_str(
+            "!!         Object has no stored projection; what is shown is what its admitted history produced. Restore the file with: engr repair\n",
+        );
+    } else if object_tampered(object) {
         out.push_str("!!         Object integrity failed; current authority changed outside a supported transition\n");
         match git::last_commit_for(root, &store::object_path(root, &object.id)) {
             Some(commit) => out.push_str(&format!(
@@ -857,15 +887,18 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         state: object.state.as_str(),
         attention: object.needs_attention(),
         rev: object.rev,
-        // Four answers, because there are four states and three of them used to
-        // be reported as `ok`. `tampered` is bytes that do not match their own
-        // seal. `divergent` is bytes that match it and that no admitted Event
-        // ever produced — the projection is what is wrong, and `repair` restores
-        // it. `unreplayable` is the opposite: the EventStore cannot be replayed
-        // at all, so there is nothing to restore from and nothing to check
-        // against.
-        integrity: match history_fault(root, object) {
-            _ if object_tampered(object) => "tampered",
+        // Five answers, because there are five states and four of them used to
+        // be reported as `ok`. `projection_missing` is no stored bytes at all —
+        // what is described here was rebuilt out of history, and `repair` writes
+        // it back. `tampered` is bytes that do not match their own seal.
+        // `divergent` is bytes that match it and that no admitted Event ever
+        // produced — the projection is what is wrong, and `repair` restores it.
+        // `unreplayable` is the opposite: the EventStore cannot be replayed at
+        // all, so there is nothing to restore from and nothing to check against.
+        //
+        // Through the same classifier the listing uses, in the same order, so
+        // the two surfaces cannot drift into answering differently.
+        integrity: match object_fault(root, object) {
             Some(fault) => fault.key(),
             None => "ok",
         },

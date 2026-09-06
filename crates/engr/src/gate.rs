@@ -1160,7 +1160,18 @@ pub fn prepare_repair(root: &Path, id: &str) -> Result<Prepared> {
 fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
     store::require_current(root)?;
     crate::model::validate_object_id(id)?;
-    let stored = store::load_object(root, id)?;
+    // Absent is one of the damaged states, not a reason to refuse. `repair`
+    // restores what history derives, and a projection that is not there at all
+    // is the plainest case of that there is: nothing has to be undone first.
+    // Loading it with `?` meant the recovery path answered a workspace with a
+    // lost file the same way it answers an id nobody has — `not found` — while
+    // `verify` was failing over it and `show` and `ls --verify` were naming it
+    // and sending the reader **here**.
+    let stored = match store::load_object(root, id) {
+        Ok(stored) => Some(stored),
+        Err(error) if error.code == crate::EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
     // Nothing to repair is a refusal, not a no-op. Repair is an exceptional
     // boundary, and one that ran on sound authority would be a general-purpose
     // rewrite with a special name.
@@ -1189,12 +1200,18 @@ fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
     // never give about a state the other surfaces call broken, so the question
     // that sees the whole history is asked before the one that sees a prefix.
     let before = ops::provable(root, id)?;
+    let damaged = match &stored {
+        None => true,
+        Some(stored) => {
+            crate::integrity::check_stored_object_integrity(stored).is_err()
+                || matches!(
+                    ops::history_fault(root, stored)?,
+                    Some(ops::HistoryFault::Divergent(_))
+                )
+        }
+    };
     ensure!(
-        crate::integrity::check_stored_object_integrity(&stored).is_err()
-            || matches!(
-                ops::history_fault(root, &stored)?,
-                Some(ops::HistoryFault::Divergent(_))
-            ),
+        damaged,
         EXIT_INVARIANT,
         "{id} verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path"
     );
