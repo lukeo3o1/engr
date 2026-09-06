@@ -1,0 +1,32 @@
+staged: manifest=yes destination=yes challenge=yes
+
+===== move the source under the staged plan =====
+-- resuming the staged plan --
+error: the predecessor workspace moved after migration J8SUZ4 was confirmed, and publishing now would discard what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIRM J8SUZ4 no"` — and prepare it again over the workspace as it now stands
+confirm exit=0
+-- and preparing again --
+1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM J8SUZ4
+migrate exit=0
+after: manifest=yes destination=yes challenges=J8SUZ4.json 
+
+===== interrupt that withdrawal across a sweep =====
+kill@20  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@40  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@60  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@80  ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@120 ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@200 ms manifest=yes destination=yes challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration

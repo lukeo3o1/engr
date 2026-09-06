@@ -1,0 +1,121 @@
+===== baseline (uninterrupted) =====
+inventory: 86be30f49f39a68f545910530a644fae0300be152c9bcf861d070e4e27a40288
+event admitted.at: 2026-09-06T17:54:17.543544959Z 
+events per stream: 1 1 1 
+
+===== interrupted at 500ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t500/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t500/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: 15a0f0b152c97cefd265db049ecee2fd4486297a391369d1abb38d7cb60223a8
+event admitted.at: 2026-09-06T17:56:36.681229073Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 700ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t700/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t700/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: 1a5f5fa7cb54a74348525e06b35a68eec68150ba9003db41d58e31b0a88dd4bf
+event admitted.at: 2026-09-06T17:56:39.344763449Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 850ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t850/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t850/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: 24c11ff3c20ff1ae030024be59ff3975f0c8610eca642391e5fb740bf09e6d19
+event admitted.at: 2026-09-06T17:54:25.91379326Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: fec3364dde1b29dbb5f5b506ad3e166de0e0ca100f3f9d01a33e2e12761df243
+event admitted.at: 2026-09-06T17:54:28.740061431Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: e7cf8abbab3e8ecd0b470240a2f601b2c1d5cb9302f4a9268048a2d1631b2ebc
+event admitted.at: 2026-09-06T17:54:31.763757235Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1000ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1000/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1000/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: c8852df0d4c4e8c4cfc15a07cde538f1cd24dc1d8dacd6fecb5351481856c9d8
+event admitted.at: 2026-09-06T17:54:34.701913454Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1050ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1050/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1050/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: ba28185c7007976dd31e2a0b47f9cffcabcc60bc1489d023766996ce8eff6ebf
+event admitted.at: 2026-09-06T17:54:37.810835742Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1080/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1080/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: f2375db1cba349b735ed23ead87ef4f84343c48d5f89c5c38b795d67f760e055
+event admitted.at: 2026-09-06T17:54:40.889818433Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1120ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting J8SUZ4
+inventory: 26fe0d0b08979bbb46f96a8bfeeded83f59a7e2e63529e629f03aa0999948e58
+event admitted.at: 2026-09-06T17:54:44.042948225Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 

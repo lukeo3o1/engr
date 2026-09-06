@@ -1,0 +1,30 @@
+===== verify =====
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  5 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+01a077e3-d3  PASS  0 sections  Continuity carried forward
+exit=0
+
+===== ls --all =====
+01a05e55-74  design/superseded      3 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   5 sections  unchecked     Predecessor fixture construction
+01a077e3-d3  decision/accepted      0 sections  unchecked     Continuity carried forward
+exit=0
+
+===== every stream, and its revisions =====
+01a05e55-74eb-7370-b771-0008bd71d149  3 events  revs 1 2 3 
+01a05e55-e62b-75c3-8b32-6c388dec4c4b  1 events  revs 1 
+01a05e55-ee46-7a91-983f-fa79b297b10c  10 events  revs 1 2 3 4 5 6 7 8 9 10 
+01a077e3-d3bb-7c52-8d58-7e84263f3208  2 events  revs 1 2 
+
+===== what git tracks, and what it must never see =====
+A  .engr/collections/release-2026.json
+M  .engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+M  .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+-- anything under local/? --
+NOT VISIBLE TO GIT (correct)
+and nothing under local/ is tracked (correct)
+
+===== inventory =====

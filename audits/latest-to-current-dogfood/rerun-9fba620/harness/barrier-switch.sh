@@ -1,0 +1,32 @@
+#!/bin/sh
+# The decisive measurement: the same out-of-band edit, at two staged instants
+# that differ only by whether the barrier has been installed.
+#
+# If it is refused before the barrier and published after it, then what decides
+# whether the workspace is re-checked is the barrier — and the barrier only
+# establishes that the *released build* cannot have written. Anything else still
+# can.
+set -u
+cd /audit/r6
+CUR=/audit/bin/engr-current
+OLD=/audit/bin/engr-latest
+CODE=J8SUZ4
+AU=.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+rm -rf bs && mkdir bs
+
+try() { # label, kill-ms
+  label=$1; ms=$2
+  rm -rf bs/w && cp -a checkpoints/pre-confirm bs/w
+  timeout -s KILL "$(awk -v m=$ms 'BEGIN{printf "%.3f", m/1000}')" $CUR --root bs/w confirm "CONFIRM $CODE" >/dev/null 2>&1
+  staged=$([ -d bs/w/.engr/local/migration/destination ] && echo yes || echo no)
+  barrier=$(grep -q 'migration-in-progress' bs/w/.engr/format.json 2>/dev/null && echo installed || echo "not yet")
+  [ "$staged" = yes ] || { printf '%-22s kill@%-5s staged=no  — not in the window this time\n' "$label" "$ms"; return; }
+  sed -i 's/Migration continuity audit/Migration continuity audit (edited out of band)/' "bs/w/$AU"
+  out=$($CUR --root bs/w confirm "CONFIRM $CODE" 2>&1); code=$?
+  kept=$(grep -c 'edited out of band' "bs/w/$AU" 2>/dev/null || echo 0)
+  printf '%-22s kill@%-5s staged=yes barrier=%-9s confirm exit=%-3s edit_survived=%s\n' "$label" "$ms" "$barrier" "$code" "$kept"
+  printf '                       %s\n' "$(printf '%s' "$out" | head -1 | cut -c1-150)"
+}
+
+for ms in 850 860 870 880; do try "before the barrier" "$ms"; done
+for ms in 900 930 960 1000; do try "after the barrier"  "$ms"; done

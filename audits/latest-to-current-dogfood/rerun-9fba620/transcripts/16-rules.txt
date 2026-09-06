@@ -1,0 +1,62 @@
+$ engr-current rules ls   # cwd=r6/project
+--- stdout ---
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  collection, object, work
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --reopen   # cwd=r6/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:7db7b86bce7d5150b509e613f360c05fa87415393b3a5829c5511fa541384f06 and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --reopen --review 1:7db7b86bce7d5150b509e613f360c05fa87415393b3a5829c5511fa541384f06 --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r6/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+Review     passed
+Digest     1:7db7b86bce7d5150b509e613f360c05fa87415393b3a5829c5511fa541384f06
+Rules      audit-scope, evidence-discipline
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM JXEGXX
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM JXEGXX   # cwd=r6/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 8
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migration completed and everything looked fine.   # cwd=r6/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:d4c1590ff758773af94d97e26d7894ee71deeac83c242fb7546df8d224f51dfb and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text The migration completed and everything looked fine. --review 1:d4c1590ff758773af94d97e26d7894ee71deeac83c242fb7546df8d224f51dfb --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 2 --review-result failed --review-explanation The wording names no transcript, which evidence-discipline requires.   # cwd=r6/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:d4c1590ff758773af94d97e26d7894ee71deeac83c242fb7546df8d224f51dfb
+Rules      audit-scope, evidence-discipline
+Reason     The wording names no transcript, which evidence-discipline requires.
+
+The migration completed and everything looked fine.
+
+Type this exactly to confirm:  CONFIRM J3E46S
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM J3E46S   # cwd=r6/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 9
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---

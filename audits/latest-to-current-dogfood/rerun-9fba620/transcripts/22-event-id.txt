@@ -1,0 +1,12 @@
+$ engr-current show 01a05e55-ee   # cwd=r6/ev
+--- stderr ---
+error: /audit/r6/ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A077D8-ED49-74F3-9318-3CEBA7FC2838" must be a canonical UUIDv7
+--- exit 4 ---
+
+$ engr-current verify   # cwd=r6/ev
+--- stdout ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+--- stderr ---
+error: /audit/r6/ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A077D8-ED49-74F3-9318-3CEBA7FC2838" must be a canonical UUIDv7
+--- exit 4 ---

@@ -1,0 +1,36 @@
+===== prev (0086bb6) =====
+  --delete 1 --text                                    exit=0   Challenge  section.delete §1
+  --delete 1 --text-file                               exit=0   Challenge  section.delete §1
+  --delete 1 --based-on                                exit=0   Challenge  section.delete §1
+  --delete 1 --ref                                     exit=0   Challenge  section.delete §1
+  --close --text                                       exit=0   Challenge  change_state
+  --close --text-file                                  exit=0   Challenge  change_state
+  --close --based-on                                   exit=0   Challenge  change_state
+  --close --ref                                        exit=0   Challenge  change_state
+  --reopen --text                                      exit=0   Challenge  change_state
+  --reopen --text-file                                 exit=0   Challenge  change_state
+  --reopen --based-on                                  exit=0   Challenge  change_state
+  --reopen --ref                                       exit=0   Challenge  change_state
+  --classify --type design --state draft --text        exit=0   Challenge  classify
+  --classify --type design --state draft --text-file   exit=0   Challenge  classify
+  --classify --type design --state draft --based-on    exit=0   Challenge  classify
+  --classify --type design --state draft --ref         exit=0   Challenge  classify
+  WORKSPACE CHANGED: something was minted
+===== current (9fba620) =====
+  --delete 1 --text                                    exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --text-file                               exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --based-on                                exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --ref                                     exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --close --text                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --text-file                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --based-on                                   exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --ref                                        exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text                                      exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text-file                                 exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --based-on                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --ref                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --classify --type design --state draft --text        exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --text-file   exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --based-on    exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --ref         exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  workspace unchanged

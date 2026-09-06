@@ -1,0 +1,6 @@
+appended an event whose id is the uppercase spelling of 01a077d8-ed49-74f3-9318-3ceba7fc2838
+sealed over that spelling: 1:fa3aa31b657859b7ed
+stream moved: 3d5cb9d7ab6b7a99e6fff3dedf292036d0bab7ee38c7d3bc89b27f28016f1076 -> 403444eda116c608c809639ab4d7c8e9270f5ee6d55b0df3d4feddd20e021943
+--- and its own seal verifies, checked independently ---
+event 1: stored=1:b0a89b7c1de575 computed=1:b0a89b7c1de575 MATCH
+event 2: stored=1:fa3aa31b657859 computed=1:fa3aa31b657859 MATCH

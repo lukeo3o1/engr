@@ -1,0 +1,103 @@
+$ engr-current show 01a05e55-74   # cwd=r6/as
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74 --format json   # cwd=r6/as
+--- stdout ---
+{
+  "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+  "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9",
+  "title": "Migration continuity audit",
+  "state": "open",
+  "attention": true,
+  "rev": 1,
+  "integrity": "ok",
+  "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+  "summary": {
+    "sections": 2,
+    "ok": 2,
+    "tampered": 0,
+    "attention": 0
+  },
+  "sections": [
+    {
+      "id": 1,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:1",
+      "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.",
+      "status": "ok",
+      "based_on": {
+        "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+      },
+      "refs": [],
+      "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:57:48.683149208Z"
+      }
+    },
+    {
+      "id": 2,
+      "reference": "engr:obj:01m1f5ax7bedrbew8012yq3ma9:2",
+      "text": "Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.",
+      "status": "ok",
+      "based_on": null,
+      "refs": [],
+      "digest": "1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7",
+      "admitted": {
+        "by": "human",
+        "at": "2026-09-01T18:59:19.709593096Z"
+      }
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current show 01a05e55-ee   # cwd=r6/as
+--- stdout ---
+01a05e55-ee  open  Predecessor fixture construction
+4 sections   4 ok   rev 2
+engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+?? 禮1 ?? ok
+The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+    based_on 1dae5f46   admitted 2026-09-01T18:58:38.654174165Z by human
+
+?? 禮4 ?? ok
+Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+    admitted 2026-09-01T18:59:23.885618829Z by human
+
+?? 禮5 ?? ok
+A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+    admitted 2026-09-01T18:59:40.546412285Z by human
+
+?? 禮6 ?? ok
+Admitted, and the projection never caught up.
+    admitted 2026-09-06T17:52:38.904376266Z by human
+note       reconciled 1 admitted event the stored projection was behind; it is now rev 2
+--- exit 0 ---
+
+$ engr-prev show 01a05e55-74   # cwd=r6/as
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- exit 0 ---
