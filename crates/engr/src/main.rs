@@ -2293,13 +2293,46 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
         // against, and nothing being overwritten either. Every Section below is
         // what history alone says, and that is the whole of what will be
         // written.
+        // Absent is not unreadable, and a person deciding whether to answer this
+        // needs the difference: there is nothing here to compare against and
+        // nothing being overwritten. What they still need is the *other* side —
+        // a Section count is not something anybody can authorize, and this
+        // branch used to stop at one, so the screen offered a confirmation code
+        // for wording it had never shown. Same rows as the damaged case, with
+        // `(absent)` where the stored value would be.
+        //
+        // Both revisions, because they are different numbers and the reader is
+        // owed both: history derives the projection at its own revision, and
+        // confirming appends `object.repaired.v1` on top of it.
         Err(error) if error.code == engr::EXIT_NOT_FOUND => {
-            return format!(
-                "Integrity  no projection is stored; admitted history is the only copy, and \
-                 confirming writes back its {} section(s) at rev {}\n",
-                provable.sections.len(),
-                provable.rev
-            )
+            let mut out = format!(
+                "Integrity  no projection is stored; admitted history is the only copy\n\
+                 Restoring  exactly what admitted history proves at rev {}, admitted as rev {}\n\n",
+                provable.rev,
+                provable.rev + 1
+            );
+            match view::repair_restores(&provable) {
+                Ok(restores) if !restores.is_empty() => {
+                    for difference in &restores {
+                        out.push_str(&format!(
+                            "  {}\n    stored   {}\n    restore  {}\n",
+                            difference.at, difference.stored, difference.restore
+                        ));
+                    }
+                }
+                // An Object history derives as empty is a real state — a created
+                // Object nobody has added to — and saying so is the honest
+                // screen. Silence would read as a rendering failure.
+                Ok(_) => {
+                    out.push_str("  admitted history derives no persisted member for this Object\n")
+                }
+                Err(error) => out.push_str(&format!(
+                    "  what history derives cannot be rendered: {}\n",
+                    error.message
+                )),
+            }
+            out.push('\n');
+            return out;
         }
         Ok(object) => object,
         Err(error) => {

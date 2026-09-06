@@ -1764,6 +1764,39 @@ pub fn repair_differences(stored: &Object, restore: &Object) -> Result<Vec<Repai
     Ok(found)
 }
 
+/// The same comparison for a projection that is not there at all.
+///
+/// The reader's question is the one the damaged case asks — *what am I about to
+/// write?* — so it gets the same rows, with `(absent)` on the stored side. A
+/// second layout for the same question would be a second thing to learn, and a
+/// Section count is not an answer to it: a person cannot authorize restoring
+/// wording they were never shown.
+///
+/// Built by walking the restored projection against a twin of itself whose every
+/// leaf is absent, for the reason [`repair_differences`] walks a representation
+/// instead of a field list: the members come from the projection, so one added
+/// later is covered the day it is added.
+pub fn repair_restores(restore: &Object) -> Result<Vec<RepairDifference>> {
+    let projection = comparable_projection(restore)?;
+    let mut found = Vec::new();
+    walk_repair_difference("", &absent_twin(&projection), &projection, &mut found);
+    Ok(found)
+}
+
+/// The same shape with nothing in it, so the walk descends instead of reporting
+/// each Section as one opaque blob.
+fn absent_twin(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(members) => serde_json::Value::Object(
+            members
+                .iter()
+                .map(|(key, value)| (key.clone(), absent_twin(value)))
+                .collect(),
+        ),
+        _ => serde_json::Value::Null,
+    }
+}
+
 /// The projection to compare, with Sections keyed by id rather than by position.
 ///
 /// Position would make a deleted Section read as a change to every Section after

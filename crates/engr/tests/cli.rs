@@ -219,13 +219,63 @@ fn repair_writes_back_a_projection_that_is_gone() {
     let sections_before = store::load_object(root, &id).expect("stored").sections;
     std::fs::remove_file(&projection).expect("remove projection");
 
-    // `repair --json` reports both sides, so its document is not a bare
-    // candidate: the code is under `challenge`.
-    let prepared = prepare(root, &["repair", &id]);
-    let code = prepared["challenge"]["id"]
-        .as_str()
-        .or_else(|| prepared["challenge"].as_str())
-        .expect("challenge code");
+    // **Without `--json`.** The document that flag prints carries `restores`,
+    // so a test that only ever asked for it verified the restoration while the
+    // screen a person actually answers showed a Section count and then offered a
+    // confirmation code for wording it had never displayed.
+    let stream_before = std::fs::read(store::events_path(root, &id)).expect("stream");
+    let prepared = run_engr(root, &["repair", &id]);
+    assert!(
+        prepared.status.success(),
+        "repair: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let screen = String::from_utf8_lossy(&prepared.stdout).to_string();
+
+    // The order is the assertion: a reader scrolling to the code must have
+    // passed the wording on the way.
+    let shows_the_wording = |screen: &str, surface: &str| {
+        let wording = screen
+            .find("Wording that exists nowhere else")
+            .unwrap_or_else(|| panic!("{surface} must show what will be restored: {screen:?}"));
+        let confirm = screen
+            .find("Type this exactly to confirm")
+            .unwrap_or_else(|| panic!("{surface} must offer the code: {screen:?}"));
+        assert!(
+            wording < confirm,
+            "{surface} offers the code before showing the wording: {screen:?}"
+        );
+    };
+    shows_the_wording(&screen, "the repair screen");
+    let code = screen
+        .split_whitespace()
+        .last()
+        .expect("the screen ends with the code")
+        .to_owned();
+
+    // The same code, rendered again hours later, through the same renderer.
+    let again = run_engr(root, &["candidate", &code]);
+    assert!(
+        again.status.success(),
+        "candidate: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    shows_the_wording(
+        &String::from_utf8_lossy(&again.stdout),
+        "the re-rendered candidate",
+    );
+
+    // Both are displays. Neither is the repair.
+    assert!(
+        !projection.exists(),
+        "showing a repair must not perform one"
+    );
+    assert_eq!(
+        stream_before,
+        std::fs::read(store::events_path(root, &id)).expect("stream"),
+        "and must not touch the record"
+    );
+
     let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
     assert!(
         confirmed.status.success(),

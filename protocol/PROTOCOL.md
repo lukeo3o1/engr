@@ -281,6 +281,18 @@ undo first. An eligibility check that loads the stored Object before asking
 anything answers this state the way it answers an id nobody has — while every
 trust surface is naming the fault and sending the reader here.
 
+**And a repair that offers a confirmation code MUST first show what it will
+write.** The Human Gate's whole claim is that what was confirmed is what was
+displayed, and a count of Sections is not wording anybody can authorize. Where a
+projection is damaged the screen compares stored against restored; where none is
+stored the comparison still has the side that matters — the restored one, which
+is precisely the side the reader has no other copy of — and the stored side is
+stated as absent. The same rendering MUST appear when a pending code is shown
+again, because a screen that only tells the truth the first time is not a record
+of what was confirmed. It MUST also distinguish the revision admitted history
+derives from the revision confirming produces: they are different numbers, and a
+repair is admitted rather than silent.
+
 **And the prefix rule below is a rule about reconciliation, not a rule about
 eligibility.** `repair` decides whether there is anything to repair, and that
 question is asked of the *whole* history: a tail that cannot be applied at all is
