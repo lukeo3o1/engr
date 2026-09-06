@@ -259,6 +259,16 @@ projection is missing is not discovered. Use `show` to recover effective state
 or `verify` to check the record. Explicit `ls --verify` performs the more expensive
 assessment and reports Object history faults as well as Section drift.
 
+**What navigation gives up, the explicit assessment MUST take on.** `ls --verify`
+enumerates through the record rather than the projection files, so it is the only
+listing that can discover an Object navigation cannot see — and it MUST report
+that Object rather than assess the reconstruction and find it sound. Seals and
+admitted history both pass over a value rebuilt from history, so an assessment
+asking only those two answers `all ok` about a workspace verification is failing;
+a surface asked explicitly for an assessment MUST NOT return an affirmative
+health report in that state. A projection that is merely *behind* its history is
+a different state and MUST NOT be reported as a missing one.
+
 **And the prefix rule below is a rule about reconciliation, not a rule about
 eligibility.** `repair` decides whether there is anything to repair, and that
 question is asked of the *whole* history: a tail that cannot be applied at all is
@@ -3049,6 +3059,18 @@ so — naming every source file it wrote over that was not the bytes the migrati
 was confirmed over — because those bytes are gone afterwards and nothing in the
 result records that they were ever different. Only the released build is locked
 out by the barrier; an editor, a script or a restored backup is not.
+
+**And the resume that published is not always the resume that reports.** The
+comparison is destroyed by the write it describes: once publication has finished
+a file, that source *equals* the destination written over it, so a later resume
+recomputes an empty list, and one arriving after `VERSION` finds the work already
+complete. An implementation MUST NOT let an interruption between the overwrite
+and the report lose it. Either emit the warning before the destructive write, or
+retain enough local transaction state to report it on recovery — and report it
+from whichever resume finishes the transaction, including one that finds it
+already finished. Local state is where that belongs: it describes one machine's
+interrupted transaction rather than anything about the record, and it is retired
+with the stage it belongs to.
 
 Answering the migration's own code is the one thing that must stay reachable
 while the stage exists, because resolving the workspace *is* a confirmation. So

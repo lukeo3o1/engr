@@ -3519,3 +3519,70 @@ fn publication_that_wrote_over_nothing_says_nothing() {
         report.published_over
     );
 }
+
+/// And it survives the interruption that used to swallow it.
+///
+/// The list was computed in memory and printed after `finish` returned, so an
+/// interruption between the overwrite and the report lost it — permanently.
+/// Publication is what destroys the evidence: on the next resume every source
+/// file equals its staged destination, `source_moved_under_publication`
+/// recomputes an **empty** list, and a successful completion says nothing about
+/// bytes that are already gone. A stop after `VERSION` is worse, because the
+/// next resume lands in `already_applied`, which returned an empty list by
+/// construction.
+///
+/// Both stops, collected and asserted once: they are two routes into the same
+/// silence, and a case-by-case test would have stopped at the first.
+#[test]
+fn an_interrupted_publication_still_names_what_it_wrote_over() {
+    let mut outcomes = Vec::new();
+    for stop in ["version", "challenge"] {
+        let (_temp, root) = released();
+        let proposed = engr::migration::prepare(&root).expect("prepare");
+        interrupt_at(&root, "destination", &proposed.challenge);
+
+        let staged = store::engr_dir(&root)
+            .join("local")
+            .join("migration")
+            .join("destination")
+            .join("eventstore")
+            .join(format!("{MODEL}.jsonl"));
+        let published = store::events_path(&root, MODEL);
+        std::fs::create_dir_all(published.parent().expect("parent")).expect("eventstore dir");
+        write(&published, &read(&staged));
+        rename_as_the_released_build_would(
+            &root,
+            AUTHORITY,
+            "written after the plan was confirmed",
+        );
+
+        // The resume that publishes, and never gets to say what it published
+        // over.
+        interrupt_at(&root, stop, &proposed.challenge);
+        // The premise, checked rather than assumed: publication really happened
+        // under that interruption, so the comparison the next resume would make
+        // is already destroyed.
+        let overwritten = predecessor_object(&root, AUTHORITY)["title"].clone();
+        outcomes.push(format!(
+            "{stop}: overwritten={}",
+            overwritten != "written after the plan was confirmed"
+        ));
+
+        let confirmed = engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+            .expect("the next resume finishes");
+        let engr::Confirmed::Migration(report) = confirmed else {
+            panic!("a migration confirmation reports a migration");
+        };
+        outcomes.push(format!("{stop}: named={:?}", report.published_over));
+    }
+    let expected = vec![
+        "version: overwritten=true".to_owned(),
+        format!("version: named=[\"objects/{AUTHORITY}.json\"]"),
+        "challenge: overwritten=true".to_owned(),
+        format!("challenge: named=[\"objects/{AUTHORITY}.json\"]"),
+    ];
+    assert_eq!(
+        outcomes, expected,
+        "the resume that reports is not always the resume that published"
+    );
+}

@@ -1049,17 +1049,23 @@ fn run(cli: Cli) -> Result<()> {
                         report.sections,
                         engr::WORKSPACE_GENERATION
                     );
-                    // Said here because it cannot be found out later: these are
-                    // predecessor bytes that publication wrote over, and they
-                    // were not the bytes the migration was confirmed over. The
-                    // resume could not refuse — publication had begun, and the
-                    // qualified `no` cannot unpublish — so the one thing left
-                    // that helps is naming them while somebody is still looking.
-                    for path in &report.published_over {
-                        println!(
-                            "note       {path} had changed since this migration was confirmed; the confirmed plan was published over it"
-                        );
-                    }
+                }
+                // Outside both arms, because the resume that publishes is not
+                // always the resume that reports. An interruption between the
+                // overwrite and this line leaves the next resume to say it, and
+                // that resume may well be the one that finds the work already
+                // done and prints COMPLETE.
+                //
+                // Said at all because it cannot be found out later: these are
+                // predecessor bytes that publication wrote over, and they were
+                // not the bytes the migration was confirmed over. The resume
+                // could not refuse — publication had begun, and the qualified
+                // `no` cannot unpublish — so the one thing left that helps is
+                // naming them while somebody is still looking.
+                for path in &report.published_over {
+                    println!(
+                        "note       {path} had changed since this migration was confirmed; the confirmed plan was published over it"
+                    );
                 }
                 Ok(())
             }
@@ -1594,8 +1600,27 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
              only to section wording",
         ));
     }
+    // Refused rather than dropped, for the reason the destination guard above
+    // gives: a flag that is silently ignored told the caller something untrue
+    // about what they confirmed. The wording flags belong here with the rest.
+    // `--text` on `--close` was read, and then the action it built had nowhere
+    // to put it — so the Challenge a human confirmed was state-only and the
+    // reason for closing existed nowhere in the subject, which is the one place
+    // confirmation could have recovered it from. `--based-on` was resolved and
+    // dropped the same way, and `--ref` was resolved against a live target and
+    // dropped after.
+    //
+    // And it has to be asked *here*, before the input is narrowed: the action
+    // is the narrowing, and afterwards there is nothing left to notice was
+    // dropped. The base kept a Payload that carried Content until
+    // `Payload::validate` refused it for these actions; the action-specific
+    // representation cannot, so the check moves in front of it.
     if !chosen.carries_content()
-        && (command.role.is_some()
+        && (text.is_some()
+            || command.based_on.is_some()
+            || command.no_based_on
+            || !command.references.is_empty()
+            || command.role.is_some()
             || command.header.is_some()
             || !supplements.is_empty()
             || !relations.is_empty())
@@ -1603,7 +1628,8 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         return Err(Error::new(
             EXIT_USAGE,
             format!(
-                "{} carries no wording, so it carries no header, role, content or relations",
+                "{} carries no wording, so it takes none of --text, --text-file, --based-on, \
+                 --no-based-on, --ref, --header, --role, --content or --implemented-by",
                 chosen.label()
             ),
         ));
@@ -1620,12 +1646,6 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         references.push(parse_ref(root, spec, fields)?);
     }
     check_unique_arguments(&references, "--ref")?;
-    if !chosen.carries_content() && command.no_based_on {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--no-based-on applies only to section wording",
-        ));
-    }
 
     // The replacement is an argument to `--supersede` rather than another
     // relation flag, because it is not optional metadata on the action — the

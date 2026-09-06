@@ -58,6 +58,92 @@ fn missing_projection_is_addressable_for_assessment_but_not_in_navigation() {
         !projection.exists(),
         "read surfaces must not recreate authority"
     );
+
+    // The half this test's name promised and never asked. Cheap navigation
+    // enumerates the projection files, so it cannot see this Object at all —
+    // that is the line above, and it is deliberate. `ls --verify` enumerates
+    // through the record, so it is the only listing that *can*, and it used to
+    // answer `all ok` at the same instant `verify` was failing over the same
+    // workspace. Assessment is where an affirmative health report is worth the
+    // most and costs the most when it is wrong.
+    //
+    // A control beside it, because "reported" is not the claim: a projection
+    // that is merely *behind* its history is a healthy crash tail, not missing
+    // storage, and the two must not collapse into one word.
+    let behind = prepare(root, &["prepare", "--new", "--text", "one revision behind"]);
+    confirm(root, &behind);
+    let behind_id = behind["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let rewound = std::fs::read(store::object_path(root, &behind_id)).expect("rev 1 bytes");
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &behind_id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "Admitted, and the projection never caught up.",
+            ],
+        ),
+    );
+    std::fs::write(store::object_path(root, &behind_id), &rewound).expect("rewind");
+
+    let before = workspace_bytes(root);
+    let assessed = run_engr(root, &["ls", "--verify"]);
+    assert!(
+        assessed.status.success(),
+        "the survey keeps its exit convention: {}",
+        String::from_utf8_lossy(&assessed.stderr)
+    );
+    let assessment = String::from_utf8_lossy(&assessed.stdout).to_string();
+    assert!(
+        !assessment.contains("all ok"),
+        "the explicit assessment reported health over a workspace verify fails: {assessment:?}"
+    );
+    assert!(
+        assessment.contains("OBJECT PROJECTION MISSING"),
+        "assessment must name the missing projection: {assessment:?}"
+    );
+    let named: Vec<&str> = assessment
+        .lines()
+        .filter(|line| line.contains("OBJECT PROJECTION MISSING"))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "one Object is missing its projection, not two: {assessment:?}"
+    );
+    // Both ids were minted seconds apart, so they share a long prefix and only
+    // the abbreviation the listing actually printed can tell them apart. Taking
+    // it from the row is also the premise check: if the column moved, this
+    // stops silently comparing the wrong thing.
+    let abbreviated = named[0]
+        .split_whitespace()
+        .nth(1)
+        .expect("the row carries an abbreviated id");
+    assert!(
+        id.starts_with(abbreviated),
+        "the row must name the Object whose projection is gone: {assessment:?}"
+    );
+    assert!(
+        !behind_id.starts_with(abbreviated),
+        "a projection that is behind its history is not a missing one: {assessment:?}"
+    );
+    assert_eq!(
+        before,
+        workspace_bytes(root),
+        "assessment is a read: it must not write"
+    );
+    assert!(
+        !projection.exists(),
+        "and it must not recreate the projection it reported"
+    );
 }
 
 #[cfg(unix)]
@@ -2749,6 +2835,167 @@ fn type_and_state_flags_belong_to_classify_and_nothing_else() {
             .expect("json");
     assert_eq!(value["state"], "closed");
     assert!(value.get("type").is_none());
+}
+
+/// A flag an action cannot carry is refused, never read and then discarded.
+///
+/// `--close --text "why"` used to prepare a **state-only** Challenge: the CLI
+/// built Content out of the wording, the `ObjectStateChanged` arm it then built
+/// had nowhere to put it, and what a human confirmed said nothing about why.
+/// Confirmation could not recover the reason either, because it never entered
+/// the subject at all. `--based-on` was resolved against the repository and
+/// dropped the same way, and `--ref` was resolved against a live target and
+/// dropped after it had been checked.
+///
+/// The base refused these: its Payload carried Content until `Payload::validate`
+/// rejected it for these actions. The action-specific representation cannot
+/// carry it that far, so the question has to be asked in front of the narrowing
+/// rather than behind it.
+///
+/// Every combination is collected and asserted once, so one run maps all
+/// sixteen instead of stopping at the first. The carried inputs are **valid** —
+/// a real committed basis, a real target section, a file that exists — so
+/// nothing here can be refused for an incidental reason and read as a pass.
+#[test]
+fn an_action_that_carries_no_wording_refuses_every_wording_flag() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "tests@example.com"]);
+    git(root, &["config", "user.name", "engr tests"]);
+    std::fs::write(root.join("source.txt"), "committed\n").expect("source");
+    std::fs::write(root.join("wording.txt"), "wording from a file\n").expect("wording");
+    git(root, &["add", "."]);
+    commit_as_test(root, "a basis --based-on HEAD can really resolve");
+    store::init(root).expect("init");
+
+    // A target with a section, committed, so `--ref` names something that
+    // exists *at HEAD* — where a Ref pins its target. Without the commit the
+    // Ref is refused for not being readable at that commit, which would refuse
+    // every row of the table below for a reason that has nothing to do with the
+    // flag being dropped.
+    let target = prepare(
+        root,
+        &["prepare", "--new", "--text", "the reference target"],
+    );
+    confirm(root, &target);
+    let target_id = target["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &target_id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "Wording a reference can legitimately name.",
+            ],
+        ),
+    );
+    git(root, &["add", "-A"]);
+    commit_as_test(root, "the target, committed so a --ref can pin it at HEAD");
+    let named_section = format!("{target_id}:1");
+    let wording_file = root.join("wording.txt").display().to_string();
+
+    let subject = prepare(
+        root,
+        &["prepare", "--new", "--text", "the flags it cannot carry"],
+    );
+    confirm(root, &subject);
+    let id = subject["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    // `--delete` has to name a section that is there, or it would be refused for
+    // that instead.
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "The section --delete names.",
+            ],
+        ),
+    );
+
+    // `--reopen` needs something closed to reopen, and every action here has to
+    // be one this object could really take: an action refused for being a no-op
+    // would refuse the whole row and hide whether the flag was dropped.
+    let closed = prepare(root, &["prepare", "--new", "--text", "already closed"]);
+    confirm(root, &closed);
+    let closed_id = closed["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(root, &["prepare", "--object", &closed_id, "--close"]),
+    );
+
+    let before = workspace_bytes(root);
+    let mut outcomes = Vec::new();
+    for (object, action) in [
+        (id.as_str(), vec!["--delete", "1"]),
+        (id.as_str(), vec!["--close"]),
+        (closed_id.as_str(), vec!["--reopen"]),
+        (
+            id.as_str(),
+            vec!["--classify", "--type", "design", "--state", "draft"],
+        ),
+    ] {
+        for carried in [
+            vec!["--text", "wording this action has nowhere to put"],
+            vec!["--text-file", wording_file.as_str()],
+            vec!["--based-on", "HEAD"],
+            vec!["--ref", named_section.as_str(), "text"],
+        ] {
+            let mut args = vec!["prepare", "--object", object];
+            args.extend(action.iter().copied());
+            args.extend(carried.iter().copied());
+            let refused = run_engr(root, &args);
+            let message = String::from_utf8_lossy(&refused.stderr).to_string();
+            let named = message.contains("carries no wording")
+                && message.contains(carried[0])
+                && message.contains(match action[0] {
+                    "--delete" => "section.deleted.v1",
+                    "--close" | "--reopen" => "object.state_changed.v1",
+                    _ => "object.classified.v1",
+                });
+            outcomes.push(format!(
+                "{} {}: exit={:?} names_the_flag={named}",
+                action[0],
+                carried[0],
+                refused.status.code(),
+            ));
+        }
+    }
+
+    let wrong: Vec<&String> = outcomes
+        .iter()
+        .filter(|line| !line.ends_with("exit=Some(2) names_the_flag=true"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "every one of these must be a usage error naming the flag: {wrong:#?}"
+    );
+    // And refusing means refusing: no Challenge minted, no record touched.
+    assert_eq!(
+        before,
+        workspace_bytes(root),
+        "a refused prepare wrote to the workspace"
+    );
 }
 
 /// Removing supplementary content shows the human what is being removed.

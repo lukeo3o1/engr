@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 const STAGE: &str = "migration";
 const STAGE_TEMP: &str = "migration.tmp";
 const MANIFEST: &str = "manifest.json";
+const PUBLISHED_OVER: &str = "published-over.json";
 
 /// The staging directory, under `local/` with every other resumable local file.
 ///
@@ -871,6 +872,37 @@ pub(crate) fn discard_orphaned_stage(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What publication is about to write over, kept with the transaction it
+/// belongs to.
+///
+/// Local, because it describes one machine's interrupted transaction and
+/// nothing about the record; and inside the stage, so the sweep that retires a
+/// completed migration retires this with it and nothing outlives what it
+/// describes. Merged rather than replaced: two resumes can each overwrite a
+/// different file, and the reader is owed both.
+fn record_published_over(root: &Path, found: Vec<String>) -> Result<Vec<String>> {
+    let mut all = recorded_published_over(root)?;
+    for path in found {
+        if !all.contains(&path) {
+            all.push(path);
+        }
+    }
+    if !all.is_empty() {
+        all.sort();
+        store::write_json(&stage_dir(root).join(PUBLISHED_OVER), &all)?;
+    }
+    Ok(all)
+}
+
+fn recorded_published_over(root: &Path) -> Result<Vec<String>> {
+    let path = stage_dir(root).join(PUBLISHED_OVER);
+    let Some(text) = read_local(&path)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&text)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))
+}
+
 fn staged(root: &Path) -> Result<Option<Manifest>> {
     let path = stage_dir(root).join(MANIFEST);
     let Some(text) = read_local(&path)? else {
@@ -1141,6 +1173,10 @@ fn already_applied(root: &Path, challenge: &crate::confirmation::Challenge) -> R
     let subject: MigrationSubject = serde_json::from_value(challenge.subject.data.clone())
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("migration subject: {error}")))?;
     established_this_workspace(root, &subject, &challenge.id)?;
+    // Read before the sweep takes the stage away with it. An interruption after
+    // `VERSION` and before the sweep arrives here, and this is the last resume
+    // that can still say what publication wrote over.
+    let published_over = recorded_published_over(root)?;
     // Only now, and it is the entire remaining operation: the spent question and
     // the plan it was waiting on. Idempotent and order-independent, so a crash
     // part way through leaves work this can simply do again.
@@ -1157,9 +1193,9 @@ fn already_applied(root: &Path, challenge: &crate::confirmation::Challenge) -> R
             .map(|planned| planned.sections as usize)
             .sum(),
         already_complete: true,
-        // This path publishes nothing, so there is nothing it could have written
-        // over.
-        published_over: Vec::new(),
+        // This path publishes nothing — but an earlier resume of the same
+        // transaction may have, and been interrupted before it could say so.
+        published_over,
     })
 }
 
@@ -1575,6 +1611,13 @@ fn finish(
     sections: usize,
     published_over: Vec<String>,
 ) -> Result<Report> {
+    // Written down *before* the write it describes, because publication is what
+    // destroys the evidence for it: afterwards every source file equals its
+    // staged destination, so a resume arriving at a finished publication
+    // recomputes an empty list and completes in silence. An interruption
+    // between the overwrite and the report therefore lost the only warning
+    // anybody was ever going to get about bytes that are already gone.
+    let published_over = record_published_over(root, published_over)?;
     publish(root, &ready)?;
     let ids = ready.iter().map(|(id, _, _)| id.clone()).collect();
     stop_for_test(Stage::BeforeVersion, &challenge.id)?;

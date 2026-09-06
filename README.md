@@ -140,6 +140,9 @@ Plain `ls` and `ls --sections` read only stored projections, so their cost does
 not grow with event history or dependency graphs. `unchecked` means history,
 bases and dependencies were not assessed; crash tails and missing projections
 are not recovered here. Use `show <id>` or `verify` before relying on the wording.
+`ls --verify` enumerates through the record instead, so it is also the listing
+that finds an Object whose projection is gone — a search that comes back empty is
+not proof the record holds nothing.
 
 For an Agent mutation, first run the intended command with `--agent`. If a Rule
 applies, engr refuses without writing and surfaces the ReviewDigest and Rule ids.

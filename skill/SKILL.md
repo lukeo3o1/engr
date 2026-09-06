@@ -231,6 +231,17 @@ significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
 
+**A search that finds nothing is not proof that the record holds nothing.**
+`engr ls` and `engr ls --all --sections` read stored projections only — that is
+what keeps them cheap, and why every row says `unchecked` — so wording admitted
+in a crash tail the projection never caught up to does not appear, and an object
+whose projection is missing is not listed at all. `unchecked` is about how far a
+row can be trusted; it says nothing about which rows are absent. Before
+concluding that something was never recorded, run `engr ls --verify` to discover
+what the record holds but the projections do not, and `engr show <id>` for the
+effective wording of anything you are about to build on. `engr verify` is the
+one that decides whether the record adds up at all.
+
 Also run `engr backlog ls`, `engr work ls` and `engr collection ls` — an
 unresolved point recorded in
 one and an execution checkpoint left in the other are exactly the context a

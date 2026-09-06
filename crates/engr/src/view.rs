@@ -241,11 +241,16 @@ fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFaul
 /// level makes every row under it wrong in the same way — and each of them used
 /// to answer some part of it with `ok`.
 ///
-/// One word per state, cased for the surface that prints it, and the word is the
-/// one the JSON `integrity` member already uses: a reader who has seen
-/// `"integrity": "divergent"` must not have to learn a second name for it.
+/// One word per state, cased for the surface that prints it, and where the JSON
+/// `integrity` member has a name for the same state it is that name: a reader
+/// who has seen `"integrity": "divergent"` must not have to learn a second one.
+/// `ProjectionMissing` has no JSON twin, because it is a fact about storage
+/// rather than about what the bytes say; it borrows `verify`'s wording instead.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ObjectFault {
+    /// There are no stored bytes at all; what was assessed is the
+    /// reconstruction admitted history produced.
+    ProjectionMissing,
     /// The stored bytes do not match their own aggregate seal.
     Tampered,
     /// They match it, and no admitted Event ever produced them.
@@ -258,6 +263,7 @@ impl ObjectFault {
     /// The prose label, beside `REF UNADMITTED` and its neighbours.
     fn label(self) -> &'static str {
         match self {
+            Self::ProjectionMissing => "OBJECT PROJECTION MISSING",
             Self::Tampered => "OBJECT TAMPERED",
             Self::Divergent => "OBJECT DIVERGENT",
             Self::Unreplayable => "OBJECT UNREPLAYABLE",
@@ -266,6 +272,24 @@ impl ObjectFault {
 }
 
 fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
+    // Asked before the other two, because they are questions about stored bytes
+    // and here there are none. `object` is the reconstruction `ops::effective`
+    // built out of admitted history: its seals pass and its history produced it,
+    // by construction. So both of the questions below answer "fine" about a
+    // record that has no projection at all — which is how the *explicit*
+    // assessment came to print `all ok` on a workspace `verify` was failing, and
+    // on the one surface still entitled to discover such an Object, since cheap
+    // navigation enumerates the files and cannot see it.
+    //
+    // "Not established as a readable file", not "established absent": a path
+    // that is there and is not a regular file is not a projection either, and
+    // the listing that cannot tell must not be the one that says nothing.
+    if !matches!(
+        store::resource_present(&store::object_path(root, &object.id)),
+        Ok(true)
+    ) {
+        return Some(ObjectFault::ProjectionMissing);
+    }
     if object_tampered(object) {
         return Some(ObjectFault::Tampered);
     }
