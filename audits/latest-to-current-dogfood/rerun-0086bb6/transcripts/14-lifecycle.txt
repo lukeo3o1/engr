@@ -1,0 +1,128 @@
+$ engr-current prepare --object 01a05e55-ee --classify --type decision --state identified   # cwd=r5/project
+--- stderr ---
+error: a decision cannot be identified; it is one of proposed | accepted | rejected | superseded
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type design --state draft   # cwd=r5/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       design
+State      draft
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 4RZRZM
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 4RZRZM   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type design --state accepted   # cwd=r5/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       design
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM ULKJDB
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ULKJDB   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type risk --state identified   # cwd=r5/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       risk
+State      identified
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM GD7S52
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM GD7S52   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 4
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --type risk --state mitigated   # cwd=r5/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       risk
+State      mitigated
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM EPN6NZ
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM EPN6NZ   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 5
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --untyped --state accepted   # cwd=r5/project
+--- stderr ---
+error: an untyped object cannot be accepted; it is one of open | closed
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --classify --untyped --state open   # cwd=r5/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM KPAURW
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM KPAURW   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.classified.v1  rev 6
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --close   # cwd=r5/project
+--- stdout ---
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      closed
+Attention  no ??it leaves the default listing
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM 7X9TVF
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 7X9TVF   # cwd=r5/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 7
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-ee --close   # cwd=r5/project
+--- stderr ---
+error: 01a05e55-ee46-7a91-983f-fa79b297b10c is already closed, so there is nothing to confirm
+--- exit 5 ---

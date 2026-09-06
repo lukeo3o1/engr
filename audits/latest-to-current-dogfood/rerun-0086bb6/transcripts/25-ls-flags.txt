@@ -1,0 +1,26 @@
+$ engr-current ls zzz-no-such-word --verify   # cwd=r5/advf
+--- stdout ---
+??01a05e55-e6  closed                禮2  refs moved ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-prev ls zzz-no-such-word --stale   # cwd=r5/advf
+--- stdout ---
+??01a05e55-e6  closed                禮2  refs moved ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-prev ls --help   # cwd=r5/project
+--- stdout ---
+List objects. Only the ones needing attention unless --all
+
+Usage: engr-prev ls [OPTIONS] [KEYWORD]
+
+Arguments:
+  [KEYWORD]  Keyword to filter by, matched against titles and section text
+
+Options:
+      --all          
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+      --sections     One line per section, so grep can reach the text
+      --stale        Sections whose basis or references moved, or that will not verify
+  -h, --help         Print help
+--- exit 0 ---

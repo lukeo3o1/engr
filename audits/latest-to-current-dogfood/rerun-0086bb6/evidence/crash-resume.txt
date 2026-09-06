@@ -1,0 +1,134 @@
+===== baseline (uninterrupted) =====
+inventory: 3a4d25fe5a1dad0701ca212517843a375742f652f62c4db41910368a50f90388
+event admitted.at: 2026-09-06T07:42:26.886798393Z 
+events per stream: 1 1 1 
+
+===== interrupted at 500ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t500/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t500/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 6a77663304d2547274d05fbab5c878299a2037ec04bf9437b2453b41f2d3d7aa
+event admitted.at: 2026-09-06T07:43:06.374669793Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 600ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t600/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t600/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: c23e54c8fd2408554d49534dd3edba328b55a838ac714e1efec67bec4e524f1f
+event admitted.at: 2026-09-06T07:43:09.101509351Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 700ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t700/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t700/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 40c2bb914e2edec728edf3934a7f6bf665a9303e1103f295b2ae441003609262
+event admitted.at: 2026-09-06T07:43:11.826734698Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 800ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t800/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t800/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 5fd753ebda67186647e9193d0e72e7693f84cc8836255662ba17c9a52337b5b7
+event admitted.at: 2026-09-06T07:43:14.535568221Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 850ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t850/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t850/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 59e3424b827dedcf5a9ad81e1cc3edf6d6e3e728d96f97d608ee55c6e99136d9
+event admitted.at: 2026-09-06T07:43:17.328327685Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 864cb6d5f7ef2b66f58f5c6c551678bf426167f560afbbf727aa60f144559388
+event admitted.at: 2026-09-06T07:42:44.368400099Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 70507fb81795f55782692bb143df942a36d03652c00412dd427a58e66941fa28
+event admitted.at: 2026-09-06T07:42:47.321284183Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1000ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1000/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1000/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 0d5f2211d6aa7cb1247ef319fab801cddc646e0b9babb186f40e6416c7e7b742
+event admitted.at: 2026-09-06T07:42:50.349134638Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1050ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1050/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1050/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: 3b867db85ef2a475ae7e14b0af8671bbcfbbec34c2828b2b9864fd5e0f676469
+event admitted.at: 2026-09-06T07:42:53.369068712Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=0 : COMPLETE   crash-runs/t1080/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting DBMUMJ
+inventory: ee2676fdc628c968203ced7f14332a2a0b86950583a192474b2538cd35e91f46
+event admitted.at: 2026-09-06T07:42:56.519228882Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 

@@ -1,0 +1,329 @@
+$ engr-current ls --all   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --sections   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-ee 禮1   open                  unchecked       The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  unchecked       Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  unchecked       A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-current ls --verify   # cwd=r5/dep-b
+--- stdout ---
+all ok
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          required Object projection is missing; admitted history reconstructs it
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- exit 0 ---
+
+$ engr-prev ls --all   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-prev ls --sections   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74 禮1   open                  ok              The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+01a05e55-74 禮2   open                  ok              Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  ok              The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  ok              Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  ok              A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-prev ls --stale   # cwd=r5/dep-b
+--- stdout ---
+all ok
+--- exit 0 ---
+
+$ engr-prev verify   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          required Object projection is missing; admitted history reconstructs it
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current ls --all   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-current ls --sections   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-current ls --verify   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-current verify   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-prev ls --all   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-prev ls --sections   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-prev ls --stale   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-prev verify   # cwd=r5/dep-c
+--- stderr ---
+error: /audit/r5/dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+--- exit 4 ---
+
+$ engr-current ls --all   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74  open                   2 sections  object tampered  Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --sections   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74 禮1   open                  object_tampered  Wording nobody ever admitted, and nothing was resealed.
+01a05e55-74 禮2   open                  object_tampered  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  unchecked       The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  unchecked       Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  unchecked       A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- stderr ---
+!! 2 of these sections cannot be trusted; run: engr verify
+!!   01a05e55-74 禮1 OBJECT TAMPERED
+!!   01a05e55-74 禮2 OBJECT TAMPERED
+--- exit 0 ---
+
+$ engr-current ls --verify   # cwd=r5/dep-d
+--- stdout ---
+繚 01a05e55-74  open                  禮-  OBJECT TAMPERED
+??01a05e55-e6  closed                禮2  REF TAMPERED ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          current Object integrity failed
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          禮1 content does not match its recorded hash
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          禮2 stands on 01a05e55-74 禮1, whose current integrity failed
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current show 01a05e55-74   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   1 ok   1 tampered   rev 1
+!!         Object integrity failed; current authority changed outside a supported transition
+!!         git show b0e3f051:.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? TAMPERED
+Wording nobody ever admitted, and nothing was resealed.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+    !!       persisted Section does not match the seal admitted at 2026-09-01T18:57:48.683149208Z
+    !!       git show b0e3f051:.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+--- exit 5 ---
+
+$ engr-prev ls --all   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74  open                   2 sections  object tampered  Migration continuity audit
+01a05e55-e6  closed                 2 sections  1 tampered    Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-prev ls --sections   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74 禮1   open                  object_tampered  Wording nobody ever admitted, and nothing was resealed.
+01a05e55-74 禮2   open                  object_tampered  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  ok              The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  ok              Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  ok              A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- stderr ---
+!! 1 of these sections cannot be trusted; run: engr verify
+!!   01a05e55-74 禮1 TAMPERED
+--- exit 0 ---
+
+$ engr-prev ls --stale   # cwd=r5/dep-d
+--- stdout ---
+繚 01a05e55-74  open                  禮1  TAMPERED
+??01a05e55-e6  closed                禮2  REF TAMPERED ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-prev verify   # cwd=r5/dep-d
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          current Object integrity failed
+          its sections is not what its admitted history produced; it was changed outside an admission path
+          禮1 content does not match its recorded hash
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+          禮2 stands on 01a05e55-74 禮1, whose current integrity failed
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-prev show 01a05e55-74   # cwd=r5/dep-b
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- exit 0 ---
+
+$ engr-current prepare --object 01a05e55-74 --add A section added to an object whose projection is missing.   # cwd=r5/dep-b
+--- stderr ---
+error: unexpected argument 'A section added to an object whose projection is missing.' found
+
+Usage: engr-current prepare [OPTIONS] <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current prepare --help   # cwd=r5/dep-b
+--- stdout ---
+Prepare a Human change, or admit a reviewed Agent change
+
+Usage: engr-current prepare [OPTIONS] <--new|--rename|--add|--revise <SECTION>|--merge <DESTINATION>|--delete <SECTION>|--close|--reopen|--classify|--supersede <OBJECT>>
+
+Options:
+      --new
+          Propose a new object
+      --root <ROOT>
+          Workspace root. Defaults to the nearest ancestor containing .engr
+      --rename
+          Replace the object's title
+      --add
+          Propose a new section
+      --revise <SECTION>
+          Replace the wording of a section
+      --merge <DESTINATION>
+          Consolidate sections into this surviving destination
+      --sources <SECTIONS>
+          Sections consumed by --merge
+      --delete <SECTION>
+          Remove a section
+      --close
+          Declare an untyped object finished. Not a spelling of --classify: it is its own action, and it refuses an object nobody is looking at
+      --reopen
+          Take a finished untyped object back up
+      --classify
+          Declare what this object is and what state it is in. Both are explicit
+      --supersede <OBJECT>
+          Replace this object with another, confirming the state, the replacement and the reason together
+      --object <OBJECT>
+          The object to act on. Any unique id prefix. Omit only with --new
+      --type <TYPE>
+          Destination type. With --classify, or on a settled object with --add, --revise, --merge, --delete or --rename, to do both in one confirmation [possible values: design, decision, risk]
+      --untyped
+          Destination is an untyped object. Same two uses as --type
+      --state <STATE>
+          Destination state, valid for the destination type [possible values: open, closed, draft, proposed, accepted, rejected, superseded, identified, mitigated, invalidated]
+      --text <TEXT>
+          Wording, inline
+      --text-file <TEXT_FILE>
+          Wording, from a file
+      --header <HEADER>
+          A short label for the section, for navigation. Part of what a reference can depend on, so changing it is a change to the assertion
+      --role <ROLE>
+          What this section asserts, semantically [possible values: decision, risk, supersession, acceptance_criterion]
+      --content <TYPE> <BODY>
+          A bounded literal excerpt, as code.<tag> or data.<tag> and a body. Repeatable; order is significant
+      --content-file <TYPE> <PATH>
+          The same, with the body read from a file
+      --implemented-by-file <PATH>
+          A repository file that implements this assertion
+      --implemented-by-symbol <PATH> <SYMBOL>
+          A source symbol that implements this assertion
+      --implemented-at <REVISION>
+          Committed revision to pin implemented_by targets at. Defaults to HEAD only while the path itself is clean
+      --based-on <BASED_ON>
+          Committed repository basis. Defaults to HEAD only when source is clean
+      --no-based-on
+          Record that this wording has no repository basis
+      --ref <OBJECT:SECTION> <FIELDS>
+          A section this wording depends on, followed by comma-separated semantic fields
+      --oversize
+          Retry a proposal a size threshold already refused once
+      --agent
+          Admit directly through Agent Rule Review instead of minting a Human challenge
+      --review <DIGEST>
+          ReviewDigest surfaced by the first governed attempt
+      --reviewed-rule <RULE>
+          Rule id actually reviewed. Repeat for the complete surfaced set
+      --review-attempt <N>
+          Which attempt of the continuous review sequence this is [default: 1]
+      --review-result <RESULT>
+          Agent-attested outcome of reviewing the exact mutation [possible values: passed, failed, exhausted]
+      --review-explanation <TEXT>
+          Exact explanation shown when a Human is asked to override
+      --json
+          
+  -h, --help
+          Print help
+--- exit 0 ---

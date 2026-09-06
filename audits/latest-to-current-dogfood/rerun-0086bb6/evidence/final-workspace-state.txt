@@ -1,0 +1,43 @@
+===== verify =====
+01a05e55-74  PASS  3 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  5 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+01a075a5-c1  PASS  0 sections  Continuity carried forward
+exit=0
+
+===== ls --all =====
+01a05e55-74  design/superseded      3 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   5 sections  unchecked     Predecessor fixture construction
+01a075a5-c1  decision/accepted      0 sections  unchecked     Continuity carried forward
+exit=0
+
+===== every stream, and its revisions =====
+01a05e55-74eb-7370-b771-0008bd71d149  3 events  revs 1 2 3 
+01a05e55-e62b-75c3-8b32-6c388dec4c4b  1 events  revs 1 
+01a05e55-ee46-7a91-983f-fa79b297b10c  10 events  revs 1 2 3 4 5 6 7 8 9 10 
+01a075a5-c106-7633-b9a0-6ce87342d6a7  2 events  revs 1 2 
+
+===== what git tracks, and what it must never see =====
+A  .engr/collections/release-2026.json
+M  .engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+M  .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+-- anything under local/? --
+NOT VISIBLE TO GIT (correct)
+and nothing under local/ is tracked (correct)
+
+===== inventory =====
+a748496f44f59816f39295a91245382ca9f7efc34a72cb665db0bce90c0e3ff5  .engr/.gitignore
+4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865  .engr/VERSION
+9a1e45689b9d6922d064107213d9f45c460d50b3d70ddd5caaf67706d0bdafa7  .engr/collections/release-2026.json
+1fda447b74c420e66dab2ac2532b55cae2ec3a6bf30dc4af071ac75dc1bbb91c  .engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+1398f13947b8d3ac297a773be5bfdaf7cfbbf3ae9164bf70d335a94dbc12da19  .engr/eventstore/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.jsonl
+f335935e61c465fb5c3506a3936575d2f06f4b6bd386cb3bfd94c9d2edaac6b2  .engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+9290198eb9250bfea3dcbb1c027d6d79bc4c1d0ba34b4c7f5a6e8c86825b8110  .engr/eventstore/objects/01a075a5-c106-7633-b9a0-6ce87342d6a7.jsonl
+fb0f8a520969ca6eff2c10f08a97041dc0953fff15332850ece857eb74435c7f  .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+15a1e01f15e149ea99e78eb4b8c8c784c811d74eb76ae709b34e699ef6d0e20a  .engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+02cb6bbc5cb59aade952fdabf5a697223dcd918486edf66105886e016566ea43  .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+851cba2d4de434cfecbe30ef6758d89d05a93f81f5e65a4c43f1be1af287bd05  .engr/objects/01a075a5-c106-7633-b9a0-6ce87342d6a7.json
+dbdedf69e3f5ae41bcca86dd7f258c21e62c308f80cca7f7531e88000809607d  .engr/rules/audit-scope.md
+e2120f71576e100eaa7051765d651e9aa59bf30ca97f79445beb8313f6f32993  .engr/rules/evidence-discipline.md

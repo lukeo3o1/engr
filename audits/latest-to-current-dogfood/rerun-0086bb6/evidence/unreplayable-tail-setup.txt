@@ -1,0 +1,7 @@
+appended section.deleted.v1 rev 2 id 01a075a9-f7a9-7327-8ee5-9111718097b1
+sealed   1:b6fb18a6b40c03555737c531d6e7ca46063511da132010dc67a1d6aec58066dd
+stream: 816617a2b363fb6197fbefaa114dd08b8270fb033fe87c68c41d087fe67ae690 -> 0b5d8e2dc3ad6fdeb4e5a92fc9614ca85d021f769c4b592fbfa113a88a2226ff
+--- the appended event, and its seal checked independently ---
+{"data":{"section":99},"digest":"1:b6fb18a6b40c03555737c531d6e7ca46063511da132010dc67a1d6aec58066dd","id":"01a075a9-f7a9-7327-8ee5-9111718097b1","metadata":{"admitted":{"at":"2026-09-06T07:28:07.290267184Z","by":"human","confirmation":{"challenge":"3UJJJU"}}},"rev":2,"type":"section.deleted.v1"}
+event 1: stored=1:ae6d804bdf3db2 computed=1:ae6d804bdf3db2 MATCH
+event 2: stored=1:b6fb18a6b40c03 computed=1:b6fb18a6b40c03 MATCH

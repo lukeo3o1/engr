@@ -1,0 +1,59 @@
+$ engr-current ls   # cwd=r5/project
+--- stdout ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r5/project
+--- stdout ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --sections   # cwd=r5/project
+--- stdout ---
+01a05e55-74 禮1   open                  unchecked       The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+01a05e55-74 禮2   open                  unchecked       Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-ee 禮1   open                  unchecked       The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  unchecked       Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  unchecked       A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-current ls --verify   # cwd=r5/project
+--- stdout ---
+all ok
+--- exit 0 ---
+
+$ engr-current ls continuity --all   # cwd=r5/project
+--- stdout ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  禮2 unchecked  Evidence rules for this audit
+01a05e55-ee  open                   3 sections  禮4 unchecked  Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --sections --verify   # cwd=r5/project
+--- stderr ---
+error: the argument '--sections' cannot be used with '--verify'
+
+Usage: engr-current ls --sections [KEYWORD]
+
+For more information, try '--help'.
+--- exit 2 ---
+
+$ engr-current ls --help   # cwd=r5/project
+--- stdout ---
+List stored projections without verification. Attention only unless --all
+
+Usage: engr-current ls [OPTIONS] [KEYWORD]
+
+Arguments:
+  [KEYWORD]  Keyword to filter by, matched against titles and section text
+
+Options:
+      --all          
+      --root <ROOT>  Workspace root. Defaults to the nearest ancestor containing .engr
+      --sections     One line per stored section, marked unchecked, so grep can reach the text
+      --verify       Assess history, bases and dependencies (more expensive than plain ls)
+  -h, --help         Print help
+--- exit 0 ---

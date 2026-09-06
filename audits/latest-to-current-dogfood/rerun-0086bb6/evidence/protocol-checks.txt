@@ -1,0 +1,22 @@
+208:Migration adds one more, `object.migrated.v1`, which no command can ask for; see
+257:These are stored snapshots: a crash tail is not applied and an Object whose
+746:match its historical snapshot. Agent admission applies the same preflight before
+771:   snapshot's own workspace generation, validating historical integrity where
+1894:two kinds — never a Section, a snapshot, a Collection, or another sidecar. This
+2490:commit. A binding must be one coherent snapshot or it must fail; it must never
+2690:`project/project/.engr`, and a real legacy snapshot would report itself as
+2894:8. emit exactly one `object.migrated.v1` bootstrap Event per migrated Object at
+3075:marker or staged material: each planned Object's revision-1 `object.migrated.v1`
+3136:A **historical** snapshot carries the generation that was current when it was
+3138:older snapshot would make every reference pinned before a migration unresolvable
+3140:correct when it was recorded. A snapshot MUST be decoded under **its own**
+3239:`engr:backlog:<id>` and `engr:backlog:<id>:<section>`. A Git snapshot selector
+3240:may follow as `@<commit>`; it selects an as-of snapshot and is not identity.
+3258:identity. The optional Git commit supplies snapshot context, not identity. The
+--- and the ls sentences the binary ships ---
+251:**Navigation MUST stay cheap and MUST NOT claim soundness.** Plain `ls`, keyword
+255:mark rows `unchecked`, including section wording copied through a pipe; matching
+259:or `verify` to check the record. Explicit `ls --verify` performs the more expensive
+1279:reader. Plain `ls` and `ls --sections` are unchecked projection surveys and keep
+1280:exiting 0 for readable projections. `ls --verify` explicitly requests assessment;
+1655:accepted unchecked. **Existence and

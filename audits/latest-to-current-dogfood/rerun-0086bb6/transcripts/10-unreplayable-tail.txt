@@ -1,0 +1,41 @@
+$ engr-current verify   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current show 01a05e55-74   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current ls --all   # cwd=r5/tail
+--- stdout ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --verify   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-current repair 01a05e55-74   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section 禮99 does not exist
+--- exit 5 ---
+
+$ engr-prev verify   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-prev ls --all   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section 禮99 does not exist
+--- exit 4 ---
+
+$ engr-prev repair 01a05e55-74   # cwd=r5/tail
+--- stderr ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+--- exit 5 ---

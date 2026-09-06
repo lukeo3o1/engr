@@ -1,0 +1,6 @@
+removed section 1: 2 -> 1 sections
+resealed object : 1:afd01438f30c23f3cc08e74b03491da8e2ea01fed558decf39406e80809274f4
+dep-e: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 677857ea73c027f7813b066d4035e3177e3f0312d9c96ecf613afb3d5c7ca6b7
+removed section 1: 2 -> 1 sections
+object seal left alone (the control: this is ordinary damage)
+dep-f: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> eb0ea7bf5a0ddafa2083c16ea4ecf935ccf73bffc8d06558d5a1a732145cf031

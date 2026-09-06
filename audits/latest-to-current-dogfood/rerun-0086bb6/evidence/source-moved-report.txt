@@ -1,0 +1,44 @@
+================ kill@960ms   published_streams=0/3
+-- the whole screen the resume prints --
+docker : error: the predecessor workspace moved after migration DBMUMJ was confirmed, and publishing now would discard 
+what arrived; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confir
+m "CONFIRM DBMUMJ no"` — and prepare it again over the workspace as it now stands
+At line:1 char:331
++ ... ngr-audit"; docker run --rm -v "${A}:/audit" -e HOME=/audit/home -e G ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: the pred...s it now stands:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+exit=5
+-- did the edit survive? --
+1
+-- and does the published record verify? --
+error: bsf/w/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+exit=4
+================ kill@980ms   published_streams=0/3
+-- the whole screen the resume prints --
+error: the predecessor workspace moved after migration DBMUMJ was confirmed, and publishing now would discard what arri
+ved; nothing has been published, so withdraw the migration — answer it with a qualified response, `engr confirm "CONFIR
+M DBMUMJ no"` — and prepare it again over the workspace as it now stands
+exit=5
+-- did the edit survive? --
+1
+-- and does the published record verify? --
+error: bsf/w/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+exit=4
+================ kill@1000ms   published_streams=1/3
+-- the whole screen the resume prints --
+MIGRATED   bsf/w/.engr  3 objects, 7 sections, generation 1
+note       objects/01a05e55-74eb-7370-b771-0008bd71d149.json had changed since this migration was confirmed; the confirmed plan was published over it
+exit=0
+-- did the edit survive? --
+0
+0
+-- and does the published record verify? --
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+exit=0

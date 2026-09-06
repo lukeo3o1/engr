@@ -1,0 +1,27 @@
+topic-level add   : b8965174be4e328ea47681da5dd95818cbcad5876f7e6e2f9edd43323062333c
+topic-level rename: 612ed037402e9829b158ec23a6d36a70b775f940938d40d6460a61ef01605ef8
+point 1           : 9a63c31eb00b10a792bfbcdd8fc4fb43e1b9a6d813712421adc411f1deaa8164
+
+===== what each operation says when the token is missing =====
+backlog rename (topic-level)                   
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back the topic's `expect.rename`
+backlog add (topic-level)                      
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back the topic's `expect.add`
+backlog revise (point-level)                   
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back §1's own `expect`
+backlog subjects (point-level)                 
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back §1's own `expect`
+backlog produced (point-level)                 
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back §1's own `expect`
+backlog consume (point-level)                  
+  exit=2   error: this needs --expect: run `engr backlog show 01a075a7-d67b-7153-b1d5-37d745edf54b --format json` and pass back §2's own `expect`
+
+===== and what happens if a reader follows that advice literally =====
+rename, given the point's token                
+  exit=2   error: --expect was §1's own `expect`; this operation binds the topic's `expect.rename`, so read that value and pass it back
+add, given the point's token                   
+  exit=2   error: --expect was §1's own `expect`; this operation binds the topic's `expect.add`, so read that value and pass it back
+revise, given the topic's add token            
+  exit=2   error: --expect was the topic's `expect.add`; this operation binds §1's own `expect`, so read that value and pass it back
+rename, given the topic's rename token         
+  exit=0   renamed 01a075a7

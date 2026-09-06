@@ -1,0 +1,28 @@
+===== a real crash with the destination staged =====
+VERSION=no  staged_dest=yes  manifest=yes  challenge=yes
+-- what a read says --
+error: wi/w/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- and what a fresh migrate does with a staged plan --
+
+Type this exactly to confirm:  CONFIRM DBMUMJ
+migrate exit=0
+
+===== now interrupt that same migrate across a sweep =====
+kill@50  ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration
+kill@100 ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration
+kill@150 ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration
+kill@200 ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration
+kill@300 ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration
+kill@400 ms  migration_dir=yes manifest=yes destination=yes
+             ls     : error: wi/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+             migrate: Challenge  migration

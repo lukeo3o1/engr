@@ -1,0 +1,11 @@
+--- dep-b: the projection is gone, the stream is not ---
+removed (was 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315)
+streams still present: 3
+--- dep-c: the projection is unreadable ---
+overwritten: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 3688c563c8c9646abb7de3a7765bc4a5250a4e23650df87ebdb424303099f0d6
+--- dep-d: one Section's wording edited, nothing resealed ---
+edited: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 09442288e3c2665a1dafc5decf8e9418857e8cfb5e937050ee8f193003a36bf3
+section 1: stored=1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6 computed=1:d24f20685719b1e858ec306e95d09b267b857fd60e5dfc4497d718cdb7a6cc97 MISMATCH
+section 2: stored=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 computed=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 MATCH
+object   : stored=1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1 computed=1:25513a57cfdf51fe16c715428ac29a9301852069e8f44e171527ee1cec14d433 MISMATCH
+(both seals must fail, which is the point)

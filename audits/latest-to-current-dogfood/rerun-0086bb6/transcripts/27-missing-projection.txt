@@ -1,0 +1,70 @@
+$ engr-current verify   # cwd=r5/mp
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          required Object projection is missing; admitted history reconstructs it
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-current ls --verify   # cwd=r5/mp
+--- stdout ---
+all ok
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r5/mp
+--- stdout ---
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+--- exit 0 ---
+
+$ engr-current ls --all --sections   # cwd=r5/mp
+--- stdout ---
+01a05e55-e6 禮1   closed                unchecked       A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+01a05e55-e6 禮2   closed                unchecked       Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+01a05e55-ee 禮1   open                  unchecked       The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  unchecked       Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  unchecked       A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-current show 01a05e55-74   # cwd=r5/mp
+--- stdout ---
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+?? 禮1 ?? ok
+The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+    based_on 1dae5f46   admitted 2026-09-01T18:57:48.683149208Z by human
+
+?? 禮2 ?? ok
+Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+    admitted 2026-09-01T18:59:19.709593096Z by human
+--- exit 0 ---
+
+$ engr-prev verify   # cwd=r5/mp
+--- stdout ---
+01a05e55-74  FAIL  2 sections  Migration continuity audit
+          required Object projection is missing; admitted history reconstructs it
+          unprojected ??1 admitted event the stored projection has not caught up to; the next read applies it
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+--- stderr ---
+error: verification failed
+--- exit 5 ---
+
+$ engr-prev ls --stale   # cwd=r5/mp
+--- stdout ---
+all ok
+--- exit 0 ---
+
+$ engr-prev ls --all   # cwd=r5/mp
+--- stdout ---
+01a05e55-74  open                   2 sections  ok            Migration continuity audit
+01a05e55-e6  closed                 2 sections  ok            Evidence rules for this audit
+01a05e55-ee  open                   3 sections  ok            Predecessor fixture construction
+--- exit 0 ---

@@ -1,0 +1,22 @@
+$ engr-current ls --all --sections   # cwd=r5/tv
+--- stdout ---
+01a05e55-74 禮1   open                  unchecked       The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+01a05e55-74 禮2   open                  unchecked       Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-e6 禮1   closed                unchecked       A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+01a05e55-e6 禮2   closed                unchecked       Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+01a05e55-ee 禮1   open                  unchecked       The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  unchecked       Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  unchecked       A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+--- exit 0 ---
+
+$ engr-prev ls --all --sections   # cwd=r5/tv
+--- stdout ---
+01a05e55-74 禮1   open                  ok              The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+01a05e55-74 禮2   open                  ok              Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+01a05e55-e6 禮1   closed                ok              A scenario is PASS only when its expected behaviour was actually observed in a transcript in this audit. Reading the implementation and concluding it would behave correctly is NOT RUN. This rule exists because the cheapest way to produce a green audit is to grade the source instead of the program.
+01a05e55-e6 禮2   closed                ok              Everything the audit claims about continuity is claimed about the record this workspace holds, so the audit's own evidence rule depends on what continuity was defined to mean.
+01a05e55-ee 禮1   open                  ok              The historical workspace is built by the published latest binary through its own Human Gate, never by writing JSON. A hand-authored fixture would only prove the migrator accepts a shape somebody believed version 1 had.
+01a05e55-ee 禮4   open                  ok              Build the historical workspace with the published binary through its own Human Gate, exercise enough real usage that continuity matters, and take every interruption on a disposable copy of it. Merged from the three notes that each said part of this.
+01a05e55-ee 禮5   open                  ok              A candidate prepared against an older revision is refused rather than rebased, which is the behaviour the audit needs to survive migration.
+01a05e55-ee 禮6   open                  ok              Wording admitted immediately before the crash, which the projection never caught up to.
+--- exit 0 ---

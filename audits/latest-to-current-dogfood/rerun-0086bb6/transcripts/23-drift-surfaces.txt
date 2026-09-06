@@ -1,0 +1,9 @@
+$ engr-current ls --verify   # cwd=r5/advf
+--- stdout ---
+??01a05e55-e6  closed                禮2  refs moved ??nobody is looking at this one
+--- exit 0 ---
+
+$ engr-prev ls --stale   # cwd=r5/advf
+--- stdout ---
+??01a05e55-e6  closed                禮2  refs moved ??nobody is looking at this one
+--- exit 0 ---

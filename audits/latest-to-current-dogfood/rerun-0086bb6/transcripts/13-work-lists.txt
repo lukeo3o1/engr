@@ -1,0 +1,17 @@
+$ engr-current work start engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r5/wk
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-74
+State      active
+Updated    2026-09-06T07:40:36Z
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 0 ---
+
+$ engr-current work show engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r5/wk
+--- stdout ---
+EXECUTION MEMORY ??agent-managed, admitted by nobody, and not what the record says
+Object     01a05e55-74
+State      active
+Updated    2026-09-06T07:40:36Z
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+--- exit 0 ---
