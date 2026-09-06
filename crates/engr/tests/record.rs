@@ -593,8 +593,16 @@ fn verify_reports_a_referenced_target_that_is_missing_or_unreadable() {
     // (d) the same removal, unsealed. Integrity is asked first and answers
     // first: the aggregate no longer vouches for itself, which is a different
     // fault from either absence or divergence.
-    let mut unsealed = without.clone();
-    unsealed.sections = held.sections.clone();
+    //
+    // The Section has to be *gone* here, under a seal that still vouches for
+    // it, because that is the state the order exists for. Restoring the
+    // sections onto the resealed-empty digest also fails the aggregate check,
+    // but with the Section present — and measured against an evaluator with the
+    // integrity question removed, that construction reports **no fault at all**
+    // while this one reports `divergent`, which is the wrong answer with teeth:
+    // it names `repair` for a file whose own seal is broken.
+    let mut unsealed = held.clone();
+    unsealed.sections.clear();
     write_raw(&path, &unsealed).expect("write");
     let report = ops::verify(&root, &source).expect("verify still runs");
     assert!(!report.passed());
