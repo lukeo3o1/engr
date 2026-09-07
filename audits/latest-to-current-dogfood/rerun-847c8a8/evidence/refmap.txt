@@ -1,0 +1,13 @@
+﻿--- workspace: /audit/r8/project ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+
+01a05e55-74    engr:obj:01m1f5ax7bedrbew8012yq3ma9
+01a05e55-e6    engr:obj:01m1f5bshbeq1rpckc726yrk2b
+01a05e55-ee    engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+
+--- the compact references the harness hardcodes, checked against this workspace ---
+  OK       01a05e55-74 = engr:obj:01m1f5ax7bedrbew8012yq3ma9  (backlog.ps1, expect-messages.sh, work-empty-lists.sh)
+  OK       01a05e55-e6 = engr:obj:01m1f5bshbeq1rpckc726yrk2b  (collection.sh's B, now resolved at runtime)
+--- script exit 0 ---

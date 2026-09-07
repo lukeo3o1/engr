@@ -1,0 +1,109 @@
+﻿===== dep-g: a Section removed through an admitted deletion Event =====
+  sections=1  events=2  section.deleted.v1=1
+  dep-g verify exit=5
+
+--- dep-b: projection removed, stream intact ---
+  current  ls             exit=0   
+  current  ls --sections  exit=0   
+  current  ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT PROJECTION MISSING
+  current  verify         exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit
+  current  show 01a05e55-74 exit=5   !!         Object has no stored projection; what is shown is what its admitted history produced.
+  prev     ls             exit=0   
+  prev     ls --sections  exit=0   
+  prev     ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT PROJECTION MISSING
+  prev     verify         exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit
+  prev     show 01a05e55-74 exit=5   !!         Object has no stored projection; what is shown is what its admitted history produced.
+
+--- dep-c: projection present and unreadable ---
+  current  ls             exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  current  ls --sections  exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  current  ls --verify    exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  current  verify         exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  current  show 01a05e55-74 exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  prev     ls             exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  prev     ls --sections  exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  prev     ls --verify    exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  prev     verify         exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+  prev     show 01a05e55-74 exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 c
+
+--- dep-d: one Section edited, nothing resealed ---
+  current  ls             exit=0   01a05e55-74  open                   2 sections  object tampered  Migration continuity audit
+  current  ls --sections  exit=0   01a05e55-74 §1   open                  object_tampered  Wording nobody ever admitted, and nothi
+  current  ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT TAMPERED
+  current  verify         exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit
+  current  show 01a05e55-74 exit=5   2 sections   1 ok   1 tampered   rev 1
+  prev     ls             exit=0   01a05e55-74  open                   2 sections  object tampered  Migration continuity audit
+  prev     ls --sections  exit=0   01a05e55-74 §1   open                  object_tampered  Wording nobody ever admitted, and nothi
+  prev     ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT TAMPERED
+  prev     verify         exit=5   01a05e55-74  FAIL  2 sections  Migration continuity audit
+  prev     show 01a05e55-74 exit=5   2 sections   1 ok   1 tampered   rev 1
+
+--- dep-e: a Section removed and the Object resealed ---
+  current  ls             exit=0   
+  current  ls --sections  exit=0   
+  current  ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT DIVERGENT
+  current  verify         exit=5   01a05e55-74  FAIL  1 sections  Migration continuity audit
+  current  show 01a05e55-74 exit=5   !!         Object sections is not what its admitted history produced; its seals verify, so somet
+  prev     ls             exit=0   
+  prev     ls --sections  exit=0   
+  prev     ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT DIVERGENT
+  prev     verify         exit=5   01a05e55-74  FAIL  1 sections  Migration continuity audit
+  prev     show 01a05e55-74 exit=5   !!         Object sections is not what its admitted history produced; its seals verify, so somet
+
+--- dep-f: the same removal, unsealed ---
+  current  ls             exit=0   01a05e55-74  open                   1 sections  object tampered  Migration continuity audit
+  current  ls --sections  exit=0   01a05e55-74 §2   open                  object_tampered  Pass means all three: identity survives
+  current  ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT TAMPERED
+  current  verify         exit=5   01a05e55-74  FAIL  1 sections  Migration continuity audit
+  current  show 01a05e55-74 exit=5   !!         Object integrity failed; current authority changed outside a supported transition
+  prev     ls             exit=0   01a05e55-74  open                   1 sections  object tampered  Migration continuity audit
+  prev     ls --sections  exit=0   01a05e55-74 §2   open                  object_tampered  Pass means all three: identity survives
+  prev     ls --verify    exit=0   · 01a05e55-74  open                  §-  OBJECT TAMPERED
+  prev     verify         exit=5   01a05e55-74  FAIL  1 sections  Migration continuity audit
+  prev     show 01a05e55-74 exit=5   !!         Object integrity failed; current authority changed outside a supported transition
+
+--- dep-g: removed through an admitted deletion ---
+  current  ls             exit=0   
+  current  ls --sections  exit=0   
+  current  ls --verify    exit=0   ⚠ 01a05e55-e6  closed                §2  REF MISSING — nobody is looking at this one
+  current  verify         exit=5   01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+  current  show 01a05e55-74 exit=0   
+  prev     ls             exit=0   
+  prev     ls --sections  exit=0   
+  prev     ls --verify    exit=0   ⚠ 01a05e55-e6  closed                §2  REF MISSING — nobody is looking at this one
+  prev     verify         exit=5   01a05e55-e6  FAIL  2 sections  Evidence rules for this audit
+  prev     show 01a05e55-74 exit=0   
+
+--- ev: an Event id in the uppercase spelling ---
+  current  ls             exit=0   
+  current  ls --sections  exit=0   
+  current  ls --verify    exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+  current  verify         exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+  current  show 01a05e55-ee exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+  prev     ls             exit=0   
+  prev     ls --sections  exit=0   
+  prev     ls --verify    exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+  prev     verify         exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+  prev     show 01a05e55-ee exit=4   error: ev/.engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl:2: event id "01A07
+
+--- tail: a sealed, contiguous Event that cannot be applied ---
+  current  ls             exit=0   
+  current  ls --sections  exit=0   
+  current  ls --verify    exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+  current  verify         exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+  current  show 01a05e55-74 exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+  prev     ls             exit=0   
+  prev     ls --sections  exit=0   
+  prev     ls --verify    exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+  prev     verify         exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+  prev     show 01a05e55-74 exit=4   error: 01a05e55-74eb-7370-b771-0008bd71d149: event tail cannot reconcile: section §99 does not 
+
+===== and what repair says about each =====
+  dep-b  exit=0   Integrity  no projection is stored; admitted history is the only copy
+  dep-c  exit=4   error: dep-c/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 column 2
+  dep-d  exit=0   Integrity  the stored record does not verify
+  dep-e  exit=0   Integrity  the stored record verifies, and is not what its admitted history produced
+  dep-f  exit=0   Integrity  the stored record does not verify
+  dep-g  exit=5   error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there
+  tail   exit=5   error: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section §99 does not 
+--- script exit 0 ---

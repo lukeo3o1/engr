@@ -1,0 +1,51 @@
+﻿
+===== unsealed projection =====
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev 1, events 2, challenge KHS8AC on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM KHS8AC
+  -- and retyping it --
+     CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+     note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+     exit=0
+     projection: finished (identical to the uninterrupted repair)
+     events now: 2
+     challenge: cleared
+     verify exit=0
+
+===== resealed-divergent projection =====
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev 1, events 2, challenge FT574E on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM FT574E
+  -- and retyping it --
+     CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+     note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+     exit=0
+     projection: finished (identical to the uninterrupted repair)
+     events now: 2
+     challenge: cleared
+     verify exit=0
+
+===== absent projection (the control that already worked) =====
+  (no projection to save)
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev , events 2, challenge K2ZZJC on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM K2ZZJC
+  -- and retyping it --
+     CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+     note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+     exit=0
+     projection: finished (identical to the uninterrupted repair)
+     events now: 2
+     challenge: cleared
+     verify exit=0
+
+===== the binaries this ran =====
+  engr-current  two-crash-windows sentence: 1
+  engr-prev     two-crash-windows sentence: 0
+--- script exit 0 ---

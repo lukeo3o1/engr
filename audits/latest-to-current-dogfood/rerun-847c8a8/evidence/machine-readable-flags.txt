@@ -1,0 +1,18 @@
+﻿COMMAND                            SPELLING       NOTE
+-------                            --------       ----
+ls                                 (none)         no machine-readable form
+show                               --format json  
+verify                             (none)         no machine-readable form
+repair                             --json         
+candidate                          (none)         no machine-readable form
+protocol                           (none)         no machine-readable form
+backlog ls                         (none)         no machine-readable form
+backlog show                       --format json  
+work show                          --format json  
+collection show                    --format json  
+rules ls                           --json         
+
+--- how many distinct spellings are in use ---
+--format json
+--json
+--- script exit 0 ---

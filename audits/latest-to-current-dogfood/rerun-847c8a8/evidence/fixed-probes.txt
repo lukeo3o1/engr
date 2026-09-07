@@ -1,0 +1,65 @@
+﻿############ the binary is the one intended ############
+round 35 sentence, head under test: 1
+
+############ F-1: which screens name both revisions ############
+  absent     fixed=1  r33=1
+  divergent  fixed=1  r33=0
+  tampered   fixed=1  r33=0
+  -- and the whole fixed screen for the divergent case --
+    Challenge  repair
+    Object     01a05e55-74  Migration continuity audit
+    Integrity  the stored record verifies, and is not what its admitted history produced
+    Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+    
+      §1.header
+        stored   A heading nobody ever admitted
+        restore  (absent)
+    
+    
+    (object.repaired.v1)
+    
+    Type this exactly to confirm:  CONFIRM N3GVL9
+  -- and the same screen re-rendered from the pending code --
+    Challenge  repair
+    Object     01a05e55-74  Migration continuity audit
+    Integrity  the stored record verifies, and is not what its admitted history produced
+    Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+    
+      §1.header
+        stored   A heading nobody ever admitted
+        restore  (absent)
+    
+    
+    (object.repaired.v1)
+    
+    Type this exactly to confirm:  CONFIRM R3CWU2
+
+############ F-2: a code retyped after the damage is gone ############
+  absent     fixed    screen offers code=0 says-settled=1  confirm exit=5   events 1 -> 1
+  absent     r33      screen offers code=1 says-settled=0  confirm exit=0   events 1 -> 2
+  divergent  fixed    screen offers code=0 says-settled=1  confirm exit=5   events 1 -> 1
+  divergent  r33      screen offers code=1 says-settled=0  confirm exit=0   events 1 -> 2
+  tampered   fixed    screen offers code=0 says-settled=1  confirm exit=5   events 1 -> 1
+  tampered   r33      screen offers code=1 says-settled=0  confirm exit=0   events 1 -> 2
+  -- the fixed screen for that state, whole --
+    Challenge  repair
+    Object     01a05e55-74  Migration continuity audit
+    Integrity  the stored record verifies and is what its admitted history produced, so there is nothing left to repair
+    
+    (object.repaired.v1)
+    
+    SETTLED       01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+                  nothing here needs confirming
+  -- and confirming it --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+
+############ and a repair that is still needed still works ############
+    Challenge  repair
+    Object     01a05e55-74  Migration continuity audit
+    Integrity  no projection is stored; admitted history is the only copy
+    Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    verify exit=0
+    rev=1 type=object.migrated.v1
+    rev=2 type=object.repaired.v1
+--- script exit 0 ---

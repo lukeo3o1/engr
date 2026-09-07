@@ -1,0 +1,22 @@
+﻿two codes prepared: HT3K25 and 45JAMW
+challenges on disk: 45JAMW.json 
+
+--- confirm the first ---
+error: no challenge awaiting HT3K25
+  exit=3
+  rev now: 1, events 1
+
+--- and the second, prepared against the revision that is gone ---
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+  exit=0
+  rev now: 2, events 2
+
+--- and an ordinary admitted mutation between prepare and confirm ---
+repair code prepared: MHTTGU
+CONFIRMED  01a05e55-74  section.created.v1  rev 3
+  rev now: 3
+--- retyping the spent repair code against the moved record ---
+error: no challenge awaiting MHTTGU
+  exit=3
+  verify exit=0
+--- script exit 0 ---

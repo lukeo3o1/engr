@@ -1,0 +1,69 @@
+﻿############ engr-current ############
+
+--- current: the projection was absent and is restored ---
+  prepared: WMLPWW
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+
+--- current: the projection was divergent and is put back ---
+  prepared: 36T9DK
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+
+--- current: the projection was tampered and is put back ---
+  prepared: P5496B
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+############ engr-prev ############
+
+--- prev: the projection was absent and is restored ---
+  prepared: K7SB6R
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+
+--- prev: the projection was divergent and is put back ---
+  prepared: 6YBBEC
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+
+--- prev: the projection was tampered and is put back ---
+  prepared: UTPDF8
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+    bytes: IDENTICAL
+    rev 1 -> 1, events 1 -> 1
+    last event: object.migrated.v1
+--- script exit 0 ---

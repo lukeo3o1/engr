@@ -1,0 +1,73 @@
+﻿$ engr-current backlog new --help   # cwd=r8/project
+--- stdout ---
+Start a topic under a title, with its first unresolved point
+
+Usage: engr-current backlog new [OPTIONS] --title <TITLE> <--text <TEXT>|--text-file <TEXT_FILE>>
+
+Options:
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --title <TITLE>                   
+      --text <TEXT>                     Wording, inline
+      --text-file <TEXT_FILE>           Wording, from a file
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+--- exit 0 ---
+
+$ engr-current backlog new --title Open questions this run raised --text Whether ls --verify should report an object whose projection is missing, as verify does.   # cwd=r8/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07cf1  Open questions this run raised
+1 unresolved   updated 2026-09-07T17:36:17Z
+engr:backlog:01m1yf2cqdfyr9gvvztgz5sa7k
+
+?? 禮1 ?? unresolved
+Whether ls --verify should report an object whose projection is missing, as verify does.
+    updated  2026-09-07T17:36:17Z
+--- exit 0 ---
+
+$ engr-current backlog ls   # cwd=r8/project
+--- stdout ---
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07cf1   1 unresolved  -             2026-09-07T17:36:17Z  Open questions this run raised
+--- exit 0 ---
+
+$ engr-current backlog show 01a07cf1 --format json   # cwd=r8/project
+--- stdout ---
+{
+  "id": "01a07cf1-32ed-7fb0-986f-7fd43e5ca8f3",
+  "reference": "engr:backlog:01m1yf2cqdfyr9gvvztgz5sa7k",
+  "topic": "Open questions this run raised",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-07T17:36:17.132715284Z",
+  "expect": {
+    "rename": "0b0aecbd042cc0027f446d80eb7b70501057c56ce8a4f33154c624ac52cdefc0",
+    "add": "af6d3c2abcb1d17c0064e6afc7ef00cfb18ae520b57828a44477fd1fc41ee2ab"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1yf2cqdfyr9gvvztgz5sa7k:1",
+      "expect": "3feaf7dbe95b7db81f7e9b38faac3780f9923cafbe22c9a3247e74ccb9a34d89",
+      "id": 1,
+      "text": "Whether ls --verify should report an object whose projection is missing, as verify does.",
+      "updated_at": "2026-09-07T17:36:17.132715284Z"
+    }
+  ]
+}
+--- exit 0 ---
+
+$ engr-current backlog add 01a07cf1 --text Whether repair should say what verify says about the same object. --expect af6d3c2abcb1d17c0064e6afc7ef00cfb18ae520b57828a44477fd1fc41ee2ab --subject engr:obj:01m1f5ax7bedrbew8012yq3ma9   # cwd=r8/project
+--- stdout ---
+added 禮2
+--- exit 0 ---
+
+$ engr-current backlog add 01a07cf1 --text stale token attempt --expect af6d3c2abcb1d17c0064e6afc7ef00cfb18ae520b57828a44477fd1fc41ee2ab   # cwd=r8/project
+--- stderr ---
+error: what you read is not what is there now; read it again and review the current wording
+--- exit 6 ---
+

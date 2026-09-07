@@ -1,0 +1,19 @@
+﻿=== building a2568f2 -> bin/engr-prev in volume engr-cargo-prev8 ===
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `engr` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 26.84s
+-rwxr-xr-x 2 root root 6146200 Sep  7 17:23 /target/release/engr
+1493e2284a07fdcd8691cffd9be6e014ba6a5abe959e22bb2450d4af72144233  /target/release/engr
+1493e2284a07fdcd8691cffd9be6e014ba6a5abe959e22bb2450d4af72144233  /audit/bin/engr-prev
+=== building 847c8a8 -> bin/engr-current in volume engr-cargo-cur8 ===
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `engr` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 25.68s
+-rwxr-xr-x 2 root root 6143888 Sep  7 17:23 /target/release/engr
+e5827a653ae87e60234ad1b33220ac7792ba8818b834105a6743888d00b0bcf8  /target/release/engr
+e5827a653ae87e60234ad1b33220ac7792ba8818b834105a6743888d00b0bcf8  /audit/bin/engr-current
+=== both built ===

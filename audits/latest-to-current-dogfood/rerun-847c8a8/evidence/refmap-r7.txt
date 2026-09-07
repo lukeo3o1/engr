@@ -1,0 +1,11 @@
+﻿--- workspace: /audit/r7/project ---
+01a05e55-74  design/superseded      3 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   6 sections  unchecked     Predecessor fixture construction
+01a07821-8e  decision/accepted      0 sections  unchecked     Continuity carried forward
+
+01a05e55-74    engr:obj:01m1f5ax7bedrbew8012yq3ma9
+01a05e55-e6    engr:obj:01m1f5bshbeq1rpckc726yrk2b
+01a05e55-ee    engr:obj:01m1f5bvj6fa8sgfztf6s9fc8c
+01a07821-8e    engr:obj:01m1w233hmetgbejpgdceakxet
+--- script exit 0 ---

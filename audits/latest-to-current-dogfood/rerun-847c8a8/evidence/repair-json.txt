@@ -1,0 +1,220 @@
+﻿===== absent =====
+{
+  "challenge": {
+    "created_at": "2026-09-07T17:52:42.784804659Z",
+    "digest": "1:327a626463a125e5e9af227cb6a6631999c3b73989662c13eb56b9cd86ba4937",
+    "generator": {
+      "fingerprint": "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd",
+      "version": "latest (unknown)"
+    },
+    "id": "EW8AZF",
+    "subject": {
+      "data": {
+        "action": "repair",
+        "expected_rev": 1,
+        "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+        "value": {}
+      },
+      "type": "object"
+    }
+  },
+  "repair": {
+    "restores": {
+      "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+      "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+      "next_section_id": 3,
+      "rev": 1,
+      "sections": [
+        {
+          "admitted": {
+            "at": "2026-09-01T18:57:48.683149208Z",
+            "by": "human"
+          },
+          "based_on": {
+            "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+          },
+          "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+          "id": 1,
+          "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."
+        },
+        {
+          "admitted": {
+  repair --json exit=0
+  the code the JSON minted: EW8AZF
+-- the same pending code, rendered as the human screen --
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+    stored   (absent)
+    restore  01a05e55-74eb-7370-b771-0008bd71d149
+  next_section_id
+    stored   (absent)
+    restore  3
+  rev
+    stored   (absent)
+    restore  1
+  §1.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:57:48.683149208Z
+  §1.admitted.by
+    stored   (absent)
+    restore  human
+  §1.based_on.commit
+    stored   (absent)
+    restore  1dae5f46717a8967662236f69694bf4ee9ef76d8
+  §1.text
+    stored   (absent)
+    restore  The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+  §2.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:59:19.709593096Z
+  §2.admitted.by
+    stored   (absent)
+    restore  human
+  §2.text
+    stored   (absent)
+    restore  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+  state
+    stored   (absent)
+    restore  open
+  title
+    stored   (absent)
+  candidate exit=0
+-- do the two agree? --
+  JSON challenge digest : 1:327a626463a125e5e9af227cb6a6631999c3b73989662c13eb56b9cd86ba4937
+  screen offers the code: 1
+  screen names a revision: 1
+  JSON names the same object: 2
+
+===== divergent =====
+{
+  "challenge": {
+    "created_at": "2026-09-07T17:52:47.950567811Z",
+    "digest": "1:05d6305cba9b1be77d9594ed135c8b68621378c81f9164d826a392a3425a90b2",
+    "generator": {
+      "fingerprint": "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd",
+      "version": "latest (unknown)"
+    },
+    "id": "B7NWHJ",
+    "subject": {
+      "data": {
+        "action": "repair",
+        "expected_rev": 1,
+        "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+        "value": {}
+      },
+      "type": "object"
+    }
+  },
+  "repair": {
+    "restores": {
+      "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+      "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+      "next_section_id": 3,
+      "rev": 1,
+      "sections": [
+        {
+          "admitted": {
+            "at": "2026-09-01T18:57:48.683149208Z",
+            "by": "human"
+          },
+          "based_on": {
+            "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+          },
+          "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+          "id": 1,
+          "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."
+        },
+        {
+          "admitted": {
+  repair --json exit=0
+  the code the JSON minted: B7NWHJ
+-- the same pending code, rendered as the human screen --
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+
+  §1.header
+    stored   A heading nobody ever admitted
+    restore  (absent)
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM B7NWHJ
+  candidate exit=0
+-- do the two agree? --
+  JSON challenge digest : 1:05d6305cba9b1be77d9594ed135c8b68621378c81f9164d826a392a3425a90b2
+  screen offers the code: 1
+  screen names a revision: 1
+  JSON names the same object: 3
+
+===== tampered =====
+{
+  "challenge": {
+    "created_at": "2026-09-07T17:52:53.158756163Z",
+    "digest": "1:67b31237d2529be663cc822b45ed2e3504fd8c299edfbcb69a102a3e802c5832",
+    "generator": {
+      "fingerprint": "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd",
+      "version": "latest (unknown)"
+    },
+    "id": "D4GPES",
+    "subject": {
+      "data": {
+        "action": "repair",
+        "expected_rev": 1,
+        "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+        "value": {}
+      },
+      "type": "object"
+    }
+  },
+  "repair": {
+    "restores": {
+      "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+      "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+      "next_section_id": 3,
+      "rev": 1,
+      "sections": [
+        {
+          "admitted": {
+            "at": "2026-09-01T18:57:48.683149208Z",
+            "by": "human"
+          },
+          "based_on": {
+            "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+          },
+          "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+          "id": 1,
+          "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."
+        },
+        {
+          "admitted": {
+  repair --json exit=0
+  the code the JSON minted: D4GPES
+-- the same pending code, rendered as the human screen --
+Challenge  repair
+Object     01a05e55-74  Migration continuity audiT
+Integrity  the stored record does not verify
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+
+  title
+    stored   Migration continuity audiT
+    restore  Migration continuity audit
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM D4GPES
+  candidate exit=0
+-- do the two agree? --
+  JSON challenge digest : 1:67b31237d2529be663cc822b45ed2e3504fd8c299edfbcb69a102a3e802c5832
+  screen offers the code: 1
+  screen names a revision: 1
+  JSON names the same object: 3
+
+--- script exit 0 ---

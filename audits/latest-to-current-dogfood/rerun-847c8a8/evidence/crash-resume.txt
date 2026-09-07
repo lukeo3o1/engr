@@ -1,0 +1,239 @@
+﻿===== baseline (uninterrupted) =====
+inventory: d6f1bb38be353c2b5afcd227228f217bf4d1a6ab333a7fcd1ba919fd9779fc8b
+event admitted.at: 2026-09-07T17:53:31.089903553Z 
+events per stream: 1 1 1 
+
+===== interrupted at 500ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t500/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t500/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 356f9cbd4b7ac4c8a96d50d79fa6fa803054807504e3ef14ea3d4b6c6387d9bb
+event admitted.at: 2026-09-07T17:54:24.218845536Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 600ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t600/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t600/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 9550b8884be1820b289a2a856866a154987d94b0a5dd39f7da5ad056d494d545
+event admitted.at: 2026-09-07T17:54:26.660340925Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 700ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t700/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t700/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 53bfbce5011651bb5f71f1f5efda6c70fb316f08ada4b2e6bebf7b91090879c3
+event admitted.at: 2026-09-07T17:54:29.090602709Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 800ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t800/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t800/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 64395977b887de7335ad3b4d80655a00287b93a1e23f07608a8069bd844650de
+event admitted.at: 2026-09-07T17:53:41.548617401Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 850ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t850/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t850/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 05bc68fa5b0bb82f9be03c40b0678f13ee1c926d268e745084441f97ba4edfe1
+event admitted.at: 2026-09-07T17:53:44.275483105Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: d6b043ab6c26d7b5d9cfe04ca5490a6f88b6baa0f628e128956f1bd6db80a645
+event admitted.at: 2026-09-07T17:53:47.069788052Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 930ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t930/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t930/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 5668b69b4b11905d85905a8a56b323ca12b05f442c62aa0b70eb2727a6d4e790
+event admitted.at: 2026-09-07T17:53:49.907278909Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: b377d3b3b1dcd58b6d49a33fd4f5b1b363688236fb3669f4a8cf8307e38b3016
+event admitted.at: 2026-09-07T17:53:52.718700799Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 980ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t980/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t980/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 599016c090e95cf3f7a51ead5162a27ac6f87484b52343013bbd05019c8a9af6
+event admitted.at: 2026-09-07T17:53:55.574954075Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1000ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1000/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1000/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: cafc8c1916b419683894ec1afde23dbd15061023cb5c655776852d2d323abb49
+event admitted.at: 2026-09-07T17:53:58.503016962Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1020ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1020/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1020/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: f99df373cfd757c816ea2ddd5bf8cfce6cb194d9e5daadf6fdf3baf00bca4b05
+event admitted.at: 2026-09-07T17:54:01.401663242Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1040ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 5ca02d2d6a7c90ebdc7bbc23008c0fbbcc494e901bd8a223715cc1377d0ddf25
+event admitted.at: 2026-09-07T17:54:04.358349537Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1060ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 8fd0dda6deb1488892b509ed4fb363e8bde4d24d2db49271358c2e536523cdf9
+event admitted.at: 2026-09-07T17:54:07.292675161Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1080/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1080/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 6c8f532c20ae0cee39a7a0f9e2012ad6ea4cd0685110e19898a4a4dbfa34aba5
+event admitted.at: 2026-09-07T17:54:10.418119833Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1090ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 6fc3578785b4ff129827f7b38c6748a64f70c179c12388ae5369d9bd610b6f4e
+event admitted.at: 2026-09-07T17:54:13.343388056Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1100ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=0 : COMPLETE   crash-runs/t1100/.engr  already generation 1; nothing was migrated, and the spent migration's leftovers are retired
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 76b03ba5af2b4fe0f92abeb3782eaeeac96f68793e235799f7ce9413600246b0
+event admitted.at: 2026-09-07T17:54:16.430976067Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1110ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 86c4c5a45a3a7e3887d1d544ce476795ae4bb8b0e4cd3b84c25dbf23fedf97dd
+event admitted.at: 2026-09-07T17:54:19.413440252Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1120ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting XDKEFZ
+inventory: 5db9b528adcbf192f7125f32d1ddbac4b48eee480f4daff0aae73fa1190c7531
+event admitted.at: 2026-09-07T17:54:22.453102409Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+--- script exit 0 ---

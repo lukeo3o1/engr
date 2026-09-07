@@ -1,0 +1,26 @@
+﻿kill@800  ms format.json=yes staged=yes  released build: exit=0   01a05e55-74  open     2 sections  ok            Migration continuity a
+             format.json bytes: {
+  "format": "engr-workspace",
+  "version": 1
+}
+kill@850  ms format.json=yes staged=yes  released build: exit=4   error: bw/w/.engr/format.json: not an engr workspace
+             format.json bytes: {"format":"engr-migration-in-progress","migration":"XDKEFZ","version":1}
+kill@870  ms format.json=yes staged=yes  released build: exit=0   01a05e55-74  open     2 sections  ok            Migration continuity a
+             format.json bytes: {
+  "format": "engr-workspace",
+  "version": 1
+}
+kill@890  ms format.json=yes staged=yes  released build: exit=4   error: bw/w/.engr/format.json: not an engr workspace
+             format.json bytes: {"format":"engr-migration-in-progress","migration":"XDKEFZ","version":1}
+kill@910  ms format.json=yes staged=yes  released build: exit=0   01a05e55-74  open     2 sections  ok            Migration continuity a
+             format.json bytes: {
+  "format": "engr-workspace",
+  "version": 1
+}
+kill@930  ms format.json=yes staged=yes  released build: exit=4   error: bw/w/.engr/format.json: not an engr workspace
+             format.json bytes: {"format":"engr-migration-in-progress","migration":"XDKEFZ","version":1}
+kill@950  ms format.json=yes staged=yes  released build: exit=4   error: bw/w/.engr/format.json: not an engr workspace
+             format.json bytes: {"format":"engr-migration-in-progress","migration":"XDKEFZ","version":1}
+kill@1000 ms format.json=no  staged=yes  released build: exit=4   error: bw/w/.engr has no format.json and is not a recognized legacy v0
+kill@1050 ms format.json=no  staged=no   released build: exit=4   error: bw/w/.engr has no format.json and is not a recognized legacy v0
+--- script exit 0 ---

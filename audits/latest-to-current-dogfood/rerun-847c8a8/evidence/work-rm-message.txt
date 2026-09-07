@@ -1,0 +1,19 @@
+﻿--- the execution memory that exists before the removal ---
+  sidecar .engr/work/backlog/01a07cf2-c01e-7153-9ee8-b0311aeaaeda.json
+  sha256  7f8b4d829597c4ec10d991243c23d79ccaa885fad0d4d3a93290b3b6bbcc8ebc
+{"items":[{"id":1,"state":"pending","text":"An item, so the memory is not empty"}],"next_item_id":2,"state":"active","summary":"A summary, so the memory is plainly not empty","updated_at":"2026-09-07T17:37:59.896306669Z"}
+
+--- work rm, against memory that exists ---
+  said : no execution memory for backlog item engr:backlog:01m1yf5g0ye59sxt5g64denbpt
+  exit : 0
+  sidecar still present: no
+
+--- work rm again, against nothing ---
+  said : error: no work recorded for backlog item engr:backlog:01m1yf5g0ye59sxt5g64denbpt
+  exit : 3
+
+--- can a reader tell the two apart? ---
+  YES: they differ.
+      removed something -> exit 0: no execution memory for backlog item engr:backlog:01m1yf5g0ye59sxt5g64denbpt
+      removed nothing   -> exit 3: error: no work recorded for backlog item engr:backlog:01m1yf5g0ye59sxt5g64denbpt
+--- script exit 0 ---

@@ -1,0 +1,8 @@
+﻿--- the healthy tail: admit a section, then put the projection back ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 2
+rewound: 6e138bba65ffb81d5b20e9c9dda19c293fd939c6090acba647e939c70870ce46 -> b57120eb387b9949d88639bb9c9e6791e43cd9acd2dd4e5f83bd7feac6970dd8
+stored sections: 3, stream events: 2
+--- the missing projection: the file goes, the stream stays ---
+removed (was 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315)
+streams still present: 3
+--- script exit 0 ---

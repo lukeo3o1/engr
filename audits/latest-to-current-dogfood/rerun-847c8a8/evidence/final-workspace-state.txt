@@ -1,0 +1,54 @@
+﻿===== verify =====
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  6 sections  Predecessor fixture construction
+          uncommitted — git holds no record of the current wording yet
+01a07cee-f0  PASS  0 sections  Continuity carried forward
+          uncommitted — git holds no record of the current wording yet
+exit=0
+
+===== ls --all =====
+01a05e55-74  design/superseded      3 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  open                   6 sections  unchecked     Predecessor fixture construction
+01a07cee-f0  decision/accepted      0 sections  unchecked     Continuity carried forward
+exit=0
+
+===== every stream, and its revisions =====
+01a05e55-74eb-7370-b771-0008bd71d149  3 events  revs 1 2 3 
+01a05e55-e62b-75c3-8b32-6c388dec4c4b  1 events  revs 1 
+01a05e55-ee46-7a91-983f-fa79b297b10c  11 events  revs 1 2 3 4 5 6 7 8 9 10 11 
+01a07cee-f0f6-7e83-8b61-87e355434194  2 events  revs 1 2 
+
+===== what git tracks, and what it must never see =====
+A  .engr/backlog/01a07cf3-22d1-7f80-962b-e143499ab0e8.json
+A  .engr/collections/release-2026.json
+M  .engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+M  .engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+A  .engr/eventstore/objects/01a07cee-f0f6-7e83-8b61-87e355434194.jsonl
+M  .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+M  .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+A  .engr/objects/01a07cee-f0f6-7e83-8b61-87e355434194.json
+A  .engr/rules/audit-scope.md
+A  .engr/rules/evidence-discipline.md
+-- anything under local/? --
+NOT VISIBLE TO GIT (correct)
+and nothing under local/ is tracked (correct)
+
+===== inventory =====
+a748496f44f59816f39295a91245382ca9f7efc34a72cb665db0bce90c0e3ff5  .engr/.gitignore
+4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865  .engr/VERSION
+4b02e1e66e23a9cdbe2773c0c5c37348c5d4d2acdf12273e5747a062f28a5cc9  .engr/backlog/01a07cf3-22d1-7f80-962b-e143499ab0e8.json
+b8f6cb2fa085dd628eac89a242fb5dd484735902236f1e944f82b0dfc9077133  .engr/collections/release-2026.json
+76a723a08320c92546cd81232fbadad5c3000632a703f3db23026e9a4cf63821  .engr/eventstore/objects/01a05e55-74eb-7370-b771-0008bd71d149.jsonl
+a10e8779d0524412963160926d41fb972aa22046c75e511144d8842dad42f245  .engr/eventstore/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.jsonl
+7943c111b583ce383721ccdf1f17dedbdd6da004b3100e674bbbca50abec255c  .engr/eventstore/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.jsonl
+4f5840e3f0440ced60da3e2b2bd50f11b26040089b12ec777fc90817406c2802  .engr/eventstore/objects/01a07cee-f0f6-7e83-8b61-87e355434194.jsonl
+b228f6bb32af4b891cb955c306ef046f442c94efe9d785ab85171e69cc063083  .engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json
+15a1e01f15e149ea99e78eb4b8c8c784c811d74eb76ae709b34e699ef6d0e20a  .engr/objects/01a05e55-e62b-75c3-8b32-6c388dec4c4b.json
+9d2c71db898190e5678a510200125f3f630f560e1c38b5ef794833c877eba2f3  .engr/objects/01a05e55-ee46-7a91-983f-fa79b297b10c.json
+a82eb3182b7b8c8cb9dfaf677a614ea027485acc996b68a94749963b2251961d  .engr/objects/01a07cee-f0f6-7e83-8b61-87e355434194.json
+dbdedf69e3f5ae41bcca86dd7f258c21e62c308f80cca7f7531e88000809607d  .engr/rules/audit-scope.md
+e2120f71576e100eaa7051765d651e9aa59bf30ca97f79445beb8313f6f32993  .engr/rules/evidence-discipline.md
+--- script exit 0 ---

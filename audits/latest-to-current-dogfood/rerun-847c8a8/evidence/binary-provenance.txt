@@ -1,0 +1,35 @@
+﻿--- engr-latest ---
+engr latest (unknown)
+round 35 (847c8a8) sentence: 0
+round 33 (9d7bf06) sentence: 0
+round 32 (259b8b4) sentence: 0
+round 31 (9fba620) sentence: 0
+sha256: d61aadba03cee2fca3a83e935f9d161c27327cbc5fff757190deb1170b83a240
+--- engr-prev ---
+engr latest (unknown)
+round 35 (847c8a8) sentence: 0
+round 33 (9d7bf06) sentence: 1
+round 32 (259b8b4) sentence: 1
+round 31 (9fba620) sentence: 1
+sha256: 1493e2284a07fdcd8691cffd9be6e014ba6a5abe959e22bb2450d4af72144233
+--- engr-current ---
+engr latest (unknown)
+round 35 (847c8a8) sentence: 1
+round 33 (9d7bf06) sentence: 1
+round 32 (259b8b4) sentence: 1
+round 31 (9fba620) sentence: 1
+sha256: e5827a653ae87e60234ad1b33220ac7792ba8818b834105a6743888d00b0bcf8
+--- engr-r33 ---
+engr latest (unknown)
+round 35 (847c8a8) sentence: 0
+round 33 (9d7bf06) sentence: 1
+round 32 (259b8b4) sentence: 1
+round 31 (9fba620) sentence: 1
+sha256: 00260e3f542169f90e7ee202ef7482d6f7ff78c092c940253d5f0f5e6f83cd4f
+
+--- prev (a2568f2) against r33 (9d7bf06), which the protocol text cannot separate ---
+round 34 made the repair screen name a revision on the divergent projection too.
+  engr-prev     divergent repair screen names the revision: 1
+  engr-r33      divergent repair screen names the revision: 0
+  engr-current  divergent repair screen names the revision: 1
+--- script exit 0 ---

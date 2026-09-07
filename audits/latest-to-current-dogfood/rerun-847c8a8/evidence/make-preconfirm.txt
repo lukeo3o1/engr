@@ -1,0 +1,12 @@
+﻿1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM XDKEFZ
+pre-confirm checkpoint minted with code XDKEFZ
+candidates
+events
+format.json
+local
+lock
+objects
+XDKEFZ.json
+--- script exit 0 ---

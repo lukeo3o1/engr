@@ -1,0 +1,6 @@
+﻿consumed §1, and the topic with it — nothing else was unresolved
+exit=0
+nothing unresolved
+exit=0
+backlog files left: 0; work files left: 0
+--- script exit 0 ---

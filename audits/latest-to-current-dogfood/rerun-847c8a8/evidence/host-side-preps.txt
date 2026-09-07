@@ -1,0 +1,44 @@
+######## ls-damage ########
+--- dep-b: the projection is gone, the stream is not ---
+removed (was 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315)
+streams still present: 3
+--- dep-c: the projection is unreadable ---
+overwritten: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 3688c563c8c9646abb7de3a7765bc4a5250a4e23650df87ebdb424303099f0d6
+--- dep-d: one Section's wording edited, nothing resealed ---
+edited: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 09442288e3c2665a1dafc5decf8e9418857e8cfb5e937050ee8f193003a36bf3
+section 1: stored=1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6 computed=1:d24f20685719b1e858ec306e95d09b267b857fd60e5dfc4497d718cdb7a6cc97 MISMATCH
+section 2: stored=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 computed=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 MATCH
+object   : stored=1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1 computed=1:25513a57cfdf51fe16c715428ac29a9301852069e8f44e171527ee1cec14d433 MISMATCH
+(both seals must fail, which is the point)
+######## removal-controls ########
+removed section 1: 2 -> 1 sections
+resealed object : 1:afd01438f30c23f3cc08e74b03491da8e2ea01fed558decf39406e80809274f4
+dep-e: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 677857ea73c027f7813b066d4035e3177e3f0312d9c96ecf613afb3d5c7ca6b7
+removed section 1: 2 -> 1 sections
+object seal left alone (the control: this is ordinary damage)
+dep-f: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> eb0ea7bf5a0ddafa2083c16ea4ecf935ccf73bffc8d06558d5a1a732145cf031
+######## event-id ########
+appended an event whose id is the uppercase spelling of 01a07ced-8826-7d31-b8cc-11310cc074e3
+sealed over that spelling: 1:259ee71fab1201fca9
+stream moved: f515e9459f8cc2c3e1ca1148470460a5d3b9155d80d815556ecaf823e9d0b4a5 -> 1b00561c566ed62a0c936e8f5e19fe5c442c153a08023ea072f972a38f70f5a4
+--- and its own seal verifies, checked independently ---
+event 1: stored=1:be3c68b0469c37 computed=1:be3c68b0469c37 MATCH
+event 2: stored=1:259ee71fab1201 computed=1:259ee71fab1201 MATCH
+######## unreplayable-tail ########
+appended section.deleted.v1 rev 2 id 01a07cf8-65d4-7d38-86bc-ef308b930c26
+sealed   1:734915bce1214e0d0e2990daa832e44e36f7417604da24837c0a38b7e7de400e
+stream: 7f2a8a72c627e6b3cf2435f14c80967519355a05ca83a4937849684c9ad8663f -> 4110b1762d83cadb26673f22a2c949c227e0345a6adf9fe35dc53b0d891d4e51
+--- the appended event, and its seal checked independently ---
+{"data":{"section":99},"digest":"1:734915bce1214e0d0e2990daa832e44e36f7417604da24837c0a38b7e7de400e","id":"01a07cf8-65d4-7d38-86bc-ef308b930c26","metadata":{"admitted":{"at":"2026-09-07T17:32:16.568705549Z","by":"human","confirmation":{"challenge":"CXLSVN"}}},"rev":2,"type":"section.deleted.v1"}
+event 1: stored=1:1d2f27ca669633 computed=1:1d2f27ca669633 MATCH
+event 2: stored=1:734915bce1214e computed=1:734915bce1214e MATCH
+######## forge-divergent ########
+section 1: header = "A heading nobody ever admitted"
+resealed section: 1:ee4d1602b2ccd6a2bb875b78f0e5c248a2480a6a9b3c78f043f54ed0301946ba
+resealed object : 1:88efde1b8634acfc2cf8dc9c05490dc8cb20ae213791c0d714103a5851b69e2b
+before: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315
+after : 655619a9a82170ed582219904b5bef320c521d9fdda39d0870c168102561ac24
+the target moved, and every seal on it still verifies
+section 1: stored=1:ee4d1602b2ccd6a2bb875b78f0e5c248a2480a6a9b3c78f043f54ed0301946ba computed=1:ee4d1602b2ccd6a2bb875b78f0e5c248a2480a6a9b3c78f043f54ed0301946ba MATCH
+section 2: stored=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 computed=1:8eb69c71fa34e403facda97ff294ace34489b8add4c4b66f62a2be324f3171d7 MATCH
+object   : stored=1:88efde1b8634acfc2cf8dc9c05490dc8cb20ae213791c0d714103a5851b69e2b computed=1:88efde1b8634acfc2cf8dc9c05490dc8cb20ae213791c0d714103a5851b69e2b MATCH

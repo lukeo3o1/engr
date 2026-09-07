@@ -1,0 +1,69 @@
+﻿===== the Rules this workspace now carries =====
+PROJECT POLICY ??read these before the mutation they govern
+
+audit-scope  backlog, object
+    review 3 attempts; on_exhaustion = human_confirmation
+evidence-discipline  collection, object, work
+EXIT: 0
+
+===== a governed mutation with no review is refused =====
+STDERR: error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:46db4f52e796443604fa6389b8a7bc14b60ef101043a5858d59fc4af54b19971 and the review outcome
+EXIT: 2
+
+===== the same mutation, review passed =====
+Challenge  change_state
+Object     01a05e55-ee  Predecessor fixture construction
+Type       none
+State      open
+Attention  yes ??it stays in the default listing
+Review     passed
+Digest     1:46db4f52e796443604fa6389b8a7bc14b60ef101043a5858d59fc4af54b19971
+Rules      audit-scope, evidence-discipline
+
+(object.state_changed.v1)
+
+Type this exactly to confirm:  CONFIRM 6U8E8E
+EXIT: 0
+CONFIRMED  01a05e55-ee  object.state_changed.v1  rev 8
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+EXIT: 0
+
+===== wording the Rules reject: failed, then overridden =====
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     FAILED ??confirming this overrides the agent's own review
+Digest     1:a4b2250107e98366d2157bc36d5ac05e4812072cbfc2003e3fdc2f64b43279cf
+Rules      audit-scope, evidence-discipline
+Reason     The wording names no transcript, which evidence-discipline requires.
+
+The migration completed and everything looked fine.
+
+Type this exactly to confirm:  CONFIRM A2MDNG
+EXIT: 0
+CONFIRMED  01a05e55-ee  section.created.v1  rev 9
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+EXIT: 0
+
+===== attempts past max_attempts: exhausted =====
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     EXHAUSTED at attempt 4 ??confirming this admits work no passing review allowed
+Digest     1:0f011de3551c6780af20f36cff58e791628806ec53f4690b56534fcbb2c4e0b9
+Rules      audit-scope, evidence-discipline
+Reason     Four attempts, and the wording still asserts what was not observed.
+
+The migration completed and everything looked fine.
+
+Type this exactly to confirm:  CONFIRM 2SB9XW
+EXIT: 0
+CONFIRMED  01a05e55-ee  section.created.v1  rev 10
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+EXIT: 0
+
+===== an attempt number the Rule does not allow =====
+STDERR: error: 01a05e55-ee46-7a91-983f-fa79b297b10c is already open, so there is nothing to confirm
+EXIT: 5

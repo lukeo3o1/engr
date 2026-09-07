@@ -1,0 +1,187 @@
+﻿############ 1. absent projection, at the head under test ############
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+    stored   (absent)
+    restore  01a05e55-74eb-7370-b771-0008bd71d149
+  next_section_id
+    stored   (absent)
+    restore  3
+  rev
+    stored   (absent)
+    restore  1
+  §1.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:57:48.683149208Z
+  §1.admitted.by
+    stored   (absent)
+    restore  human
+  §1.based_on.commit
+    stored   (absent)
+    restore  1dae5f46717a8967662236f69694bf4ee9ef76d8
+  §1.text
+    stored   (absent)
+    restore  The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+  §2.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:59:19.709593096Z
+  §2.admitted.by
+    stored   (absent)
+    restore  human
+  §2.text
+    stored   (absent)
+    restore  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+  state
+    stored   (absent)
+    restore  open
+  title
+    stored   (absent)
+    restore  Migration continuity audit
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM TCT75F
+  exit=0
+
+############ 2. the same, at the previously audited head ############
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+    stored   (absent)
+    restore  01a05e55-74eb-7370-b771-0008bd71d149
+  next_section_id
+    stored   (absent)
+    restore  3
+  rev
+    stored   (absent)
+    restore  1
+  §1.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:57:48.683149208Z
+  §1.admitted.by
+    stored   (absent)
+    restore  human
+  §1.based_on.commit
+    stored   (absent)
+    restore  1dae5f46717a8967662236f69694bf4ee9ef76d8
+  §1.text
+    stored   (absent)
+    restore  The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+  §2.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:59:19.709593096Z
+  §2.admitted.by
+    stored   (absent)
+    restore  human
+  §2.text
+    stored   (absent)
+    restore  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+  state
+    stored   (absent)
+    restore  open
+  title
+    stored   (absent)
+    restore  Migration continuity audit
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM FK7HYE
+  exit=0
+
+############ 3. the pending code shown again (current) ############
+  the pending code is UDMQ5E
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+    stored   (absent)
+    restore  01a05e55-74eb-7370-b771-0008bd71d149
+  next_section_id
+    stored   (absent)
+    restore  3
+  rev
+    stored   (absent)
+    restore  1
+  §1.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:57:48.683149208Z
+  §1.admitted.by
+    stored   (absent)
+    restore  human
+  §1.based_on.commit
+    stored   (absent)
+    restore  1dae5f46717a8967662236f69694bf4ee9ef76d8
+  §1.text
+    stored   (absent)
+    restore  The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way.
+  §2.admitted.at
+    stored   (absent)
+    restore  2026-09-01T18:59:19.709593096Z
+  §2.admitted.by
+    stored   (absent)
+    restore  human
+  §2.text
+    stored   (absent)
+    restore  Pass means all three: identity survives, provenance survives, and the record keeps refusing what it refused before. A migration that preserved bytes but lost the ability to detect drift would read as success and would not be one. Revised after the reference above was admitted: detection is the part a byte-for-byte comparison cannot check.
+  state
+    stored   (absent)
+    restore  open
+  title
+    stored   (absent)
+    restore  Migration continuity audit
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM UDMQ5E
+  exit=0
+--- is the re-render the same screen? ---
+IDENTICAL
+
+############ 4. the damaged screen, for the same two MUSTs ############
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+
+  §1.header
+    stored   A heading nobody ever admitted
+    restore  (absent)
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM QLQ8CT
+  exit=0
+
+############ 5. the tampered screen ############
+Challenge  repair
+Object     01a05e55-74  Migration continuity audiT
+Integrity  the stored record does not verify
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2, and nothing from the stored bytes
+
+  title
+    stored   Migration continuity audiT
+    restore  Migration continuity audit
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM UR56VB
+  exit=0
+
+############ 6. which screens name a revision at all ############
+  absent     lines naming a revision: 1
+  divergent  lines naming a revision: 1
+  tampered   lines naming a revision: 1
+--- script exit 0 ---

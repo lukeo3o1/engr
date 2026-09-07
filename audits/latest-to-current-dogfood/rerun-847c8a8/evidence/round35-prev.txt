@@ -1,0 +1,49 @@
+﻿
+===== unsealed projection =====
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev 1, events 2, challenge ARADG4 on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM ARADG4
+  -- and retyping it --
+     error: object 01a05e55-74eb-7370-b771-0008bd71d149 was sealed as 1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1 and its current contents seal as 1:24e8ad67f881d142394c0109f97a07886c17d8929b7bc06d3278ea6a5b59eb92
+     exit=5
+     projection: STILL DAMAGED
+     events now: 2
+     challenge: STILL PENDING
+     verify exit=5
+
+===== resealed-divergent projection =====
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev 1, events 2, challenge 6AW66J on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM 6AW66J
+  -- and retyping it --
+     error: 01a05e55-74eb-7370-b771-0008bd71d149: its sections is not what its admitted history produced, so it was changed outside an admission path; restore it with `engr repair` before building on it
+     exit=5
+     projection: STILL DAMAGED
+     events now: 2
+     challenge: STILL PENDING
+     verify exit=5
+
+===== absent projection (the control that already worked) =====
+  (no projection to save)
+  the uninterrupted repair landed: rev 2, events 2
+  the crash state: projection rev , events 2, challenge TH53YB on disk
+  -- what the pending code's screen says --
+     ALREADY APPLIED  this admission is already in the record.
+                      Retype it to finish cleanup:  CONFIRM TH53YB
+  -- and retyping it --
+     CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+     note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+     exit=0
+     projection: finished (identical to the uninterrupted repair)
+     events now: 2
+     challenge: cleared
+     verify exit=0
+
+===== the binaries this ran =====
+  engr-current  two-crash-windows sentence: 1
+  engr-prev     two-crash-windows sentence: 0
+--- script exit 0 ---

@@ -1,0 +1,28 @@
+﻿--- before: is the file there? ---
+absent
+--- what checkpoints/migrated holds for the same Object, for comparison ---
+8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315
+--- the repair screen ---
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+--- confirm ---
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+exit=0
+--- after: the file, and its bytes ---
+200f0509da307f2efcea3ccca8cba2d4e83be319799e863c70c851fc1401bba3
+--- and does the workspace verify now? ---
+01a05e55-74  PASS  2 sections  Migration continuity audit
+          uncommitted — git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          unprojected — 1 admitted event the stored projection has not caught up to; the next read applies it
+verify exit=0
+--- the stream, so the repair is visible as an admitted event ---
+rev=1 type=object.migrated.v1
+rev=2 type=object.repaired.v1
+--- script exit 0 ---
