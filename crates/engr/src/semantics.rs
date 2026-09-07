@@ -1,4 +1,4 @@
-//! The Phase 3 semantic vocabulary: what an Object *is*, what state it is in,
+//! The semantic vocabulary: what an Object *is*, what state it is in,
 //! what role a Section plays, what it relates to, and how much literal material
 //! it may carry.
 //!
@@ -167,6 +167,118 @@ pub fn needs_attention(object_type: Option<ObjectType>, state: State) -> bool {
     }
 }
 
+/// Which path admitted a Section's current semantics, and therefore how much
+/// authority those semantics carry.
+///
+/// This is the field that makes mixed authority readable rather than inferred.
+/// Durable engineering knowledge now arrives through two doors, and a reader who
+/// cannot tell which one a Section came through cannot tell whether a human ever
+/// assented to it — so the answer is persisted on the Section itself rather than
+/// reconstructed from history, which is evidence and may be purged.
+///
+/// There is deliberately no `Object.admission`. An Object is an aggregate, and
+/// an aggregate of one Human Section and one Agent Section has no single honest
+/// answer; asking the question of the Section is the only place it has one.
+///
+/// The ordering is one-way. A Human-Gated semantic mutation of a surviving Agent
+/// Section yields [`Admission::Human`], because those exact words were put
+/// through the gate where a human is asked. Nothing demotes Human to Agent:
+/// that would be engr deciding an admission it recorded had expired.
+///
+/// What this field records is **which door**, and only that. `human` says the
+/// wording went through the Human Gate; it is not evidence that a human was
+/// present, and nothing here can be — see the threat model in `PROTOCOL.md`,
+/// which is explicit that nothing stops an agent confirming its own proposal.
+/// Every rule below rests on the door, never on the presence.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Admission {
+    /// Admitted through Agent Rule Review. Durable engineering knowledge, and
+    /// explicitly **not** Human-authoritative.
+    Agent,
+    /// Admitted through the Human Gate. Human-authoritative.
+    ///
+    /// The default in memory only. Nothing persisted relies on it: every stored
+    /// Section writes `admitted.by` out, because a missing door read as `human`
+    /// is a file that gains Human authority by omission.
+    #[default]
+    Human,
+}
+
+impl Admission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Admission::Agent => "agent",
+            Admission::Human => "human",
+        }
+    }
+}
+
+/// Provenance of a Section's **current semantic value**: which door, and when.
+///
+/// One structure rather than two flat members, because the pair is one fact and
+/// a reader that finds only half of it has been told nothing useful. It is also
+/// what keeps the Section's provenance distinct from the Event's: `Section
+/// .admitted` says how these words came to mean what they mean, while
+/// `Event.metadata.admitted` says how that Event was allowed into history.
+/// Normally they agree; migration is the case that proves they are two facts,
+/// because a migrated Section keeps its original Human admission while the
+/// bootstrap Event records the migration's own confirmation.
+///
+/// `at` is not covered by the `admission` Ref selector. A dependency on when
+/// something was admitted is a dependency on a clock, and drift in a timestamp
+/// is not drift in an assertion.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Admitted {
+    pub by: Admission,
+    pub at: String,
+}
+
+impl Admitted {
+    pub fn new(by: Admission, at: impl Into<String>) -> Self {
+        Self { by, at: at.into() }
+    }
+
+    pub fn human(at: impl Into<String>) -> Self {
+        Self::new(Admission::Human, at)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            time::OffsetDateTime::parse(&self.at, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
+            EXIT_SCHEMA,
+            "admitted.at is not RFC3339"
+        );
+        Ok(())
+    }
+}
+
+/// The committed repository state a Section's wording was written against.
+///
+/// An object with one member rather than a bare string, so the basis has
+/// somewhere to grow that is not a second meaning for an existing scalar — and
+/// so a reader can tell "no basis was recorded" (the whole member absent) from
+/// "the basis is this commit" without either being a special string value.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BasedOn {
+    pub commit: String,
+}
+
+impl BasedOn {
+    pub fn new(commit: impl Into<String>) -> Self {
+        Self {
+            commit: commit.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_pinned_commit("based_on", &self.commit)
+    }
+}
+
 /// What semantic role a confirmed Section plays.
 ///
 /// Optional, and independent of the Object's type: an untyped Object may hold a
@@ -254,12 +366,12 @@ impl Target {
     }
 }
 
-/// A confirmed typed semantic edge.
+/// An admitted typed semantic edge.
 ///
-/// Distinct from `refs[]`, which is a wording dependency and drifts when its
-/// target is reworded. A relation says what this assertion is related to, and
-/// each type defines its own target rules; there is no shared drift behaviour to
-/// inherit and none is applied.
+/// Distinct from `refs[]`, which selects semantic dependencies and drifts only
+/// when those selected values move. A relation says what this assertion is
+/// related to, and each type defines its own target rules; there is no shared
+/// drift behaviour to inherit and none is applied.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Relation {

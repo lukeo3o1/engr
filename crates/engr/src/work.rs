@@ -1,4 +1,4 @@
-//! Bounded execution memory an agent keeps for one Object.
+//! Bounded execution memory an agent keeps for one Object or one Backlog item.
 //!
 //! Work answers "where does execution currently stand", and nothing else. It is
 //! agent-managed, non-authoritative, and deliberately outside the confirmation
@@ -6,14 +6,24 @@
 //! asking a human to confirm a checkpoint would make checkpoints not worth
 //! writing.
 //!
-//! What keeps that safe is that Work owns no authority. It is a sidecar on an
-//! Object, not a resource: there is no `engr:work:` reference, nothing points at
-//! it, and finishing every item it lists changes nothing about what the Object
-//! says. Stable conclusions reach the record the only way anything does, through
-//! `prepare` and a human. Work is what the next agent reads first and trusts
-//! least.
+//! What keeps that safe is that Work owns no authority. It is a sidecar on its
+//! subject, not a resource: there is no `engr:work:` reference, nothing points at
+//! it, and finishing every item it lists changes nothing about what its subject
+//! says. Stable conclusions reach the record through the applicable Human or
+//! reviewed Agent admission path. Work is what the next agent reads first and
+//! trusts least.
+//!
+//! That question — where does execution stand — is the same one whether the
+//! execution started from an unresolved Backlog point or from a durable Object,
+//! so the subject follows the thing being worked on while authority and identity
+//! stay with the subject. #63 is where that was decided. What the second subject
+//! kind costs is a lifetime rule, because the two are not alike in one respect:
+//! **an Object is never removed, and a Backlog item is removed by being
+//! resolved**. See [`Subject`] and the removal guard in
+//! [`crate::backlog::consume_section`].
 
 use crate::reference::{canonical_embedded, EngrTarget, ResourceKind};
+use crate::rules::Attempt;
 use crate::{
     ensure, store, tool_error, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA,
     EXIT_USAGE,
@@ -35,12 +45,161 @@ pub const ITEM_TEXT_MAX: usize = 160;
 pub const ITEM_RESULT_MAX: usize = 240;
 pub const REASON_MAX: usize = 200;
 
-pub fn dir(root: &Path) -> PathBuf {
-    store::engr_dir(root).join(DIR).join("objects")
+/// What a sidecar belongs to.
+///
+/// Two kinds, and they are one enum rather than two designs because they differ
+/// in exactly one respect: **an Object cannot be removed, and a Backlog item is
+/// meant to be**. Everything else about a sidecar — its shape, its limits, its
+/// Rule domain, what it may depend on — is the same either way, so the subject is
+/// a parameter here, and the difference is a lifetime rule over in
+/// [`crate::backlog`].
+///
+/// The subject is not a member of the stored file. It is the directory the file is
+/// in plus the file's own name, which is what keeps Work from acquiring an
+/// identity of its own: there is no `engr:work:`, nothing points at a sidecar,
+/// and the only way to reach one is to name the thing it belongs to.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Subject {
+    Object(String),
+    Backlog(String),
 }
 
-pub fn path(root: &Path, object: &str) -> PathBuf {
-    dir(root).join(format!("{object}.json"))
+/// One subject kind: the directory its sidecars live in, and how to name one.
+type Kind = (&'static str, fn(String) -> Subject);
+
+/// Both subject kinds, in the order everything that enumerates them uses.
+///
+/// One list, so a directory cannot join the domain in one place and be missed in
+/// another — which is how the released-v1 floor came to cover half of Work.
+const SUBJECTS: &[Kind] = &[("objects", Subject::Object), ("backlog", Subject::Backlog)];
+
+impl Subject {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Object(id) | Self::Backlog(id) => id,
+        }
+    }
+
+    pub fn kind(&self) -> ResourceKind {
+        match self {
+            Self::Object(_) => ResourceKind::Object,
+            Self::Backlog(_) => ResourceKind::Backlog,
+        }
+    }
+
+    pub(crate) fn folder(&self) -> &'static str {
+        match self {
+            Self::Object(_) => "objects",
+            Self::Backlog(_) => "backlog",
+        }
+    }
+
+    /// What the subject is called in prose, where a reference would read as noise.
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Self::Object(_) => "object",
+            Self::Backlog(_) => "backlog item",
+        }
+    }
+
+    /// The namespace-relative spelling, `obj:<id>` or `backlog:<id>`.
+    ///
+    /// Falls back to the stored id if the compact encoding somehow fails, which
+    /// is reachable only for an id that is not a UUID at all — every load path
+    /// refuses one. Printing it beats printing nothing, because the message it
+    /// lands in is about that id being wrong.
+    fn embedded(&self) -> String {
+        let token = self.kind().token();
+        match crate::reference::encode_uuid_str(self.id()) {
+            Ok(compact) => format!("{token}:{compact}"),
+            Err(_) => format!("{token}:{}", self.id()),
+        }
+    }
+
+    /// The subject in the spelling a caller can retype.
+    ///
+    /// Diagnostics name subjects this way rather than by bare id, because a bare
+    /// id no longer says which namespace it is in, and a message that leaves the
+    /// reader to guess between two resources is the kind of thing #61 was about.
+    pub fn reference(&self) -> String {
+        format!("engr:{}", self.embedded())
+    }
+
+    /// The subject as the shared embedded target, for structured output.
+    ///
+    /// `{ "kind": "engr", "ref": "backlog:<id>" }` — the same representation
+    /// this domain's own `dependencies[]` and `blockers[]` already use, and the
+    /// one every other engr target is written in. A work-specific identity
+    /// object would have been a second way to say a thing the workspace already
+    /// has one way to say.
+    pub fn target(&self) -> EngrTarget {
+        EngrTarget::new(self.embedded())
+    }
+}
+
+impl std::fmt::Display for Subject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reference())
+    }
+}
+
+/// The whole domain, both subject kinds.
+///
+/// Separate from [`dir`] because a caller asking "does this workspace hold any
+/// Work at all" must not be handed one half of the answer. The released-v1
+/// migration floor asks exactly that.
+pub fn root_dir(root: &Path) -> PathBuf {
+    store::engr_dir(root).join(DIR)
+}
+
+pub fn dir(root: &Path, subject: &Subject) -> PathBuf {
+    root_dir(root).join(subject.folder())
+}
+
+/// Every directory this domain stores sidecars in.
+pub fn dirs(root: &Path) -> Vec<PathBuf> {
+    SUBJECTS
+        .iter()
+        .map(|(folder, _)| root_dir(root).join(folder))
+        .collect()
+}
+
+pub fn path(root: &Path, subject: &Subject) -> PathBuf {
+    dir(root, subject).join(format!("{}.json", subject.id()))
+}
+
+/// Whether a sidecar file is there at all, without asking whether it loads.
+///
+/// The question a removal guard has to ask: an unreadable sidecar is still a
+/// sidecar, and letting a broken one through would make corruption the way past
+/// the invariant. `symlink_metadata`, so a dangling link counts as present for
+/// the same reason it does in the migration floor.
+///
+/// Every "is there one" in this module goes through here, so a sidecar cannot be
+/// absent to one caller and present to another — which is what `exists()` and
+/// `symlink_metadata` would otherwise disagree about for a broken link.
+///
+/// **Three answers, not two.** `is_ok()` was the second version of this
+/// question and kept the first one's flaw: it reads `PermissionDenied`, `EIO`
+/// and every other stat failure as absence. Absence is what lets the final
+/// Backlog Section be consumed and its parent item removed, so failing to
+/// establish it there would leave execution memory behind for a subject that no
+/// longer exists — the orphan the guard exists to prevent. Not knowing is not
+/// the same as no, and only `NotFound` is no.
+///
+/// The containment boundary comes first for the same reason, and it was the
+/// third version's flaw: stat'ing the final path alone answers about whatever
+/// the path leads to, so an intermediate `work/…` link whose target is missing
+/// answered `NotFound` — established absence, through a redirection nobody
+/// established at all — and the destructive consume then went ahead.
+pub fn exists(root: &Path, subject: &Subject) -> Result<bool> {
+    let path = path(root, subject);
+    store::contained(&path)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(tool_error(path.display(), error)),
+    }
 }
 
 /// Whether agents may keep going on their own.
@@ -129,7 +288,8 @@ pub struct Item {
     /// anchor. A commit that a rebase made unreachable is a dead signpost, not a
     /// corrupt sidecar, and an item can be done with no commit at all.
     ///
-    /// Required, and may be empty, for the same reason the lists above are.
+    /// Omitted when empty, for the same reason the lists above are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<String>,
 }
 
@@ -142,7 +302,7 @@ pub struct Work {
     /// There is no `blocked`: that is derived from `blockers`, and storing it
     /// would let the two disagree. There is no `done` either, and that absence
     /// is load-bearing — a completed sidecar must not become a second answer to
-    /// "is this settled" alongside the Object's own state.
+    /// "is this settled" alongside its subject's own state.
     ///
     /// `paused` is a **human-directed** stop signal. An agent must not set it
     /// because a session is ending, because nothing is currently actionable, or
@@ -162,12 +322,15 @@ pub struct Work {
     /// handoff note or a conversation keeps meaning the same step even after
     /// item 3 is pruned.
     pub next_item_id: u64,
-    /// Required, and may be empty. Not `#[serde(default)]`: an omitted list and
-    /// an empty one would be the same sidecar written two ways, and a stored
-    /// shape the write path can never produce is a shadow schema that only ever
-    /// gets discovered by something depending on it.
+    /// Omitted when empty, per the canonical omission rule: an absent optional,
+    /// an empty array and an empty object are all written the same way, which is
+    /// not at all. An omitted list and an empty one would otherwise be the same
+    /// sidecar written two ways.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<Blocker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<Item>,
 }
 
@@ -214,6 +377,11 @@ impl Work {
 
     fn take_id(&mut self) -> Result<u64> {
         let id = self.next_item_id;
+        ensure!(
+            id < crate::proof::MAX_SAFE_INTEGER,
+            EXIT_USAGE,
+            "this sidecar has no remaining item ids in the shared safe-integer domain"
+        );
         self.next_item_id = self
             .next_item_id
             .checked_add(1)
@@ -227,6 +395,14 @@ impl Work {
     /// edit, and these files are meant to be read and diffed like any other
     /// tracked file.
     pub fn validate(&self) -> Result<()> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("work: {error}")))?;
+        crate::proof::stored_within_safe_integers(&value, "work")?;
+        ensure!(
+            self.next_item_id >= 1,
+            EXIT_SCHEMA,
+            "next_item_id must be positive"
+        );
         // Every fault here is a fault in *stored* data, so they all read as
         // schema rather than usage. A caller who typed something too long is
         // refused earlier, by the same rule with the other exit code — a file
@@ -270,6 +446,7 @@ impl Work {
         }
         let mut seen = std::collections::BTreeSet::new();
         for item in &self.items {
+            ensure!(item.id >= 1, EXIT_SCHEMA, "work item ids must be positive");
             bounded(EXIT_SCHEMA, "a work item", &item.text, ITEM_TEXT_MAX)?;
             if let Some(result) = &item.result {
                 bounded(EXIT_SCHEMA, "a work item result", result, ITEM_RESULT_MAX)?;
@@ -369,57 +546,77 @@ fn now() -> String {
 // Storage
 // ---------------------------------------------------------------------------
 
-/// Every Object that currently has a sidecar.
-pub fn ids(root: &Path) -> Result<Vec<String>> {
-    let dir = dir(root);
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
+/// Every subject that currently has a sidecar.
+///
+/// Deterministic across both kinds: the kinds in [`SUBJECTS`] order, each sorted.
+/// Migration plans this sequence into a manifest, so "whatever the filesystem
+/// hands back" is not good enough.
+pub fn ids(root: &Path) -> Result<Vec<Subject>> {
     let mut found = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
-        let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(id) = name.strip_suffix(".json") {
-            found.push(id.to_owned());
+    for (folder, make) in SUBJECTS {
+        let dir = root_dir(root).join(folder);
+        if !store::namespace(&dir)? {
+            continue;
         }
+        let mut here = Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(|error| tool_error(dir.display(), error))? {
+            let entry = entry.map_err(|error| tool_error(dir.display(), error))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(id) = name.strip_suffix(".json") {
+                here.push(id.to_owned());
+            }
+        }
+        here.sort();
+        found.extend(here.into_iter().map(make));
     }
-    found.sort();
     Ok(found)
 }
 
-pub fn load(root: &Path, object: &str) -> Result<Work> {
-    let path = path(root, object);
+pub fn load(root: &Path, subject: &Subject) -> Result<Work> {
+    let path = path(root, subject);
     ensure!(
-        path.exists(),
+        exists(root, subject)?,
         EXIT_NOT_FOUND,
-        "no work recorded for object {object}"
+        "no work recorded for {} {}",
+        subject.noun(),
+        subject
     );
-    let work: Work = store::read_json(&path)?;
+    let work: Work = store::read_resource(root, &path)?;
     work.validate()?;
-    // The owner invariant, held on the way *out* as well as on the way in. A
-    // sidecar names its Object in its filename, so a copied file can name one
-    // that never existed — and a check that only runs on the write path would
-    // let this build read, list and hand back operational memory for nothing.
-    // `is_ok()` used to answer this, which collapsed "the Object is not there"
-    // and "the Object will not load" into one sentence — and the sentence it
+    if store::validate_format(root)? == store::WorkspaceFormat::Current {
+        check_canonical_work(&path, &work)?;
+    }
+    // The subject invariant, held on the way *out* as well as on the way in. A
+    // sidecar names its subject in its path, so a copied file can name one that
+    // never existed — and a check that only runs on the write path would let
+    // this build read, list and hand back operational memory for nothing.
+    // `is_ok()` used to answer this, which collapsed "the subject is not there"
+    // and "the subject will not load" into one sentence — and the sentence it
     // chose was the wrong one, sending a reader to create a record that is
     // already on disk while hiding the fault that actually needs looking at.
     // Unreadable authority is not absence, on this path as on every other.
-    if let Err(error) = crate::ops::effective(root, object) {
+    //
+    // Reachable for a Backlog subject only through a fault: the removal guard in
+    // `backlog::consume_section` is what keeps an ordinary resolution from
+    // producing one. This is the second half of that invariant, and it is the
+    // half that catches a hand-edited workspace.
+    if let Err(error) = require_subject(root, subject) {
         return Err(if error.code == EXIT_NOT_FOUND {
             Error::new(
                 EXIT_SCHEMA,
                 format!(
-                    "{} belongs to no object: a sidecar is owned by an Object, and object {object} does not exist",
-                    path.display()
+                    "{} belongs to nothing: a sidecar is owned by the resource it names, and {} {subject} does not exist",
+                    path.display(),
+                    subject.noun()
                 ),
             )
         } else {
             Error::new(
                 error.code,
                 format!(
-                    "{} belongs to object {object}, which cannot be read: {}",
+                    "{} belongs to {} {subject}, which cannot be read: {}",
                     path.display(),
+                    subject.noun(),
                     error.message
                 ),
             )
@@ -428,37 +625,77 @@ pub fn load(root: &Path, object: &str) -> Result<Work> {
     Ok(work)
 }
 
+/// The current writer's one representation for each Work collection.
+pub(crate) fn canonicalize_work(work: &mut Work) -> Result<()> {
+    crate::proof::canonical_set(&mut work.dependencies, "work dependency")?;
+    work.items.sort_by_key(|item| item.id);
+    for item in &mut work.items {
+        crate::proof::canonical_set(&mut item.commits, "work item commit")?;
+    }
+    Ok(())
+}
+
+fn check_canonical_work(path: &Path, work: &Work) -> Result<()> {
+    let mut canonical = work.clone();
+    canonicalize_work(&mut canonical)?;
+    ensure!(
+        canonical == *work,
+        EXIT_SCHEMA,
+        "{}: Work collections are stored in their canonical order",
+        path.display()
+    );
+    Ok(())
+}
+
 /// The sidecar if there is one, and no complaint if there is not.
 ///
-/// Absence means only that engr holds no operational memory for the Object —
-/// the ordinary state of most Objects, and never an error.
-pub fn find(root: &Path, object: &str) -> Result<Option<Work>> {
-    if !path(root, object).exists() {
+/// Absence means only that engr holds no operational memory for this subject —
+/// the ordinary state of most subjects, and never an error.
+pub fn find(root: &Path, subject: &Subject) -> Result<Option<Work>> {
+    if !exists(root, subject)? {
         return Ok(None);
     }
-    load(root, object).map(Some)
+    load(root, subject).map(Some)
 }
 
-fn save(root: &Path, object: &str, work: &Work) -> Result<()> {
+fn save(root: &Path, subject: &Subject, work: &Work) -> Result<()> {
     work.validate()?;
-    store::write_json(&path(root, object), work)
+    let mut work = work.clone();
+    canonicalize_work(&mut work)?;
+    store::write_json(&path(root, subject), &work)
 }
 
-fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+/// Every Work mutation, under the lock, past the applicable Rule set.
+///
+/// The Rule check is inside the lock and before the read, so what it was
+/// established against is what gets written. Work has no prepared candidate to
+/// bind, so the attempt is the whole of what a caller attests.
+fn locked<T>(root: &Path, attempt: Attempt, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
         store::require_current(root)?;
+        crate::rules::direct(root, crate::rules::Domain::Work, attempt)?;
         body()
     })
 }
 
-/// A sidecar belongs to an Object that exists.
+/// A sidecar belongs to a subject that exists.
 ///
-/// Checked on every write rather than only at creation: an Object cannot be
-/// deleted in v0, but a hand-copied file can name anything, and a sidecar for
-/// nothing is operational memory nobody will ever read.
-fn require_object(root: &Path, object: &str) -> Result<()> {
-    crate::ops::effective(root, object).map(|_| ())
+/// Checked on every write rather than only at creation: a hand-copied file can
+/// name anything, and a sidecar for nothing is operational memory nobody will
+/// ever read.
+///
+/// The two subject kinds reach the same question through different doors. An
+/// Object's existence is its admitted history — a missing projection is a
+/// repairable fault and not an absence, which is why this asks
+/// [`crate::ops::effective`] rather than the objects directory. A Backlog item
+/// has no history behind it: the file is the item, so its absence is the whole
+/// answer.
+fn require_subject(root: &Path, subject: &Subject) -> Result<()> {
+    match subject {
+        Subject::Object(id) => crate::ops::effective(root, id).map(|_| ()),
+        Subject::Backlog(id) => crate::backlog::load(root, id).map(|_| ()),
+    }
 }
 
 /// A dependency or blocker may name only something that exists **now**.
@@ -494,42 +731,55 @@ fn require_target(root: &Path, target: &str) -> Result<()> {
 
 /// Read, change, stamp, write — under the lock, with the invariants checked on
 /// both sides of the change.
-fn edit<T>(root: &Path, object: &str, body: impl FnOnce(&mut Work) -> Result<T>) -> Result<T> {
-    locked(root, || {
-        require_object(root, object)?;
-        let mut work = load(root, object)?;
+fn edit<T>(
+    root: &Path,
+    subject: &Subject,
+    attempt: Attempt,
+    body: impl FnOnce(&mut Work) -> Result<T>,
+) -> Result<T> {
+    locked(root, attempt, || {
+        require_subject(root, subject)?;
+        let mut work = load(root, subject)?;
         let outcome = body(&mut work)?;
-        work.items.sort_by_key(|item| item.id);
         work.updated_at = now();
-        save(root, object, &work)?;
+        save(root, subject, &work)?;
         Ok(outcome)
     })
 }
 
-/// Begin keeping execution memory for an Object.
-pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+/// Begin keeping execution memory for an Object or a Backlog item.
+pub fn start(
+    root: &Path,
+    subject: &Subject,
+    summary: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    locked(root, || {
-        require_object(root, object)?;
+    locked(root, attempt, || {
+        require_subject(root, subject)?;
         ensure!(
-            !path(root, object).exists(),
+            !exists(root, subject)?,
             EXIT_INVARIANT,
-            "object {object} already has work recorded; change it rather than starting again"
+            "{} {subject} already has work recorded; change it rather than starting again",
+            subject.noun()
         );
         let mut work = Work::new();
         if let Some(summary) = summary {
             work.summary = Some(summary.to_owned());
         }
-        save(root, object, &work)?;
+        save(root, subject, &work)?;
         Ok(work)
     })
 }
 
-/// Forget the execution memory for an Object.
+/// Forget the execution memory for one subject.
 ///
-/// Deleting says nothing about the Object; the record is untouched.
+/// Deleting says nothing about the subject; the record is untouched. It is also
+/// the only way to clear the way for a Backlog item to be resolved, which is
+/// what makes this the deliberate step the invariant asks for rather than a
+/// cascade nobody sees.
 ///
 /// A `paused` sidecar is deleted too, and that is deliberate. #12 makes "an
 /// agent MUST NOT delete a paused WorkObject without explicit human direction" a
@@ -544,11 +794,11 @@ pub fn start(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
 /// the Skill. Whether human direction should have a mechanical representation at
 /// all is a real question and an open one; see `## What v0 does not solve`.
 /// [`Removed`] reports what was discarded so a caller can say so.
-pub fn remove(root: &Path, object: &str) -> Result<Removed> {
-    locked(root, || {
-        let work = load(root, object)?;
-        let path = path(root, object);
-        std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))?;
+pub fn remove(root: &Path, subject: &Subject, attempt: Attempt) -> Result<Removed> {
+    locked(root, attempt, || {
+        let work = load(root, subject)?;
+        let path = path(root, subject);
+        crate::store::remove_durably(&path)?;
         Ok(Removed {
             was_paused: work.state == State::Paused,
         })
@@ -570,36 +820,42 @@ pub struct Removed {
 /// rule an agent has to follow is about who decided, not about which value is
 /// stored. engr cannot check that; the Skill is where it is stated, and the
 /// refusal in [`remove`] is where it bites.
-pub fn set_state(root: &Path, object: &str, state: State) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_state(root: &Path, subject: &Subject, state: State, attempt: Attempt) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         work.state = state;
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn set_summary(root: &Path, object: &str, summary: Option<&str>) -> Result<Work> {
+pub fn set_summary(
+    root: &Path,
+    subject: &Subject,
+    summary: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(summary) = summary {
         check_text("summary", summary, SUMMARY_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         work.summary = summary.map(str::to_owned);
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
 pub fn add_dependency(
     root: &Path,
-    object: &str,
+    subject: &Subject,
     target: &str,
     reason: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a dependency reason", reason, REASON_MAX)?;
     }
     check_target("a dependency target", target)?;
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         // Inside the lock, because the check is what defines admission. It used
         // to live only in the CLI, so what a sidecar could name depended on
         // which door it came through — the same split that was fixed for
@@ -623,11 +879,16 @@ pub fn add_dependency(
         work.dependencies.push(dependency);
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn remove_dependency(root: &Path, object: &str, target: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_dependency(
+    root: &Path,
+    subject: &Subject,
+    target: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         let before = work.dependencies.len();
         work.dependencies
             .retain(|held| held.target.reference != target);
@@ -638,14 +899,15 @@ pub fn remove_dependency(root: &Path, object: &str, target: &str) -> Result<Work
         );
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
 pub fn add_blocker(
     root: &Path,
-    object: &str,
+    subject: &Subject,
     reason: Option<&str>,
     target: Option<&str>,
+    attempt: Attempt,
 ) -> Result<Work> {
     if let Some(reason) = reason {
         check_text("a blocker reason", reason, REASON_MAX)?;
@@ -653,7 +915,7 @@ pub fn add_blocker(
     if let Some(target) = target {
         check_target("a blocker target", target)?;
     }
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         if let Some(target) = target {
             require_target(root, target)?;
         }
@@ -663,13 +925,18 @@ pub fn add_blocker(
         });
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
 /// Blockers are addressed by position, because they have no ids — they are
 /// conditions rather than things, and a condition that cleared is simply gone.
-pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_blocker(
+    root: &Path,
+    subject: &Subject,
+    index: usize,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         ensure!(
             index < work.blockers.len(),
             EXIT_NOT_FOUND,
@@ -679,12 +946,12 @@ pub fn remove_blocker(root: &Path, object: &str, index: usize) -> Result<Work> {
         work.blockers.remove(index);
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
+pub fn add_item(root: &Path, subject: &Subject, text: &str, attempt: Attempt) -> Result<u64> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         let id = work.take_id()?;
         work.items.push(Item {
             id,
@@ -697,36 +964,60 @@ pub fn add_item(root: &Path, object: &str, text: &str) -> Result<u64> {
     })
 }
 
-pub fn set_item_state(root: &Path, object: &str, id: u64, state: ItemState) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn set_item_state(
+    root: &Path,
+    subject: &Subject,
+    id: u64,
+    state: ItemState,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         work.item_mut(id)?.state = state;
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn set_item_text(root: &Path, object: &str, id: u64, text: &str) -> Result<Work> {
+pub fn set_item_text(
+    root: &Path,
+    subject: &Subject,
+    id: u64,
+    text: &str,
+    attempt: Attempt,
+) -> Result<Work> {
     check_text("a work item", text, ITEM_TEXT_MAX)?;
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         work.item_mut(id)?.text = text.to_owned();
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn set_item_result(root: &Path, object: &str, id: u64, result: Option<&str>) -> Result<Work> {
+pub fn set_item_result(
+    root: &Path,
+    subject: &Subject,
+    id: u64,
+    result: Option<&str>,
+    attempt: Attempt,
+) -> Result<Work> {
     if let Some(result) = result {
         check_text("a work item result", result, ITEM_RESULT_MAX)?;
     }
-    edit(root, object, |work| {
+    edit(root, subject, attempt, |work| {
         work.item_mut(id)?.result = result.map(str::to_owned);
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
-pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn add_item_commit(
+    root: &Path,
+    subject: &Subject,
+    id: u64,
+    commit: &str,
+    attempt: Attempt,
+) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         let item = work.item_mut(id)?;
         ensure!(
             !item.commits.iter().any(|held| held == commit),
@@ -736,16 +1027,16 @@ pub fn add_item_commit(root: &Path, object: &str, id: u64, commit: &str) -> Resu
         item.commits.push(commit.to_owned());
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }
 
 /// Prune one item. Its id is not reclaimed, and nothing is archived: git holds
 /// what the sidecar used to say.
-pub fn remove_item(root: &Path, object: &str, id: u64) -> Result<Work> {
-    edit(root, object, |work| {
+pub fn remove_item(root: &Path, subject: &Subject, id: u64, attempt: Attempt) -> Result<Work> {
+    edit(root, subject, attempt, |work| {
         work.item(id)?;
         work.items.retain(|item| item.id != id);
         Ok(())
     })?;
-    load(root, object)
+    load(root, subject)
 }

@@ -1,8 +1,8 @@
 //! Read surfaces: staleness assessment, `show`, and `ls`.
 //!
-//! Two rules shape everything here. The confirmed wording and how much it can
+//! Two rules shape everything here. The admitted wording and how much it can
 //! be trusted appear on the *same* default surface — the previous design hid the
-//! confirmed text behind a flag, and a reader given the default output drew the
+//! authoritative text behind a flag, and a reader given the default output drew the
 //! opposite conclusion from the truth. And nothing is truncated: an agent asked
 //! to reason from a record needs all of it.
 
@@ -10,7 +10,7 @@ use crate::backlog;
 use crate::git;
 use crate::model::{Object, Ref};
 use crate::semantics::{Relation, Supplement};
-use crate::{collection, ops, store, work, Result};
+use crate::{collection, ops, store, work, Error, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -21,10 +21,8 @@ pub struct RefDrift {
     pub confirmed_sha256: String,
     pub current_sha256: Option<String>,
     pub lookback: Option<String>,
-    /// The target's stored content no longer hashes to the target's own
-    /// recorded hash. Comparing hashes cannot see this: an edit that leaves the
-    /// stored hash alone leaves `current_sha256` equal to what was pinned, so
-    /// the ref looks unmoved while the wording under it was rewritten.
+    /// Current or historical target integrity failed before semantic drift
+    /// could be trusted. `integrity_side` keeps the actionable distinction.
     pub target_tampered: bool,
     /// The target could not be read at all — malformed authority, a broken
     /// invariant, a file this build refuses. **Not** the same as the target
@@ -40,24 +38,69 @@ pub struct RefDrift {
     /// `verify` already treated it as a failure while this surface called it
     /// drift was one workspace state with two verdicts.
     pub target_missing: bool,
+    /// The target seals correctly and is not what its own admitted history
+    /// produced.
+    ///
+    /// A failure, and its own flag. Without one it fell through to ordinary
+    /// drift: `forged()` stayed false, `show` exited 0, the advice line said the
+    /// target "no longer exists" when it is right there, and JSON reported
+    /// `stale_refs` — while `verify` failed on the same state. A new dependency
+    /// answer has to be carried all the way to the surfaces or the surfaces go
+    /// on describing the state they were written for.
+    pub target_history_divergent: bool,
+    /// The target's own admitted history will not replay.
+    ///
+    /// Kept apart from [`Self::target_history_divergent`] for the reason the
+    /// Verify contract keeps them apart: that one is repairable and this one has
+    /// nothing to repair from.
+    pub target_history_unreplayable: bool,
+    /// Selected semantic fields that changed for a selective Ref.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved_fields: Vec<String>,
+    /// Which side of a selective Ref failed integrity. The machine state is
+    /// intentionally coarse; this diagnostic keeps the actionable distinction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_side: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SectionStatus {
     /// This section's stored content does not hash to its own recorded hash.
     /// Dominates every other signal: a forged section's drift assessment is an
-    /// assessment of something nobody confirmed.
+    /// assessment of something no admission path accepted.
     pub tampered: bool,
     pub basis: Option<git::Distance>,
     pub drifted: Vec<RefDrift>,
+    /// A `superseded_by` on this Section whose target cannot be established.
+    ///
+    /// Not drift, and deliberately not one of the `drifted` entries. Drift asks
+    /// a person whether this wording still holds; this says the authoritative
+    /// forward link out of this Object leads nowhere, so the chain a reader
+    /// follows to find current knowledge is broken.
+    pub replacement: Option<String>,
 }
 
 impl SectionStatus {
     pub fn is_ok(&self) -> bool {
-        !self.tampered && self.basis.is_none() && self.drifted.is_empty()
+        !self.tampered
+            && self.basis.is_none()
+            && self.drifted.is_empty()
+            && self.replacement.is_none()
     }
 
-    /// A section standing on wording that is not what was confirmed.
+    /// A Section standing on a target nothing admitted, or on one whose own
+    /// history will not replay.
+    ///
+    /// Both are failures, and neither is drift. Drift asks a person whether this
+    /// wording still holds; these say the thing being depended on is not
+    /// established at all.
+    pub fn stands_on_unadmitted(&self) -> bool {
+        self.drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent || drift.target_history_unreplayable)
+    }
+
+    /// A Section standing on semantics that are not what was admitted.
     pub fn stands_on_tampered(&self) -> bool {
         self.drifted.iter().any(|drift| drift.target_tampered)
     }
@@ -80,8 +123,10 @@ impl SectionStatus {
     pub fn forged(&self) -> bool {
         self.tampered
             || self.stands_on_tampered()
+            || self.stands_on_unadmitted()
             || self.stands_on_unreadable()
             || self.stands_on_missing()
+            || self.replacement.is_some()
     }
 
     pub fn label(&self) -> &'static str {
@@ -91,11 +136,28 @@ impl SectionStatus {
         if self.stands_on_tampered() {
             return "REF TAMPERED";
         }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "REF UNADMITTED";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "REF HISTORY BROKEN";
+        }
         if self.stands_on_unreadable() {
             return "REF UNREADABLE";
         }
         if self.stands_on_missing() {
             return "REF MISSING";
+        }
+        if self.replacement.is_some() {
+            return "REPLACEMENT UNAVAILABLE";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -112,11 +174,28 @@ impl SectionStatus {
         if self.stands_on_tampered() {
             return "ref_tampered";
         }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_divergent)
+        {
+            return "ref_unadmitted";
+        }
+        if self
+            .drifted
+            .iter()
+            .any(|drift| drift.target_history_unreplayable)
+        {
+            return "ref_history_broken";
+        }
         if self.stands_on_unreadable() {
             return "ref_unreadable";
         }
         if self.stands_on_missing() {
             return "ref_missing";
+        }
+        if self.replacement.is_some() {
+            return "replacement_unavailable";
         }
         match (self.basis.is_some(), !self.drifted.is_empty()) {
             (false, false) => "ok",
@@ -131,11 +210,115 @@ impl SectionStatus {
 ///
 /// A hash that cannot be recomputed counts as a mismatch: the alternative is
 /// reporting content we could not check as sound.
-fn tampered(section: &crate::model::Section) -> bool {
-    section
-        .recomputed_sha256()
-        .map(|now| now != section.sha256)
-        .unwrap_or(true)
+fn section_tampered(_object: &Object, section: &crate::model::Section) -> bool {
+    crate::integrity::check_section_seal(section).is_err()
+}
+
+fn object_tampered(object: &Object) -> bool {
+    crate::integrity::check_object_integrity(object).is_err()
+}
+
+/// Whether this projection is the value its own admitted history produced, and
+/// if not, which of the two faults it is.
+///
+/// The question no seal can answer, because seals are recomputed from the bytes
+/// on disk: an out-of-band edit that was also resealed verifies perfectly, so
+/// integrity says `ok` about a record nothing admitted.
+///
+/// Reserved for explicit assessment (show and ls --verify). Navigation
+/// listings read projections only and mark unchecked rows instead of claiming
+/// that matching seals prove admission.
+fn history_fault(root: &Path, object: &Object) -> Option<crate::ops::HistoryFault> {
+    ops::history_fault(root, object).ok().flatten()
+}
+
+/// What is wrong with the Object itself, above anything about its Sections.
+///
+/// **Three answers, in the evaluator's own order.** The aggregate seal first,
+/// because bytes that do not match their own seal establish nothing about what
+/// history produced; then what that history says. Explicit assessment asks
+/// this before it asks about a Section, because an Object that is wrong at this
+/// level makes every row under it wrong in the same way — and each of them used
+/// to answer some part of it with `ok`.
+///
+/// One word per state, cased for the surface that prints it, and the JSON
+/// `integrity` member uses the same word: a reader who has seen
+/// `"integrity": "divergent"` must not have to learn a second name for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectFault {
+    /// There are no stored bytes at all; what was assessed is the
+    /// reconstruction admitted history produced.
+    ProjectionMissing,
+    /// The stored bytes do not match their own aggregate seal.
+    Tampered,
+    /// They match it, and no admitted Event ever produced them.
+    Divergent,
+    /// The history cannot be replayed, so there is nothing to compare against.
+    Unreplayable,
+}
+
+impl ObjectFault {
+    /// The prose label, beside `REF UNADMITTED` and its neighbours.
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProjectionMissing => "OBJECT PROJECTION MISSING",
+            Self::Tampered => "OBJECT TAMPERED",
+            Self::Divergent => "OBJECT DIVERGENT",
+            Self::Unreplayable => "OBJECT UNREPLAYABLE",
+        }
+    }
+
+    /// The machine word, for `show --format json`'s `integrity` member.
+    ///
+    /// The same classifier the listing uses, because the two surfaces answering
+    /// the same question with different vocabularies is how a reader ends up
+    /// believing they are different questions.
+    fn key(self) -> &'static str {
+        match self {
+            Self::ProjectionMissing => "projection_missing",
+            Self::Tampered => "tampered",
+            Self::Divergent => "divergent",
+            Self::Unreplayable => "unreplayable",
+        }
+    }
+}
+
+/// Whether the Object being rendered has any stored bytes at all.
+///
+/// Asked once, here, and by everything that classifies an Object: `show` used to
+/// answer `"integrity": "ok"` about a value it had rebuilt out of history
+/// because the file was gone, at the same instant `verify` was exiting 5 over
+/// the same workspace.
+///
+/// "Not established as a readable file", not "established absent": a path that
+/// is there and is not a regular file is not a projection either.
+fn projection_missing(root: &Path, object: &Object) -> bool {
+    !matches!(
+        store::resource_present(&store::object_path(root, &object.id)),
+        Ok(true)
+    )
+}
+
+fn object_fault(root: &Path, object: &Object) -> Option<ObjectFault> {
+    // Asked before the other two, because they are questions about stored bytes
+    // and here there are none. `object` is the reconstruction `ops::effective`
+    // built out of admitted history: its seals pass and its history produced it,
+    // by construction. So both of the questions below answer "fine" about a
+    // record that has no projection at all — which is how the *explicit*
+    // assessment came to print `all ok` on a workspace `verify` was failing, and
+    // on the one surface still entitled to discover such an Object, since cheap
+    // navigation enumerates the files and cannot see it.
+    //
+    if projection_missing(root, object) {
+        return Some(ObjectFault::ProjectionMissing);
+    }
+    if object_tampered(object) {
+        return Some(ObjectFault::Tampered);
+    }
+    match history_fault(root, object)? {
+        crate::ops::HistoryFault::Divergent(_) => Some(ObjectFault::Divergent),
+        crate::ops::HistoryFault::Unreplayable(_) => Some(ObjectFault::Unreplayable),
+    }
 }
 
 /// For commit ids and content hashes, which are random throughout.
@@ -163,53 +346,118 @@ fn canonical_reference(id: &str) -> String {
 
 /// The abbreviation width to use across one command's output.
 pub fn width(root: &Path) -> usize {
+    ops::object_ids(root)
+        .map(|ids| store::abbrev_len(&ids))
+        .unwrap_or(8)
+}
+
+// Navigation must not discover identities by reading the EventStore.
+fn projection_width(root: &Path) -> usize {
     store::object_ids(root)
         .map(|ids| store::abbrev_len(&ids))
         .unwrap_or(8)
 }
 
 fn drift_for(root: &Path, reference: &Ref) -> RefDrift {
-    let loaded = ops::effective(root, &reference.object);
+    let (object, section) = match crate::dependency::parse_target(reference.target()) {
+        Ok(identity) => identity,
+        Err(_) => {
+            return RefDrift {
+                object: "invalid reference target".to_owned(),
+                section: 0,
+                confirmed_sha256: String::new(),
+                current_sha256: None,
+                lookback: None,
+                target_tampered: false,
+                target_unreadable: true,
+                target_missing: false,
+                target_history_divergent: false,
+                target_history_unreplayable: false,
+                moved_fields: Vec::new(),
+                integrity_side: None,
+            }
+        }
+    };
+    let loaded = ops::effective(root, &object);
     // Absent and unreadable are different answers, and flattening them here is
     // what would let a corrupt dependency read as ordinary drift on the one
     // surface whose job is to say how far wording can be trusted.
-    let target_unreadable = loaded
+    let mut target_unreadable = loaded
         .as_ref()
         .err()
         .is_some_and(|error| error.code != crate::EXIT_NOT_FOUND);
-    let target = loaded
-        .ok()
-        .and_then(|target| target.section(reference.section).ok().cloned());
+    let target_object = loaded.ok();
+    let target = target_object
+        .as_ref()
+        .and_then(|target| target.section(section).ok().cloned());
     let target_missing = target.is_none() && !target_unreadable;
-    let target_tampered = target.as_ref().map(tampered).unwrap_or(false);
-    // Recomputed from the target's actual content, not read off its stored
-    // seal. The seal is a claim about what was confirmed; it is not the
-    // content, and a file rewritten behind the gate keeps the old seal while
-    // saying something else. Reporting the seal here made the two verdicts
-    // agree by accident — "was X, now X" for a section whose wording had
-    // changed — because the value being compared was the very value that had
-    // not moved. Content identity decides drift; the seal decides tampering.
-    let current = target.and_then(|section| section.recomputed_sha256().ok());
-    let moved = current.as_deref() != Some(reference.sha256.as_str());
-    // Worth offering whenever the target is not what was pinned, whether it was
-    // revised through the gate or rewritten behind it.
-    let lookback = (current.is_some() && (moved || target_tampered)).then(|| {
+
+    let current_integrity_failed = target_object
+        .as_ref()
+        .is_some_and(|target| crate::integrity::check_object_integrity(target).is_err());
+    let evaluated = target_object
+        .as_ref()
+        .map(|target| crate::dependency::evaluate(root, target, reference));
+    if evaluated.as_ref().is_some_and(Result::is_err) {
+        target_unreadable = true;
+    }
+    let state = evaluated.and_then(Result::ok);
+    let moved_fields = match &state {
+        Some(crate::dependency::Dependency::Drifted { fields }) => fields
+            .iter()
+            .map(|field| field.as_str().to_owned())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let target_tampered = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetIntegrityFailure)
+    );
+    let target_history_divergent = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryDivergent)
+    );
+    let target_history_unreplayable = matches!(
+        state,
+        Some(crate::dependency::Dependency::TargetHistoryUnreplayable)
+    );
+    let target_missing =
+        matches!(state, Some(crate::dependency::Dependency::TargetMissing)) || target_missing;
+    let target_unreadable = target_unreadable
+        || matches!(
+            state,
+            Some(
+                crate::dependency::Dependency::ProvenanceUnavailable
+                    | crate::dependency::Dependency::SchemaMismatch
+                    | crate::dependency::Dependency::DigestInvalid
+            )
+        );
+    let lookback = (!matches!(state, Some(crate::dependency::Dependency::Unchanged))).then(|| {
         format!(
             "git show {}:{}/objects/{}.json",
-            short(&reference.commit),
+            short(reference.commit()),
             store::DIR,
-            reference.object
+            object
         )
     });
     RefDrift {
-        object: reference.object.clone(),
-        section: reference.section,
-        confirmed_sha256: reference.sha256.clone(),
-        current_sha256: current,
+        object,
+        section,
+        confirmed_sha256: reference.digest().to_owned(),
+        current_sha256: matches!(state, Some(crate::dependency::Dependency::Unchanged))
+            .then(|| reference.digest().to_owned()),
         lookback,
         target_tampered,
         target_unreadable,
         target_missing,
+        target_history_divergent,
+        target_history_unreplayable,
+        moved_fields,
+        integrity_side: target_tampered.then_some(if current_integrity_failed {
+            "current"
+        } else {
+            "historical"
+        }),
     }
 }
 
@@ -222,8 +470,8 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
         .map(|section| {
             let basis = section
                 .based_on
-                .as_deref()
-                .and_then(|commit| git::distance(root, commit))
+                .as_ref()
+                .and_then(|basis| git::distance(root, &basis.commit))
                 .filter(git::Distance::moved);
             let drifted = section
                 .refs
@@ -237,9 +485,13 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
             (
                 section.id,
                 SectionStatus {
-                    tampered: tampered(section),
+                    tampered: section_tampered(object, section),
                     basis,
                     drifted,
+                    replacement: crate::ops::broken_replacements_in(root, section)
+                        .into_iter()
+                        .next()
+                        .map(|broken| format!("{}: {}", broken.target, broken.reason)),
                 },
             )
         })
@@ -249,8 +501,8 @@ pub fn assess(root: &Path, object: &Object) -> Vec<(u64, SectionStatus)> {
 pub struct Counts {
     pub total: usize,
     pub ok: usize,
-    /// Sections whose wording, or whose stated basis, is not what was
-    /// confirmed. Counted apart from `attention`: drift is a question for a
+    /// Sections whose persisted state, or whose stated basis, is not what was
+    /// admitted. Counted apart from `attention`: drift is a question for a
     /// human, this is a broken record.
     pub tampered: usize,
     pub attention: usize,
@@ -287,7 +539,7 @@ pub fn classification(object: &Object) -> String {
 /// The supplementary entries, verbatim.
 ///
 /// Never truncated and never re-indented: the body is literal content somebody
-/// confirmed, and an agent reading it back has to get the bytes that were
+/// admitted, and an agent reading it back has to get the bytes that were
 /// hashed, not a prettier arrangement of them.
 fn render_content(out: &mut String, content: &[Supplement]) {
     for (index, entry) in content.iter().enumerate() {
@@ -329,6 +581,41 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push_str(&format!("   {} stale", tally.attention));
     }
     out.push_str(&format!("   rev {}\n", object.rev));
+    // Before the seal question, for the reason the classifier asks it first:
+    // these bytes were rebuilt out of history, so their seals pass and their
+    // history produced them, and both of the questions below would answer
+    // "fine" about a record with no projection at all.
+    if projection_missing(root, object) {
+        out.push_str(
+            "!!         Object has no stored projection; what is shown is what its admitted history produced. Restore the file with: engr repair\n",
+        );
+    } else if object_tampered(object) {
+        out.push_str("!!         Object integrity failed; current authority changed outside a supported transition\n");
+        match git::last_commit_for(root, &store::object_path(root, &object.id)) {
+            Some(commit) => out.push_str(&format!(
+                "!!         git show {}:{}/objects/{}.json\n",
+                short(&commit),
+                store::DIR,
+                object.id
+            )),
+            None => out.push_str(
+                "!!         this Object was never committed, so there is nothing to compare against\n",
+            ),
+        }
+    } else {
+        match history_fault(root, object) {
+            Some(ops::HistoryFault::Divergent(what)) => out.push_str(&format!(
+                "!!         Object {what} is not what its admitted history produced; its seals verify, so something rewrote and resealed it. Restore it with: engr repair\n"
+            )),
+            // A different fault and a different answer: there is nothing to
+            // restore from, so sending a reader to `repair` would be sending
+            // them to a path that refuses.
+            Some(ops::HistoryFault::Unreplayable(why)) => out.push_str(&format!(
+                "!!         Object history cannot be replayed, so nothing can check this projection: {why}\n"
+            )),
+            None => {}
+        }
+    }
     // The canonical reference, on the screen you land on when you want to name
     // this object to something else. Every reference-taking flag wants this
     // exact string, and until it was printed the only way to produce one was to
@@ -353,20 +640,27 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         out.push('\n');
         render_content(&mut out, &section.content);
         render_relations(&mut out, &section.relations);
-        if let Some(commit) = &section.based_on {
+        if let Some(basis) = &section.based_on {
             out.push_str(&format!(
-                "    based_on {}   confirmed {}\n",
-                short(commit),
-                section.confirmed_at
+                "    based_on {}   admitted {} by {}\n",
+                short(&basis.commit),
+                section.admitted.at,
+                section.admitted.by.as_str()
             ));
         } else {
-            out.push_str(&format!("    confirmed {}\n", section.confirmed_at));
+            out.push_str(&format!(
+                "    admitted {} by {}\n",
+                section.admitted.at,
+                section.admitted.by.as_str()
+            ));
         }
         for reference in &section.refs {
+            let (target, target_section) = crate::dependency::parse_target(reference.target())
+                .unwrap_or_else(|_| ("invalid".to_owned(), 0));
             out.push_str(&format!(
                 "    refs     {} §{}\n",
-                abbrev(&reference.object, w),
-                reference.section
+                abbrev(&target, w),
+                target_section
             ));
         }
         // The hash sits in the same file as the text it covers, so this catches
@@ -375,8 +669,8 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // pointed at it in the moment they learn something is wrong.
         if status.tampered {
             out.push_str(&format!(
-                "    !!       content does not match the hash confirmed at {}\n",
-                section.confirmed_at
+                "    !!       persisted Section does not match the seal admitted at {}\n",
+                section.admitted.at
             ));
             match git::last_commit_for(root, &store::object_path(root, &object.id)) {
                 Some(commit) => out.push_str(&format!(
@@ -395,13 +689,19 @@ pub fn render_show(root: &Path, object: &Object) -> String {
         // after the first line has to have stopped on the worse news.
         for drift in status.drifted.iter().filter(|drift| drift.target_tampered) {
             out.push_str(&format!(
-                "    !!       {} §{} does not match its own hash; what this section stands on is not what was confirmed\n",
+                "    !!       {} §{} {} integrity failed; what this section stands on is not what was admitted\n",
                 abbrev(&drift.object, w),
-                drift.section
+                drift.section,
+                drift.integrity_side.unwrap_or("current")
             ));
             if let Some(lookback) = &drift.lookback {
                 out.push_str(&format!("             {lookback}\n"));
             }
+        }
+        // Before the advice lines, with the other `!!`: this is not a question
+        // for the reader to weigh, it is a forward link that leads nowhere.
+        if let Some(detail) = &status.replacement {
+            out.push_str(&format!("    !!       superseded by {detail}\n"));
         }
         // Say what to do about it, rather than making the reader work it out.
         if let Some(distance) = &status.basis {
@@ -409,7 +709,7 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 "    advice   {} commits and {} files have changed since {}; check this still holds\n",
                 distance.commits,
                 distance.files.len(),
-                short(section.based_on.as_deref().unwrap_or("")),
+                section.based_on.as_ref().map(|basis| short(&basis.commit)).unwrap_or(""),
             ));
         }
         for drift in &status.drifted {
@@ -417,9 +717,18 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 continue;
             }
             match (&drift.current_sha256, &drift.lookback) {
+                (_, Some(lookback)) if !drift.moved_fields.is_empty() => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} changed selected fields: {}\n             {}\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        drift.moved_fields.join(", "),
+                        lookback
+                    ));
+                }
                 (Some(current), Some(lookback)) => {
                     out.push_str(&format!(
-                        "    advice   {} §{} was {} when confirmed, now {}\n             {}\n",
+                        "    advice   {} §{} was {} when admitted, now {}\n             {}\n",
                         abbrev(&drift.object, w),
                         drift.section,
                         short(&drift.confirmed_sha256),
@@ -433,6 +742,27 @@ pub fn render_show(root: &Path, object: &Object) -> String {
                 // "gone" would send someone to recreate a file that is right
                 // there. The protocol names those words as the ones malformed
                 // authority must never be reported in.
+                // Both of these are right there and readable; "gone" would send
+                // a reader to recreate something that exists, and the work is on
+                // the target rather than here. They are separated from each
+                // other for the reason the Verify contract separates them: one
+                // has an admitted value to be restored to and the other does
+                // not, so only one of them may name `repair`.
+                _ if drift.target_history_divergent => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} is not what its own history produced; repair {} before trusting this\n",
+                        abbrev(&drift.object, w),
+                        drift.section,
+                        abbrev(&drift.object, w)
+                    ));
+                }
+                _ if drift.target_history_unreplayable => {
+                    out.push_str(&format!(
+                        "    advice   {} §{} has history that will not replay; nothing can be restored from it\n",
+                        abbrev(&drift.object, w),
+                        drift.section
+                    ));
+                }
                 _ if drift.target_missing => {
                     out.push_str(&format!(
                         "    advice   {} §{} no longer exists; what this section stood on is gone
@@ -472,12 +802,12 @@ struct JsonSection<'a> {
     #[serde(skip_serializing_if = "<[Supplement]>::is_empty")]
     content: &'a [Supplement],
     status: &'static str,
-    based_on: Option<&'a str>,
+    based_on: Option<&'a crate::semantics::BasedOn>,
     refs: &'a [Ref],
     #[serde(skip_serializing_if = "<[Relation]>::is_empty")]
     relations: &'a [Relation],
-    sha256: &'a str,
-    confirmed_at: &'a str,
+    digest: &'a str,
+    admitted: &'a crate::semantics::Admitted,
     #[serde(skip_serializing_if = "Option::is_none")]
     basis_commits_behind: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,6 +842,8 @@ struct JsonObject<'a> {
     /// is absent from storage because a stored copy would be a second truth.
     attention: bool,
     rev: u64,
+    integrity: &'static str,
+    digest: &'a str,
     summary: JsonSummary,
     sections: Vec<JsonSection<'a>>,
 }
@@ -536,11 +868,11 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
                 text: &section.text,
                 content: &section.content,
                 status: status.key(),
-                based_on: section.based_on.as_deref(),
+                based_on: section.based_on.as_ref(),
                 refs: &section.refs,
                 relations: &section.relations,
-                sha256: &section.sha256,
-                confirmed_at: &section.confirmed_at,
+                digest: &section.digest,
+                admitted: &section.admitted,
                 basis_commits_behind: status.basis.as_ref().map(|item| item.commits),
                 basis_files_changed: status.basis.as_ref().map(|item| item.files.len()),
                 stale: status.drifted.clone(),
@@ -555,6 +887,22 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
         state: object.state.as_str(),
         attention: object.needs_attention(),
         rev: object.rev,
+        // Five answers, because there are five states and four of them used to
+        // be reported as `ok`. `projection_missing` is no stored bytes at all —
+        // what is described here was rebuilt out of history, and `repair` writes
+        // it back. `tampered` is bytes that do not match their own seal.
+        // `divergent` is bytes that match it and that no admitted Event ever
+        // produced — the projection is what is wrong, and `repair` restores it.
+        // `unreplayable` is the opposite: the EventStore cannot be replayed at
+        // all, so there is nothing to restore from and nothing to check against.
+        //
+        // Through the same classifier the listing uses, in the same order, so
+        // the two surfaces cannot drift into answering differently.
+        integrity: match object_fault(root, object) {
+            Some(fault) => fault.key(),
+            None => "ok",
+        },
+        digest: &object.digest,
         summary: JsonSummary {
             sections: tally.total,
             ok: tally.ok,
@@ -570,11 +918,9 @@ pub fn render_show_json(root: &Path, object: &Object) -> Result<String> {
 /// One line per object, stable columns, never wrapped — so `grep`, `awk` and
 /// `fzf` all compose with it.
 pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment = assess(root, object);
-        let tally = counts(&assessment);
         let hits = keyword.map(|needle| matching_sections(object, needle));
         if let Some(hits) = &hits {
             if hits.is_empty()
@@ -587,20 +933,21 @@ pub fn render_ls(root: &Path, objects: &[Object], keyword: Option<&str>) -> Stri
             }
         }
         let note = match &hits {
-            Some(hits) if !hits.is_empty() => hits
-                .iter()
-                .map(|id| format!("§{id}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ if tally.tampered > 0 => format!("{} tampered", tally.tampered),
-            _ if tally.attention > 0 => format!("{} stale", tally.attention),
-            _ => "ok".to_owned(),
+            Some(hits) if !hits.is_empty() => {
+                hits.iter()
+                    .map(|id| format!("§{id}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    + " unchecked"
+            }
+            _ if object_tampered(object) => "object tampered".to_owned(),
+            _ => "unchecked".to_owned(),
         };
         out.push_str(&format!(
             "{}  {:<20}  {:>2} sections  {:<12}  {}\n",
             abbrev(&object.id, w),
             classification(object),
-            tally.total,
+            object.sections.len(),
             note,
             object.title
         ));
@@ -626,33 +973,32 @@ fn matching_sections(object: &Object, needle: &str) -> Vec<u64> {
 pub fn tampered_count(objects: &[Object]) -> usize {
     objects
         .iter()
-        .flat_map(|object| &object.sections)
-        .filter(|section| tampered(section))
-        .count()
+        .map(|object| {
+            usize::from(object_tampered(object))
+                + object
+                    .sections
+                    .iter()
+                    .filter(|section| section_tampered(object, section))
+                    .count()
+        })
+        .sum()
 }
 
-/// One line per section, so grep can reach the text.
-///
-/// Every row carries its own trust status, immediately before the wording.
-/// This is the surface the Skill recommends for searching before a decision, so
-/// a hit here is something an agent is about to act on — and wording that was
-/// forged, or that stands on authority which was, must not arrive looking
-/// exactly like wording a human confirmed. A count on stderr did not do that
-/// job: it says how many, never which, and it is the first thing a pipe drops.
-///
-/// The status sits before the text rather than after it because the text is the
-/// only field that can contain spaces; anything following it is not a column.
+/// One line per stored section. The unchecked marker travels through pipes:
+/// seals can expose damage cheaply, but cannot establish admission or freshness.
 pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
-    let w = width(root);
+    let w = projection_width(root);
     let mut out = String::new();
     for object in objects {
-        let assessment: Vec<(u64, SectionStatus)> = assess(root, object);
+        let tampered = object_tampered(object);
         for section in &object.sections {
-            let status = assessment
-                .iter()
-                .find(|(id, _)| *id == section.id)
-                .map(|(_, status)| status.key())
-                .unwrap_or("ok");
+            let status = if tampered {
+                "object_tampered"
+            } else if section_tampered(object, section) {
+                "tampered"
+            } else {
+                "unchecked"
+            };
             out.push_str(&format!(
                 "{} §{:<3} {:<20}  {:<14}  {}\n",
                 abbrev(&object.id, w),
@@ -666,24 +1012,21 @@ pub fn render_ls_sections(root: &Path, objects: &[Object]) -> String {
     out
 }
 
-/// Which sections cannot be trusted, named rather than counted.
-///
-/// "3 sections do not match their hashes" tells a reader that something is
-/// wrong and nothing about where, which turns a warning into a chore. The
-/// listing above already marks each row; this is for the caller that wants to
-/// say so once, loudly, on the stream a pipe does not swallow.
+/// Cheap seal failures only; dependency and history checks belong to assessment.
 pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
-    let w = width(root);
+    let w = projection_width(root);
     let mut found = Vec::new();
     for object in objects {
-        for (id, status) in assess(root, object) {
-            if status.forged() {
-                found.push(format!(
-                    "{} §{id} {}",
-                    abbrev(&object.id, w),
-                    status.label()
-                ));
-            }
+        let tampered = object_tampered(object);
+        for section in &object.sections {
+            let label = if tampered {
+                "OBJECT TAMPERED"
+            } else if section_tampered(object, section) {
+                "TAMPERED"
+            } else {
+                continue;
+            };
+            found.push(format!("{} §{} {label}", abbrev(&object.id, w), section.id));
         }
     }
     found
@@ -695,7 +1038,7 @@ pub fn untrusted_sections(root: &Path, objects: &[Object]) -> Vec<String> {
 /// them. Nothing here was read by anyone, and the two are one `engr` command
 /// apart — so the boundary is stated where the reader already is, rather than
 /// left to be inferred from which subcommand they happened to type.
-pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here was confirmed by a human\n";
+pub const STAGING_BANNER: &str = "UNCONFIRMED STAGING — nothing here is admitted to the record\n";
 
 /// Activity to the second, in UTC.
 ///
@@ -766,7 +1109,8 @@ fn subject_note(root: &Path, subject: &backlog::Subject) -> Option<&'static str>
                 Err(_) => Some("unreadable"),
             }
         }
-        backlog::Subject::File { path, commit } | backlog::Subject::Symbol { path, commit, .. } => {
+        backlog::Subject::File { path, commit, .. }
+        | backlog::Subject::Symbol { path, commit, .. } => {
             (!git::path_at(root, commit, path)).then_some("snapshot unavailable")
         }
     }
@@ -778,7 +1122,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
     for item in items {
         if let Some(needle) = keyword {
             let needle = needle.to_lowercase();
-            let hit = item.topic.to_lowercase().contains(&needle)
+            let hit = item.title.to_lowercase().contains(&needle)
                 || item
                     .sections
                     .iter()
@@ -803,7 +1147,7 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
             item.sections.len(),
             note,
             to_the_second(item.updated_at()),
-            item.topic
+            item.title
         ));
     }
     out
@@ -813,11 +1157,11 @@ pub fn render_backlog_ls(root: &Path, items: &[backlog::Item], keyword: Option<&
 ///
 /// A resumed agent needs all four of text, subjects, produced outcomes and
 /// activity to decide what is left — and needs none of it to read like
-/// confirmed wording, which is what the banner and the section marker are for.
+/// admitted wording, which is what the banner and the section marker are for.
 pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     let w = backlog_width(root);
     let mut out = String::from(STAGING_BANNER);
-    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.topic));
+    out.push_str(&format!("{}  {}\n", abbrev(&item.id, w), item.title));
     out.push_str(&format!(
         "{} unresolved   updated {}\n",
         item.sections.len(),
@@ -851,7 +1195,17 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
         // Said once per Section that has outcomes, because this is the exact
         // place a resuming agent is most likely to conclude the opposite.
         if !section.produced.is_empty() {
-            out.push_str("             (already confirmed; this point is still unresolved)\n");
+            out.push_str("             (already admitted; this point is still unresolved)\n");
+        }
+        // The marker exists so an exhausted review is not silent, and until now
+        // it was reachable only from `--format json`. The wording standing here
+        // is wording no passing review allowed; a reader of the human surface is
+        // exactly who needs to know that.
+        if let Some(review) = section.review_exhaustion {
+            out.push_str(&format!(
+                "    exhausted attempt {} against a ceiling of {}; this wording stands without a passing review\n",
+                review.attempts, review.limit
+            ));
         }
     }
     out
@@ -869,6 +1223,12 @@ struct JsonBacklogSection<'a> {
     /// refuses outright. A machine-readable contract that only permissive
     /// readers can read is not one.
     reference: String,
+    /// What to hand back to `--expect` when changing or consuming this point.
+    ///
+    /// The predecessor an agent read, in a form a command line can carry. It
+    /// covers the whole Section and the parent topic, so anything either of them
+    /// does between reading and applying changes it.
+    expect: String,
     #[serde(flatten)]
     section: &'a backlog::Section,
 }
@@ -884,27 +1244,47 @@ struct JsonBacklogItem<'a> {
     authority: &'static str,
     next_section_id: u64,
     updated_at: &'a str,
+    /// The two item-level predecessors, for the two mutations that do not name
+    /// an existing point: renaming the topic, and adding a point.
+    ///
+    /// Separate values because they bind different things. A rename rests on the
+    /// complete item, so any point moving stales it; an add rests only on the
+    /// topic and the id it will receive, so a sibling being reworded does not.
+    expect: JsonBacklogExpect,
     sections: Vec<JsonBacklogSection<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonBacklogExpect {
+    rename: String,
+    add: String,
 }
 
 pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
     serde_json::to_string_pretty(&JsonBacklogItem {
         id: &item.id,
         reference: backlog_reference(&item.id),
-        topic: &item.topic,
+        topic: &item.title,
         // Structured output travels furthest from the banner, so the boundary
         // has to be a field rather than a line somebody printed once.
         authority: "unconfirmed_staging",
         next_section_id: item.next_section_id,
         updated_at: item.updated_at(),
+        expect: JsonBacklogExpect {
+            rename: backlog::Precondition::of_item(item).token()?,
+            add: backlog::Precondition::of_add(item).token()?,
+        },
         sections: item
             .sections
             .iter()
-            .map(|section| JsonBacklogSection {
-                reference: format!("{}:{}", backlog_reference(&item.id), section.id),
-                section,
+            .map(|section| {
+                Ok(JsonBacklogSection {
+                    reference: format!("{}:{}", backlog_reference(&item.id), section.id),
+                    expect: backlog::Precondition::of_section(item, section.id)?.token()?,
+                    section,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     })
     .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
 }
@@ -913,10 +1293,30 @@ pub fn render_backlog_json(item: &backlog::Item) -> Result<String> {
 /// at, whose basis has since moved. Outside the attention set is exactly where
 /// drift goes unnoticed — which is why this reads the derived class rather than
 /// `open`/`closed`, and so covers an accepted design and a mitigated risk too.
-pub fn render_stale(root: &Path, objects: &[Object]) -> String {
+pub fn render_ls_verify(root: &Path, objects: &[Object]) -> String {
     let w = width(root);
     let mut out = String::new();
     for object in objects {
+        // One row for the Object's own fault, not one per Section: the thing
+        // that is wrong is the Object, and repeating it under every §id would
+        // say it is several separate problems. `§-` keeps the columns, and is
+        // the only row an Object with no Sections left could have.
+        if let Some(fault) = object_fault(root, object) {
+            let unwatched = !object.needs_attention();
+            out.push_str(&format!(
+                "{} {}  {:<20}  §-  {}{}\n",
+                if unwatched { "⚠" } else { "·" },
+                abbrev(&object.id, w),
+                classification(object),
+                fault.label(),
+                if unwatched {
+                    " — nobody is looking at this one"
+                } else {
+                    ""
+                }
+            ));
+            continue;
+        }
         for (id, status) in assess(root, object) {
             if status.is_ok() {
                 continue;
@@ -952,7 +1352,7 @@ pub fn render_stale(root: &Path, objects: &[Object]) -> String {
 /// settles nothing — the failure mode worth preventing is an agent reading a
 /// sidecar with every item done and concluding the Object is decided.
 pub const WORK_BANNER: &str =
-    "EXECUTION MEMORY — agent-managed, confirmed by nobody, and not what the record says\n";
+    "EXECUTION MEMORY — agent-managed, admitted by nobody, and not what the record says\n";
 
 /// Whether a Work target still resolves.
 ///
@@ -982,53 +1382,93 @@ fn work_target(root: &Path, target: &crate::reference::EngrTarget) -> String {
     )
 }
 
-/// One line per Object that has execution memory.
+/// One line per subject that has execution memory.
 ///
 /// The state column shows the derived standing rather than the stored field,
 /// because `blocked` is the answer someone scanning this actually wants and
 /// `active` on a sidecar with three blockers would be true and useless.
-pub fn render_work_ls(root: &Path, entries: &[(String, work::Work)]) -> String {
-    let w = width(root);
+///
+/// The subject kind gets a column of its own rather than being left to the id,
+/// because the two namespaces look identical in an abbreviation and a reader
+/// scanning this has to know which resource a row is about before the title
+/// tells them anything.
+pub fn render_work_ls(root: &Path, entries: &[(work::Subject, work::Work)]) -> String {
+    // Over the ids actually listed, rather than either namespace's own width.
+    // A listing that spans two namespaces cannot borrow one of them to shorten
+    // the other: an Object-derived prefix says nothing about whether two Backlog
+    // ids in this table still differ at that length.
+    let listed: Vec<String> = entries
+        .iter()
+        .map(|(subject, _)| subject.id().to_owned())
+        .collect();
+    let w = store::abbrev_len(&listed);
     let mut out = String::from(WORK_BANNER);
     if entries.is_empty() {
         out.push_str("no execution memory\n");
         return out;
     }
-    for (id, item) in entries {
+    for (subject, item) in entries {
         let open = item
             .items
             .iter()
             .filter(|entry| entry.state != work::ItemState::Done)
             .count();
-        // Loading a sidecar holds the owner invariant, so by the time a row is
-        // rendered the Object exists. No "(object not found)" fallback: an
-        // orphan is invalid Work and is refused as such, not drawn as a row.
-        let title = ops::effective(root, id)
-            .map(|object| object.title)
-            .unwrap_or_default();
         out.push_str(&format!(
-            "{}  {:<8}  {:>2} open  {}  {}\n",
-            abbrev(id, w),
+            "{}  {:<8}  {:<8}  {:>2} open  {}  {}\n",
+            abbrev(subject.id(), w),
+            subject.kind().token(),
             item.standing(),
             open,
             to_the_second(&item.updated_at),
-            title
+            subject_title(root, subject)
         ));
     }
     out
 }
 
+/// What the subject is called, in whichever way its kind says who it is.
+///
+/// Loading a sidecar holds the subject invariant, so by the time a row is rendered
+/// the subject exists. No "(not found)" fallback: an orphan is invalid Work and is
+/// refused as such, not drawn as a row.
+fn subject_title(root: &Path, subject: &work::Subject) -> String {
+    match subject {
+        work::Subject::Object(id) => ops::effective(root, id)
+            .map(|object| object.title)
+            .unwrap_or_default(),
+        work::Subject::Backlog(id) => backlog::load(root, id)
+            .map(|item| item.title)
+            .unwrap_or_default(),
+    }
+}
+
 /// The whole sidecar, in the order a resuming agent reads it: where things
 /// stand, what is stopping them, what is left, what was already done.
-pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
-    let w = width(root);
+pub fn render_work_show(root: &Path, subject: &work::Subject, item: &work::Work) -> String {
+    // Each namespace's own abbreviation, because a prefix means "unambiguous
+    // among these ids" and the two sets are not one set.
+    let w = match subject {
+        work::Subject::Object(_) => width(root),
+        work::Subject::Backlog(_) => backlog_width(root),
+    };
     let mut out = String::from(WORK_BANNER);
+    // The subject line names the kind, because "Object" over a Backlog item's
+    // sidecar was the whole confusion this domain must not cause.
     out.push_str(&format!(
-        "Object     {}\nState      {}\nUpdated    {}\n",
-        abbrev(id, w),
+        "{:<10} {}\nState      {}\nUpdated    {}\n",
+        match subject {
+            work::Subject::Object(_) => "Object",
+            work::Subject::Backlog(_) => "Backlog",
+        },
+        abbrev(subject.id(), w),
         item.standing(),
         to_the_second(&item.updated_at)
     ));
+    // The same line the record's and Backlog's `show` carry, and it earns its
+    // place here for one more reason: naming this subject to another command is
+    // the one thing an abbreviation cannot do now that a bare id no longer says
+    // which namespace it is in.
+    out.push_str(&format!("{subject}\n"));
     if item.state == work::State::Paused {
         out.push_str("           a human stopped this; do not resume it on your own\n");
     }
@@ -1080,13 +1520,21 @@ pub fn render_work_show(root: &Path, id: &str, item: &work::Work) -> String {
     out
 }
 
-pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
+pub fn render_work_json(subject: &work::Subject, item: &work::Work) -> Result<String> {
     let value = serde_json::json!({
-        "object": id,
+        // The shared embedded target, replacing the bare `object` id this used
+        // to carry. A sidecar's subject is now a namespace *and* an id, and a
+        // consumer reading the id alone could not tell an Object's execution
+        // memory from a Backlog item's — the two namespaces mint the same shape
+        // of identity. Saying it the way every other engr target is said keeps
+        // that from being a second identity representation to parse: it is the
+        // form `dependencies[]` and `blockers[]` in this very document already
+        // use.
+        "subject": subject.target(),
         // Structured output is the surface that travels furthest from any
         // banner — straight into another tool, with no screen in between — so
         // the boundary has to be a field rather than a line somebody printed.
-        // `{"state": "active"}` on its own is indistinguishable from an Object's
+        // `{"state": "active"}` on its own is indistinguishable from a subject's
         // own state, which is exactly the confusion this domain must not cause.
         "authority": "execution_memory",
         "state": item.state.as_str(),
@@ -1114,7 +1562,7 @@ pub fn render_work_json(id: &str, item: &work::Work) -> Result<String> {
 /// banner has to stop a reader concluding anything at all about the members
 /// from where they sit in a plan.
 pub const PLANNING_BANNER: &str =
-    "PLANNING — agent-managed, confirmed by nobody, and says nothing about what its members mean\n";
+    "PLANNING — agent-managed, admitted by nobody, and says nothing about what its members mean\n";
 
 pub fn collection_width(root: &Path) -> usize {
     collection::ids(root)
@@ -1137,7 +1585,7 @@ fn member_note(root: &Path, target: &crate::reference::EngrTarget) -> String {
     let id = uuid.to_string();
     match parsed.kind() {
         crate::reference::ResourceKind::Backlog => match backlog::load(root, &id) {
-            Ok(item) => format!("unresolved  {}", item.topic),
+            Ok(item) => format!("unresolved  {}", item.title),
             Err(error) if error.code == crate::EXIT_NOT_FOUND => {
                 "gone (consumed or removed)".to_owned()
             }
@@ -1181,7 +1629,7 @@ pub fn render_collection_ls(root: &Path, collections: &[collection::Collection])
             item.state.as_str(),
             item.members.len(),
             attention,
-            item.name
+            item.title
         ));
     }
     out
@@ -1213,7 +1661,7 @@ pub fn render_collection_show(root: &Path, item: &collection::Collection) -> Str
         item.id,
         item.id,
         item.state.as_str(),
-        item.name
+        item.title
     ));
     if let Some(schedule) = &item.schedule {
         let mut parts = Vec::new();
@@ -1269,7 +1717,7 @@ pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
         // The same field Backlog and Work carry, for the same reason: structured
         // output leaves the screen that would otherwise have said so.
         "authority": "planning",
-        "name": item.name,
+        "title": item.title,
         "description": item.description,
         "state": item.state.as_str(),
         "schedule": item.schedule,
@@ -1277,4 +1725,149 @@ pub fn render_collection_json(item: &collection::Collection) -> Result<String> {
     });
     serde_json::to_string_pretty(&value)
         .map_err(|error| crate::Error::new(crate::EXIT_SCHEMA, format!("json: {error}")))
+}
+
+/// One persisted difference between stored bytes and what history proves.
+pub struct RepairDifference {
+    /// Where it is, e.g. `title` or `§3.role`.
+    pub at: String,
+    /// What the integrity-invalid file holds.
+    pub stored: String,
+    /// What admitted history derives, and what repair will restore.
+    pub restore: String,
+}
+
+/// Every persisted difference between an integrity-invalid Object and the
+/// projection a repair would restore.
+///
+/// Derived from the canonical projection of both, deliberately, rather than
+/// from a list of fields. The first version of this comparison enumerated
+/// `title`, lifecycle `state` and Section `text`, and therefore showed *nothing
+/// at all* for an out-of-band edit to a Section's `role`, `refs` or any other
+/// sealed member — the case where a person most needs to see what they are
+/// about to discard. Walking the representation instead means a member this
+/// code has never heard of is still reported, and a member added later is
+/// covered the day it is added.
+///
+/// Seals are excluded at both levels. They are not the difference; they are how
+/// the difference was detected, and the repair's own seals are computed after it
+/// is admitted. Listing them would put a guaranteed, meaningless line at the top
+/// of every comparison, which is how a screen teaches people to skim.
+pub fn repair_differences(stored: &Object, restore: &Object) -> Result<Vec<RepairDifference>> {
+    let mut found = Vec::new();
+    walk_repair_difference(
+        "",
+        &comparable_projection(stored)?,
+        &comparable_projection(restore)?,
+        &mut found,
+    );
+    Ok(found)
+}
+
+/// The same comparison for a projection that is not there at all.
+///
+/// The reader's question is the one the damaged case asks — *what am I about to
+/// write?* — so it gets the same rows, with `(absent)` on the stored side. A
+/// second layout for the same question would be a second thing to learn, and a
+/// Section count is not an answer to it: a person cannot authorize restoring
+/// wording they were never shown.
+///
+/// Built by walking the restored projection against a twin of itself whose every
+/// leaf is absent, for the reason [`repair_differences`] walks a representation
+/// instead of a field list: the members come from the projection, so one added
+/// later is covered the day it is added.
+pub fn repair_restores(restore: &Object) -> Result<Vec<RepairDifference>> {
+    let projection = comparable_projection(restore)?;
+    let mut found = Vec::new();
+    walk_repair_difference("", &absent_twin(&projection), &projection, &mut found);
+    Ok(found)
+}
+
+/// The same shape with nothing in it, so the walk descends instead of reporting
+/// each Section as one opaque blob.
+fn absent_twin(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(members) => serde_json::Value::Object(
+            members
+                .iter()
+                .map(|(key, value)| (key.clone(), absent_twin(value)))
+                .collect(),
+        ),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// The projection to compare, with Sections keyed by id rather than by position.
+///
+/// Position would make a deleted Section read as a change to every Section after
+/// it. Ids are what a person and every reference actually name.
+fn comparable_projection(object: &Object) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(object)
+        .map_err(|error| Error::new(crate::EXIT_SCHEMA, format!("comparing: {error}")))?;
+    if let Some(map) = value.as_object_mut() {
+        map.remove("digest");
+        if let Some(sections) = map.get_mut("sections").and_then(|s| s.as_array_mut()) {
+            let mut keyed = serde_json::Map::new();
+            for mut section in sections.drain(..) {
+                let id = section.get("id").and_then(serde_json::Value::as_u64);
+                if let Some(entry) = section.as_object_mut() {
+                    entry.remove("digest");
+                    entry.remove("id");
+                }
+                let at = id
+                    .map(|id| format!("§{id}"))
+                    .unwrap_or_else(|| "§?".to_owned());
+                keyed.insert(at, section);
+            }
+            map.insert("sections".to_owned(), serde_json::Value::Object(keyed));
+        }
+    }
+    Ok(value)
+}
+
+fn walk_repair_difference(
+    at: &str,
+    stored: &serde_json::Value,
+    restore: &serde_json::Value,
+    found: &mut Vec<RepairDifference>,
+) {
+    if stored == restore {
+        return;
+    }
+    if let (serde_json::Value::Object(left), serde_json::Value::Object(right)) = (stored, restore) {
+        let mut members: Vec<&str> = left
+            .keys()
+            .chain(right.keys())
+            .map(String::as_str)
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        for member in members {
+            let nested = if at.is_empty() {
+                member.to_owned()
+            } else {
+                format!("{at}.{member}")
+            };
+            walk_repair_difference(
+                &nested,
+                left.get(member).unwrap_or(&serde_json::Value::Null),
+                right.get(member).unwrap_or(&serde_json::Value::Null),
+                found,
+            );
+        }
+        return;
+    }
+    found.push(RepairDifference {
+        at: at.trim_start_matches("sections.").to_owned(),
+        stored: render_repair_value(stored),
+        restore: render_repair_value(restore),
+    });
+}
+
+fn render_repair_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "(absent)".to_owned(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }

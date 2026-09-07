@@ -1,16 +1,16 @@
 use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use engr::backlog::{self, Subject};
-use engr::model::{self, Action, Payload, Ref};
+use engr::model::{self, Action, Merge, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{collection, gate, git, ops, store, view, work};
-use engr::{Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
+use engr::{collection, gate, git, ops, rules, store, view, work};
+use engr::{ensure, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
     name = "engr",
     version = engr::IMPLEMENTATION_VERSION,
-    about = "Engineering records whose every word a human confirmed"
+    about = "Engineering records with explicit Human or reviewed Agent authority"
 )]
 struct Cli {
     /// Workspace root. Defaults to the nearest ancestor containing .engr
@@ -24,12 +24,12 @@ struct Cli {
 enum Command {
     /// Create a workspace in the current directory
     Init,
-    /// Explicitly upgrade a recognized legacy v0 workspace
+    /// Explicitly upgrade the released predecessor workspace to generation 1
     Migrate,
     /// Print the protocol this build implements
     Protocol,
-    /// Put a change up for a human to confirm
-    Prepare(Prepare),
+    /// Prepare a Human change, or admit a reviewed Agent change
+    Prepare(Box<Prepare>),
     /// List candidates awaiting confirmation, or show one in full
     Candidate {
         /// Challenge code. Omit to list everything pending
@@ -37,18 +37,18 @@ enum Command {
     },
     /// Admit a candidate. The response must be exactly `CONFIRM <code>`
     Confirm { response: String },
-    /// List objects. Only the ones needing attention unless --all
+    /// List stored projections without verification. Attention only unless --all
     Ls {
         /// Keyword to filter by, matched against titles and section text
         keyword: Option<String>,
         #[arg(long)]
         all: bool,
-        /// One line per section, so grep can reach the text
+        /// One line per stored section, marked unchecked, so grep can reach the text
         #[arg(long)]
         sections: bool,
-        /// Sections whose basis or references moved, or that will not verify
-        #[arg(long)]
-        stale: bool,
+        /// Assess history, bases and dependencies (more expensive than plain ls)
+        #[arg(long, conflicts_with = "sections")]
+        verify: bool,
     },
     /// Show one object: its sections, and how much each can be trusted
     Show {
@@ -56,32 +56,110 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Recompute section hashes
+    /// Check Object and Section integrity, and report dependencies that moved
+    ///
+    /// Integrity is what fails: a seal that no longer matches its wording, a
+    /// projection admitted history never produced, a dependency that cannot be
+    /// read. A dependency that merely *moved* is reported and does not fail —
+    /// the target changed in a way somebody was entitled to change it, and
+    /// whether this wording still holds is a judgement nothing can checksum.
     Verify { object: Option<String> },
+    /// Propose restoring an Object whose stored integrity has failed
+    ///
+    /// Prepares a Human candidate that restores exactly what admitted history
+    /// proves. It carries no changes of its own: confirm it, then make any
+    /// wanted change the normal way.
+    Repair {
+        /// The object to restore. Any unique id prefix
+        object: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Execution memory an agent keeps for an Object. Nothing here is confirmed
-    #[command(subcommand)]
-    Work(Work),
+    Work {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs work
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: Work,
+    },
     /// Planning metadata: what is grouped together. Nothing here is confirmed
-    #[command(subcommand)]
-    Collection(CollectionCommand),
+    Collection {
+        /// Which attempt of your own review this is, counted from 1. Needed
+        /// only where a project rule governs collection
+        #[arg(long, default_value_t = 1, value_name = "N", global = false)]
+        attempt: u32,
+        #[command(subcommand)]
+        command: CollectionCommand,
+    },
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
+    /// Project rules an agent must read before a semantic mutation
+    #[command(subcommand)]
+    Rules(RulesCommand),
+}
+
+/// Rules are project policy data, so this surface is read-only.
+///
+/// engr does not author or edit a rule. There is no `rules new`, no gate, no
+/// event: a rule is a file in the repository, and git is its history. What engr
+/// owes an agent is the ability to see exactly which rules govern a mutation
+/// and exactly what they rest on — everything a review has to have covered.
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// What rules exist, and what they govern
+    Ls {
+        /// Only rules governing this domain
+        #[arg(long, value_enum, value_name = "DOMAIN")]
+        domain: Option<DomainArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One rule in full, with its bases resolved to what must be read
+    Show {
+        /// The rule's stable id, not its filename
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DomainArg {
+    Object,
+    Backlog,
+    Collection,
+    Work,
+}
+
+impl DomainArg {
+    fn model(self) -> rules::Domain {
+        match self {
+            Self::Object => rules::Domain::Object,
+            Self::Backlog => rules::Domain::Backlog,
+            Self::Collection => rules::Domain::Collection,
+            Self::Work => rules::Domain::Work,
+        }
+    }
 }
 
 /// Backlog edits do not go through the gate, and must not look as though they
 /// might: a separate namespace keeps `ls`, `show` and `verify` meaning exactly
-/// what they meant before, which is confirmed record and nothing else.
+/// what they meant before, which is admitted record and nothing else.
 #[derive(Subcommand)]
 enum Backlog {
-    /// Start a topic with its first unresolved point
+    /// Start a topic under a title, with its first unresolved point
     New {
         #[arg(long)]
-        topic: String,
+        title: String,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// List unresolved topics
     Ls {
@@ -94,11 +172,13 @@ enum Backlog {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Replace the topic. Does not touch section activity
+    /// Replace the title. Does not touch section activity
     Rename {
         item: String,
         #[arg(long)]
-        topic: String,
+        title: String,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Add another unresolved point to a topic
     Add {
@@ -107,6 +187,8 @@ enum Backlog {
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Reword an unresolved point
     Revise {
@@ -115,6 +197,8 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         text: TextArg,
+        #[command(flatten)]
+        review: ReviewArg,
     },
     /// Replace what an unresolved point concerns
     Subjects {
@@ -123,24 +207,173 @@ enum Backlog {
         section: u64,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Consolidate unresolved points into one
+    /// Consolidate unresolved points into one of them
     Merge {
         item: String,
-        #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-        sections: Vec<u64>,
+        /// The point that survives, keeping its id and taking the merged wording
+        #[arg(long = "into", value_name = "SECTION")]
+        into: u64,
+        /// The point merged into it. It is removed, and its id not reused
+        #[arg(long, value_name = "SECTION")]
+        section: u64,
         #[command(flatten)]
         text: TextArg,
         #[command(flatten)]
         subjects: SubjectArgs,
+        #[command(flatten)]
+        review: ReviewArg,
     },
-    /// Remove an unresolved point, or the whole topic
-    Rm {
+    /// Record durable knowledge this point produced. Does not resolve it
+    Produced {
         item: String,
-        /// Remove one point. The topic goes when its last one does
         #[arg(long)]
-        section: Option<u64>,
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        /// Take the outcome back off: the bookkeeping was wrong, not the record
+        #[arg(long)]
+        forget: bool,
+        #[command(flatten)]
+        review: ReviewArg,
     },
+    /// Consume a resolved point. The topic goes when its last one does
+    Consume {
+        item: String,
+        /// The point being judged resolved
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        review: ReviewArg,
+    },
+}
+
+/// What the agent read and reviewed, and how many times it has been round.
+///
+/// The attempt is attested, not counted: engr keeps no retry state, so nothing
+/// there can be checked against anything. It is honest because saying a lower
+/// number buys an agent nothing except a review it has already failed.
+///
+/// `--expect` is the other half, and it is the one engr *can* check. The review
+/// happens before the command is invoked, so a command that reads and writes
+/// under one lock still leaves the interval between what the agent reviewed and
+/// what gets applied wide open — a concurrent edit in that interval lands
+/// underneath a mutation nobody reviewed against it. The value is printed by
+/// `backlog show --format json` beside the thing it describes.
+#[derive(Args, Clone)]
+struct ReviewArg {
+    /// Which attempt of this review sequence this is, counted from 1
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    attempt: u32,
+    /// The `expect` value from `backlog show --format json` for what you read.
+    /// Repeat once per point for a merge
+    #[arg(long = "expect", value_name = "TOKEN")]
+    expect: Vec<String>,
+}
+
+impl ReviewArg {
+    /// Turn what the caller said into the predecessor this mutation binds.
+    ///
+    /// `binds` builds the precondition from current state; the caller's token is
+    /// compared against it, so a mismatch means the world moved between reading
+    /// and running rather than that the caller spelled something wrong. The
+    /// precondition then travels into the mutation and is checked again under
+    /// the writer lock — this comparison narrows the window, and that one closes
+    /// it.
+    /// Creating an item, which binds nothing engr can check.
+    ///
+    /// `--expect` is refused rather than ignored, and refused with an answer: a
+    /// caller that offers one has a predecessor in mind, and being told the id
+    /// is not theirs to choose is more use than silence.
+    fn for_creation(&self) -> Result<backlog::Prepared> {
+        ensure!(
+            self.expect.is_empty(),
+            EXIT_USAGE,
+            "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
+        );
+        Ok(backlog::Prepared::attempt(rules::Attempt::new(
+            self.attempt,
+        )?))
+    }
+
+    fn prepared(
+        &self,
+        root: &Path,
+        item: &str,
+        binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
+    ) -> Result<backlog::Prepared> {
+        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
+        ensure!(
+            self.expect.iter().all(|token| token.len() == 64
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+            engr::EXIT_USAGE,
+            "--expect must be a 64-character lowercase hexadecimal token from `backlog show --format json`"
+        );
+        // Bound first, because what this operation binds is what the sentences
+        // below have to name. One sentence for all six operations named the
+        // point's token, which is the wrong one for `rename` and `add` — and
+        // the refusal that followed said the world had moved.
+        let bound = binds()?;
+        let binding = bound
+            .iter()
+            .map(backlog::Precondition::binding)
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Every existing-state mutation, whether or not a Rule governs backlog.
+        // A rule decides whether there is a *review* to anchor; it does not
+        // decide whether someone else's write can land between your reading and
+        // yours. Making this conditional meant stale-write protection was
+        // switched off in exactly the workspaces nobody had configured.
+        ensure!(
+            !self.expect.is_empty(),
+            engr::EXIT_USAGE,
+            "this needs --expect: run `engr backlog show {item} --format json` and pass back {binding}"
+        );
+        let mut wanted = Vec::new();
+        for precondition in &bound {
+            wanted.push(precondition.token()?);
+        }
+        let mut given = self.expect.clone();
+        given.sort();
+        wanted.sort();
+        if given != wanted {
+            // A token this item is offering right now is not a stale read of
+            // anything: it is the wrong one of the two levels, and saying "read
+            // it again" sends the caller back for the same value. Which level it
+            // was is the only thing that helps, so it is what gets said.
+            let offered = backlog::offered_tokens(root, item).unwrap_or_default();
+            let passed: Vec<String> = given
+                .iter()
+                .filter(|token| !wanted.contains(token))
+                .filter_map(|token| {
+                    offered
+                        .iter()
+                        .find(|(_, value)| value == token)
+                        .map(|(name, _)| name.clone())
+                })
+                .collect();
+            ensure!(
+                passed.is_empty(),
+                engr::EXIT_USAGE,
+                "--expect was {}; this operation binds {binding}, so read that value and pass it back",
+                passed.join(" and ")
+            );
+            return Err(engr::Error::new(
+                engr::EXIT_STALE,
+                "what you read is not what is there now; read it again and review the current wording"
+                    .to_owned(),
+            ));
+        }
+        // One precondition per bound thing on the wire, one on the mutation: a
+        // merge is a single judgement about several points, so it binds them
+        // together rather than one at a time.
+        Ok(prepared.against(backlog::Precondition::combine(bound)?))
+    }
 }
 
 #[derive(Args)]
@@ -207,9 +440,11 @@ impl SubjectArgs {
             subjects.push(subject);
         }
         for path in &self.subject_file {
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-file", path, error))?;
             subjects.push(Subject::File {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-file", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
             });
         }
@@ -220,9 +455,11 @@ impl SubjectArgs {
                     "--subject-symbol takes a path and a symbol name",
                 ));
             };
+            let (commit, dirty) = backlog::pin(root, path, revision)
+                .map_err(|error| malformed_argument("--subject-symbol", path, error))?;
             let subject = Subject::Symbol {
-                commit: backlog::pin(root, path, revision)
-                    .map_err(|error| malformed_argument("--subject-symbol", path, error))?,
+                commit,
+                dirty,
                 path: path.clone(),
                 symbol: symbol.clone(),
             };
@@ -241,7 +478,7 @@ enum Format {
     Json,
 }
 
-/// The Phase 3 vocabularies, spelled for a command line. They are the protocol
+/// The Object vocabularies, spelled for a command line. They are the protocol
 /// values, so `clap` rejects anything outside them before a payload exists.
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum TypeArg {
@@ -304,6 +541,24 @@ enum RoleArg {
     AcceptanceCriterion,
 }
 
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum ReviewResultArg {
+    Passed,
+    Failed,
+    Exhausted,
+}
+
+impl ReviewResultArg {
+    fn model(self) -> engr::proof::ReviewResult {
+        match self {
+            Self::Passed => engr::proof::ReviewResult::Passed,
+            Self::Failed => engr::proof::ReviewResult::Failed,
+            Self::Exhausted => engr::proof::ReviewResult::Exhausted,
+        }
+    }
+}
+
 impl RoleArg {
     fn model(self) -> semantics::Role {
         match self {
@@ -334,9 +589,17 @@ struct Prepare {
     /// Replace the wording of a section
     #[arg(long, value_name = "SECTION")]
     revise: Option<u64>,
-    /// Consolidate sections into one
-    #[arg(long, value_name = "SECTIONS", value_delimiter = ',')]
-    merge: Option<Vec<u64>>,
+    /// Consolidate sections into this surviving destination
+    #[arg(long, value_name = "DESTINATION")]
+    merge: Option<u64>,
+    /// Sections consumed by --merge
+    #[arg(
+        long,
+        value_name = "SECTIONS",
+        value_delimiter = ',',
+        requires = "merge"
+    )]
+    sources: Vec<u64>,
     /// Remove a section
     #[arg(long, value_name = "SECTION")]
     delete: Option<u64>,
@@ -379,6 +642,10 @@ struct Prepare {
     /// Wording, from a file
     #[arg(long)]
     text_file: Option<PathBuf>,
+    /// A short label for the section, for navigation. Part of what a reference
+    /// can depend on, so changing it is a change to the assertion
+    #[arg(long)]
+    header: Option<String>,
     /// What this section asserts, semantically
     #[arg(long, value_enum, value_name = "ROLE")]
     role: Option<RoleArg>,
@@ -410,17 +677,64 @@ struct Prepare {
     /// Record that this wording has no repository basis
     #[arg(long, conflicts_with = "based_on")]
     no_based_on: bool,
-    /// A section this wording depends on, as OBJECT:SECTION
-    #[arg(long = "ref", value_name = "OBJECT:SECTION")]
+    /// A section this wording depends on, followed by comma-separated semantic fields
+    #[arg(long = "ref", value_names = ["OBJECT:SECTION", "FIELDS"], num_args = 2)]
     references: Vec<String>,
     /// Retry a proposal a size threshold already refused once
     #[arg(long)]
     oversize: bool,
+    /// Admit directly through Agent Rule Review instead of minting a Human challenge
+    #[arg(long)]
+    agent: bool,
+    /// ReviewDigest surfaced by the first governed attempt
+    #[arg(long = "review", value_name = "DIGEST")]
+    review_digest: Option<String>,
+    /// Rule id actually reviewed. Repeat for the complete surfaced set
+    #[arg(long = "reviewed-rule", value_name = "RULE")]
+    reviewed_rules: Vec<String>,
+    /// Which attempt of the continuous review sequence this is
+    #[arg(long = "review-attempt", default_value_t = 1, value_name = "N")]
+    review_attempt: u32,
+    /// Agent-attested outcome of reviewing the exact mutation
+    #[arg(long = "review-result", value_enum, value_name = "RESULT")]
+    review_result: Option<ReviewResultArg>,
+    /// Exact explanation shown when a Human is asked to override
+    #[arg(long = "review-explanation", value_name = "TEXT")]
+    review_explanation: Option<String>,
     #[arg(long)]
     json: bool,
 }
 
 impl Prepare {
+    fn review(&self) -> Result<Option<gate::ReviewAttestation>> {
+        let any = self.review_digest.is_some()
+            || !self.reviewed_rules.is_empty()
+            || self.review_result.is_some()
+            || self.review_explanation.is_some();
+        if !any {
+            return Ok(None);
+        }
+        let review_digest = self.review_digest.clone().ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review <DIGEST>",
+            )
+        })?;
+        let result = self.review_result.ok_or_else(|| {
+            Error::new(
+                EXIT_USAGE,
+                "a Rule Review attestation needs --review-result passed|failed|exhausted",
+            )
+        })?;
+        Ok(Some(gate::ReviewAttestation {
+            review_digest,
+            reviewed_rules: self.reviewed_rules.clone(),
+            attempt: self.review_attempt,
+            result: result.model(),
+            explanation: self.review_explanation.clone(),
+        }))
+    }
+
     /// The supplementary entries, in the order the caller wrote them.
     ///
     /// Inline and from-file entries are two spellings of one list, and clap
@@ -486,12 +800,11 @@ impl Prepare {
         let revision = self.implemented_at.as_deref();
         let mut relations = Vec::new();
         for path in &self.implemented_by_file {
+            let commit = pin_exact(root, path, revision, "--implemented-by-file")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::File {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-file", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                 },
             });
@@ -503,12 +816,11 @@ impl Prepare {
                     "--implemented-by-symbol takes a path and a symbol name",
                 ));
             };
+            let commit = pin_exact(root, path, revision, "--implemented-by-symbol")?;
             relations.push(Relation {
                 relation: semantics::RelationType::ImplementedBy,
                 target: Target::Symbol {
-                    commit: backlog::pin(root, path, revision).map_err(|error| {
-                        malformed_argument("--implemented-by-symbol", path, error)
-                    })?,
+                    commit,
                     path: path.clone(),
                     symbol: symbol.clone(),
                 },
@@ -563,6 +875,12 @@ fn content_order(matches: &clap::ArgMatches) -> Vec<ContentSource> {
 }
 
 fn main() {
+    #[cfg(unix)]
+    unsafe {
+        // Rust ignores SIGPIPE and its printing macros panic on EPIPE. Restore
+        // the ordinary Unix command-line contract at the output boundary.
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     // The long way round `Cli::parse()`, which is exactly this pair, because the
     // matches are thrown away by `parse` and one thing here needs them.
     let matches = Cli::command().get_matches();
@@ -577,6 +895,59 @@ fn main() {
         eprintln!("error: {}", error.message);
         std::process::exit(error.code);
     }
+}
+
+/// Propose restoring an Object whose stored integrity has failed.
+///
+/// The recovery half of #35 §10, and the reason it needs a command of its own:
+/// ordinary mutation is refused on integrity-invalid authority, so without this
+/// the only way back was editing `.engr` by hand — which is not an authority
+/// path, and is the behaviour the refusal exists to discourage.
+///
+/// It proposes only what admitted history proves. Anything worth keeping from
+/// the invalid bytes is a separate, ordinary change made after the repair, so
+/// the record shows both acts instead of one that quietly did both.
+fn repair(root: &Path, object: &str, json: bool) -> Result<()> {
+    store::require_current(root)?;
+    // Through the same resolver as every other object argument. This was the
+    // one command that took the string raw, so it alone refused the short id
+    // `ls` and `show` print — on the recovery path, reached only when something
+    // is already wrong, and named by the very refusals that send a reader here.
+    let object = &resolve_object_argument(root, "repair", object)?;
+    let prepared = gate::prepare_repair(root, object)?;
+    if json {
+        // Both sides, not just the candidate. The candidate binds only what is
+        // being restored — the invalid bytes are deliberately outside it and
+        // outside its digest — so a reader given the candidate alone cannot see
+        // what the repair discards. The comparison is reported beside it, as
+        // diagnostic material rather than as anything being admitted.
+        let document = serde_json::json!({
+            "challenge": prepared.candidate.challenge,
+            "repair": {
+                "stored_verifies": store::load_object(root, object)
+                    .ok()
+                    .is_some_and(|stored| {
+                        engr::integrity::check_stored_object_integrity(&stored).is_ok()
+                    }),
+                "restores": engr::ops::provable(root, object).ok(),
+                "stored": store::load_object(root, object).ok(),
+            }
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&document)
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    print!(
+        "{}",
+        render_candidate(root, &prepared.candidate, &prepared.notes)
+    );
+    for code in &prepared.superseded {
+        println!("(candidate {code} was superseded by this one)");
+    }
+    Ok(())
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -599,124 +970,262 @@ fn run(cli: Cli) -> Result<()> {
             println!("git          ok");
         } else {
             println!(
-                "git          not a repository — commit {}/objects and {}/events to preserve the record",
+                "git          not a repository — commit {}/objects and {}/eventstore to preserve the record",
                 store::DIR,
                 store::DIR
             );
         }
         return Ok(());
     }
-
     let root = store::find_root(cli.root.as_deref())?;
     if matches!(cli.command, Command::Migrate) {
-        store::with_lock(&root, || store::migrate(&root))?;
-        println!(
-            "migrated {} to workspace version {}",
-            store::engr_dir(&root).display(),
-            engr::WORKSPACE_VERSION
-        );
+        let proposed = engr::migration::prepare(&root)?;
+        print!("{}", render_migration(&root, &proposed));
         return Ok(());
     }
-    let workspace_format = store::validate_format(&root)?;
+    // `confirm` is exempt, and only `confirm`. A staged migration makes the
+    // workspace unreadable to every ordinary command until it is resolved — and
+    // resolving it *is* a confirmation, so a boundary that refused this one
+    // would leave the only way out behind the door it locks. What a Challenge
+    // may then do is still decided by its own domain: an Object confirmation
+    // goes through `require_current` and is refused mid-migration like anything
+    // else.
+    if !matches!(cli.command, Command::Confirm { .. }) {
+        store::validate_format(&root)?;
+    }
+    // Every domain but the migration itself reads through this generation’s own
+    // schema, and the released predecessor is a different one. A reader that
+    // fell through to it would not be lenient, it would be answering about a
+    // file it cannot interpret — so the whole surface refuses by name and says
+    // what to do, rather than each command failing somewhere lower down.
+    if !matches!(
+        cli.command,
+        Command::Confirm { .. } | Command::Candidate { .. }
+    ) {
+        store::require_current(&root)?;
+    }
 
     match cli.command {
         Command::Init | Command::Protocol | Command::Migrate => unreachable!("handled above"),
         Command::Prepare(command) => {
             store::require_current(&root)?;
-            prepare(&root, command)
+            prepare(&root, *command)
         }
         Command::Candidate { code } => candidate(&root, code.as_deref()),
-        Command::Confirm { response } => {
-            store::require_current(&root)?;
-            let admitted = gate::confirm(&root, &response)?;
-            println!(
-                "CONFIRMED  {}  {}  rev {}",
-                shorten(&admitted.object.id, view::width(&root)),
-                admitted.event.payload.action.label(),
-                // The event's rev, not the object's. They coincide except on
-                // the already-applied retry — the one path that exists to
-                // reassure someone after a crash, and the one where naming a
-                // later revision would say the wrong thing happened.
-                admitted.event.rev
-            );
-            report_backlog(&root, &admitted.backlog);
-            warn_uncommitted(&root, &admitted.object.id);
-            Ok(())
-        }
+        Command::Confirm { response } => match engr::confirm(&root, &response)? {
+            engr::Confirmed::Object(admitted) => {
+                println!(
+                    "CONFIRMED  {}  {}  rev {}",
+                    shorten(&admitted.object.id, view::width(&root)),
+                    admitted.event.action.event_type(),
+                    // The event's rev, not the object's. They coincide except on
+                    // the already-applied retry — the one path that exists to
+                    // reassure someone after a crash, and the one where naming a
+                    // later revision would say the wrong thing happened.
+                    admitted.event.rev
+                );
+                warn_uncommitted(&root, &admitted.object.id);
+                Ok(())
+            }
+            engr::Confirmed::Migration(report) => {
+                // Two outcomes, and they must not read alike. The retry after a
+                // crash between `VERSION` and the sweep publishes nothing — the
+                // record is already this generation's, and may have moved on
+                // since. Printing the migration line there stated that a
+                // migration had just happened, with the plan's section count
+                // rather than the workspace's, which is the reading that made
+                // retyping the code look safe in the first place.
+                if report.already_complete {
+                    println!(
+                        "COMPLETE   {}  already generation {}; nothing was migrated, and the spent migration's leftovers are retired",
+                        store::engr_dir(&root).display(),
+                        engr::WORKSPACE_GENERATION
+                    );
+                } else {
+                    println!(
+                        "MIGRATED   {}  {} objects, {} sections, generation {}",
+                        store::engr_dir(&root).display(),
+                        report.objects.len(),
+                        report.sections,
+                        engr::WORKSPACE_GENERATION
+                    );
+                }
+                // Outside both arms, because the resume that publishes is not
+                // always the resume that reports. An interruption between the
+                // overwrite and this line leaves the next resume to say it, and
+                // that resume may well be the one that finds the work already
+                // done and prints COMPLETE.
+                //
+                // Said at all because it cannot be found out later: these are
+                // predecessor bytes that publication wrote over, and they were
+                // not the bytes the migration was confirmed over. The resume
+                // could not refuse — publication had begun, and the qualified
+                // `no` cannot unpublish — so the one thing left that helps is
+                // naming them while somebody is still looking.
+                for path in &report.published_over {
+                    println!(
+                        "note       {path} had changed since this migration was confirmed; the confirmed plan was published over it"
+                    );
+                }
+                Ok(())
+            }
+        },
         Command::Ls {
             keyword,
             all,
             sections,
-            stale,
-        } => ls(&root, keyword.as_deref(), all, sections, stale),
+            verify,
+        } => ls(&root, keyword.as_deref(), all, sections, verify),
         Command::Show { object, format } => {
             let id = resolve_object_argument(&root, "show", &object)?;
-            let object = if workspace_format == store::WorkspaceFormat::Current {
-                store::with_lock(&root, || ops::reconcile(&root, &id))?
+            let stored = store::load_object(&root, &id);
+            // The record holds this Object and the file does not exist. Kept
+            // here rather than derived later, because everything below this line
+            // works on the value history rebuilt — whose seals pass and whose
+            // history produced it, by construction — and that value cannot be
+            // asked whether it was ever stored.
+            let projection_missing =
+                matches!(&stored, Err(error) if error.code == engr::EXIT_NOT_FOUND);
+            // Reconciliation is only for a projection an admission could build
+            // on. A seal that verifies is half of that; the other half is that
+            // admitted history produced these bytes, because applying a tail
+            // over ones it did not would reseal wording nobody admitted and
+            // overwrite the evidence. A divergent Object is still *shown* —
+            // diagnosing it is the whole point of the screen — from the bytes on
+            // disk, and the command still fails at the end.
+            let object = if stored.as_ref().is_ok_and(|stored| {
+                engr::integrity::check_stored_object_integrity(stored).is_ok()
+                    && ops::history_fault(&root, stored).is_ok_and(|fault| fault.is_none())
+            }) {
+                // Reconciliation is a write and shares the same lock as
+                // admission. The integrity check is repeated inside the lock by
+                // `reconcile`; this first check only decides whether show may
+                // repair or must remain diagnostic-only.
+                ops::reconcile(&root, &id)?
             } else {
                 ops::effective(&root, &id)?
             };
+            // Reconciliation rewrites the Object file, and a read command that
+            // writes must say so. Silence here meant `verify` could fail on a
+            // crash tail, a `show` could clear it, and nothing in between named
+            // the write that changed the answer — or the dirty working tree it
+            // left behind.
+            let caught_up = stored
+                .as_ref()
+                .ok()
+                .map_or(0, |stored| object.rev.saturating_sub(stored.rev));
             if format == Format::Json {
                 println!("{}", view::render_show_json(&root, &object)?);
             } else {
                 print!("{}", view::render_show(&root, &object));
+                if caught_up > 0 {
+                    println!(
+                        "note       reconciled {} admitted {} the stored projection was behind; it is now rev {}",
+                        caught_up,
+                        if caught_up == 1 { "event" } else { "events" },
+                        object.rev
+                    );
+                }
             }
             // `show` asserts about one object, so a broken one must not exit 0
             // and let `set -e` carry on. `ls` surveys, and keeps exiting 0.
-            let forged = view::assess(&root, &object)
+            let assessed = view::assess(&root, &object);
+            let forged = assessed
                 .iter()
                 .filter(|(_, status)| status.forged())
                 .count();
-            if forged > 0 {
+            // A dependency this Object cannot trust is not a fault of this
+            // Object, and the refusal has to say so or a reader spends the round
+            // trip looking here. Named per Section, with the target and the
+            // recovery that target actually needs — `repair` only where there is
+            // an admitted value to restore to.
+            let width = view::width(&root);
+            let unadmitted: Vec<String> = assessed
+                .iter()
+                .flat_map(|(id, status)| status.drifted.iter().map(move |drift| (*id, drift)))
+                .filter_map(|(id, drift)| {
+                    if drift.target_history_divergent {
+                        Some(format!(
+                            "§{id} stands on {} §{}, which is not what its own admitted history produced; repair {} first",
+                            shorten(&drift.object, width),
+                            drift.section,
+                            shorten(&drift.object, width)
+                        ))
+                    } else if drift.target_history_unreplayable {
+                        Some(format!(
+                            "§{id} stands on {} §{}, whose own admitted history will not replay; nothing can be restored from it",
+                            shorten(&drift.object, width),
+                            drift.section
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Same rule as `verify`: in a current workspace a missing aggregate
+            // seal is a failure, not an absence of anything to check.
+            let object_forged = engr::integrity::check_object_integrity(&object).is_err();
+            // And the same rule for the fault no seal can see. The screen says
+            // this Object is not what its history produced; exiting 0 underneath
+            // that would tell a script the opposite of what the reader was told,
+            // and `verify` already fails the same Object.
+            let history = ops::history_fault(&root, &object)?;
+            // And the same rule again for the state no question asked of the
+            // value can reach. The screen above has just said this Object has no
+            // stored projection; `verify` fails the same workspace at the same
+            // instant. Exiting 0 underneath both would be the third surface
+            // disagreeing with the other two about one state.
+            if forged > 0 || object_forged || history.is_some() || projection_missing {
                 return Err(Error::new(
                     engr::EXIT_INVARIANT,
-                    format!("{forged} sections are not what was confirmed; run: engr verify"),
+                    match (&history, projection_missing, unadmitted.is_empty()) {
+                        (Some(fault), _, _) => fault.message(&object.id),
+                        (None, true, _) => format!(
+                            "{id}: the record holds this Object and no projection is stored for it; \
+                             what was shown is what admitted history produced. Write it back with: engr repair {}",
+                            shorten(&id, view::width(&root))
+                        ),
+                        (None, false, false) => unadmitted.join("; "),
+                        (None, false, true) => format!(
+                            "current Object integrity failed or {forged} sections are not what was admitted; run: engr verify"
+                        ),
+                    },
                 ));
             }
             Ok(())
         }
         Command::Verify { object } => verify(&root, object.as_deref()),
+        Command::Repair { object, json } => repair(&root, &object, json),
         Command::Backlog(command) => backlog_command(&root, command),
-        Command::Work(command) => work_command(&root, command),
-        Command::Collection(command) => collection_command(&root, command),
-    }
-}
-
-/// Say what confirmation did to unresolved staging, in the same breath as the
-/// admission. A source that moved needs a decision, and the moment the human is
-/// still here is the moment to say so.
-fn report_backlog(root: &Path, outcomes: &[backlog::Outcome]) {
-    let width = view::backlog_width(root);
-    for outcome in outcomes {
-        let item = shorten(&outcome.item, width);
-        let line = match &outcome.result {
-            backlog::Reconciliation::Recorded { added: 0 } => {
-                "already recorded — nothing to add".to_owned()
-            }
-            backlog::Reconciliation::Recorded { added } => {
-                format!("recorded {added} produced outcome(s); still unresolved")
-            }
-            backlog::Reconciliation::Consumed { item_removed: true } => {
-                "resolved and consumed; the topic had nothing else unresolved".to_owned()
-            }
-            backlog::Reconciliation::Consumed { .. } => "resolved and consumed".to_owned(),
-            backlog::Reconciliation::SourceChanged => {
-                "CHANGED since this was prepared — left untouched; reconcile it yourself".to_owned()
-            }
-            backlog::Reconciliation::SourceGone => "already gone — nothing to reconcile".to_owned(),
-        };
-        println!("backlog    {item} §{}  {line}", outcome.section);
+        Command::Rules(command) => rules_command(&root, command),
+        Command::Work { attempt, command } => {
+            work_command(&root, command, rules::Attempt::new(attempt)?)
+        }
+        Command::Collection { attempt, command } => {
+            collection_command(&root, command, rules::Attempt::new(attempt)?)
+        }
     }
 }
 
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
     match command {
         Backlog::New {
-            topic,
+            title,
             text,
             subjects,
+            review,
         } => {
-            let item = backlog::create(root, &topic, &text.read()?, subjects.build(root)?)?;
+            let item = backlog::create(
+                root,
+                &title,
+                &text.read()?,
+                subjects.build(root)?,
+                // Creation binds nothing, so it is never treated as governed
+                // here: engr allocates the id, and demanding a predecessor it
+                // cannot express would make `backlog new` impossible in every
+                // workspace that has a backlog rule.
+                &review.for_creation()?,
+            )?;
             print!("{}", view::render_backlog_show(root, &item));
             Ok(())
         }
@@ -741,9 +1250,16 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             }
             Ok(())
         }
-        Backlog::Rename { item, topic } => {
+        Backlog::Rename {
+            item,
+            title,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let item = backlog::rename(root, &id, &topic)?;
+            let prepared = review.prepared(root, &id, || {
+                Ok(vec![backlog::Precondition::title(root, &id)?])
+            })?;
+            let item = backlog::rename(root, &id, &title, &prepared)?;
             println!("renamed {}", shorten(&item.id, view::backlog_width(root)));
             Ok(())
         }
@@ -751,90 +1267,231 @@ fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
             item,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::add_section(root, &id, &text.read()?, subjects.build(root)?)?;
+            let section = backlog::add_section(
+                root,
+                &id,
+                &text.read()?,
+                subjects.build(root)?,
+                &review.prepared(root, &id, || {
+                    Ok(vec![backlog::Precondition::section_absent(root, &id)?])
+                })?,
+            )?;
             println!("added §{section}");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Revise {
             item,
             section,
             text,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            backlog::revise_section(root, &id, section, &text.read()?)?;
+            let prepared = review.prepared(root, &id, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::revise_section(root, &id, section, &text.read()?, &prepared)?;
             println!("revised §{section}");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Subjects {
             item,
             section,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
             let subjects = subjects.build(root)?;
             let count = subjects.len();
-            backlog::set_subjects(root, &id, section, subjects)?;
+            let prepared = review.prepared(root, &id, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            backlog::set_subjects(root, &id, section, subjects, &prepared)?;
             println!("§{section} now concerns {count} subject(s)");
+            warn_exhausted(root, &id, section);
             Ok(())
         }
         Backlog::Merge {
             item,
-            sections,
+            into,
+            section,
             text,
             subjects,
+            review,
         } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            let section = backlog::merge_sections(
+            backlog::merge_into(
                 root,
                 &id,
-                &sections,
+                into,
+                section,
                 &text.read()?,
                 subjects.build(root)?,
+                &review.prepared(root, &id, || {
+                    Ok(vec![
+                        backlog::Precondition::section(root, &id, into)?,
+                        backlog::Precondition::section(root, &id, section)?,
+                    ])
+                })?,
             )?;
-            println!("merged into §{section}");
+            println!("merged §{section} into §{into}");
+            warn_exhausted(root, &id, into);
             Ok(())
         }
-        Backlog::Rm { item, section } => {
+        Backlog::Produced {
+            item,
+            section,
+            target,
+            forget,
+            review,
+        } => {
             let id = resolve_backlog_argument(root, "backlog", &item)?;
-            match section {
-                Some(section) => {
-                    if backlog::delete_section(root, &id, section)? {
-                        println!(
-                            "removed §{section}, and the topic with it — nothing else was unresolved"
-                        );
-                    } else {
-                        println!("removed §{section}");
-                    }
+            let prepared = review.prepared(root, &id, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            let reference = engr::reference::EngrRef::parse_standalone(&target)
+                .map_err(|error| malformed_argument("--target", &target, error))?
+                .canonicalize(|revision| git::resolve(root, revision))
+                .map_err(|error| malformed_argument("--target", &target, error))?;
+            ensure!(
+                reference.kind() == engr::reference::ResourceKind::Object
+                    && reference.snapshot().is_none(),
+                EXIT_USAGE,
+                "--target {target:?} must identify a current Object or Object section"
+            );
+            let outcome = backlog::Produced::object(reference.embedded());
+            if forget {
+                if backlog::forget_produced(root, &id, section, &outcome, &prepared)? {
+                    println!("§{section} no longer records that outcome");
+                } else {
+                    println!("§{section} was not recording that outcome");
                 }
-                None => {
-                    backlog::delete_item(root, &id)?;
-                    println!("removed {}", shorten(&id, view::backlog_width(root)));
-                }
+            } else if backlog::record_produced(root, &id, section, outcome, &prepared)? {
+                println!("§{section} produced {target}; still unresolved");
+            } else {
+                println!("§{section} already recorded that outcome");
+            }
+            Ok(())
+        }
+        Backlog::Consume {
+            item,
+            section,
+            review,
+        } => {
+            let id = resolve_backlog_argument(root, "backlog", &item)?;
+            let prepared = review.prepared(root, &id, || {
+                Ok(vec![backlog::Precondition::section(root, &id, section)?])
+            })?;
+            if backlog::consume_section(root, &id, section, &prepared)? {
+                println!(
+                    "consumed §{section}, and the topic with it — nothing else was unresolved"
+                );
+            } else {
+                println!("consumed §{section}");
             }
             Ok(())
         }
     }
 }
 
+/// Which command was asked for, before its wording is gathered.
+///
+/// The action variants carry their payload, and the payload is not built until
+/// every flag has been read — so the CLI settles *which* action first and fills
+/// it in afterwards. Keeping the two apart is what lets one set of flag checks
+/// serve every action.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chosen {
+    Create,
+    Rename,
+    SectionCreate,
+    SectionUpdate(u64),
+    SectionMerge,
+    SectionDelete(u64),
+    ChangeState,
+    Classify,
+    Supersede,
+}
+
+impl Chosen {
+    fn carries_title(self) -> bool {
+        matches!(self, Self::Create | Self::Rename)
+    }
+
+    fn carries_content(self) -> bool {
+        matches!(
+            self,
+            Self::Create
+                | Self::Rename
+                | Self::SectionCreate
+                | Self::SectionUpdate(_)
+                | Self::SectionMerge
+                | Self::Supersede
+        )
+    }
+
+    /// The actions a destination is admissible on: exactly the ones the
+    /// attention guard would otherwise refuse.
+    fn requires_attention(self) -> bool {
+        matches!(
+            self,
+            Self::Rename
+                | Self::SectionCreate
+                | Self::SectionUpdate(_)
+                | Self::SectionMerge
+                | Self::SectionDelete(_)
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Create => "object.created.v1",
+            Self::Rename => "object.renamed.v1",
+            Self::SectionCreate => "section.created.v1",
+            Self::SectionUpdate(_) => "section.updated.v1",
+            Self::SectionMerge => "section.merged.v1",
+            Self::SectionDelete(_) => "section.deleted.v1",
+            Self::ChangeState => "object.state_changed.v1",
+            Self::Classify => "object.classified.v1",
+            Self::Supersede => "object.superseded.v1",
+        }
+    }
+}
+
 fn prepare(root: &Path, command: Prepare) -> Result<()> {
-    let action = if command.new {
-        Action::ObjectCreated
+    let mut merge = None;
+    let chosen = if command.new {
+        Chosen::Create
     } else if command.rename {
-        Action::ObjectRenamed
+        Chosen::Rename
     } else if command.add {
-        Action::SectionAdded
+        Chosen::SectionCreate
     } else if let Some(section) = command.revise {
-        Action::SectionRevised { section }
-    } else if let Some(absorbs) = command.merge.clone() {
-        Action::SectionMerged { absorbs }
+        Chosen::SectionUpdate(section)
+    } else if let Some(destination) = command.merge {
+        let mut sources = command.sources.clone();
+        sources.sort_unstable();
+        for pair in sources.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    "--sources names each consumed Section once",
+                ));
+            }
+        }
+        merge = Some(Merge {
+            destination,
+            sources,
+        });
+        Chosen::SectionMerge
     } else if let Some(section) = command.delete {
-        Action::SectionDeleted { section }
-    } else if command.close {
-        Action::ObjectClosed
-    } else if command.reopen {
-        Action::ObjectReopened
+        Chosen::SectionDelete(section)
+    } else if command.close || command.reopen {
+        Chosen::ChangeState
     } else if command.classify {
         // Both halves, always. `--untyped` is a word rather than the absence of
         // `--type` because "I want no type" and "I forgot to say" look identical
@@ -846,15 +1503,9 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 "--classify needs the destination type: --type <TYPE>, or --untyped",
             ));
         }
-        Action::ObjectClassified {
-            object_type: command.object_type.map(TypeArg::model),
-            state: command
-                .state
-                .ok_or_else(|| Error::new(EXIT_USAGE, "--classify needs a destination --state"))?
-                .model(),
-        }
+        Chosen::Classify
     } else {
-        Action::ObjectSuperseded
+        Chosen::Supersede
     };
     // A destination belongs either to `--classify`, which is only a
     // classification, or to an action that needs the object back in the
@@ -867,15 +1518,32 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     // reducer's call, not the parser's: `gate::prepare` projects a trial event,
     // so an object that already needs attention is refused there, once, with
     // the authority that will still be enforcing it when the event replays.
-    let becomes = if command.classify {
+    let names_a_destination =
+        command.state.is_some() || command.object_type.is_some() || command.untyped;
+    let becomes = if chosen == Chosen::Classify {
         None
-    } else if command.state.is_some() || command.object_type.is_some() || command.untyped {
-        if !action.requires_attention() {
+    } else if chosen == Chosen::ChangeState {
+        // `--close` and `--reopen` *are* the state change, so a destination
+        // riding along would be a second one nobody was asked about. Refused
+        // rather than dropped: a flag that is silently ignored is a flag that
+        // told the caller something untrue about what they confirmed.
+        if names_a_destination {
             return Err(Error::new(
                 EXIT_USAGE,
                 format!(
                     "{} already names the state it produces, so it takes no destination",
-                    action.label()
+                    chosen.label()
+                ),
+            ));
+        }
+        None
+    } else if names_a_destination {
+        if !chosen.requires_attention() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{} already names the state it produces, so it takes no destination",
+                    chosen.label()
                 ),
             ));
         }
@@ -896,14 +1564,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         None
     };
 
-    let object = match (&action, &command.object) {
-        (Action::ObjectCreated, Some(_)) => {
+    let object = match (chosen, &command.object) {
+        (Chosen::Create, Some(_)) => {
             return Err(Error::new(
                 EXIT_USAGE,
                 "--new mints its own id; drop --object",
             ))
         }
-        (Action::ObjectCreated, None) => model::new_id(),
+        (Chosen::Create, None) => model::new_id(),
         (_, Some(prefix)) => resolve_object_argument(root, "--object", prefix)?,
         (_, None) => {
             return Err(Error::new(
@@ -928,7 +1596,7 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         (None, None) => None,
     };
 
-    if action.carries_title() && (command.based_on.is_some() || command.no_based_on) {
+    if chosen.carries_title() && (command.based_on.is_some() || command.no_based_on) {
         return Err(Error::new(
             EXIT_USAGE,
             "a title has no repository basis; use --based-on or --no-based-on only for section wording",
@@ -936,41 +1604,65 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
     }
     let supplements = command.supplements()?;
     let mut relations = command.relations(root)?;
-    if action.carries_title()
+    if chosen.carries_title()
         && (!command.references.is_empty()
             || command.role.is_some()
+            || command.header.is_some()
             || !supplements.is_empty()
             || !relations.is_empty())
     {
         return Err(Error::new(
             EXIT_USAGE,
-            "a title is a label: --ref, --role, --content and --implemented-by apply only to \
-             section wording",
+            "a title is a label: --ref, --role, --header, --content and --implemented-by apply \
+             only to section wording",
         ));
     }
-    if !action.carries_content()
-        && (command.role.is_some() || !supplements.is_empty() || !relations.is_empty())
+    // Refused rather than dropped, for the reason the destination guard above
+    // gives: a flag that is silently ignored told the caller something untrue
+    // about what they confirmed. The wording flags belong here with the rest.
+    // `--text` on `--close` was read, and then the action it built had nowhere
+    // to put it — so the Challenge a human confirmed was state-only and the
+    // reason for closing existed nowhere in the subject, which is the one place
+    // confirmation could have recovered it from. `--based-on` was resolved and
+    // dropped the same way, and `--ref` was resolved against a live target and
+    // dropped after.
+    //
+    // And it has to be asked *here*, before the input is narrowed: the action
+    // is the narrowing, and afterwards there is nothing left to notice was
+    // dropped. The base kept a Payload that carried Content until
+    // `Payload::validate` refused it for these actions; the action-specific
+    // representation cannot, so the check moves in front of it.
+    if !chosen.carries_content()
+        && (text.is_some()
+            || command.based_on.is_some()
+            || command.no_based_on
+            || !command.references.is_empty()
+            || command.role.is_some()
+            || command.header.is_some()
+            || !supplements.is_empty()
+            || !relations.is_empty())
     {
         return Err(Error::new(
             EXIT_USAGE,
             format!(
-                "{} carries no wording, so it carries no role, content or relations",
-                action.label()
+                "{} carries no wording, so it takes none of --text, --text-file, --based-on, \
+                 --no-based-on, --ref, --header, --role, --content or --implemented-by",
+                chosen.label()
             ),
         ));
     }
 
     let mut references = Vec::new();
-    for spec in &command.references {
-        references.push(parse_ref(root, spec)?);
+    for pair in command.references.chunks(2) {
+        let [spec, fields] = pair else {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--ref takes an Object section and a comma-separated field list",
+            ));
+        };
+        references.push(parse_ref(root, spec, fields)?);
     }
     check_unique_arguments(&references, "--ref")?;
-    if !action.carries_content() && command.no_based_on {
-        return Err(Error::new(
-            EXIT_USAGE,
-            "--no-based-on applies only to section wording",
-        ));
-    }
 
     // The replacement is an argument to `--supersede` rather than another
     // relation flag, because it is not optional metadata on the action — the
@@ -996,30 +1688,101 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 
     let mut content = gate::content(
         root,
-        text,
+        text.clone(),
         command.based_on.clone(),
-        command.no_based_on || action.carries_title(),
+        command.no_based_on || chosen.carries_title(),
         references,
     )?;
+    content.header = command.header.clone();
     content.role = role;
     content.content = supplements;
     content.relations = relations;
-    let payload = Payload {
-        action,
-        object,
-        becomes,
-        content,
-    };
-    let prepared = if command.oversize {
-        gate::prepare_oversize(root, payload)?
+
+    let admission = if command.agent {
+        semantics::Admission::Agent
     } else {
-        gate::prepare(root, payload)?
+        semantics::Admission::Human
+    };
+    let title = text.unwrap_or_default();
+    let value = || gate::value(content.clone(), admission);
+    let action = match chosen {
+        Chosen::Create => Action::ObjectCreated { title },
+        Chosen::Rename => Action::ObjectRenamed { title, becomes },
+        Chosen::SectionCreate => Action::SectionCreated {
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionUpdate(section) => Action::SectionUpdated {
+            section,
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionMerge => Action::SectionMerged {
+            merge: merge.expect("the merge branch set it"),
+            value: value(),
+            becomes,
+        },
+        Chosen::SectionDelete(section) => Action::SectionDeleted { section, becomes },
+        Chosen::ChangeState => Action::ObjectStateChanged {
+            state: if command.close {
+                semantics::State::Closed
+            } else {
+                semantics::State::Open
+            },
+        },
+        Chosen::Classify => Action::ObjectClassified {
+            object_type: command.object_type.map(TypeArg::model),
+            state: command
+                .state
+                .ok_or_else(|| Error::new(EXIT_USAGE, "--classify needs a destination --state"))?
+                .model(),
+        },
+        Chosen::Supersede => Action::ObjectSuperseded { value: value() },
+    };
+    let review = command.review()?;
+    let payload = Payload::new(object, action);
+    if command.agent {
+        ensure!(
+            !command.oversize,
+            EXIT_USAGE,
+            "--oversize is a Human candidate exception; an Agent admission cannot claim it"
+        );
+        let admitted = gate::admit_agent(root, payload, review)?;
+        if command.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "event": admitted.event,
+                    "object": admitted.object,
+                }))
+                .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+            );
+        } else {
+            println!(
+                "ADMITTED   {}  {}  rev {}  agent",
+                shorten(&admitted.object.id, view::width(root)),
+                admitted.event.action.event_type(),
+                admitted.event.rev
+            );
+            warn_uncommitted(root, &admitted.object.id);
+        }
+        return Ok(());
+    }
+    let allowance = if command.oversize {
+        gate::Allowance::Oversize
+    } else {
+        gate::Allowance::Normal
+    };
+    let prepared = match review {
+        Some(review) => gate::prepare_reviewed(root, payload, allowance, review)?,
+        None if command.oversize => gate::prepare_oversize(root, payload)?,
+        None => gate::prepare(root, payload)?,
     };
 
     if command.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&prepared.candidate)
+            serde_json::to_string_pretty(&prepared.candidate.challenge)
                 .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
         );
         return Ok(());
@@ -1057,6 +1820,47 @@ fn check_unique_arguments<T: PartialEq>(items: &[T], flag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pin a commit for an **authoritative** relation target, refusing a dirty path.
+///
+/// Backlog subjects may now pin a baseline and record `dirty: true`, because
+/// losing the context entirely is worse than recording an inexact one. A record
+/// relation is not that: `implemented_by` is admitted wording claiming this
+/// assertion is implemented *there*, and a snapshot that does not describe what
+/// was read is a claim nobody can check later.
+///
+/// Whether the record should relax the same way is #9's and #35's question, not
+/// this slice's, so the refusal stays exactly where it was and only Backlog
+/// moved.
+///
+/// Which means asking the record's own question rather than reusing Backlog's
+/// answer. `backlog::pin` reports whether the file differs from **the commit
+/// being pinned**, which is right for a subject: `dirty` there says the observed
+/// target holds bytes outside its recoverable baseline. Reusing it here quietly
+/// rewrote this refusal — an author naming an explicit historical revision from
+/// a clean worktree got told the file had uncommitted changes, because the file
+/// had legitimately moved on since. What this guard is for is narrower: the
+/// wording claims something is implemented *there*, so what the author read must
+/// be committed somewhere, not identical to the revision they chose.
+fn pin_exact(root: &Path, path: &str, revision: Option<&str>, flag: &str) -> Result<String> {
+    let (commit, _) = backlog::pin(root, path, revision)
+        .map_err(|error| malformed_argument(flag, path, error))?;
+    let uncommitted = git::path_dirty(root, path).ok_or_else(|| {
+        Error::new(
+            engr::EXIT_INVARIANT,
+            format!("{flag} {path}: could not determine whether it has uncommitted changes"),
+        )
+    })?;
+    if uncommitted {
+        return Err(Error::new(
+            engr::EXIT_INVARIANT,
+            format!(
+                "{flag} {path} has uncommitted changes, so no commit describes what was read; commit it first, or choose another committed revision"
+            ),
+        ));
+    }
+    Ok(commit)
+}
+
 fn malformed_argument(field: &str, spec: &str, error: Error) -> Error {
     if error.code == EXIT_SCHEMA {
         Error::new(EXIT_USAGE, format!("{field} {spec:?}: {}", error.message))
@@ -1082,6 +1886,69 @@ fn resolve_object_argument(root: &Path, field: &str, spec: &str) -> Result<Strin
     store::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
+/// The subject of a Work sidecar, which may be an Object or a Backlog item.
+///
+/// A bare id still means an Object. Both namespaces mint UUIDv7, so a bare id
+/// cannot say which one it is in, and the abbreviation a caller types could
+/// match in both — so the second subject kind is named the way #59 settled that
+/// every CLI surface names a resource, with its canonical `engr:` reference. No
+/// new syntax, no `--backlog` flag, and no change to what already worked.
+///
+/// A bare id that is not an Object but *is* a Backlog item gets told so rather
+/// than "no such object", because the caller is one prefix away from what they
+/// meant and the tool knows it.
+fn resolve_work_subject(root: &Path, field: &str, spec: &str) -> Result<work::Subject> {
+    if spec.starts_with("engr:") {
+        let reference = engr::reference::EngrRef::parse_standalone(spec)
+            .map_err(|error| malformed_argument(field, spec, error))?;
+        if reference.section().is_some() || reference.snapshot_selector().is_some() {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} must identify a current whole Object or Backlog item; a \
+                     sidecar belongs to the whole thing, not to a part of it or to how it once read"
+                ),
+            ));
+        }
+        return match reference.kind() {
+            engr::reference::ResourceKind::Object => Ok(work::Subject::Object(
+                resolve_object_argument(root, field, spec)?,
+            )),
+            engr::reference::ResourceKind::Backlog => Ok(work::Subject::Backlog(
+                resolve_backlog_argument(root, field, spec)?,
+            )),
+            engr::reference::ResourceKind::Collection => Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} names a Collection, which is planning metadata and has no \
+                     execution to remember; work is kept for an Object or a Backlog item"
+                ),
+            )),
+        };
+    }
+    let error = match store::resolve_id(root, spec) {
+        Ok(id) => return Ok(work::Subject::Object(id)),
+        Err(error) => error,
+    };
+    // Only absence sends the question to the other namespace. An ambiguous
+    // prefix or an Object that will not load are answers about the Object
+    // namespace, and reporting either as "that is a backlog item" would send a
+    // caller somewhere else with their actual problem still there.
+    if error.code == EXIT_NOT_FOUND {
+        if let Ok(id) = backlog::resolve_id(root, spec) {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "{field} {spec:?} is not an object, but it is a backlog item. Name it as \
+                     {} — a bare id cannot say which namespace it is in",
+                    work::Subject::Backlog(id)
+                ),
+            ));
+        }
+    }
+    Err(malformed_argument(field, spec, error))
+}
+
 /// The same boundary for the Backlog namespace. Every `engr backlog` command
 /// addresses a whole item, so a Section reference is a legal thing to write and
 /// the wrong thing to write here — a usage error, not a missing resource.
@@ -1102,31 +1969,11 @@ fn resolve_backlog_argument(root: &Path, field: &str, spec: &str) -> Result<Stri
     backlog::resolve_id(root, spec).map_err(|error| malformed_argument(field, spec, error))
 }
 
-/// The content identity to pin, recomputed from what the target actually says.
-///
-/// Not `section.sha256`. That value is the target's confirmed integrity seal —
-/// a claim about what was admitted — and copying a claim is not the same as
-/// checking it. A section rewritten outside the gate keeps its old seal, so a
-/// ref built from the seal would pin a hash the current wording does not
-/// produce, and the pin would look like agreement to text nobody confirmed.
-///
-/// Recomputing and then refusing the mismatch keeps the two roles apart:
-/// `section.sha256` says what was confirmed, `refs[].sha256` says what this
-/// section was actually written against, and they are only allowed to be equal.
-fn pin_target(target: &engr::model::Section, object: &str, section: u64) -> Result<String> {
-    let actual = target.recomputed_sha256()?;
-    if actual != target.sha256 {
-        return Err(Error::new(
-            engr::EXIT_INVARIANT,
-            format!(
-                "{object} §{section} does not match its own confirmed hash; its wording was changed outside the gate, so it cannot be referenced until that is resolved"
-            ),
-        ));
-    }
-    Ok(actual)
-}
-
-fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
+fn parse_ref(root: &Path, spec: &str, field_names: &str) -> Result<Ref> {
+    let fields = field_names
+        .split(',')
+        .map(engr::dependency::SemanticField::parse)
+        .collect::<Result<Vec<_>>>()?;
     if spec.starts_with("engr:") {
         let reference = engr::reference::EngrRef::parse_standalone(spec)
             .map_err(|error| malformed_argument("--ref", spec, error))?;
@@ -1147,12 +1994,6 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         let section = canonical
             .section()
             .expect("checked before canonicalization");
-        let target_section = ops::effective_section(root, &id, section)?;
-        // Content identity before provenance, in that order. What the target
-        // says is the question a reference is about; which commit it was read
-        // at explains the answer. Asking for a repository first would refuse a
-        // rewritten target with a message about git.
-        let sha256 = pin_target(&target_section, &id, section)?;
         let commit = match canonical.snapshot() {
             Some(commit) => commit.to_owned(),
             None => git::head(root).ok_or_else(|| {
@@ -1162,12 +2003,8 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
                 )
             })?,
         };
-        return Ok(Ref {
-            object: id,
-            section,
-            sha256,
-            commit,
-        });
+        let target = ops::effective(root, &id)?;
+        return engr::dependency::admit(root, &target, section, &fields, &commit);
     }
     let (prefix, section) = spec.split_once(':').ok_or_else(|| {
         Error::new(
@@ -1182,20 +2019,14 @@ fn parse_ref(root: &Path, spec: &str) -> Result<Ref> {
         )
     })?;
     let id = resolve_object_argument(root, "--ref", prefix)?;
-    let target_section = ops::effective_section(root, &id, section)?;
-    let sha256 = pin_target(&target_section, &id, section)?;
     let commit = git::head(root).ok_or_else(|| {
         Error::new(
             engr::EXIT_INVARIANT,
             "a reference records the commit it was read at, which needs a git repository",
         )
     })?;
-    Ok(Ref {
-        object: id,
-        section,
-        sha256,
-        commit,
-    })
+    let target = ops::effective(root, &id)?;
+    engr::dependency::admit(root, &target, section, &fields, &commit)
 }
 
 fn shorten(id: &str, width: usize) -> &str {
@@ -1203,12 +2034,20 @@ fn shorten(id: &str, width: usize) -> &str {
 }
 
 fn render_ref(reference: &Ref, width: usize) -> String {
+    let (object, section) = engr::dependency::parse_target(reference.target())
+        .unwrap_or_else(|_| ("invalid".to_owned(), 0));
     format!(
-        "{} §{}  sha256 {}  commit {}",
-        shorten(&reference.object, width),
-        reference.section,
-        shorten(&reference.sha256, 8),
-        shorten(&reference.commit, 8)
+        "{} §{}  fields {}  digest {}  commit {}",
+        shorten(&object, width),
+        section,
+        reference
+            .fields()
+            .iter()
+            .map(|field| field.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        shorten(reference.digest(), 10),
+        shorten(reference.commit(), 8)
     )
 }
 
@@ -1413,9 +2252,9 @@ fn tail_suffix(separator: &str, note: String) -> String {
     }
 }
 
-fn render_basis(basis: Option<&str>) -> String {
+fn render_basis(basis: Option<&semantics::BasedOn>) -> String {
     basis
-        .map(|commit| shorten(commit, 8).to_owned())
+        .map(|basis| shorten(&basis.commit, 8).to_owned())
         .unwrap_or_else(|| "none (explicit)".to_owned())
 }
 
@@ -1424,73 +2263,291 @@ fn render_basis(basis: Option<&str>) -> String {
 /// Backlog ids — borrowing the Object width can print two different unresolved
 /// points identically on the one screen that says which of them confirming
 /// consumes.
+/// What a repair discards, beside what it restores.
+///
+/// #35's ruling requires the person confirming a repair to see three things: the
+/// last provable admitted projection, the integrity-invalid stored state, and
+/// the difference. Only the first is in the candidate — binding the invalid
+/// bytes into a CandidateDigest would make a digest that could never be
+/// recomputed from history, which is the one property every durable candidate
+/// digest has to keep. So they are read here, at render time, and stay
+/// diagnostic: nothing on this screen is authority, and confirming does not
+/// admit any of it.
+///
+/// Being unable to read them is not a reason to hide the screen. A repair whose
+/// comparison cannot be built is exactly the one a person should be told about
+/// before answering.
+/// The two revisions every repair screen owes the reader.
+///
+/// They are different numbers: admitted history derives the projection at its
+/// own revision, and confirming appends `object.repaired.v1` on top of it, so a
+/// repair is admitted rather than silent. One function because there are three
+/// screens — absent, unsealed and resealed-divergent — and the rule arrived
+/// spelled out on the one that was reported, leaving the two a reader actually
+/// reaches from `verify` naming no revision at all.
+fn repair_revisions(provable: &engr::model::Object) -> String {
+    format!(
+        "at rev {}, admitted as rev {}",
+        provable.rev,
+        provable.rev.saturating_add(1)
+    )
+}
+
+fn render_repair_comparison(root: &Path, id: &str) -> String {
+    let provable = match engr::ops::provable(root, id) {
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  admitted history cannot rebuild this record: {}\n",
+                error.message
+            )
+        }
+    };
+    let stored = match store::load_object(root, id) {
+        // Absent is not unreadable, and a person deciding whether to answer this
+        // needs the difference: there is nothing here to compare against and
+        // nothing being overwritten. What they still need is the *other* side —
+        // a Section count is not something anybody can authorize, and this
+        // branch used to stop at one, so the screen offered a confirmation code
+        // for wording it had never shown. Same rows as the damaged case, with
+        // `(absent)` where the stored value would be.
+        Err(error) if error.code == engr::EXIT_NOT_FOUND => {
+            let mut out = format!(
+                "Integrity  no projection is stored; admitted history is the only copy\n\
+                 Restoring  exactly what admitted history proves {}\n\n",
+                repair_revisions(&provable)
+            );
+            match view::repair_restores(&provable) {
+                Ok(restores) if !restores.is_empty() => {
+                    for difference in &restores {
+                        out.push_str(&format!(
+                            "  {}\n    stored   {}\n    restore  {}\n",
+                            difference.at, difference.stored, difference.restore
+                        ));
+                    }
+                }
+                // An Object history derives as empty is a real state — a created
+                // Object nobody has added to — and saying so is the honest
+                // screen. Silence would read as a rendering failure.
+                Ok(_) => {
+                    out.push_str("  admitted history derives no persisted member for this Object\n")
+                }
+                Err(error) => out.push_str(&format!(
+                    "  what history derives cannot be rendered: {}\n",
+                    error.message
+                )),
+            }
+            out.push('\n');
+            return out;
+        }
+        Ok(object) => object,
+        Err(error) => {
+            return format!(
+                "Integrity  the stored record cannot be read: {}\n",
+                error.message
+            )
+        }
+    };
+    // Which of the two damaged states this is, because they read completely
+    // differently to a person: a failed seal says the bytes were changed and not
+    // resealed, while a projection that seals perfectly and is not what history
+    // produced says somebody rewrote it *and* covered their tracks — the seal
+    // proves nothing there, and the comparison below is the whole evidence.
+    let sealed = engr::integrity::check_stored_object_integrity(&stored).is_ok();
+    let divergent = matches!(
+        engr::ops::history_fault(root, &stored),
+        Ok(Some(engr::ops::HistoryFault::Divergent(_)))
+    );
+    // A pending repair candidate rendered again after the record is sound —
+    // someone repaired it another way, or the edit was reverted. Say so rather
+    // than showing an empty comparison.
+    if sealed && !divergent {
+        return "Integrity  the stored record verifies and is what its admitted history produced, so there is nothing left to repair\n"
+            .to_owned();
+    }
+
+    let mut out = format!(
+        "Integrity  {}\nRestoring  exactly what admitted history proves {}, and nothing from the stored bytes\n\n",
+        if sealed {
+            "the stored record verifies, and is not what its admitted history produced"
+        } else {
+            "the stored record does not verify"
+        },
+        repair_revisions(&provable)
+    );
+    let differences = match view::repair_differences(&stored, &provable) {
+        Ok(differences) => differences,
+        Err(error) => {
+            return format!(
+                "{out}  the two states cannot be compared: {}\n\n",
+                error.message
+            )
+        }
+    };
+    // Something is wrong with the stored record, so something differs. Nothing
+    // listed would mean the comparison missed it, and saying so is better than
+    // an empty screen that reads like agreement.
+    if differences.is_empty() {
+        out.push_str(
+            "  the record is damaged but no persisted member differs; do not confirm this\n  without looking at the file, because something is wrong with this comparison\n\n",
+        );
+        return out;
+    }
+    for difference in &differences {
+        out.push_str(&format!(
+            "  {}\n    stored   {}\n    restore  {}\n",
+            difference.at, difference.stored, difference.restore
+        ));
+    }
+    out.push('\n');
+    out
+}
+
+/// What the Section being changed says right now, for the screen.
+///
+/// Derived rather than stored. A pending Challenge is only actionable while the
+/// Object still stands at `expected_rev`, so the current Object *is* the
+/// predecessor the human is being shown a change against — and a second copy on
+/// disk could only ever disagree with it. Absent when the Object has moved, in
+/// which case the Challenge is dead and the screen says so separately.
+struct Shown {
+    title: Option<String>,
+    text: Option<String>,
+    section: Option<model::Section>,
+}
+
+fn shown(root: &Path, candidate: &gate::Candidate) -> Shown {
+    let object = ops::effective(root, candidate.object()).ok();
+    let fresh = object
+        .as_ref()
+        .is_some_and(|object| object.rev == candidate.expected_rev());
+    let title = object
+        .as_ref()
+        .filter(|_| fresh)
+        .map(|object| object.title.clone())
+        .filter(|title| !title.is_empty());
+    let section = |id: u64| {
+        object
+            .as_ref()
+            .filter(|_| fresh)
+            .and_then(|object| object.section(id).ok().cloned())
+    };
+    let (text, held) = match &candidate.payload.action {
+        Action::ObjectRenamed { .. } => (title.clone(), None),
+        Action::SectionUpdated { section: id, .. } => {
+            let held = section(*id);
+            (held.as_ref().map(|held| held.text.clone()), held)
+        }
+        Action::SectionDeleted { section: id, .. } => {
+            let held = section(*id);
+            (held.as_ref().map(|held| held.text.clone()), held)
+        }
+        Action::SectionMerged { merge, .. } => {
+            // Every participant, survivor first, because the survivor's own
+            // wording is being replaced too. Showing only what is consumed would
+            // present a merge as if the destination were untouched.
+            let mut parts = Vec::new();
+            for id in merge.participants() {
+                match section(id) {
+                    Some(held) => parts.push(format!("§{id}: {}", held.text.trim_end())),
+                    None => {
+                        return Shown {
+                            title,
+                            text: None,
+                            section: None,
+                        }
+                    }
+                }
+            }
+            (Some(parts.join("\n")), None)
+        }
+        _ => (None, None),
+    };
+    Shown {
+        title,
+        text,
+        section: held,
+    }
+}
+
 fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Note]) -> String {
     let width = view::width(root);
-    let backlog_width = view::backlog_width(root);
     let mut out = String::new();
+    let payload = &candidate.payload;
+    let shown = shown(root, candidate);
     // The action names what is being done; without the section it applies to,
     // it does not name *what to*. Two sections can carry identical wording, and
     // then `--delete 1` and `--delete 2` render the same screen for two
     // mutations that are not interchangeable: ids are never reused, so
     // confirming the wrong one breaks every reference pinning it with no way
-    // back. `Payload`'s own rustdoc promises "delete §3 cannot become delete §5
-    // after it was displayed" — the hash kept that promise, the screen did not.
-    //
-    // The object gets its title for the same reason. A human asked to assent to
-    // a change is entitled to be told which record they are changing by a name
-    // they would recognise, not only by an abbreviated uuid.
-    //
-    // It comes from the prepared context, never from a fresh read. A live
-    // lookup would put part of the confirmation identity outside the candidate
-    // and outside its integrity value, so a title rewritten afterwards would
-    // change what a pending candidate presents while the payload hash, the
-    // integrity hash and `expected_rev` all still checked out. Omitted when
-    // there is none, which is the case for `object.created` — its title is the
-    // wording below — and for candidates prepared before the snapshot existed.
-    let subject = match &candidate.payload.action {
-        Action::SectionRevised { section } | Action::SectionDeleted { section } => {
+    // back. The frozen subject's own rustdoc promises "delete §3 cannot become
+    // delete §5 after it was displayed" — the digest kept that promise, the
+    // screen did not.
+    let subject = match &payload.action {
+        Action::SectionUpdated { section, .. } | Action::SectionDeleted { section, .. } => {
             format!(" §{section}")
         }
-        Action::SectionMerged { absorbs } => format!(
-            " absorbing {}",
-            absorbs
-                .iter()
-                .map(|section| format!("§{section}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Action::SectionMerged { merge, .. } => {
+            // Persisted order is the shared canonical set order, which is over
+            // JCS bytes: §10 comes before §2. That is right for hashing and
+            // wrong for the line a person reads before answering, so the
+            // rendering sorts numerically. It changes nothing persisted.
+            let mut consumed = merge.consumed().to_vec();
+            consumed.sort_unstable();
+            format!(
+                " absorbing {}",
+                consumed
+                    .iter()
+                    .map(|section| format!("§{section}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
         _ => String::new(),
     };
-    let title = candidate
-        .context
-        .object_title
+    // A human asked to assent to a change is entitled to be told which record
+    // they are changing by a name they would recognise, not only by an
+    // abbreviated uuid.
+    let title = shown
+        .title
         .as_deref()
         .map(|title| format!("  {title}"))
         .unwrap_or_default();
+    // The command, not the Event type. A person is being asked to assent to an
+    // act; what that act becomes in history is a second statement, and the
+    // Challenge makes the first. Showing `section.deleted.v1` would describe the
+    // record rather than the question.
     out.push_str(&format!(
-        "Candidate  {}{}\nObject     {}{}\n",
-        candidate.payload.action.label(),
+        "Challenge  {}{}\nObject     {}{}\n",
+        candidate.subject.action,
         subject,
-        shorten(&candidate.payload.object, width),
+        shorten(payload.object.as_str(), width),
         title
     ));
-    // A title is a label, not wording written against code, so the commit it
-    // happened to be typed at says nothing about the change being confirmed.
-    // It stays in the payload; it just does not belong on this screen, where
-    // every line that means nothing is a line that trains people to skim.
+    // A repair is confirmed against a comparison, not against wording. It
+    // carries no content of its own, so without this the screen would say only
+    // that something is being restored, and a person would be assenting to the
+    // discarding of material they were never shown.
+    if matches!(payload.action, Action::ObjectRepaired {}) {
+        out.push_str(&render_repair_comparison(root, &payload.object));
+    }
     // The whole destination, both halves, because that is what is being
     // confirmed: a state read without the type it belongs to is a word that
     // means different things on different objects.
-    // Both spellings of a destination reach this screen the same way: one is a
-    // classification on its own, the other rides along with a section action to
-    // bring the object back into attention in the same confirmation. Either way
-    // it is part of what is being confirmed, so it is part of what is shown.
-    let destination = match &candidate.payload.action {
+    //
+    // Both spellings reach this screen the same way: a classification on its
+    // own, or a destination riding along with a section action to bring the
+    // object back into attention in the same confirmation.
+    let destination = match &payload.action {
         Action::ObjectClassified { object_type, state } => Some((*object_type, *state)),
-        _ => candidate
-            .payload
-            .becomes
-            .as_ref()
+        Action::ObjectStateChanged { state } => {
+            let object_type = ops::effective(root, &payload.object)
+                .ok()
+                .and_then(|object| object.object_type);
+            Some((object_type, *state))
+        }
+        _ => payload
+            .becomes()
             .map(|becomes| (becomes.object_type, becomes.state)),
     };
     if let Some((object_type, state)) = destination {
@@ -1505,88 +2562,88 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             }
         ));
     }
-    if !candidate.payload.action.carries_title() && candidate.payload.action.carries_content() {
-        if matches!(candidate.payload.action, Action::SectionRevised { .. }) {
-            if !candidate.context.previous_semantics_recorded {
-                out.push_str(
-                    "WARNING    semantic revision metadata is unavailable; this legacy candidate cannot be confirmed\n",
+    if let Some(value) = payload.action.value() {
+        let content = &value.content;
+        match &shown.section {
+            Some(previous) => {
+                render_header(
+                    &mut out,
+                    previous.header.as_deref(),
+                    content.header.as_deref(),
                 );
-            }
-            render_role(
-                &mut out,
-                candidate.context.previous_role,
-                candidate.payload.content.role,
-            );
-            render_supplement_diff(
-                &mut out,
-                &candidate.context.previous_content,
-                &candidate.payload.content.content,
-            );
-            for relation in &candidate.context.previous_relations {
-                if !candidate.payload.content.relations.contains(relation) {
-                    out.push_str(&format!("Relation - {}\n", render_relation(relation)));
+                render_role(&mut out, previous.role, content.role);
+                render_supplement_diff(&mut out, &previous.content, &content.content);
+                for relation in &previous.relations {
+                    if !content.relations.contains(relation) {
+                        out.push_str(&format!("Relation - {}\n", render_relation(relation)));
+                    }
+                }
+                for relation in &content.relations {
+                    if !previous.relations.contains(relation) {
+                        out.push_str(&format!("Relation + {}\n", render_relation(relation)));
+                    }
+                }
+                if previous.based_on != content.based_on {
+                    out.push_str(&format!(
+                        "Based on - {}\nBased on + {}\n",
+                        render_basis(previous.based_on.as_ref()),
+                        render_basis(content.based_on.as_ref())
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "Based on   {}\n",
+                        render_basis(content.based_on.as_ref())
+                    ));
+                }
+                for reference in &previous.refs {
+                    if !content.refs.contains(reference) {
+                        out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                    }
+                }
+                for reference in &content.refs {
+                    if !previous.refs.contains(reference) {
+                        out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
+                    }
                 }
             }
-            for relation in &candidate.payload.content.relations {
-                if !candidate.context.previous_relations.contains(relation) {
-                    out.push_str(&format!("Relation + {}\n", render_relation(relation)));
+            None => {
+                if let Some(header) = &content.header {
+                    out.push_str(&format!("Header     {header}\n"));
                 }
-            }
-            if candidate.context.previous_based_on != candidate.payload.content.based_on {
-                out.push_str(&format!(
-                    "Based on - {}\nBased on + {}\n",
-                    render_basis(candidate.context.previous_based_on.as_deref()),
-                    render_basis(candidate.payload.content.based_on.as_deref())
-                ));
-            } else {
+                if let Some(role) = content.role {
+                    out.push_str(&format!("Role       {}\n", role.as_str()));
+                }
+                for (index, entry) in content.content.iter().enumerate() {
+                    out.push_str(&format!("Content    [{index}] {}\n", entry.content_type));
+                }
+                for relation in &content.relations {
+                    out.push_str(&format!("Relation   {}\n", render_relation(relation)));
+                }
                 out.push_str(&format!(
                     "Based on   {}\n",
-                    render_basis(candidate.payload.content.based_on.as_deref())
+                    render_basis(content.based_on.as_ref())
                 ));
-            }
-            for reference in &candidate.context.previous_refs {
-                if !candidate.payload.content.refs.contains(reference) {
-                    out.push_str(&format!("Ref      - {}\n", render_ref(reference, width)));
+                for reference in &content.refs {
+                    out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
                 }
-            }
-            for reference in &candidate.payload.content.refs {
-                if !candidate.context.previous_refs.contains(reference) {
-                    out.push_str(&format!("Ref      + {}\n", render_ref(reference, width)));
-                }
-            }
-        } else {
-            if let Some(role) = candidate.payload.content.role {
-                out.push_str(&format!("Role       {}\n", role.as_str()));
-            }
-            for (index, entry) in candidate.payload.content.content.iter().enumerate() {
-                out.push_str(&format!("Content    [{index}] {}\n", entry.content_type));
-            }
-            for relation in &candidate.payload.content.relations {
-                out.push_str(&format!("Relation   {}\n", render_relation(relation)));
-            }
-            out.push_str(&format!(
-                "Based on   {}\n",
-                render_basis(candidate.payload.content.based_on.as_deref())
-            ));
-            for reference in &candidate.payload.content.refs {
-                out.push_str(&format!("Ref        {}\n", render_ref(reference, width)));
             }
         }
-        if matches!(candidate.payload.action, Action::ObjectSuperseded) {
+        out.push_str(&format!(
+            "Admission  {}; time assigned on confirmation\n",
+            value.admitted.by.as_str()
+        ));
+        if matches!(payload.action, Action::ObjectSuperseded { .. }) {
             out.push_str(
                 "State      superseded — this object leaves the default listing, and the \
                  relation above is where a reader is sent instead\n",
             );
         }
-        // Loud, and above the wording. The human is being asked to admit
-        // something engr already refused once, and the only way that stays a
-        // decision rather than a formality is if the screen says so before they
-        // read the text.
-        if candidate.context.oversize {
-            let exceeded = semantics::exceeded(
-                &candidate.payload.content.text,
-                &candidate.payload.content.content,
-            );
+        // Loud, and above the wording. A proposal that broke a normal threshold
+        // was refused once already, and the only way its admission stays a
+        // decision rather than a formality is if the screen says so before the
+        // text is read.
+        let exceeded = semantics::exceeded(&content.text, &content.content);
+        if !exceeded.is_empty() {
             out.push_str(&format!(
                 "OVERSIZE   admitted by exception: {}\n",
                 exceeded
@@ -1597,32 +2654,52 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             ));
         }
     }
-    // Confirming this will also edit unresolved staging, so the human reading
-    // the change is shown that before they type, not told about it afterwards.
-    for source in &candidate.context.backlog {
-        out.push_str(&format!(
-            "Backlog    {} §{}  {}\n",
-            shorten(&source.item, backlog_width),
-            source.section,
-            if source.resolves {
-                "resolved by this — will be consumed"
-            } else {
-                "still unresolved after this"
+    // Rendered from the frozen review, not recomputed from live Rules.
+    //
+    // The two are different claims and only one of them is the question. What a
+    // person is being asked to overrule is what the agent actually hit: this
+    // attempt, this outcome, this Rule set, this explanation. Recomputing the
+    // Rule list from live state means a Rule edited after the code was minted
+    // silently changes what a frozen Challenge appears to say — and confirmation
+    // would still refuse, because it rebinds and compares, so the screen would
+    // have been describing something that could not be confirmed.
+    //
+    // Live Rules still decide staleness; they do not decide what is displayed.
+    if let Some(review) = &candidate.subject.review {
+        let outcome = match review.result {
+            engr::proof::ReviewResult::Passed => "passed".to_owned(),
+            engr::proof::ReviewResult::Failed => {
+                "FAILED — confirming this overrides the agent's own review".to_owned()
             }
+            engr::proof::ReviewResult::Exhausted => format!(
+                "EXHAUSTED at attempt {} — confirming this admits work no passing review allowed",
+                review.attempts
+            ),
+        };
+        out.push_str(&format!(
+            "Review     {outcome}\nDigest     {}\n",
+            review.digest
         ));
-        for produced in &source.produced {
-            out.push_str(&format!(
-                "           produced engr:{}\n",
-                produced.target.reference
-            ));
+        if !review.rules.is_empty() {
+            out.push_str(&format!("Rules      {}\n", review.rules.join(", ")));
+        }
+        // The one part nothing can reconstruct. A human overruling a review has
+        // to read the reason it was offered, or the override means nothing.
+        if let Some(explanation) = &review.explanation {
+            out.push_str(&format!("Reason     {explanation}\n"));
         }
     }
     out.push('\n');
     // Show the change, not the whole section again: making a human re-read
     // everything is how confirmation decays into rubber-stamping.
-    match (&candidate.context.previous_text, &candidate.payload.action) {
-        (Some(previous), _) => {
-            let diff = similar::TextDiff::from_lines(previous, &candidate.payload.content.text);
+    let wording = payload
+        .action
+        .value()
+        .map(|value| value.content.text.clone())
+        .or_else(|| payload.action.title().map(str::to_owned));
+    match (&shown.text, wording) {
+        (Some(previous), Some(current)) => {
+            let diff = similar::TextDiff::from_lines(previous.as_str(), current.as_str());
             out.push_str(
                 &diff
                     .unified_diff()
@@ -1631,24 +2708,31 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                     .to_string(),
             );
         }
-        (None, _) if candidate.payload.action.carries_content() => {
-            out.push_str(candidate.payload.content.text.trim_end());
+        (None, Some(current)) => {
+            out.push_str(current.trim_end());
             out.push('\n');
         }
-        (None, action) => {
-            out.push_str(&format!("({})\n", action.label()));
+        (_, None) => {
+            out.push_str(&format!("({})\n", payload.action.event_type()));
         }
     }
     // In full, and never elided. Supplementary content is part of the assertion
     // being confirmed and part of what gets hashed, so a human who was shown
     // only its type has not read what they are about to admit. It is bounded
     // precisely so that printing all of it stays reasonable.
-    render_supplement_bodies(
-        &mut out,
-        &candidate.context.previous_content,
-        &candidate.payload.content.content,
-        candidate.context.previous_semantics_recorded,
-    );
+    if let Some(value) = payload.action.value() {
+        let previous = shown
+            .section
+            .as_ref()
+            .map(|section| section.content.clone())
+            .unwrap_or_default();
+        render_supplement_bodies(
+            &mut out,
+            &previous,
+            &value.content.content,
+            shown.section.is_some(),
+        );
+    }
     // Above the code, not below it: the point of a note is to be read while
     // there is still a decision to make.
     for note in notes {
@@ -1659,11 +2743,57 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
             )),
         }
     }
-    out.push_str(&format!(
-        "\nType this exactly to confirm:  CONFIRM {}\n",
-        candidate.challenge
-    ));
+    // What this screen may offer, decided by the Challenge's own state first and
+    // by live Rule material only where a new admission is still on the table.
+    // One statement, in one place: this screen used to print the confirmation
+    // instruction from a Rule check alone and leave the state to a line
+    // underneath it, so a dead Challenge said "type this exactly to confirm"
+    // above "this candidate is dead", and an already-applied one said nothing
+    // here can be confirmed above the instruction to retype the code.
+    let trailer = match gate::answerable(root, candidate) {
+        Ok(gate::Answerable::Confirm) => format!(
+            "\nType this exactly to confirm:  CONFIRM {}\n",
+            candidate.code()
+        ),
+        Ok(gate::Answerable::Cleanup) => format!(
+            "\nALREADY APPLIED  this admission is already in the record.\n                 Retype it to finish cleanup:  CONFIRM {}\n",
+            candidate.code()
+        ),
+        Ok(gate::Answerable::Dead { current_rev }) => format!(
+            "\nDEAD          the object moved to revision {current_rev} after this was prepared\n              prepare it again; nothing here can be confirmed\n"
+        ),
+        Ok(gate::Answerable::Unanswerable(reason)) => format!(
+            "\nUNANSWERABLE  {reason}\n              prepare it again; nothing here can be confirmed\n"
+        ),
+        // Not "prepare it again", which is what the line above says and what a
+        // fresh prepare would refuse for this same reason. Nothing failed here:
+        // what this code was prepared to achieve has happened by other means.
+        Ok(gate::Answerable::Settled(reason)) => format!(
+            "\nSETTLED       {reason}\n              nothing here needs confirming\n"
+        ),
+        // Not "prepare it again": the state could not be established at all, so
+        // what to do about it is not something this screen knows.
+        Err(error) => format!(
+            "\nUNANSWERABLE  {}\n              this candidate's state cannot be established\n",
+            error.message
+        ),
+    };
+    out.push_str(&trailer);
     out
+}
+
+fn render_header(out: &mut String, previous: Option<&str>, current: Option<&str>) {
+    if previous == current {
+        if let Some(header) = current {
+            out.push_str(&format!("Header     {header}\n"));
+        }
+        return;
+    }
+    out.push_str(&format!(
+        "Header   - {}\nHeader   + {}\n",
+        previous.unwrap_or("(none)"),
+        current.unwrap_or("(none)")
+    ));
 }
 
 fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
@@ -1671,16 +2801,10 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
         Some(code) => {
             let candidate = gate::find(root, code)?;
             let notes = gate::notes_for(root, &candidate);
+            // One trailer, printed by the renderer, which is the only thing that
+            // knows both halves. A second statement here is how the screen came
+            // to contradict itself.
             print!("{}", render_candidate(root, &candidate, &notes));
-            match gate::candidate_state(root, &candidate)? {
-                gate::CandidateState::Pending => {}
-                gate::CandidateState::AlreadyApplied(_) => println!(
-                    "\nThis candidate was already applied. Retry the same confirmation to finish cleanup."
-                ),
-                gate::CandidateState::Stale { .. } => println!(
-                    "\nThis candidate is dead — the object moved after it was prepared. Prepare again."
-                ),
-            }
             Ok(())
         }
         None => {
@@ -1704,15 +2828,15 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
                 };
                 println!(
                     "{}   {:<16} {} {:<8} {}",
-                    candidate.challenge,
-                    candidate.payload.action.label(),
+                    candidate.code(),
+                    candidate.payload.action.event_type(),
                     shorten(&candidate.payload.object, width),
                     match gate::candidate_state(root, &candidate)? {
                         gate::CandidateState::Pending => "pending",
                         gate::CandidateState::AlreadyApplied(_) => "retry",
                         gate::CandidateState::Stale { .. } => "stale",
                     },
-                    candidate.created_at
+                    candidate.challenge.created_at
                 );
             }
             Ok(())
@@ -1720,10 +2844,19 @@ fn candidate(root: &Path, code: Option<&str>) -> Result<()> {
     }
 }
 
-fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
+fn load_all(root: &Path, all: bool, assess: bool) -> Result<Vec<engr::model::Object>> {
     let mut objects = Vec::new();
-    for id in store::object_ids(root)? {
-        let object = ops::effective(root, &id)?;
+    let ids = if assess {
+        ops::object_ids(root)?
+    } else {
+        store::object_ids(root)?
+    };
+    for id in ids {
+        let object = if assess {
+            ops::effective(root, &id)?
+        } else {
+            store::load_object(root, &id)?
+        };
         if all || object.needs_attention() {
             objects.push(object);
         }
@@ -1732,17 +2865,16 @@ fn load_all(root: &Path, all: bool) -> Result<Vec<engr::model::Object>> {
     Ok(objects)
 }
 
-fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool) -> Result<()> {
+fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, verify: bool) -> Result<()> {
     // A closed object whose basis moved is the one case that must surface
-    // unprompted. `--stale` therefore cannot inherit `ls`'s open-only default.
-    let objects = load_all(root, all || stale)?;
+    // unprompted. `--verify` therefore cannot inherit `ls`'s open-only default.
+    let objects = load_all(root, all || verify, verify)?;
     if objects.is_empty() {
         println!("no objects");
         return Ok(());
     }
     if sections {
-        // stdout stays byte for byte what it was — this is the surface people
-        // pipe into grep — so the alarm goes to stderr, which survives the pipe.
+        // Keep the per-row marker in pipes and the detailed alarm on stderr.
         print!("{}", view::render_ls_sections(root, &objects));
         let untrusted = view::untrusted_sections(root, &objects);
         if !untrusted.is_empty() {
@@ -1754,8 +2886,8 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
                 eprintln!("!!   {row}");
             }
         }
-    } else if stale {
-        let out = view::render_stale(root, &objects);
+    } else if verify {
+        let out = view::render_ls_verify(root, &objects);
         if out.is_empty() {
             println!("all ok");
         } else {
@@ -1770,7 +2902,7 @@ fn ls(root: &Path, keyword: Option<&str>, all: bool, sections: bool, stale: bool
 fn verify(root: &Path, object: Option<&str>) -> Result<()> {
     let ids = match object {
         Some(prefix) => vec![resolve_object_argument(root, "verify", prefix)?],
-        None => store::object_ids(root)?,
+        None => ops::object_ids(root)?,
     };
     if ids.is_empty() {
         return Err(Error::new(EXIT_NOT_FOUND, "no objects to verify"));
@@ -1787,20 +2919,68 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
             report.sections,
             report.title
         );
+        if report.object_tampered {
+            println!("          current Object integrity failed");
+        }
+        if report.projection_missing {
+            println!(
+                "          required Object projection is missing; admitted history reconstructs it"
+            );
+        }
+        // Said in its own words, because the seals pass — and said as whichever
+        // of the two faults it is. A resealed out-of-band edit leaves intact
+        // bytes that admitted history never produced, and `repair` restores
+        // them; history that cannot be replayed at all is damage to the
+        // EventStore, where there is nothing to restore *from*.
+        match &report.history {
+            Some(ops::HistoryFault::Divergent(what)) => println!(
+                "          its {what} is not what its admitted history produced; it was changed outside an admission path"
+            ),
+            Some(ops::HistoryFault::Unreplayable(why)) => println!(
+                "          its admitted history cannot be replayed, so there is nothing to check it against: {why}"
+            ),
+            None => {}
+        }
         for section in &report.tampered {
             println!("          §{section} content does not match its recorded hash");
         }
         for stood in &report.standing_on_tampered {
             println!(
-                "          §{} stands on {} §{}, which does not match its own hash",
+                "          §{} stands on {} §{}, whose {} integrity failed",
                 stood.section,
                 shorten(&stood.target, width),
-                stood.target_section
+                stood.target_section,
+                stood.side.unwrap_or("current")
             );
         }
         // Said separately from tampering, and from each other. "Not there" and
         // "will not load" are different problems with different answers, and
         // both used to be silence.
+        // Said in its own words rather than folded into "tampered". The target's
+        // seals pass; what it cannot show is that anything admitted the value
+        // being depended on, and the reader's move is against the target rather
+        // than against this Object.
+        for stood in &report.standing_on_divergent {
+            println!(
+                "          §{} stands on {} §{}, which seals correctly and is not what its own history produced; repair {} first",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section,
+                shorten(&stood.target, width)
+            );
+        }
+        // And the fault that establishes nothing gets its own words, without
+        // `repair` in them: replay failed, so there is no admitted value to
+        // restore, and the work is on the target's history rather than on its
+        // projection.
+        for stood in &report.standing_on_unreplayable {
+            println!(
+                "          §{} stands on {} §{}, whose own admitted history will not replay; nothing here can be restored from it",
+                stood.section,
+                shorten(&stood.target, width),
+                stood.target_section
+            );
+        }
         for stood in &report.standing_on_missing {
             println!(
                 "          §{} stands on {} §{}, which is not there",
@@ -1818,10 +2998,49 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
                 stood.reason
             );
         }
+        // An authoritative forward link that leads nowhere, said in its own
+        // words. It is not drift: nobody is being asked to judge whether this
+        // section still holds. The replacement this object points at cannot be
+        // established, so the chain a reader follows to find current knowledge
+        // is broken.
+        for broken in &report.broken_replacements {
+            println!(
+                "          §{} is superseded by {}, which cannot be established: {}",
+                broken.section,
+                shorten(&broken.target, width),
+                broken.reason
+            );
+        }
+        // Reported, and deliberately not a failure — the same line `show` and
+        // `ls` already draw. What was missing was `verify` drawing it at all: a
+        // PASS that never mentions a moved dependency reads as "nothing here
+        // needs your attention", which is the one thing it cannot mean.
+        for moved in &report.drifted {
+            println!(
+                "          §{} stands on {} §{}, which moved: {} — a judgement, not an integrity failure",
+                moved.section,
+                shorten(&moved.target, width),
+                moved.target_section,
+                moved
+                    .fields
+                    .iter()
+                    .map(|field| field.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // A note, in the same register as `uncommitted`, and for the same
+        // reason: it is worth knowing and it is not a failure. These Events are
+        // admitted; the projection is derived from them and has not caught up.
+        // Saying "not reflected in the sections" read as damage and sent people
+        // to `repair`, which then correctly told them there was nothing to
+        // repair.
         if report.unprojected > 0 {
             println!(
-                "          {} events are not reflected in the sections",
-                report.unprojected
+                "          unprojected — {} admitted {} the stored projection has not caught up to; the next read applies {}",
+                report.unprojected,
+                if report.unprojected == 1 { "event" } else { "events" },
+                if report.unprojected == 1 { "it" } else { "them" }
             );
         }
         if report.uncommitted == Some(true) {
@@ -1835,54 +3054,82 @@ fn verify(root: &Path, object: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Say out loud that this mutation was admitted on an exhausted review.
+///
+/// The marker is persisted so an exhausted review is not silent, and it was
+/// silent anyway: only `--format json` carried it, so the moment it happened
+/// printed `revised §2` and exit 0 like any other. The Object domain announces
+/// the same condition on the screen that admits it, and this is the same
+/// condition.
+///
+/// Read back from what was stored rather than from the verdict in hand, so the
+/// line reports the marker that is actually on the point.
+fn warn_exhausted(root: &Path, id: &str, section: u64) {
+    let Ok(item) = backlog::load(root, id) else {
+        return;
+    };
+    let Some(review) = item
+        .sections
+        .iter()
+        .find(|one| one.id == section)
+        .and_then(|one| one.review_exhaustion)
+    else {
+        return;
+    };
+    println!(
+        "note       admitted on attempt {} against a ceiling of {}; no passing review allowed this wording",
+        review.attempts, review.limit
+    );
+}
+
 fn warn_uncommitted(root: &Path, id: &str) {
     if git::uncommitted(root, &store::object_path(root, id)) == Some(true) {
         println!(
-            "note       commit {}/objects and {}/events to preserve history and look-back",
+            "note       commit {}/objects and {}/eventstore to preserve history and look-back",
             store::DIR,
             store::DIR
         );
     }
 }
 
-/// Execution memory an agent keeps for an Object.
+/// Execution memory an agent keeps for an Object or a Backlog item.
 ///
 /// Its own namespace, like `backlog`, and for the same reason: nothing here
 /// goes through the gate, so it must not be reachable by a command that looks
-/// like one that does. `ls`, `show` and `verify` still mean confirmed record
+/// like one that does. `ls`, `show` and `verify` still mean admitted record
 /// and nothing else.
 #[derive(Subcommand)]
 enum Work {
-    /// Begin keeping execution memory for an Object
+    /// Begin keeping execution memory. The subject is engr:obj:<id> or engr:backlog:<id>
     Start {
-        object: String,
+        subject: String,
         /// Where execution currently stands
         #[arg(long)]
         summary: Option<String>,
     },
-    /// List the Objects with execution memory
+    /// List the subjects with execution memory
     Ls,
-    /// Show one Object's execution memory
+    /// Show one subject's execution memory
     Show {
-        object: String,
+        subject: String,
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
     /// Replace the checkpoint. Omit --text to clear it
     Summary {
-        object: String,
+        subject: String,
         #[arg(long)]
         text: Option<String>,
     },
     /// Suspend autonomous execution. Only on explicit human direction
-    Pause { object: String },
+    Pause { subject: String },
     /// Resume it. Only on explicit human direction
-    Resume { object: String },
+    Resume { subject: String },
     /// Stop keeping execution memory. Deleting paused work says so
-    Rm { object: String },
+    Rm { subject: String },
     /// Record something this work relies on
     Depend {
-        object: String,
+        subject: String,
         /// engr:obj:<id> or engr:backlog:<id>
         #[arg(long = "on", value_name = "ENGR_REF")]
         on: String,
@@ -1892,13 +3139,13 @@ enum Work {
     },
     /// Drop a dependency
     Undepend {
-        object: String,
+        subject: String,
         #[arg(long = "on", value_name = "ENGR_REF")]
         on: String,
     },
     /// Record a condition preventing useful progress
     Block {
-        object: String,
+        subject: String,
         #[arg(long)]
         reason: Option<String>,
         /// engr:obj:<id> or engr:backlog:<id>
@@ -1907,7 +3154,7 @@ enum Work {
     },
     /// Clear a blocker by its position
     Unblock {
-        object: String,
+        subject: String,
         #[arg(long)]
         index: usize,
     },
@@ -1920,13 +3167,13 @@ enum Work {
 enum WorkItem {
     /// Add a step
     Add {
-        object: String,
+        subject: String,
         #[arg(long)]
         text: String,
     },
     /// Reword a step
     Revise {
-        object: String,
+        subject: String,
         #[arg(long)]
         item: u64,
         #[arg(long)]
@@ -1934,7 +3181,7 @@ enum WorkItem {
     },
     /// Move a step's progress
     State {
-        object: String,
+        subject: String,
         #[arg(long)]
         item: u64,
         #[arg(long, value_enum)]
@@ -1942,7 +3189,7 @@ enum WorkItem {
     },
     /// Record what a step produced. Omit --text to clear it
     Result {
-        object: String,
+        subject: String,
         #[arg(long)]
         item: u64,
         #[arg(long)]
@@ -1950,7 +3197,7 @@ enum WorkItem {
     },
     /// Point a step at a commit, as navigation rather than proof
     Commit {
-        object: String,
+        subject: String,
         #[arg(long)]
         item: u64,
         #[arg(long, value_name = "REVISION")]
@@ -1958,7 +3205,7 @@ enum WorkItem {
     },
     /// Prune a step. Its id is not reused
     Rm {
-        object: String,
+        subject: String,
         #[arg(long)]
         item: u64,
     },
@@ -2022,20 +3269,21 @@ fn work_target(root: &Path, field: &str, spec: &str) -> Result<String> {
     }
 }
 
-fn work_command(root: &Path, command: Work) -> Result<()> {
+fn work_command(root: &Path, command: Work, attempt: rules::Attempt) -> Result<()> {
     match command {
-        Work::Start { object, summary } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            work::start(root, &id, summary.as_deref())?;
+        Work::Start { subject, summary } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            work::start(root, &subject, summary.as_deref(), attempt)?;
             print!(
                 "{}",
-                view::render_work_show(root, &id, &work::load(root, &id)?)
+                view::render_work_show(root, &subject, &work::load(root, &subject)?)
             );
         }
         Work::Ls => {
             let mut entries = Vec::new();
-            for id in work::ids(root)? {
-                entries.push((id.clone(), work::load(root, &id)?));
+            for subject in work::ids(root)? {
+                let item = work::load(root, &subject)?;
+                entries.push((subject, item));
             }
             // As instants, not as strings: two valid RFC3339 values written in
             // different offsets do not compare correctly as text, and the most
@@ -2043,36 +3291,33 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
             entries.sort_by_key(|(_, item)| std::cmp::Reverse(item.updated_at()));
             print!("{}", view::render_work_ls(root, &entries));
         }
-        Work::Show { object, format } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::load(root, &id)?;
+        Work::Show { subject, format } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::load(root, &subject)?;
             match format {
-                Format::Text => print!("{}", view::render_work_show(root, &id, &item)),
-                Format::Json => println!("{}", view::render_work_json(&id, &item)?),
+                Format::Text => print!("{}", view::render_work_show(root, &subject, &item)),
+                Format::Json => println!("{}", view::render_work_json(&subject, &item)?),
             }
         }
-        Work::Summary { object, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_summary(root, &id, text.as_deref())?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Summary { subject, text } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::set_summary(root, &subject, text.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Pause { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Paused)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Pause { subject } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::set_state(root, &subject, work::State::Paused, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Resume { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::set_state(root, &id, work::State::Active)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Resume { subject } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::set_state(root, &subject, work::State::Active, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Rm { object } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let removed = work::remove(root, &id)?;
-            println!(
-                "no execution memory for {}",
-                shorten(&id, view::width(root))
-            );
+        Work::Rm { subject } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let removed = work::remove(root, &subject, attempt)?;
+            println!("no execution memory for {} {subject}", subject.noun());
             // Reported, not refused. Whether a human directed this is not
             // something engr can know, so it carries the deletion out and says
             // what went with it — a stop signal disappearing in silence is the
@@ -2082,76 +3327,94 @@ fn work_command(root: &Path, command: Work) -> Result<()> {
                 println!("that work was paused; a human's stop signal went with it");
             }
         }
-        Work::Depend { object, on, reason } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+        Work::Depend {
+            subject,
+            on,
+            reason,
+        } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
             let target = work_target(root, "--on", &on)?;
-            let item = work::add_dependency(root, &id, &target, reason.as_deref())?;
-            print!("{}", view::render_work_show(root, &id, &item));
+            let item = work::add_dependency(root, &subject, &target, reason.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Undepend { object, on } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let target = on.strip_prefix("engr:").unwrap_or(&on).to_owned();
-            let item = work::remove_dependency(root, &id, &target)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Undepend { subject, on } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let target = standalone_embedded_target("--on", &on)?;
+            let item = work::remove_dependency(root, &subject, &target, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
         Work::Block {
-            object,
+            subject,
             reason,
             target,
         } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+            let subject = resolve_work_subject(root, "subject", &subject)?;
             let target = target
                 .map(|spec| work_target(root, "--target", &spec))
                 .transpose()?;
-            let item = work::add_blocker(root, &id, reason.as_deref(), target.as_deref())?;
-            print!("{}", view::render_work_show(root, &id, &item));
+            let item = work::add_blocker(
+                root,
+                &subject,
+                reason.as_deref(),
+                target.as_deref(),
+                attempt,
+            )?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Unblock { object, index } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::remove_blocker(root, &id, index)?;
-            print!("{}", view::render_work_show(root, &id, &item));
+        Work::Unblock { subject, index } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::remove_blocker(root, &subject, index, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &item));
         }
-        Work::Item(command) => return work_item_command(root, command),
+        Work::Item(command) => return work_item_command(root, command, attempt),
     }
     Ok(())
 }
 
-fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
+fn work_item_command(root: &Path, command: WorkItem, attempt: rules::Attempt) -> Result<()> {
     match command {
-        WorkItem::Add { object, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let item = work::add_item(root, &id, &text)?;
+        WorkItem::Add { subject, text } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let item = work::add_item(root, &subject, &text, attempt)?;
             println!("work item {item}");
             print!(
                 "{}",
-                view::render_work_show(root, &id, &work::load(root, &id)?)
+                view::render_work_show(root, &subject, &work::load(root, &subject)?)
             );
         }
-        WorkItem::Revise { object, item, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_text(root, &id, item, &text)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Revise {
+            subject,
+            item,
+            text,
+        } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let work = work::set_item_text(root, &subject, item, &text, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &work));
         }
         WorkItem::State {
-            object,
+            subject,
             item,
             state,
         } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_state(root, &id, item, state.into())?;
-            print!("{}", view::render_work_show(root, &id, &work));
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let work = work::set_item_state(root, &subject, item, state.into(), attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &work));
         }
-        WorkItem::Result { object, item, text } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::set_item_result(root, &id, item, text.as_deref())?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Result {
+            subject,
+            item,
+            text,
+        } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let work = work::set_item_result(root, &subject, item, text.as_deref(), attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &work));
         }
         WorkItem::Commit {
-            object,
+            subject,
             item,
             commit,
         } => {
-            let id = resolve_object_argument(root, "object", &object)?;
+            let subject = resolve_work_subject(root, "subject", &subject)?;
             // Resolved here so `HEAD` and short ids are accepted as input while
             // the sidecar stores the full object id — the same rule every other
             // commit in engr follows, even though this one anchors nothing.
@@ -2161,13 +3424,13 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
                     format!("--commit {commit:?} does not name a commit in this repository"),
                 )
             })?;
-            let work = work::add_item_commit(root, &id, item, &resolved)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+            let work = work::add_item_commit(root, &subject, item, &resolved, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &work));
         }
-        WorkItem::Rm { object, item } => {
-            let id = resolve_object_argument(root, "object", &object)?;
-            let work = work::remove_item(root, &id, item)?;
-            print!("{}", view::render_work_show(root, &id, &work));
+        WorkItem::Rm { subject, item } => {
+            let subject = resolve_work_subject(root, "subject", &subject)?;
+            let work = work::remove_item(root, &subject, item, attempt)?;
+            print!("{}", view::render_work_show(root, &subject, &work));
         }
     }
     Ok(())
@@ -2180,10 +3443,12 @@ fn work_item_command(root: &Path, command: WorkItem) -> Result<()> {
 /// that looks like one that does.
 #[derive(Subcommand)]
 enum CollectionCommand {
-    /// Start a plan
+    /// Start a plan under an id you choose
     New {
+        /// The plan's stable workspace-scoped key: [a-z0-9][a-z0-9-]{0,31}
+        id: String,
         #[arg(long)]
-        name: String,
+        title: String,
         #[arg(long)]
         description: Option<String>,
         #[command(flatten)]
@@ -2197,11 +3462,11 @@ enum CollectionCommand {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Replace the name
+    /// Replace the title
     Rename {
         collection: String,
         #[arg(long)]
-        name: String,
+        title: String,
     },
     /// Replace the description. Omit --text to clear it
     Describe {
@@ -2334,14 +3599,25 @@ impl From<LevelArg> for collection::Level {
 /// what a plan could contain depended on which door it came through. The rule
 /// lives in `collection::add_member` now, and this only translates the spelling.
 fn collection_target(spec: &str) -> Result<String> {
-    spec.strip_prefix("engr:")
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            Error::new(
-                EXIT_USAGE,
-                format!("--target {spec:?} must be an engr: reference"),
-            )
-        })
+    standalone_embedded_target("--target", spec)
+}
+
+fn standalone_embedded_target(field: &str, spec: &str) -> Result<String> {
+    let parsed = engr::reference::EngrRef::parse_standalone(spec)
+        .map_err(|error| malformed_argument(field, spec, error))?;
+    ensure!(
+        matches!(
+            parsed.kind(),
+            engr::reference::ResourceKind::Object | engr::reference::ResourceKind::Backlog
+        ) && parsed.section().is_none()
+            && parsed.snapshot_selector().is_none(),
+        EXIT_USAGE,
+        "{field} {spec:?} must identify a current whole Object or Backlog item"
+    );
+    Ok(spec
+        .strip_prefix("engr:")
+        .expect("standalone parser checked prefix")
+        .to_owned())
 }
 
 fn priority_of(
@@ -2361,14 +3637,26 @@ fn priority_of(
     }
 }
 
-fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
+fn collection_command(
+    root: &Path,
+    command: CollectionCommand,
+    attempt: rules::Attempt,
+) -> Result<()> {
     match command {
         CollectionCommand::New {
-            name,
+            id,
+            title,
             description,
             schedule,
         } => {
-            let item = collection::create(root, &name, description.as_deref(), schedule.build())?;
+            let item = collection::create(
+                root,
+                &id,
+                &title,
+                description.as_deref(),
+                schedule.build(),
+                attempt,
+            )?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Ls => {
@@ -2392,7 +3680,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
                         collection::State::Completed => 1,
                         collection::State::Cancelled => 2,
                     },
-                    item.name.to_lowercase(),
+                    item.title.to_lowercase(),
                 )
             });
             print!("{}", view::render_collection_ls(root, &found));
@@ -2405,19 +3693,19 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
                 Format::Json => println!("{}", view::render_collection_json(&item)?),
             }
         }
-        CollectionCommand::Rename { collection, name } => {
+        CollectionCommand::Rename { collection, title } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::rename(root, &id, &name)?;
+            let item = collection::rename(root, &id, &title, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Describe { collection, text } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::describe(root, &id, text.as_deref())?;
+            let item = collection::describe(root, &id, text.as_deref(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::State { collection, state } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_state(root, &id, state.into())?;
+            let item = collection::set_state(root, &id, state.into(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Schedule {
@@ -2425,7 +3713,7 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             schedule,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let item = collection::set_schedule(root, &id, schedule.build())?;
+            let item = collection::set_schedule(root, &id, schedule.build(), attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Add {
@@ -2438,13 +3726,13 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             let id = collection::resolve_id(root, &collection)?;
             let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
-            let item = collection::add_member(root, &id, &target, order, priority)?;
+            let item = collection::add_member(root, &id, &target, order, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Rm { collection, target } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::remove_member(root, &id, &target)?;
+            let target = collection_target(&target)?;
+            let item = collection::remove_member(root, &id, &target, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Order {
@@ -2453,8 +3741,8 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             order,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
-            let item = collection::set_order(root, &id, &target, order)?;
+            let target = collection_target(&target)?;
+            let item = collection::set_order(root, &id, &target, order, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Priority {
@@ -2464,23 +3752,270 @@ fn collection_command(root: &Path, command: CollectionCommand) -> Result<()> {
             reason,
         } => {
             let id = collection::resolve_id(root, &collection)?;
-            let target = target.strip_prefix("engr:").unwrap_or(&target).to_owned();
+            let target = collection_target(&target)?;
             let priority = priority_of(priority, reason)?;
-            let item = collection::set_priority(root, &id, &target, priority)?;
+            let item = collection::set_priority(root, &id, &target, priority, attempt)?;
             print!("{}", view::render_collection_show(root, &item));
         }
         CollectionCommand::Delete { collection } => {
             let id = collection::resolve_id(root, &collection)?;
-            let removed = collection::remove(root, &id)?;
+            let removed = collection::remove(root, &id, attempt)?;
             // Carried out and reported, not refused. #10 makes this a rule for
             // the agent and says a technical guard can come later if real use
             // shows one is needed; engr cannot tell who asked, so it says what
             // was discarded rather than pretending it can.
             println!(
                 "deleted collection {id} — {:?}, {} member(s) of planning context",
-                removed.name, removed.members
+                removed.title, removed.members
             );
         }
     }
     Ok(())
+}
+
+/// Read-only, because a rule is project data rather than an engr resource.
+///
+/// The listing says whether each rule is *usable*, which is the question an
+/// agent actually has: a rule whose basis cannot be resolved, or whose pinned
+/// basis no longer matches the project, cannot be reviewed against — and under
+/// #25 that blocks the mutations it covers rather than being quietly skipped.
+/// Saying so here means the agent finds out while reading, not at admission.
+fn rules_command(root: &Path, command: RulesCommand) -> Result<()> {
+    store::require_current(root)?;
+    match command {
+        RulesCommand::Ls { domain, json } => {
+            let domain = domain.map(DomainArg::model);
+            let all = match domain {
+                Some(domain) => rules::applicable(root, domain)?,
+                None => rules::load_all(root)?,
+            };
+            if json {
+                let listed: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|rule| {
+                        serde_json::json!({
+                            "id": rule.id,
+                            "domains": rule.domains.iter().map(|domain| domain.as_str()).collect::<Vec<_>>(),
+                            "based_on": rule.based_on,
+                            // Effective values, never "unspecified": a machine
+                            // reading this must not have to know the defaults
+                            // to know what the rule does.
+                            "review": rule.review,
+                            "usable": basis_trouble(root, rule).is_none(),
+                            "authority": "project_policy",
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&listed)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rules: {error}")) })?
+                );
+                return Ok(());
+            }
+            if all.is_empty() {
+                // What an empty set means belongs to the domain, not here: for
+                // most it means no review is required, and for autonomous
+                // agent Object admission it is what blocks the path.
+                match domain {
+                    Some(domain) => {
+                        println!("No rule governs {}.", domain.as_str())
+                    }
+                    None => println!("No project rules."),
+                }
+                return Ok(());
+            }
+            println!("PROJECT POLICY — read these before the mutation they govern\n");
+            for rule in &all {
+                let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+                println!("{}  {}", rule.id, domains.join(", "));
+                for basis in &rule.based_on {
+                    match &basis.commit {
+                        Some(commit) => {
+                            println!("    based on {} at {}", basis.path, shorten(commit, 8))
+                        }
+                        None => println!("    based on {} (current)", basis.path),
+                    }
+                }
+                // Listed only when it is not the default. A line on every rule
+                // repeating the same ceiling is noise a reader learns to skip,
+                // and the one rule that escalates to a person would be skipped
+                // with it. `rules show` states it unconditionally.
+                if rule.review != rules::Review::default() {
+                    println!("    review {}", review_line(&rule.review));
+                }
+                if let Some(trouble) = basis_trouble(root, rule) {
+                    println!("    UNUSABLE  {trouble}");
+                }
+            }
+            Ok(())
+        }
+        RulesCommand::Show { id, json } => {
+            let rule = rules::load_all(root)?
+                .into_iter()
+                .find(|rule| rule.id == id)
+                .ok_or_else(|| Error::new(EXIT_NOT_FOUND, format!("no rule with id {id:?}")))?;
+            let resolved: Result<Vec<_>> = rule
+                .based_on
+                .iter()
+                .map(|basis| basis.resolve(root, &rule.id))
+                .collect();
+            if json {
+                // Nothing reaches stdout until the rule is known to be usable.
+                // Printing first and failing after left a machine surface whose
+                // successful-looking document was indistinguishable from a real
+                // one — a caller that drops the exit status would consume
+                // normative wording as reviewable when engr had already
+                // established that it is not. The human surface may say
+                // "UNUSABLE" and then fail, because a person reads the line; a
+                // parser reads the document.
+                resolved?;
+                let value = serde_json::json!({
+                    "id": rule.id,
+                    "domains": rule.domains.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+                    "based_on": rule.based_on,
+                    "review": rule.review,
+                    "body": rule.body,
+                    "authority": "project_policy",
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value)
+                        .map_err(|error| { Error::new(EXIT_SCHEMA, format!("rule: {error}")) })?
+                );
+                return Ok(());
+            }
+            let domains: Vec<&str> = rule.domains.iter().map(|d| d.as_str()).collect();
+            println!("Rule       {}", rule.id);
+            println!("Governs    {}", domains.join(", "));
+            println!("Review     {}", review_line(&rule.review));
+            match &resolved {
+                Ok(bases) if bases.is_empty() => {
+                    println!("Based on   nothing outside the rule itself")
+                }
+                Ok(bases) => {
+                    for basis in bases {
+                        match &basis.commit {
+                            Some(commit) => println!(
+                                "Based on   {} at {} — read it, it is part of this rule",
+                                basis.path,
+                                shorten(commit, 8)
+                            ),
+                            None => println!(
+                                "Based on   {} (current) — read it, it is part of this rule",
+                                basis.path
+                            ),
+                        }
+                    }
+                }
+                Err(error) => println!("Based on   UNUSABLE — {}", error.message),
+            }
+            println!("\n{}", rule.body);
+            resolved.map(|_| ())
+        }
+    }
+}
+
+/// The effective review policy in one line.
+///
+/// States the policy rather than a consequence, because **a rule does not have
+/// one consequence**. What running out of attempts costs depends on the domain
+/// — Object stops, Backlog records and keeps the unresolved state, Collection
+/// and Work are undefined in v1 — and inside Backlog it depends further on the
+/// mutation, since a consume needs a review that passed while an ordinary edit
+/// does not. Even `reject` on an Object is the autonomous-agent outcome and not
+/// a repository prohibition: a human may still initiate the same mutation and
+/// override the result.
+///
+/// So a line here saying "then it is refused" would be false for most rules that
+/// carry the default. It names the effective field instead, and the consequence
+/// is stated once, per domain, in the protocol.
+///
+/// The number is the effective ceiling, so a rule that wrote nothing and one
+/// that wrote `5` read identically — which is what they mean.
+fn review_line(review: &rules::Review) -> String {
+    format!(
+        "{} attempt{}; on_exhaustion = {}",
+        review.max_attempts,
+        if review.max_attempts == 1 { "" } else { "s" },
+        review.on_exhaustion.as_str()
+    )
+}
+
+/// The first reason this rule cannot be reviewed against, if there is one.
+fn basis_trouble(root: &Path, rule: &rules::Rule) -> Option<String> {
+    rule.based_on
+        .iter()
+        .find_map(|basis| basis.resolve(root, &rule.id).err())
+        .map(|error| error.message)
+}
+
+/// What `engr migrate` puts on the screen.
+///
+/// A migration is confirmed like any other question, so the screen has the same
+/// job: say exactly what is being asked, and end with the phrase that answers
+/// it. What makes it different is scale — the human is assenting to every Object
+/// at once — so each one is named with what it becomes.
+fn render_migration(root: &Path, proposed: &engr::migration::Proposed) -> String {
+    let mut out = String::new();
+    let width = view::width(root);
+    out.push_str(&format!(
+        "Challenge  migration\nWorkspace  {}\nFrom       {} version {}\nTo         generation {}\n",
+        store::engr_dir(root).display(),
+        proposed.subject.from.format,
+        proposed.subject.from.version,
+        proposed.subject.to
+    ));
+    if proposed.resumed {
+        out.push_str(
+            "Resumed    this plan was already staged; the code below is the one it is waiting on\n",
+        );
+    }
+    out.push('\n');
+    for object in &proposed.subject.objects {
+        out.push_str(&format!(
+            "{}  rev {} -> 1  {} section{}  {}\n",
+            shorten(&object.object, width),
+            object.predecessor_rev,
+            object.sections,
+            if object.sections == 1 { "" } else { "s" },
+            object.title
+        ));
+    }
+    out.push_str(&format!(
+        "\n{} predecessor file{} will be read, converted, and replaced.\n",
+        proposed.subject.source.len(),
+        if proposed.subject.source.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    ));
+    out.push_str(
+        "The predecessor's own event history is discarded rather than translated: each Object\n\
+         gets one object.migrated.v1 bootstrap at revision 1.\n",
+    );
+    // Named, not alluded to. "Any pending candidate is not migrated" is a
+    // sentence about the contract, and a reader cannot tell from it whether
+    // their own workspace has one. These are unrecoverable and are not among
+    // the files counted above.
+    if proposed.discarded_candidates.is_empty() {
+        out.push_str("No Human-Gate question is pending, so none is discarded.\n");
+    } else {
+        out.push_str(&format!(
+            "{} pending Human-Gate question{} will be DISCARDED and must be prepared again: {}\n",
+            proposed.discarded_candidates.len(),
+            if proposed.discarded_candidates.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            proposed.discarded_candidates.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "\nType this exactly to confirm:  CONFIRM {}\n",
+        proposed.challenge
+    ));
+    out
 }

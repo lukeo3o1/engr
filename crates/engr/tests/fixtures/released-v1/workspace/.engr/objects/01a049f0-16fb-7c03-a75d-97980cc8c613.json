@@ -1,0 +1,25 @@
+{
+  "id": "01a049f0-16fb-7c03-a75d-97980cc8c613",
+  "title": "Human authority and the admission boundary",
+  "state": "open",
+  "rev": 3,
+  "next_section_id": 3,
+  "sections": [
+    {
+      "id": 1,
+      "text": "Nothing enters the engineering record unless a human has read the exact proposed change and answered its exact challenge. Every semantic action is prepare, review, confirm, and there is no unconfirmed write path.",
+      "based_on": "3d669ec36a507a9ed77b5fedb09ab1095ddd3c7a",
+      "refs": [],
+      "sha256": "8a85d09e275cc76f6d8ba72ff3307bc60c77a55efe036453e045e54190b2d55b",
+      "confirmed_at": "2026-08-28T19:54:27.04417027Z"
+    },
+    {
+      "id": 2,
+      "text": "Preparation freezes the mutation before review and binds it to the object revision it was prepared against. A later change makes that candidate stale, and preparing another candidate for the same object supersedes the earlier challenge.",
+      "based_on": "3d669ec36a507a9ed77b5fedb09ab1095ddd3c7a",
+      "refs": [],
+      "sha256": "e3aa09366aca05e191ba321ab4fac662190b49e911cd0035648f21b59b3766f6",
+      "confirmed_at": "2026-08-28T19:54:27.533814694Z"
+    }
+  ]
+}

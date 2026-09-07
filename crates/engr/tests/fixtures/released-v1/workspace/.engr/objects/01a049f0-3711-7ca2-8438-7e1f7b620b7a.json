@@ -1,0 +1,17 @@
+{
+  "id": "01a049f0-3711-7ca2-8438-7e1f7b620b7a",
+  "title": "Projection determinism and the atomic writer",
+  "state": "closed",
+  "rev": 3,
+  "next_section_id": 2,
+  "sections": [
+    {
+      "id": 1,
+      "text": "Projection is deterministic: the reducer depends only on the prior object and the confirmed event, never on clocks, git queries, model calls, or interpretation of prose. Writer serialization and atomic replacement keep a partial authoritative state off disk.",
+      "based_on": "09812e934473344303edfcdfc5849975c9967f04",
+      "refs": [],
+      "sha256": "3bae33a3e70274f501130635d33728ea1587209341b8eee9e87c07d6f8f4e572",
+      "confirmed_at": "2026-08-28T19:54:35.388821477Z"
+    }
+  ]
+}
