@@ -1,0 +1,4 @@
+﻿uninterrupted confirm: 1079 ms
+MIGRATED   crash-runs/baseline/.engr  3 objects, 7 sections, generation 1
+---- SIGKILL sweep across that window ----
+--- script exit 0 ---

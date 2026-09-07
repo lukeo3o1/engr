@@ -1,0 +1,40 @@
+﻿--- predecessor files that must be gone ---
+.engr/format.json  gone
+.engr/lock  gone
+.engr/candidates  gone
+.engr/events  gone
+--- the migrated .engr/.gitignore ---
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. eventstore/ is safe to commit too: any challenge codes in it
+# have already been spent, and a spent code resolves to nothing.
+#
+# local/ is this machine's alone: the writer lock, live challenges whose
+# filenames are their codes, and a resumable migration plan.
+/local/
+--- what a fresh init writes, for comparison ---
+# The record lives in objects/ — commit that; it is where earlier wording is
+# recovered from. eventstore/ is safe to commit too: any challenge codes in it
+# have already been spent, and a spent code resolves to nothing.
+#
+# local/ is this machine's alone: the writer lock, live challenges whose
+# filenames are their codes, and a resumable migration plan.
+/local/
+--- diff (empty means identical) ---
+IDENTICAL
+--- every migrated Event's admitted.at ---
+2026-09-06T19:02:02.021948841Z
+2026-09-06T19:02:02.021948841Z
+2026-09-06T19:02:02.021948841Z
+pre-confirm  wallclock: ﻿2026-09-07T03:01:54.1464032+08:00
+post-confirm wallclock: ﻿2026-09-07T03:02:03.5070193+08:00
+--- each Event's type and rev ---
+rev=1 type=object.migrated.v1
+rev=1 type=object.migrated.v1
+rev=1 type=object.migrated.v1
+type=object.migrated.v1
+type=object.migrated.v1
+type=object.migrated.v1
+--- git status of the migrated workspace ---
+--- and nothing under local/ is visible ---
+NOT VISIBLE TO GIT (correct)
+--- script exit 0 ---

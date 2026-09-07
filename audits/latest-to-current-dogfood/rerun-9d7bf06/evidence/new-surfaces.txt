@@ -1,0 +1,21 @@
+﻿===== a) a stage left holding only published-over.json =====
+-- what a read says --
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+ls exit=0
+01a05e55-74  PASS  2 sections  Migration continuity audit
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+verify exit=0
+-- and is the leftover discarded or does it wedge? --
+published-over.json
+
+===== b) an Object path that is a directory, not a file =====
+  ls --all         exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+  ls --verify      exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+  verify           exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+  show 01a05e55-74 exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+-- and the previously audited head, for comparison --
+  ls --all         exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+  ls --verify      exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+  verify           exit=8   error: ns2/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: Is a directory (os error 21)
+--- script exit 0 ---

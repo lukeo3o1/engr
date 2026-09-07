@@ -1,0 +1,21 @@
+﻿===== show, on the Object whose projection is absent =====
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+  exit=0
+===== its JSON integrity =====
+  "integrity": "ok",
+===== repair, which the screen now names =====
+docker.exe : error: fx/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: not found
+At D:\lukeo3o1\engr-audit\s7.ps1:21 char:1
++ & docker @dockerArgs > $path 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: fx/.engr...json: not found:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  exit=0
+===== the control: a projection one revision behind is still sound =====
+  show -ee exit=0
+  "integrity": "ok",
+--- script exit 0 ---

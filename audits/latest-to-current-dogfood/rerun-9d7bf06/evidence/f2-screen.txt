@@ -1,0 +1,13 @@
+﻿pending code: YA3DQE
+===== the whole candidate screen, untruncated =====
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies and is what its admitted history produced, so there is nothing left to repair
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM YA3DQE
+===== and confirming it =====
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- script exit 0 ---

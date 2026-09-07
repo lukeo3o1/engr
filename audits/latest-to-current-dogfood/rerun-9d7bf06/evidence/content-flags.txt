@@ -1,0 +1,37 @@
+﻿===== prev (9fba620) =====
+  --delete 1 --text                                    exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --text-file                               exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --based-on                                exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --ref                                     exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --close --text                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --text-file                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --based-on                                   exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --ref                                        exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text                                      exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text-file                                 exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --based-on                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --ref                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --classify --type design --state draft --text        exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --text-file   exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --based-on    exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --ref         exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  workspace unchanged
+===== current (9d7bf06) =====
+  --delete 1 --text                                    exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --text-file                               exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --based-on                                exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --delete 1 --ref                                     exit=2   error: section.deleted.v1 carries no wording, so it takes none of --text, --text-file, --based-o
+  --close --text                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --text-file                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --based-on                                   exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --close --ref                                        exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text                                      exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --text-file                                 exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --based-on                                  exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --reopen --ref                                       exit=2   error: object.state_changed.v1 carries no wording, so it takes none of --text, --text-file, --ba
+  --classify --type design --state draft --text        exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --text-file   exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --based-on    exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  --classify --type design --state draft --ref         exit=2   error: object.classified.v1 carries no wording, so it takes none of --text, --text-file, --based
+  workspace unchanged
+--- script exit 0 ---

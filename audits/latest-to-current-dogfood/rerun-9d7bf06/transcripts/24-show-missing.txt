@@ -1,0 +1,33 @@
+﻿===== show, on the Object whose projection is absent =====
+01a05e55-74  open  Migration continuity audit
+2 sections   2 ok   rev 1
+!!         Object has no stored projection; what is shown is what its admitted history produced. Restore the file with: engr repair
+engr:obj:01m1f5ax7bedrbew8012yq3ma9
+docker.exe : error: 01a05e55-74eb-7370-b771-0008bd71d149: the record holds this Object and no projection is stored for 
+it; what was shown is what admitted history produced. Write it back with: engr repair 01a05e55-74
+At D:\lukeo3o1\engr-audit\s7.ps1:21 char:1
++ & docker @dockerArgs > $path 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: 01a05e55...air 01a05e55-74:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  exit=5
+error: 01a05e55-74eb-7370-b771-0008bd71d149: the record holds this Object and no projection is stored for it; what was shown is what admitted history produced. Write it back with: engr repair 01a05e55-74
+===== its JSON integrity =====
+  "integrity": "projection_missing",
+===== repair, which the screen now names =====
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 1, admitted as rev 2
+
+  id
+    stored   (absent)
+    restore  01a05e55-74eb-7370-b771-0008bd71d149
+  next_section_id
+    stored   (absent)
+  exit=0
+===== the control: a projection one revision behind is still sound =====
+  show -ee exit=0
+  "integrity": "ok",
+--- script exit 0 ---

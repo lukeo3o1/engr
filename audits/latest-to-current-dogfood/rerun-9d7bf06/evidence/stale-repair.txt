@@ -1,0 +1,61 @@
+﻿############ engr-current ############
+
+--- current: the projection was absent and is restored ---
+  prepared: VU5HJL
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    bytes: CHANGED
+    rev 1 -> 2, events 1 -> 2
+    last event: object.repaired.v1
+
+--- current: the projection was divergent and is put back ---
+  prepared: 3DR2AR
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    bytes: CHANGED
+    rev 1 -> 2, events 1 -> 2
+    last event: object.repaired.v1
+
+--- current: the projection was tampered and is put back ---
+  prepared: FF36G7
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    bytes: CHANGED
+    rev 1 -> 2, events 1 -> 2
+    last event: object.repaired.v1
+############ engr-prev ############
+
+--- prev: the projection was absent and is restored ---
+  no code offered: error: sr/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: not found
+
+--- prev: the projection was divergent and is put back ---
+  prepared: 7DG4FR
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    bytes: CHANGED
+    rev 1 -> 2, events 1 -> 2
+    last event: object.repaired.v1
+
+--- prev: the projection was tampered and is put back ---
+  prepared: DEC4YS
+  the record is sound again: verify exit=0
+  -- what a prepare would say now --
+    error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  -- and what retyping the code the first screen gave does --
+    CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+    bytes: CHANGED
+    rev 1 -> 2, events 1 -> 2
+    last event: object.repaired.v1
+--- script exit 0 ---

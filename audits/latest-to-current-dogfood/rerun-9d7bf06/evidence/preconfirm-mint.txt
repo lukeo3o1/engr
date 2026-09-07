@@ -1,0 +1,12 @@
+﻿1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM KR824S
+pre-confirm checkpoint minted with code KR824S
+candidates
+events
+format.json
+local
+lock
+objects
+KR824S.json
+--- script exit 0 ---

@@ -1,0 +1,25 @@
+﻿rule sha256 before: dbdedf69e3f5ae41bcca86dd7f258c21e62c308f80cca7f7531e88000809607d
+===== first attempt: the review is demanded, and named =====
+STDERR: error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd and the review outcome
+EXIT: 2
+===== one byte of the Rule moves =====
+rule sha256 after : c339be14045f2962748624cc1b95179d867f776b669492a0893ec46541f6abb9
+STDERR: error: this review was of something else; review the current subject and attest to 1:cb97ffe22d538f2bffd55dc7a9626be71e1fcf222dfc3b7a02f37e982cd5cee7
+EXIT: 5
+===== the byte goes back =====
+rule sha256 restored: dbdedf69e3f5ae41bcca86dd7f258c21e62c308f80cca7f7531e88000809607d
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd
+Rules      audit-scope, evidence-discipline
+
+A claim that names evidence/crash-sweep.txt, as evidence-discipline requires.
+
+Type this exactly to confirm:  CONFIRM WVYRL5
+EXIT: 0
+CONFIRMED  01a05e55-ee  section.created.v1  rev 11
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+EXIT: 0

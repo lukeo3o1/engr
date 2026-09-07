@@ -1,0 +1,5 @@
+﻿CONFIRMED  01a05e55-ee  section.created.v1  rev 2
+--- the crash: the projection goes back, the Event stays ---
+projection rewound: 436f9603ea21ee8615b1c182f623a1a63eac380c7c45dff2b699cc2ee6a9b3e7 -> b57120eb387b9949d88639bb9c9e6791e43cd9acd2dd4e5f83bd7feac6970dd8
+stored sections: 4, stream events: 2
+--- script exit 0 ---

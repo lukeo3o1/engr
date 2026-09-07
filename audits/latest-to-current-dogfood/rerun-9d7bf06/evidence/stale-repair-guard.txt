@@ -1,0 +1,22 @@
+﻿two codes prepared: LQGYU9 and CCXEN5
+challenges on disk: CCXEN5.json 
+
+--- confirm the first ---
+error: no challenge awaiting LQGYU9
+  exit=0
+  rev now: 1, events 1
+
+--- and the second, prepared against the revision that is gone ---
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+  exit=0
+  rev now: 2, events 2
+
+--- and an ordinary admitted mutation between prepare and confirm ---
+repair code prepared: PZ97DS
+CONFIRMED  01a05e55-74  section.created.v1  rev 3
+  rev now: 3
+--- retyping the spent repair code against the moved record ---
+error: no challenge awaiting PZ97DS
+  exit=0
+  verify exit=0
+--- script exit 0 ---

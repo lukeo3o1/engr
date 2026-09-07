@@ -1,0 +1,16 @@
+﻿  current  ls               exit=0   01a05e55-ee  open                   3 sections  unchecked     Predecessor fixture construction
+  current  ls --sections    exit=0   01a05e55-ee §1   open                  unchecked       The historical workspace is built by the pub
+  current  ls --verify      exit=0   
+  current  verify           exit=0   01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+  current  show 01a05e55-ee exit=0   01a05e55-ee  open  Predecessor fixture construction
+
+  prev     ls               exit=0   01a05e55-ee  open                   4 sections  unchecked     Predecessor fixture construction
+  prev     ls --sections    exit=0   01a05e55-ee §1   open                  unchecked       The historical workspace is built by the pub
+  prev     ls --verify      exit=0   
+  prev     verify           exit=0   01a05e55-ee  PASS  4 sections  Predecessor fixture construction
+  prev     show 01a05e55-ee exit=0   01a05e55-ee  open  Predecessor fixture construction
+
+--- and the JSON integrity member for the behind Object ---
+  "rev": 2,
+  "integrity": "ok",
+--- script exit 0 ---

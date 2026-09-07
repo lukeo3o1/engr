@@ -1,0 +1,78 @@
+﻿the Object with no Sections at all: 01a07821-8e34-76a0-b74a-d06b1ca9f5da
+
+===== 1. an absent projection whose Object has zero Sections =====
+Challenge  repair
+Object     01a07821-8e  Continuity carried forward
+Integrity  no projection is stored; admitted history is the only copy
+Restoring  exactly what admitted history proves at rev 2, admitted as rev 3
+
+  id
+    stored   (absent)
+    restore  01a07821-8e34-76a0-b74a-d06b1ca9f5da
+  next_section_id
+    stored   (absent)
+    restore  1
+  rev
+    stored   (absent)
+    restore  2
+  state
+    stored   (absent)
+    restore  accepted
+  title
+    stored   (absent)
+    restore  Continuity carried forward
+  type
+    stored   (absent)
+    restore  decision
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM ZMJW2C
+  exit=0
+
+===== 2. the projection comes back while the code is pending =====
+  pending code: 3TTK23
+  -- and what the pending code renders now --
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies and is what its admitted history produced, so there is nothing left to repair
+
+(object.repaired.v1)
+
+  exit=0
+  -- and whether confirming it is still allowed --
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+  exit=0
+
+===== 3. history stops replaying while the code is pending =====
+  pending code: R8RWEC
+  -- and what the pending code renders now --
+Challenge  repair
+Object     01a05e55-74
+Integrity  admitted history cannot rebuild this record: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section §99 does not exist
+
+(object.repaired.v1)
+
+  exit=0
+  -- and whether confirming it is still allowed --
+error: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section §99 does not exist
+  exit=0
+
+===== 4. the damaged screen through candidate, for the same MUSTs =====
+Challenge  repair
+Object     01a05e55-74  Migration continuity audit
+Integrity  the stored record verifies, and is not what its admitted history produced
+Restoring  exactly what admitted history proves, and nothing from the stored bytes
+
+  §1.header
+    stored   A heading nobody ever admitted
+    restore  (absent)
+
+
+(object.repaired.v1)
+
+Type this exactly to confirm:  CONFIRM WY26J9
+  exit=0
+--- script exit 0 ---

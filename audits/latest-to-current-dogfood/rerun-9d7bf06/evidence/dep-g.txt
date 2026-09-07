@@ -1,0 +1,24 @@
+﻿sections before: 2
+Challenge  section.delete §1
+Object     01a05e55-74  Migration continuity audit
+
+(section.deleted.v1)
+
+Type this exactly to confirm:  CONFIRM WQSSPM
+CONFIRMED  01a05e55-74  section.deleted.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+confirm exit=0
+deleted: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315 -> 0c9bc00c597d00169b6b4d79cd20f797734a62825579cda15a948430e356ddd6
+sections after : 1
+
+--- every surface, at both heads ---
+  current  ls --verify    exit=0   ⚠ 01a05e55-e6  closed                §2  REF MISSING — nobody is looking at this one
+  current  verify         exit=5   01a05e55-74  PASS  1 sections  Migration continuity audit|          uncommitted — git hold
+  current  show 01a05e55-74 exit=0   01a05e55-74  open  Migration continuity audit|1 sections   1 ok   rev 2|
+  prev     ls --verify    exit=0   ⚠ 01a05e55-e6  closed                §2  REF MISSING — nobody is looking at this one
+  prev     verify         exit=5   01a05e55-74  PASS  1 sections  Migration continuity audit|          uncommitted — git hold
+  prev     show 01a05e55-74 exit=0   01a05e55-74  open  Migration continuity audit|1 sections   1 ok   rev 2|
+--- and repair, which must refuse: nothing here is damaged ---
+error: 01a05e55-74eb-7370-b771-0008bd71d149 verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path
+  repair exit=0
+--- script exit 0 ---

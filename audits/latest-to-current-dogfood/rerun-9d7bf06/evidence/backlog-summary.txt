@@ -1,0 +1,58 @@
+﻿Start a topic under a title, with its first unresolved point
+
+Usage: engr-current backlog new [OPTIONS] --title <TITLE> <--text <TEXT>|--text-file <TEXT_FILE>>
+
+Options:
+      --root <ROOT>                     Workspace root. Defaults to the nearest ancestor containing .engr
+      --title <TITLE>                   
+      --text <TEXT>                     Wording, inline
+      --text-file <TEXT_FILE>           Wording, from a file
+      --subject <ENGR_REF>              Something this concerns, as engr:obj:<id>[:<section>] or engr:backlog:<id>[:<section>]
+      --subject-file <PATH>             A repository file this concerns
+      --subject-symbol <PATH> <SYMBOL>  A source symbol this concerns
+      --subject-commit <REVISION>       Committed revision to pin file and symbol subjects at. Defaults to HEAD only while the path itself is clean
+      --attempt <N>                     Which attempt of this review sequence this is, counted from 1 [default: 1]
+      --expect <TOKEN>                  The `expect` value from `backlog show --format json` for what you read. Repeat once per point for a merge
+  -h, --help                            Print help
+EXIT: 0
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07825  Open questions this run raised
+1 unresolved   updated 2026-09-06T19:14:46Z
+engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj
+
+?? 禮1 ?? unresolved
+Whether ls --verify should report an object whose projection is missing, as verify does.
+    updated  2026-09-06T19:14:46Z
+EXIT: 0
+UNCONFIRMED STAGING ??nothing here is admitted to the record
+01a07825   1 unresolved  -             2026-09-06T19:14:46Z  Open questions this run raised
+EXIT: 0
+BACKLOG: 01a07825
+{
+  "id": "01a07825-0264-7d20-b0e2-9cdf2f61a952",
+  "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj",
+  "topic": "Open questions this run raised",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 2,
+  "updated_at": "2026-09-06T19:14:46.500434252Z",
+  "expect": {
+    "rename": "e5a272905c59cbef808d4faf5a7687c645e7a1685fc87aa5c50c91d29bfd765a",
+    "add": "29a969208e92051b0596a22da7ca4cae7e094bdb5e572ea4ed47ba091d9c2365"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj:1",
+      "expect": "5ae8c521574b7463757c55f678333640ded898bab7f3d446f609d4422917715e",
+      "id": 1,
+      "text": "Whether ls --verify should report an object whose projection is missing, as verify does.",
+      "updated_at": "2026-09-06T19:14:46.500434252Z"
+    }
+  ]
+}
+EXIT: 0
+topic-level add token: 29a969208e92051b0596a22da7ca4cae7e094bdb5e572ea4ed47ba091d9c2365
+added 禮2
+EXIT: 0
+===== the same token again: it was spent when the topic moved =====
+STDERR: error: what you read is not what is there now; read it again and review the current wording
+EXIT: 6

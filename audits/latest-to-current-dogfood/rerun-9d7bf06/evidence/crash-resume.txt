@@ -1,0 +1,239 @@
+﻿===== baseline (uninterrupted) =====
+inventory: da9cfee13b4a72dc9dc2f3a73b84230b8ebaec6afbe8e15596b39de06e5cb2af
+event admitted.at: 2026-09-06T19:24:02.790475835Z 
+events per stream: 1 1 1 
+
+===== interrupted at 500ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t500/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t500/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: eb6af968a5c227be9bfee221c74d60665f12f39e74468aad24db5628fa4023a4
+event admitted.at: 2026-09-06T19:24:58.887154794Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 600ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t600/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t600/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: fce95f9da3d87ec0424d7aca1f5463316bad53cd736eb261e82ce6eeff59cf79
+event admitted.at: 2026-09-06T19:25:01.606422809Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 700ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t700/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t700/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 816b02551e16dbd7e982d6b9cc1f2844a9375116e9ac2163e9d14dd727086de5
+event admitted.at: 2026-09-06T19:25:04.389618076Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 800ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t800/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t800/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 44d05a14d5118d01bae7df3f0e04aff9085a77c4ccc1fcb76e2b824825ac9eba
+event admitted.at: 2026-09-06T19:25:07.175768663Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 850ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t850/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t850/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 2562818b46f8b2f112933e7c4b3fa0c08e72a67f9a0aa29802b549b85620ba4f
+event admitted.at: 2026-09-06T19:24:16.986361709Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 900ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t900/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t900/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 3568f57345b6fbce4ae3b242756c40da7c94c22608621bf1a9ae758df8672d3b
+event admitted.at: 2026-09-06T19:24:19.882758617Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 930ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t930/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t930/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: cd448887ad18564234bf077f7bb7ac15ce8f05d2264f8fa401e4d06ac593bfef
+event admitted.at: 2026-09-06T19:24:22.913030762Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 950ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t950/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t950/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: cc810c36a52c7de09f829ab9f5dcf2ee617b4f89070aa465839af355090a688d
+event admitted.at: 2026-09-06T19:25:16.061705751Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 980ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t980/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t980/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 1af7a61abdf5000d8f26163829396bf5bbe43cdac0a5851793cbbb98c2005a7f
+event admitted.at: 2026-09-06T19:24:28.967774747Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1000ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1000/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1000/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 85cfac6965d9a92dd6acffa2209ce8faf3d658b9760753e82dbfcbb81d305022
+event admitted.at: 2026-09-06T19:24:32.157808973Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1020ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1020/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1020/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: ac96cea0b375cf432a2f31ccd0b673d3d354e1ad2d59991793d651e2ed4fefc1
+event admitted.at: 2026-09-06T19:24:35.393909751Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1040ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=4 : error: crash-runs/t1040/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+-- resume: same code, again --
+confirm exit=0 : MIGRATED   crash-runs/t1040/.engr  3 objects, 7 sections, generation 1
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: a6b9f9d6116aee3fc41544fbb8734cec9b2922315352423884f4b48c2ed351ab
+event admitted.at: 2026-09-06T19:24:38.422631478Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1060ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 0056993f27edb852f3daaef6bf0d27ee6f29124f329daffbf17c4d343f1097f4
+event admitted.at: 2026-09-06T19:24:41.676162706Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1080ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: f857bb5396887143f2b9a22acf8ee8be430197459258384fe0760ceb37934ecf
+event admitted.at: 2026-09-06T19:24:44.730637237Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1090ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 8a6276c6247a5dc9cf03aa7cc5fce1e7b395c211d3c91b2e19f128277b940266
+event admitted.at: 2026-09-06T19:24:47.745619847Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1100ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 92923317113577d82dc73c80ee26dec3be808a65a1277ceafa16baaf196ca31e
+event admitted.at: 2026-09-06T19:24:50.867517737Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1110ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: 876cb142f61abe879ee0dec823d5797de0eab8435aa93c8fe9d9947ec751e963
+event admitted.at: 2026-09-06T19:24:54.009926016Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+
+===== interrupted at 1120ms =====
+-- while incomplete, does a read surface fail closed? --
+ls exit=0 : 01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+-- resume: same code, again --
+confirm exit=3 : error: no challenge awaiting KR824S
+-- resume again (idempotence) --
+confirm exit=3 : error: no challenge awaiting KR824S
+inventory: c3952a70da4c06e2dd268648a3112ce86029fd735be99c89e9dbfdf747182ce7
+event admitted.at: 2026-09-06T19:24:57.086457812Z 
+events per stream: 1 1 1 
+-- verify --
+verify exit=0 : 3 PASS 
+--- script exit 0 ---

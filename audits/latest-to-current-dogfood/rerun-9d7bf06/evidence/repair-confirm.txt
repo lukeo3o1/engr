@@ -1,0 +1,47 @@
+﻿the migrated bytes this audit carried forward: 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315
+
+===== absent projection =====
+before: absent
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+confirm exit=0
+after : 200f0509da307f2efcea3ccca8cba2d4e83be319799e863c70c851fc1401bba3
+        (differs from the migrated bytes)
+stored rev: 2
+stream:
+  rev=1 type=object.migrated.v1
+  rev=2 type=object.repaired.v1
+verify exit=0
+show   exit=0
+  "integrity": "ok",
+
+===== divergent projection =====
+before: 655619a9a82170ed582219904b5bef320c521d9fdda39d0870c168102561ac24
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+confirm exit=0
+after : 200f0509da307f2efcea3ccca8cba2d4e83be319799e863c70c851fc1401bba3
+        (differs from the migrated bytes)
+stored rev: 2
+stream:
+  rev=1 type=object.migrated.v1
+  rev=2 type=object.repaired.v1
+verify exit=0
+show   exit=0
+  "integrity": "ok",
+
+===== tampered projection =====
+before: 56648aecc1a350eb84aa395d678484ad683a9b634864d7e48340cd6eea5fbc57
+CONFIRMED  01a05e55-74  object.repaired.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+confirm exit=0
+after : 200f0509da307f2efcea3ccca8cba2d4e83be319799e863c70c851fc1401bba3
+        (differs from the migrated bytes)
+stored rev: 2
+stream:
+  rev=1 type=object.migrated.v1
+  rev=2 type=object.repaired.v1
+verify exit=0
+show   exit=0
+  "integrity": "ok",
+--- script exit 0 ---

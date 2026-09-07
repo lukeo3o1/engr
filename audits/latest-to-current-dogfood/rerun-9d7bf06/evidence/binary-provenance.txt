@@ -1,0 +1,18 @@
+﻿--- engr-latest ---
+engr latest (unknown)
+round 33 (9d7bf06) sentence: 0
+round 32 (259b8b4) sentence: 0
+round 31 (9fba620) sentence: 0
+sha256: d61aadba03cee2fca3a83e935f9d161c27327cbc5fff757190deb1170b83a240
+--- engr-prev ---
+engr latest (unknown)
+round 33 (9d7bf06) sentence: 0
+round 32 (259b8b4) sentence: 0
+round 31 (9fba620) sentence: 1
+sha256: 142fcf3c1ae5fc48e60d037e0b886baf231b14f9a08a12f553a21d53087b8fc8
+--- engr-current ---
+engr latest (unknown)
+round 33 (9d7bf06) sentence: 1
+round 32 (259b8b4) sentence: 1
+round 31 (9fba620) sentence: 1
+sha256: 00260e3f542169f90e7ee202ef7482d6f7ff78c092c940253d5f0f5e6f83cd4f

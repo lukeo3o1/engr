@@ -1,0 +1,13 @@
+﻿  unreadable   fixed    screen offers code=0  confirm exit=4    projection present after=yes
+  unreadable   9d7bf06  screen offers code=1  confirm exit=4    projection present after=yes
+  unreadable   prepare  error: fd/.engr/objects/01a05e55-74eb-7370-b771-0008bd71d149.json: expected ident at line 1 colu
+
+  removed      fixed    screen offers code=1  confirm exit=0    projection present after=yes
+  removed      9d7bf06  screen offers code=1  confirm exit=0    projection present after=yes
+  removed      prepare  Challenge  repair
+
+  unreplayable fixed    screen offers code=0  confirm exit=5    projection present after=yes
+  unreplayable 9d7bf06  screen offers code=0  confirm exit=5    projection present after=yes
+  unreplayable prepare  error: 01a05e55-74eb-7370-b771-0008bd71d149: admitted history cannot be replayed: section §99 d
+
+--- script exit 0 ---

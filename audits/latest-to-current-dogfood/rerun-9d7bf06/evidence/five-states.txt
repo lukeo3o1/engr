@@ -1,0 +1,48 @@
+﻿===== building st-behind: admit, then rewind the projection =====
+CONFIRMED  01a05e55-74  section.created.v1  rev 2
+rewound: 2fab824198f92cc6af8b6eeeb7f27cde50616282d8e4676428ebfebf33627016 -> 8bc54cbed553d7fb82a6b5e04d0d91259e0c0dcd6ddeefb69e559c6ad0413315
+
+===== the matrix: exit codes and the word each surface uses =====
+  current   st-ok       verify=0  ls--verify=0  show=0  json=0  integrity=ok                 
+    ls row : <not named>
+    show !!: <no banner>
+  prev      st-ok       verify=0  ls--verify=0  show=0  json=0  integrity=ok                 
+    ls row : <not named>
+    show !!: <no banner>
+
+  current   st-behind   verify=0  ls--verify=0  show=0  json=0  integrity=ok                 
+    ls row : <not named>
+    show !!: <no banner>
+  prev      st-behind   verify=0  ls--verify=0  show=0  json=0  integrity=ok                 
+    ls row : <not named>
+    show !!: <no banner>
+
+  current   st-missing  verify=5  ls--verify=0  show=5  json=5  integrity=projection_missing 
+    ls row : · 01a05e55-74 open §- OBJECT PROJECTION MISSING
+    show !!: !!         Object has no stored projection; what is shown is what its ad
+  prev      st-missing  verify=5  ls--verify=0  show=0  json=0  integrity=ok                 
+    ls row : · 01a05e55-74 open §- OBJECT PROJECTION MISSING
+    show !!: <no banner>
+
+  current   st-tampered verify=5  ls--verify=0  show=5  json=5  integrity=tampered           
+    ls row : · 01a05e55-74 open §- OBJECT TAMPERED
+    show !!: !!         Object integrity failed; current authority changed outside a 
+  prev      st-tampered verify=5  ls--verify=0  show=5  json=5  integrity=tampered           
+    ls row : · 01a05e55-74 open §- OBJECT TAMPERED
+    show !!: !!         Object integrity failed; current authority changed outside a 
+
+  current   st-divergentverify=5  ls--verify=0  show=5  json=5  integrity=divergent          
+    ls row : · 01a05e55-74 open §- OBJECT DIVERGENT
+    show !!: !!         Object sections is not what its admitted history produced; it
+  prev      st-divergentverify=5  ls--verify=0  show=5  json=5  integrity=divergent          
+    ls row : · 01a05e55-74 open §- OBJECT DIVERGENT
+    show !!: !!         Object sections is not what its admitted history produced; it
+
+  current   st-unreplayableverify=4  ls--verify=4  show=4  json=4  integrity=<none>             
+    ls row : <not named>
+    show !!: <no banner>
+  prev      st-unreplayableverify=4  ls--verify=4  show=4  json=4  integrity=<none>             
+    ls row : <not named>
+    show !!: <no banner>
+
+--- script exit 0 ---

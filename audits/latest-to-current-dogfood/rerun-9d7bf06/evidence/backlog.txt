@@ -1,0 +1,112 @@
+﻿===== subjects: replace what a point concerns =====
+§1 now concerns 1 subject(s)
+exit=0
+
+===== produced: record durable knowledge, without resolving the point =====
+§2 produced engr:obj:01m1f5ax7bedrbew8012yq3ma9; still unresolved
+exit=0
+UNCONFIRMED STAGING — nothing here is admitted to the record
+01a07825  Open questions this run raised
+2 unresolved   updated 2026-09-06T19:15:14Z
+engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj
+
+── §1 ── unresolved
+Whether ls --verify should report an object whose projection is missing, as verify does.
+    updated  2026-09-06T19:15:14Z
+    concerns engr:obj:01m1f5ax7bedrbew8012yq3ma9
+
+── §2 ── unresolved
+Whether repair should say what verify says about the same object.
+    updated  2026-09-06T19:15:14Z
+    concerns engr:obj:01m1f5ax7bedrbew8012yq3ma9
+    produced engr:obj:01m1f5ax7bedrbew8012yq3ma9
+             (already admitted; this point is still unresolved)
+exit=0
+
+===== merge: two points become one =====
+merged §2 into §1
+exit=0
+
+===== the merged point, and the produced outcome it inherited =====
+{
+  "id": "01a07825-0264-7d20-b0e2-9cdf2f61a952",
+  "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj",
+  "topic": "Open questions this run raised",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-06T19:15:15.72796295Z",
+  "expect": {
+    "rename": "7eee7fe3acfd5887846a783d3f63a2ff32162f3edb0b6a16f5a7e6a85831fc77",
+    "add": "c52468685da85b6f41de57eb4c5c1cc67a3ceb13a6c341ec493902ea8435cd41"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj:1",
+      "expect": "ae57a8ac0e16c268bf9c2bf63b582d1b4d2f1fcf88198f654980eb7fb43bcb99",
+      "id": 1,
+      "text": "Whether ls and repair should say what verify says about the same object.",
+      "updated_at": "2026-09-06T19:15:15.72796295Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1f5ax7bedrbew8012yq3ma9"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+===== review exhaustion: attempt 5 against audit-scope's ceiling of 3 =====
+revised §1
+note       admitted on attempt 5 against a ceiling of 3; no passing review allowed this wording
+exit=0
+UNCONFIRMED STAGING — nothing here is admitted to the record
+01a07825  Open questions this run raised
+1 unresolved   updated 2026-09-06T19:15:16Z
+engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj
+
+── §1 ── unresolved
+Whether ls and repair should say what verify says about the same object; raised again on attempt five.
+    updated  2026-09-06T19:15:16Z
+    produced engr:obj:01m1f5ax7bedrbew8012yq3ma9
+             (already admitted; this point is still unresolved)
+    exhausted attempt 5 against a ceiling of 3; this wording stands without a passing review
+exit=0
+
+===== and it is persisted, not only printed =====
+{
+  "id": "01a07825-0264-7d20-b0e2-9cdf2f61a952",
+  "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj",
+  "topic": "Open questions this run raised",
+  "authority": "unconfirmed_staging",
+  "next_section_id": 3,
+  "updated_at": "2026-09-06T19:15:16.278331743Z",
+  "expect": {
+    "rename": "2736232557ebf87aafb1a1d63b6aa086597b77b1d04a021e8bc1e98ed5c8ada6",
+    "add": "c52468685da85b6f41de57eb4c5c1cc67a3ceb13a6c341ec493902ea8435cd41"
+  },
+  "sections": [
+    {
+      "reference": "engr:backlog:01m1w2a0k4fmgb1rmwvwqp3aaj:1",
+      "expect": "055770885a7958464223fb79b0e84edd4879699835d071349a4afe77109c686a",
+      "id": 1,
+      "text": "Whether ls and repair should say what verify says about the same object; raised again on attempt five.",
+      "updated_at": "2026-09-06T19:15:16.278331743Z",
+      "produced": [
+        {
+          "target": {
+            "kind": "engr",
+            "ref": "obj:01m1f5ax7bedrbew8012yq3ma9"
+          }
+        }
+      ],
+      "review_exhaustion": {
+        "attempts": 5,
+        "limit": 3
+      }
+    }
+  ]
+}
+--- script exit 0 ---

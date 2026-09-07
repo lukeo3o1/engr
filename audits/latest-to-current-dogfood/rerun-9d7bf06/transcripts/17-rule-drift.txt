@@ -1,0 +1,31 @@
+﻿$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires.   # cwd=r7/project
+--- stderr ---
+error: this mutation is governed by audit-scope, evidence-discipline; review the surfaced Rules, then repeat it with review digest 1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd and the review outcome
+--- exit 2 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires. --review 1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r7/project
+--- stderr ---
+error: this review was of something else; review the current subject and attest to 1:cb97ffe22d538f2bffd55dc7a9626be71e1fcf222dfc3b7a02f37e982cd5cee7
+--- exit 5 ---
+
+$ engr-current prepare --object 01a05e55-ee --add --no-based-on --text A claim that names evidence/crash-sweep.txt, as evidence-discipline requires. --review 1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd --reviewed-rule audit-scope --reviewed-rule evidence-discipline --review-attempt 1 --review-result passed   # cwd=r7/project
+--- stdout ---
+Challenge  section.create
+Object     01a05e55-ee  Predecessor fixture construction
+Based on   none (explicit)
+Admission  human; time assigned on confirmation
+Review     passed
+Digest     1:18e59399c8c8fb7a23cdc7744c3883afb0fa9b801961970a528a523e2364cafd
+Rules      audit-scope, evidence-discipline
+
+A claim that names evidence/crash-sweep.txt, as evidence-discipline requires.
+
+Type this exactly to confirm:  CONFIRM WVYRL5
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM WVYRL5   # cwd=r7/project
+--- stdout ---
+CONFIRMED  01a05e55-ee  section.created.v1  rev 11
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+

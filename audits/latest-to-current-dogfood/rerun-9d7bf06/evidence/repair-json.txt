@@ -1,0 +1,95 @@
+﻿===== absent =====
+-- repair --format json --
+{
+  "challenge": {
+    "created_at": "2026-09-06T19:30:59.616874082Z",
+    "digest": "1:431f3cb89d40126e23544cf400d9eb95990d70a119a4cc6cf952043a69cc10a1",
+    "generator": {
+      "fingerprint": "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd",
+      "version": "latest (unknown)"
+    },
+    "id": "W4DHTE",
+    "subject": {
+      "data": {
+        "action": "repair",
+        "expected_rev": 1,
+        "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+        "value": {}
+      },
+      "type": "object"
+    }
+  },
+  "repair": {
+    "restores": {
+      "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+      "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+      "next_section_id": 3,
+      "rev": 1,
+      "sections": [
+        {
+          "admitted": {
+            "at": "2026-09-01T18:57:48.683149208Z",
+            "by": "human"
+          },
+          "based_on": {
+            "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+          },
+          "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+          "id": 1,
+          "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."
+        },
+        {
+          "admitted": {
+  exit=0
+-- candidate --format json --
+error: no challenge awaiting RN9AHV
+  exit=0
+
+===== divergent =====
+-- repair --format json --
+{
+  "challenge": {
+    "created_at": "2026-09-06T19:31:02.398488502Z",
+    "digest": "1:e211de368218f76c13f9ff276cdeb9a431d4b241be9ed8fb3c13ab8412ed5340",
+    "generator": {
+      "fingerprint": "1:d3c171cab55ba05230f8012e02f8ecfe26b589413fcdc7fb31464914380901dd",
+      "version": "latest (unknown)"
+    },
+    "id": "X5FJNH",
+    "subject": {
+      "data": {
+        "action": "repair",
+        "expected_rev": 1,
+        "object": "01a05e55-74eb-7370-b771-0008bd71d149",
+        "value": {}
+      },
+      "type": "object"
+    }
+  },
+  "repair": {
+    "restores": {
+      "digest": "1:2bf0f34f393f08d884ae738ba6323ab2244ba51ed9d9d2a0574daf2b53e15dd1",
+      "id": "01a05e55-74eb-7370-b771-0008bd71d149",
+      "next_section_id": 3,
+      "rev": 1,
+      "sections": [
+        {
+          "admitted": {
+            "at": "2026-09-01T18:57:48.683149208Z",
+            "by": "human"
+          },
+          "based_on": {
+            "commit": "1dae5f46717a8967662236f69694bf4ee9ef76d8"
+          },
+          "digest": "1:b8a581de5295fc604101d0b928b6e05cea6c57b3f3a110f3acf209a6559343f6",
+          "id": 1,
+          "text": "The question is not whether the migrator runs. It is whether an agent that kept its engineering memory here can still trust that memory afterwards: same identities, same admission provenance, same dependencies, and no fact that was quietly invented or quietly dropped along the way."
+        },
+        {
+          "admitted": {
+  exit=0
+-- candidate --format json --
+error: no challenge awaiting 9WCHCR
+  exit=0
+
+--- script exit 0 ---

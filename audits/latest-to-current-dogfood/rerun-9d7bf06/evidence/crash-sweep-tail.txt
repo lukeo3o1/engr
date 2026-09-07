@@ -1,0 +1,12 @@
+﻿uninterrupted confirm: 1133 ms
+MIGRATED   crash-runs/baseline/.engr  3 objects, 7 sections, generation 1
+---- SIGKILL sweep across that window ----
+t1090ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+t1100ms exit=137  VERSION=yes format.json=no  staged_dest=yes challenge=no  new_eventstore=3 old_events=0
+t1110ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+t1120ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+t1130ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+t1140ms exit=137  VERSION=yes format.json=no  staged_dest=yes challenge=no  new_eventstore=3 old_events=0
+t1150ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+t1160ms exit=0    VERSION=yes format.json=no  staged_dest=no  challenge=no  new_eventstore=3 old_events=0
+--- script exit 0 ---

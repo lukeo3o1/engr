@@ -1,0 +1,110 @@
+﻿$ engr-current prepare --new --text Continuity carried forward   # cwd=r7/project
+--- stdout ---
+Challenge  create
+Object     01a07821-8e
+
+Continuity carried forward
+
+Type this exactly to confirm:  CONFIRM 2NFW6K
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 2NFW6K   # cwd=r7/project
+--- stdout ---
+CONFIRMED  01a07821-8e  object.created.v1  rev 1
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current ls --all   # cwd=r7/project
+--- stdout ---
+01a05e55-74  open                   2 sections  unchecked     Migration continuity audit
+01a05e55-e6  closed                 2 sections  unchecked     Evidence rules for this audit
+01a05e55-ee  closed                 3 sections  unchecked     Predecessor fixture construction
+01a07821-8e  open                   0 sections  unchecked     Continuity carried forward
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a05e55-74 --type design --state proposed   # cwd=r7/project
+--- stdout ---
+Challenge  classify
+Object     01a05e55-74  Migration continuity audit
+Type       design
+State      proposed
+Attention  yes ??it stays in the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM 8UGAB2
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM 8UGAB2   # cwd=r7/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a05e55-74 --text a section that supersedes its own object   # cwd=r7/project
+--- stderr ---
+error: an object cannot supersede itself
+--- exit 5 ---
+
+$ engr-current prepare --supersede 01a07821-8e --object 01a05e55-74 --text The continuity question is settled; the replacement carries it forward. --header Superseded   # cwd=r7/project
+--- stdout ---
+Challenge  supersede
+Object     01a05e55-74  Migration continuity audit
+Header     Superseded
+Role       supersession
+Relation   superseded_by -> engr:obj:01m1w233hmetgbejpgdceakxet
+Based on   c4add6e8
+Admission  human; time assigned on confirmation
+State      superseded ??this object leaves the default listing, and the relation above is where a reader is sent instead
+
+The continuity question is settled; the replacement carries it forward.
+
+Type this exactly to confirm:  CONFIRM ELV2MZ
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM ELV2MZ   # cwd=r7/project
+--- stdout ---
+CONFIRMED  01a05e55-74  object.superseded.v1  rev 3
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --classify --object 01a07821-8e --type decision --state accepted   # cwd=r7/project
+--- stdout ---
+Challenge  classify
+Object     01a07821-8e  Continuity carried forward
+Type       decision
+State      accepted
+Attention  no ??it leaves the default listing
+
+(object.classified.v1)
+
+Type this exactly to confirm:  CONFIRM TUJV6G
+--- exit 0 ---
+
+$ engr-current confirm CONFIRM TUJV6G   # cwd=r7/project
+--- stdout ---
+CONFIRMED  01a07821-8e  object.classified.v1  rev 2
+note       commit .engr/objects and .engr/eventstore to preserve history and look-back
+--- exit 0 ---
+
+$ engr-current prepare --supersede 01a05e55-74 --object 01a07821-8e --text a cycle back to the object this one replaced   # cwd=r7/project
+--- stderr ---
+error: that replacement closes a supersession cycle back onto 01a07821-8e34-76a0-b74a-d06b1ca9f5da
+--- exit 5 ---
+
+$ engr-current ls   # cwd=r7/project
+--- stdout ---
+no objects
+--- exit 0 ---
+
+$ engr-current verify   # cwd=r7/project
+--- stdout ---
+01a05e55-74  PASS  3 sections  Migration continuity audit
+          uncommitted ??git holds no record of the current wording yet
+01a05e55-e6  PASS  2 sections  Evidence rules for this audit
+01a05e55-ee  PASS  3 sections  Predecessor fixture construction
+          uncommitted ??git holds no record of the current wording yet
+01a07821-8e  PASS  0 sections  Continuity carried forward
+          uncommitted ??git holds no record of the current wording yet
+--- exit 0 ---
+

@@ -1,0 +1,24 @@
+﻿--- what the real digest for this mutation is ---
+  1:038ffc80b1f3c935afc9f278f74922bd166adf11eddf097c177a5dba98c0b331
+
+--- a digest that is not this mutation's ---
+error: this review was of something else; review the current subject and attest to 1:038ffc80b1f3c935afc9f278f74922bd166adf11eddf097c177a5dba98c0b331
+  exit=0
+
+--- the right digest, but only one of the two governing Rules named ---
+error: the review names audit-scope, and this mutation is governed by audit-scope, evidence-discipline
+  exit=0
+
+--- failed, with no explanation ---
+error: a review offered for override must say what is being overridden
+  exit=0
+
+--- attempt 0, which no review can be ---
+error: a review attempt is counted from 1; there is no attempt 0
+  exit=0
+
+--- and the review provenance that reached the record ---
+"review":{"attempts":1,"outcome":"passed","result":"passed"}
+"review":{"attempts":2,"outcome":"overridden","result":"failed"}
+"review":{"attempts":4,"outcome":"overridden","result":"exhausted"}
+--- script exit 0 ---

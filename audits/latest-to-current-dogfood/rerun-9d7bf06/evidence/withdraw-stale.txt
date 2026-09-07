@@ -1,0 +1,33 @@
+﻿staged: manifest=yes destination= challenge=yes
+
+===== move the source under the staged plan =====
+-- resuming the staged plan --
+error: 01a05e55-74eb-7370-b771-0008bd71d149: predecessor Object projection is not exactly derivable from admitted history
+confirm exit=0
+-- and preparing again --
+1 pending Human-Gate question will be DISCARDED and must be prepared again: 8TTSM6
+
+Type this exactly to confirm:  CONFIRM KR824S
+migrate exit=0
+after: manifest=yes destination=no challenges=KR824S.json 
+
+===== interrupt that withdrawal across a sweep =====
+kill@20  ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@40  ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@60  ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@80  ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@120 ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+kill@200 ms manifest=yes destination=no  challenges=1
+            ls     : error: ws/k/.engr/local/migration marks an incomplete coordinated migration; run `engr migrate` to resume it
+            migrate: Challenge  migration
+--- script exit 0 ---
