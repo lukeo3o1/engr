@@ -170,3 +170,43 @@ fixture -> encounter -> migrate -> post-migration -> post-inventory
 `repair-missing.sh` and `show-missing.sh`, `adv-final.sh` before `adv-verify.sh`,
 and `crash-sweep` before anything reading `crash-runs/`. Each of those is now a
 refusal rather than a convention.
+
+## The audit root is no longer written into the drivers
+
+Every PowerShell driver used to open with
+
+```powershell
+$A = "<the absolute path of the audit tree on the machine that ran it>"
+```
+
+so each run baked one machine's filesystem layout into `harness/` and, through
+PowerShell's `NativeCommandError` decoration (`At …\s8.ps1:21 char:1`), into
+`evidence/` as well. Across the seven earlier re-runs that reached 74 committed
+files. No username or home directory was ever exposed — the account name is the
+one already public in `Cargo.toml` and `README.md` — but a published audit has
+no reason to carry a local path at all.
+
+**The files already committed are left exactly as they are.** `harness/` is
+defined as the scripts this run used and `transcripts/`/`evidence/` as verbatim
+argv, stdout, stderr and exit code; rewriting either to tidy a path would cost
+more than the path does. What changed is the working tree, so no later run
+repeats it.
+
+The drivers now locate the tree themselves, and `ENGR_AUDIT_ROOT` overrides it:
+
+```powershell
+# a driver at the audit root
+$A = if ($env:ENGR_AUDIT_ROOT) { $env:ENGR_AUDIT_ROOT } else { $PSScriptRoot }
+
+# a driver under <root>/rN/harness/
+$A = if ($env:ENGR_AUDIT_ROOT) { $env:ENGR_AUDIT_ROOT } else { (Get-Item $PSScriptRoot).Parent.Parent.FullName }
+```
+
+Both forms were proved before this was written: `s8.ps1` and `t8.ps1` were run
+self-locating, and again with `ENGR_AUDIT_ROOT` set, and answered identically.
+
+**Reproducing from this directory:** the `.ps1` files here are the hardcoded
+versions that actually ran. Apply the two lines above before reusing them, or
+the path will be wrong on any machine but the one that produced this record. The
+`.sh` scripts need no change — they address everything as `/audit/…` inside the
+container and never saw a host path.
