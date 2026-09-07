@@ -307,6 +307,239 @@ fn repair_writes_back_a_projection_that_is_gone() {
     );
 }
 
+/// The code a screen actually offers, taken from the line that offers it.
+///
+/// The last word on the output is not always the code: preparing a candidate
+/// while another is pending retires it and says so on a line underneath.
+fn offered_code(screen: &str) -> String {
+    screen
+        .lines()
+        .find_map(|line| line.strip_prefix("Type this exactly to confirm:"))
+        .and_then(|offer| offer.split_whitespace().nth(1))
+        .unwrap_or_else(|| panic!("the screen must offer a code: {screen:?}"))
+        .to_owned()
+}
+
+/// Every repair screen names the revision history derives and the revision
+/// confirming produces.
+///
+/// The rule arrived spelled out on the screen that had been reported — the one
+/// for a projection that is not there at all — and the two a reader actually
+/// reaches from `verify` named no revision at all. A repair is admitted rather
+/// than silent, and that is as true of a projection somebody edited as of one
+/// that is gone.
+///
+/// All three states in one workspace, collected and asserted once at the end,
+/// so one run maps every screen rather than stopping at the first hole.
+#[test]
+fn every_repair_screen_names_both_revisions() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(
+        root,
+        &["prepare", "--new", "--text", "a record worth restoring"],
+    );
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "the wording admitted",
+            ],
+        ),
+    );
+    let projection = store::object_path(root, &id);
+    let sound = std::fs::read(&projection).expect("sound bytes");
+    // The revision admitted history derives, which is what every one of these
+    // screens is restoring to; confirming appends `object.repaired.v1` on top.
+    let derived = store::load_object(root, &id).expect("stored").rev;
+
+    // Three damaged states, each reached the way a reader reaches it: a file
+    // that is gone, a file edited and left unsealed, and one edited and
+    // resealed. They differ in what `repair` says on the `Integrity` line and in
+    // nothing else that matters here.
+    let owed = format!("at rev {derived}, admitted as rev {}", derived + 1);
+    let mut silent = Vec::new();
+    for state in ["absent", "unsealed", "divergent"] {
+        std::fs::write(&projection, &sound).expect("start from the sound record");
+        match state {
+            "absent" => std::fs::remove_file(&projection).expect("remove projection"),
+            "unsealed" => {
+                let text = String::from_utf8(sound.clone()).expect("utf8");
+                std::fs::write(
+                    &projection,
+                    text.replace("the wording admitted", "the wording nobody admitted"),
+                )
+                .expect("edit without resealing");
+            }
+            _ => {
+                let object = store::load_object(root, &id).expect("object");
+                let resealed = engr::integrity::mutate(&object, |object| {
+                    object.sections[0].text = "wording nobody was ever shown".to_owned();
+                    Ok(())
+                })
+                .expect("an out-of-band edit can always be resealed");
+                save_raw(root, &resealed.object).expect("put it on disk");
+            }
+        }
+        let prepared = run_engr(root, &["repair", &id]);
+        let screen = String::from_utf8_lossy(&prepared.stdout).to_string();
+        assert!(
+            prepared.status.success(),
+            "repair must accept the {state} projection: {}",
+            String::from_utf8_lossy(&prepared.stderr)
+        );
+        // The screen a person answers, not `--json`: the document that flag
+        // prints carries the whole restored projection, so it can satisfy a
+        // revision assertion the screen never made.
+        if !screen.contains(&owed) {
+            silent.push(format!("{state}: {screen}"));
+        }
+        // And the same rendering when the pending code is shown again, because a
+        // screen that only tells the truth the first time is not a record of
+        // what was confirmed.
+        //
+        // Taken from the confirmation line rather than the end of the output:
+        // the second and third preparations retire the one before them and say
+        // so on a line after it, so the last word on this screen is `one)`.
+        let code = offered_code(&screen);
+        let rendered = run_engr(root, &["candidate", &code]);
+        let again = String::from_utf8_lossy(&rendered.stdout).to_string();
+        if !again.contains(&owed) {
+            silent.push(format!(
+                "{state}, re-rendered as {code}: {again}{}",
+                String::from_utf8_lossy(&rendered.stderr)
+            ));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "these repair screens offer a confirmation code without naming {owed:?}: {silent:#?}"
+    );
+}
+
+/// A repair code stops being spendable once there is nothing left to repair.
+///
+/// The eligibility question — *is anything damaged?* — was asked at `prepare`
+/// and nowhere else, and the ordinary recovery for a lost or hand-edited
+/// projection is to restore it from git. Doing that while a code was pending
+/// left the code live: the screen said *there is nothing left to repair* and
+/// offered it three lines further down, and confirming wrote
+/// `object.repaired.v1` over a sound record — a durable statement that the
+/// stored bytes were not what history derives, made about bytes that were.
+#[test]
+fn a_repair_code_is_dead_once_the_damage_is_gone() {
+    let workspace = TempDir::new().expect("workspace");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(
+        root,
+        &["prepare", "--new", "--text", "a record worth restoring"],
+    );
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    confirm(
+        root,
+        &prepare(
+            root,
+            &[
+                "prepare",
+                "--object",
+                &id,
+                "--add",
+                "--no-based-on",
+                "--text",
+                "the wording admitted",
+            ],
+        ),
+    );
+    let projection = store::object_path(root, &id);
+    let sound = std::fs::read(&projection).expect("sound bytes");
+
+    let object = store::load_object(root, &id).expect("object");
+    let resealed = engr::integrity::mutate(&object, |object| {
+        object.sections[0].text = "wording nobody was ever shown".to_owned();
+        Ok(())
+    })
+    .expect("an out-of-band edit can always be resealed");
+    save_raw(root, &resealed.object).expect("put it on disk");
+
+    let screen = String::from_utf8_lossy(&run_engr(root, &["repair", &id]).stdout).to_string();
+    let code = offered_code(&screen);
+
+    // The out-of-band recovery, which is what a person reaches for first.
+    std::fs::write(&projection, &sound).expect("restore it from the copy in git");
+    assert!(
+        run_engr(root, &["verify", &id]).status.success(),
+        "the premise: the record is sound again before the code is retyped"
+    );
+    let stream_before = std::fs::read(store::events_path(root, &id)).expect("stream");
+
+    let again = run_engr(root, &["candidate", &code]);
+    let rendered = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(
+        rendered.contains("nothing to repair"),
+        "the screen must say the reason it was prepared for is gone: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Type this exactly to confirm"),
+        "and must not offer a code it will refuse: {rendered:?}"
+    );
+    // Not "prepare it again": that is what a fresh `repair` refuses, for this
+    // same reason. A surface that names a recovery has to name one that accepts
+    // the state.
+    assert!(
+        !rendered.contains("prepare it again"),
+        "preparing it again refuses for this same reason: {rendered:?}"
+    );
+
+    let spent = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
+    assert_eq!(
+        spent.status.code(),
+        Some(engr::EXIT_INVARIANT),
+        "confirmation must refuse what the screen refused to offer: {}",
+        String::from_utf8_lossy(&spent.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&spent.stderr).contains("nothing to repair"),
+        "and for the reason the screen gave: {}",
+        String::from_utf8_lossy(&spent.stderr)
+    );
+    assert_eq!(
+        sound,
+        std::fs::read(&projection).expect("projection"),
+        "a refused repair writes nothing"
+    );
+    assert_eq!(
+        stream_before,
+        std::fs::read(store::events_path(root, &id)).expect("stream"),
+        "and puts no repair in the record"
+    );
+    // A repair that is still needed is still confirmable: this closes one state,
+    // not the command.
+    save_raw(root, &resealed.object).expect("damage it again");
+    let live = String::from_utf8_lossy(&run_engr(root, &["repair", &id]).stdout).to_string();
+    assert!(
+        live.contains("Type this exactly to confirm"),
+        "a damaged projection is still repairable: {live:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn closed_stdout_is_normal_pipe_termination_not_a_rust_panic() {

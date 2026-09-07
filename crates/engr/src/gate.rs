@@ -860,6 +860,10 @@ pub enum Answerable {
     Confirm,
     /// Pending, but the question can no longer be answered as it was asked.
     Unanswerable(String),
+    /// Pending, and the state it exists to reach already holds. Distinct from
+    /// [`Self::Unanswerable`] because the advice differs: nothing failed, and
+    /// preparing it again would refuse for this same reason.
+    Settled(String),
     /// The admission is already durable; the same code finishes cleanup.
     Cleanup,
     /// The Object moved past the revision this Challenge pinned.
@@ -877,8 +881,12 @@ pub fn answerable(root: &Path, candidate: &Candidate) -> Result<Answerable> {
             // confirmation asks it. An integrity-invalid or history-divergent
             // stored Object is refused there, so a screen rendered from
             // diagnostic material alone would offer a code that cannot be spent.
-            if let Err(error) = confirmable_predecessor(root, candidate) {
-                return Ok(Answerable::Unanswerable(error.message));
+            match confirmable_predecessor(root, candidate) {
+                Ok(Predecessor::Ready) => {}
+                Ok(Predecessor::RepairSettled) => {
+                    return Ok(Answerable::Settled(nothing_to_repair(candidate.object())))
+                }
+                Err(error) => return Ok(Answerable::Unanswerable(error.message)),
             }
             if let Err(error) = check_rule_material(root, candidate) {
                 return Ok(Answerable::Unanswerable(error.message));
@@ -888,6 +896,14 @@ pub fn answerable(root: &Path, candidate: &Candidate) -> Result<Answerable> {
     }
 }
 
+/// A predecessor an admission may build on, or the one reason a repair may have
+/// stopped having anything to do.
+enum Predecessor {
+    Ready,
+    /// Repair only: the Object became sound while the code was pending.
+    RepairSettled,
+}
+
 /// Whether the predecessor this Challenge names is one its own confirmation
 /// would accept.
 ///
@@ -895,15 +911,22 @@ pub fn answerable(root: &Path, candidate: &Candidate) -> Result<Answerable> {
 /// its action will ask. Repair rebuilds from admitted history and requires
 /// nothing of the stored bytes; every other action requires a predecessor that
 /// seals correctly *and* is what admitted history produced.
-fn confirmable_predecessor(root: &Path, candidate: &Candidate) -> Result<()> {
+///
+/// Repair asks [`repairable`], the same question `prepare` and `confirm` ask,
+/// so the screen and the admission cannot disagree about whether there is still
+/// something to repair.
+fn confirmable_predecessor(root: &Path, candidate: &Candidate) -> Result<Predecessor> {
     let id = candidate.object();
     match candidate.payload.action {
-        Action::ObjectRepaired {} => ops::provable(root, id).map(|_| ()),
+        Action::ObjectRepaired {} => match repairable(root, id)? {
+            Repairable::Damaged(_) => Ok(Predecessor::Ready),
+            Repairable::Settled => Ok(Predecessor::RepairSettled),
+        },
         _ => match ops::admission_predecessor(root, id) {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(Predecessor::Ready),
             // No Object yet. `candidate_state` has already established that this
             // is the creation-shaped Pending it belongs to.
-            Err(error) if error.code == EXIT_NOT_FOUND => Ok(()),
+            Err(error) if error.code == EXIT_NOT_FOUND => Ok(Predecessor::Ready),
             Err(error) => Err(error),
         },
     }
@@ -1157,8 +1180,41 @@ pub fn prepare_repair(root: &Path, id: &str) -> Result<Prepared> {
     store::with_lock(root, move || prepare_repair_locked(root, id))
 }
 
-fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
-    store::require_current(root)?;
+/// What `repair` has to say about one Object.
+///
+/// Two answers rather than one error, because "sound" is not a failure to
+/// establish anything — it is a different thing to tell the reader, and the
+/// screen that renders a pending code has to be able to say it. Unreplayable
+/// history stays an `Err`: there, nothing about the Object could be established
+/// at all.
+pub(crate) enum Repairable {
+    /// Damaged, and this is the projection a repair would restore.
+    Damaged(Box<Object>),
+    /// Sound. The stored bytes are exactly what admitted history derives.
+    Settled,
+}
+
+/// The one sentence for an Object that is not in a state `repair` is for, said
+/// the same way wherever it is said.
+fn nothing_to_repair(id: &str) -> String {
+    format!(
+        "{id} verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path"
+    )
+}
+
+/// Whether this Object is in a state `repair` exists for, and the projection a
+/// repair would restore.
+///
+/// **Asked at every entry, because the answer moves between them.** `prepare`
+/// asked it and nothing else did, so a code minted against a damaged projection
+/// stayed spendable after the damage was gone — and the ordinary recovery for a
+/// lost or hand-edited file is to restore it from git, which is exactly how the
+/// damage goes away while a code is pending. Confirming then wrote
+/// `object.repaired.v1` over a record with nothing wrong with it: a durable
+/// statement that the stored bytes were not what history derives, made about
+/// bytes that were. The screen said so at the time — *there is nothing left to
+/// repair* — and offered the code three lines further down.
+pub(crate) fn repairable(root: &Path, id: &str) -> Result<Repairable> {
     crate::model::validate_object_id(id)?;
     // Absent is one of the damaged states, not a reason to refuse. `repair`
     // restores what history derives, and a projection that is not there at all
@@ -1210,11 +1266,20 @@ fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
                 )
         }
     };
-    ensure!(
-        damaged,
-        EXIT_INVARIANT,
-        "{id} verifies and is what its admitted history produced, so there is nothing to repair; ordinary changes go through the normal path"
-    );
+    Ok(match damaged {
+        true => Repairable::Damaged(Box::new(before)),
+        false => Repairable::Settled,
+    })
+}
+
+fn prepare_repair_locked(root: &Path, id: &str) -> Result<Prepared> {
+    store::require_current(root)?;
+    let before = match repairable(root, id)? {
+        Repairable::Damaged(object) => *object,
+        Repairable::Settled => {
+            return Err(Error::new(EXIT_INVARIANT, nothing_to_repair(id)));
+        }
+    };
 
     let payload = Payload::new(id, Action::ObjectRepaired {});
     let at = now();
@@ -2137,10 +2202,20 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         // stored seal to verify, which is the condition repair exists to leave —
         // so it rebuilds the predecessor from admitted history instead, and the
         // invalid bytes on disk contribute nothing to what gets admitted.
+        //
+        // The same question `prepare` and the pending code's screen ask, because
+        // its answer moves while a code is pending and a repair admitted over a
+        // sound record states a fact about the stored bytes that is not true of
+        // them.
         CandidateState::Pending
             if matches!(candidate.payload.action, Action::ObjectRepaired {}) =>
         {
-            ops::provable(root, &id)?
+            match repairable(root, &id)? {
+                Repairable::Damaged(object) => *object,
+                Repairable::Settled => {
+                    return Err(Error::new(EXIT_INVARIANT, nothing_to_repair(&id)))
+                }
+            }
         }
         CandidateState::Pending => match ops::admission_predecessor(root, &id) {
             Ok(object) => object,

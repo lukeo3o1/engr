@@ -2277,6 +2277,22 @@ fn render_basis(basis: Option<&semantics::BasedOn>) -> String {
 /// Being unable to read them is not a reason to hide the screen. A repair whose
 /// comparison cannot be built is exactly the one a person should be told about
 /// before answering.
+/// The two revisions every repair screen owes the reader.
+///
+/// They are different numbers: admitted history derives the projection at its
+/// own revision, and confirming appends `object.repaired.v1` on top of it, so a
+/// repair is admitted rather than silent. One function because there are three
+/// screens — absent, unsealed and resealed-divergent — and the rule arrived
+/// spelled out on the one that was reported, leaving the two a reader actually
+/// reaches from `verify` naming no revision at all.
+fn repair_revisions(provable: &engr::model::Object) -> String {
+    format!(
+        "at rev {}, admitted as rev {}",
+        provable.rev,
+        provable.rev.saturating_add(1)
+    )
+}
+
 fn render_repair_comparison(root: &Path, id: &str) -> String {
     let provable = match engr::ops::provable(root, id) {
         Ok(object) => object,
@@ -2289,27 +2305,17 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
     };
     let stored = match store::load_object(root, id) {
         // Absent is not unreadable, and a person deciding whether to answer this
-        // needs the difference: there is nothing here to compare the rebuild
-        // against, and nothing being overwritten either. Every Section below is
-        // what history alone says, and that is the whole of what will be
-        // written.
-        // Absent is not unreadable, and a person deciding whether to answer this
         // needs the difference: there is nothing here to compare against and
         // nothing being overwritten. What they still need is the *other* side —
         // a Section count is not something anybody can authorize, and this
         // branch used to stop at one, so the screen offered a confirmation code
         // for wording it had never shown. Same rows as the damaged case, with
         // `(absent)` where the stored value would be.
-        //
-        // Both revisions, because they are different numbers and the reader is
-        // owed both: history derives the projection at its own revision, and
-        // confirming appends `object.repaired.v1` on top of it.
         Err(error) if error.code == engr::EXIT_NOT_FOUND => {
             let mut out = format!(
                 "Integrity  no projection is stored; admitted history is the only copy\n\
-                 Restoring  exactly what admitted history proves at rev {}, admitted as rev {}\n\n",
-                provable.rev,
-                provable.rev + 1
+                 Restoring  exactly what admitted history proves {}\n\n",
+                repair_revisions(&provable)
             );
             match view::repair_restores(&provable) {
                 Ok(restores) if !restores.is_empty() => {
@@ -2360,11 +2366,15 @@ fn render_repair_comparison(root: &Path, id: &str) -> String {
             .to_owned();
     }
 
-    let mut out = String::from(if sealed {
-        "Integrity  the stored record verifies, and is not what its admitted history produced\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n"
-    } else {
-        "Integrity  the stored record does not verify\nRestoring  exactly what admitted history proves, and nothing from the stored bytes\n\n"
-    });
+    let mut out = format!(
+        "Integrity  {}\nRestoring  exactly what admitted history proves {}, and nothing from the stored bytes\n\n",
+        if sealed {
+            "the stored record verifies, and is not what its admitted history produced"
+        } else {
+            "the stored record does not verify"
+        },
+        repair_revisions(&provable)
+    );
     let differences = match view::repair_differences(&stored, &provable) {
         Ok(differences) => differences,
         Err(error) => {
@@ -2754,6 +2764,12 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
         ),
         Ok(gate::Answerable::Unanswerable(reason)) => format!(
             "\nUNANSWERABLE  {reason}\n              prepare it again; nothing here can be confirmed\n"
+        ),
+        // Not "prepare it again", which is what the line above says and what a
+        // fresh prepare would refuse for this same reason. Nothing failed here:
+        // what this code was prepared to achieve has happened by other means.
+        Ok(gate::Answerable::Settled(reason)) => format!(
+            "\nSETTLED       {reason}\n              nothing here needs confirming\n"
         ),
         // Not "prepare it again": the state could not be established at all, so
         // what to do about it is not something this screen knows.
