@@ -209,7 +209,14 @@ fn digest_length_is_the_contracts_business_and_not_the_parsers() {
 /// The real families this build ships.
 #[test]
 fn the_shipped_families_emit_and_verify_their_own_current_version() {
-    for family in [&engr::digest::REVIEW, &engr::digest::CANDIDATE] {
+    for family in [
+        &engr::digest::REVIEW,
+        &engr::digest::CHALLENGE,
+        &engr::digest::REF,
+        &engr::digest::OBJECT,
+        &engr::digest::SECTION,
+        &engr::digest::EVENT,
+    ] {
         let emitted = family.emit(SHA).expect("emit");
         assert_eq!(emitted.version(), 1, "{} starts at contract 1", family.name);
         family.verify(&emitted.to_string()).expect("round trip");

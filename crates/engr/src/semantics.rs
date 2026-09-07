@@ -1,4 +1,4 @@
-//! The Phase 3 semantic vocabulary: what an Object *is*, what state it is in,
+//! The semantic vocabulary: what an Object *is*, what state it is in,
 //! what role a Section plays, what it relates to, and how much literal material
 //! it may carry.
 //!
@@ -198,11 +198,9 @@ pub enum Admission {
     Agent,
     /// Admitted through the Human Gate. Human-authoritative.
     ///
-    /// The default, and only while the Agent path has no envelope to be
-    /// admitted through. Until the coordinated Phase-3 contract is activated the
-    /// Human Gate is the only door there is, so this is what every stored
-    /// Section came through — a fact about the current protocol rather than an
-    /// assumption about a missing field. See [`crate::model::Section::admission`].
+    /// The default in memory only. Nothing persisted relies on it: every stored
+    /// Section writes `admitted.by` out, because a missing door read as `human`
+    /// is a file that gains Human authority by omission.
     #[default]
     Human,
 }
@@ -213,6 +211,71 @@ impl Admission {
             Admission::Agent => "agent",
             Admission::Human => "human",
         }
+    }
+}
+
+/// Provenance of a Section's **current semantic value**: which door, and when.
+///
+/// One structure rather than two flat members, because the pair is one fact and
+/// a reader that finds only half of it has been told nothing useful. It is also
+/// what keeps the Section's provenance distinct from the Event's: `Section
+/// .admitted` says how these words came to mean what they mean, while
+/// `Event.metadata.admitted` says how that Event was allowed into history.
+/// Normally they agree; migration is the case that proves they are two facts,
+/// because a migrated Section keeps its original Human admission while the
+/// bootstrap Event records the migration's own confirmation.
+///
+/// `at` is not covered by the `admission` Ref selector. A dependency on when
+/// something was admitted is a dependency on a clock, and drift in a timestamp
+/// is not drift in an assertion.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Admitted {
+    pub by: Admission,
+    pub at: String,
+}
+
+impl Admitted {
+    pub fn new(by: Admission, at: impl Into<String>) -> Self {
+        Self { by, at: at.into() }
+    }
+
+    pub fn human(at: impl Into<String>) -> Self {
+        Self::new(Admission::Human, at)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            time::OffsetDateTime::parse(&self.at, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
+            EXIT_SCHEMA,
+            "admitted.at is not RFC3339"
+        );
+        Ok(())
+    }
+}
+
+/// The committed repository state a Section's wording was written against.
+///
+/// An object with one member rather than a bare string, so the basis has
+/// somewhere to grow that is not a second meaning for an existing scalar — and
+/// so a reader can tell "no basis was recorded" (the whole member absent) from
+/// "the basis is this commit" without either being a special string value.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BasedOn {
+    pub commit: String,
+}
+
+impl BasedOn {
+    pub fn new(commit: impl Into<String>) -> Self {
+        Self {
+            commit: commit.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_pinned_commit("based_on", &self.commit)
     }
 }
 

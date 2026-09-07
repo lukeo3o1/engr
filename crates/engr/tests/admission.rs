@@ -1,0 +1,1171 @@
+//! The two admission doors, and the one recovery path behind the Human one.
+//!
+//! What is pinned here is which door a mutation came through, what the record
+//! keeps of it, and that neither door can be used to reach the other's
+//! authority.
+
+mod common;
+
+use common::{payload, wording, Act};
+use engr::model::{Content, Event, EventAdmission, Payload};
+use engr::semantics::Admission;
+use engr::{gate, integrity, proof, rules, store};
+use std::path::Path;
+use std::process::Command;
+
+fn creation(id: &str) -> Payload {
+    payload(Act::Create, id, wording("workspace generation one"))
+}
+
+fn add(id: &str, text: &str) -> Payload {
+    payload(Act::Add, id, wording(text))
+}
+
+fn agent_add(id: &str, text: &str) -> Payload {
+    common::agent_payload(Act::Add, id, wording(text))
+}
+
+fn admit_human(root: &Path, payload: Payload) {
+    common::admit(root, payload);
+}
+
+fn object_rule(root: &Path) {
+    std::fs::create_dir_all(rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        rules::dir(root).join("object-policy.md"),
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation.\n",
+    )
+    .expect("rule");
+}
+
+fn attestation(
+    root: &Path,
+    payload: &Payload,
+    admission: Admission,
+    result: proof::ReviewResult,
+    explanation: Option<&str>,
+) -> gate::ReviewAttestation {
+    // The value carries its own admission, so a review of an Agent mutation has
+    // to be a review of the Agent-admitted value — not of the same wording with
+    // a Human label on it.
+    let mut payload = payload.clone();
+    if let Some(value) = payload.action.value_mut() {
+        value.admitted.by = admission;
+    }
+    let payload = &payload;
+    let before = store::load_object(root, &payload.object).expect("before");
+    let mut after = before.clone();
+    let admitted = match admission {
+        Admission::Human => EventAdmission::human("2026-08-25T00:00:00Z", "ABC234"),
+        Admission::Agent => EventAdmission {
+            by: Admission::Agent,
+            at: "2026-08-25T00:00:00Z".to_owned(),
+            confirmation: None,
+            review: None,
+        },
+    };
+    let event = Event::sealed(
+        &payload.object,
+        engr::model::new_id(),
+        payload.action.clone(),
+        before.rev + 1,
+        admitted,
+    )
+    .expect("event");
+    engr::model::project(&mut after, &event).expect("project");
+    let mutation = proof::object_review_mutation(&before, &after, payload).expect("mutation");
+    let binding = rules::bind_object(root, &mutation, before.rev).expect("binding");
+    gate::ReviewAttestation {
+        review_digest: binding.digest().expect("digest").to_string(),
+        reviewed_rules: binding.rule_ids(),
+        attempt: 1,
+        result,
+        explanation: explanation.map(str::to_owned),
+    }
+}
+
+#[test]
+fn the_human_gate_records_the_spent_code_and_seals_what_it_admitted() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+
+    let prepared = gate::prepare(temp.path(), creation(id)).expect("prepare");
+    assert!(prepared.candidate.challenge.digest.starts_with("1:"));
+    let code = prepared.candidate.code().to_owned();
+
+    let admitted = match engr::confirm(temp.path(), &format!("CONFIRM {code}")).expect("confirm") {
+        engr::Confirmed::Object(admitted) => *admitted,
+        engr::Confirmed::Migration(_) => panic!("an Object confirmation"),
+    };
+
+    let recorded = &admitted.event.metadata.admitted;
+    assert_eq!(recorded.by, Admission::Human);
+    assert_eq!(
+        recorded
+            .confirmation
+            .as_ref()
+            .expect("human confirmation")
+            .challenge,
+        code,
+        "the record keeps the spent code and nothing else of the challenge"
+    );
+    integrity::check_stored_object_integrity(&admitted.object).expect("object integrity");
+    let loaded = store::load_object(temp.path(), id).expect("load");
+    assert_eq!(loaded, admitted.object);
+}
+
+#[test]
+fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    admit_human(temp.path(), creation(id));
+    object_rule(temp.path());
+    let payload = agent_add(id, "agent-reviewed knowledge");
+    let review = attestation(
+        temp.path(),
+        &payload,
+        Admission::Agent,
+        proof::ReviewResult::Passed,
+        None,
+    );
+    let expected = review.review_digest.clone();
+
+    let admitted = gate::admit_agent(temp.path(), payload, Some(review)).expect("agent admit");
+
+    assert_eq!(admitted.object.sections[0].admitted.by, Admission::Agent);
+    let admission = &admitted.event.metadata.admitted;
+    assert_eq!(admission.by, Admission::Agent);
+    assert!(admission.confirmation.is_none());
+    // The digest is deliberately not here: it binds artifacts at review time
+    // and explains nothing once they have moved. What history keeps is what a
+    // reader can still interpret.
+    let durable = admission.review.as_ref().expect("durable review");
+    assert_eq!(durable.outcome, engr::model::ReviewOutcome::Passed);
+    assert_eq!(durable.result, engr::proof::ReviewResult::Passed);
+    assert_eq!(durable.attempts, 1);
+    assert!(
+        !serde_json::to_string(&admitted.event)
+            .expect("event json")
+            .contains(&expected),
+        "the ReviewDigest is admission-time material and does not become history"
+    );
+    integrity::check_stored_object_integrity(&admitted.object).expect("integrity");
+}
+
+#[test]
+fn agent_cli_surfaces_the_review_then_admits_the_same_bound_mutation() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    admit_human(temp.path(), creation(id));
+    object_rule(temp.path());
+    let payload = add(id, "agent-reviewed through the CLI");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(temp.path())
+        .args([
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "agent-reviewed through the CLI",
+            "--no-based-on",
+            "--agent",
+        ])
+        .output()
+        .expect("first attempt");
+    assert_eq!(first.status.code(), Some(engr::EXIT_USAGE));
+    let refusal = String::from_utf8_lossy(&first.stderr);
+    assert!(refusal.contains("object-policy"), "{refusal}");
+    assert!(refusal.contains("review digest"), "{refusal}");
+    assert_eq!(
+        store::load_object(temp.path(), id).expect("unchanged").rev,
+        1
+    );
+
+    let review = attestation(
+        temp.path(),
+        &payload,
+        Admission::Agent,
+        proof::ReviewResult::Passed,
+        None,
+    );
+    let admitted = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(temp.path())
+        .args([
+            "prepare",
+            "--object",
+            id,
+            "--add",
+            "--text",
+            "agent-reviewed through the CLI",
+            "--no-based-on",
+            "--agent",
+            "--review",
+            &review.review_digest,
+            "--reviewed-rule",
+            "object-policy",
+            "--review-result",
+            "passed",
+            "--json",
+        ])
+        .output()
+        .expect("admit");
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    let output: serde_json::Value = serde_json::from_slice(&admitted.stdout).expect("json");
+    assert_eq!(output["event"]["type"], "section.created.v1");
+    assert_eq!(output["event"]["metadata"]["admitted"]["by"], "agent");
+    assert_eq!(output["object"]["sections"][0]["admitted"]["by"], "agent");
+    // Interpretable facts, not a binding token: what the review concluded and
+    // which attempt it was of. The digest bound the mutation while the review
+    // was being made and does not become history.
+    let durable = &output["event"]["metadata"]["admitted"]["review"];
+    assert_eq!(durable["outcome"], "passed");
+    assert_eq!(durable["result"], "passed");
+    assert_eq!(durable["attempts"], 1);
+    assert!(
+        durable["digest"].is_null(),
+        "the ReviewDigest is admission-time material: {durable}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&admitted.stdout).contains(&review.review_digest),
+        "and it appears nowhere else in what was written either"
+    );
+}
+
+#[test]
+fn human_source_cannot_treat_agent_semantics_as_human_authority() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    admit_human(temp.path(), creation(id));
+    object_rule(temp.path());
+    let agent_payload = agent_add(id, "agent authority");
+    let review = attestation(
+        temp.path(),
+        &agent_payload,
+        Admission::Agent,
+        proof::ReviewResult::Passed,
+        None,
+    );
+    gate::admit_agent(temp.path(), agent_payload, Some(review)).expect("agent section");
+
+    let reference = engr::dependency::SelectiveRef::stored(
+        engr::proof::section_target(id, 1).expect("section target"),
+        vec![engr::dependency::SemanticField::Text],
+        "0".repeat(40),
+        format!("1:{}", "0".repeat(64)),
+    )
+    .expect("stored ref shape");
+    let error = gate::prepare(
+        temp.path(),
+        payload(
+            Act::Add,
+            id,
+            Content {
+                text: "human assertion".to_owned(),
+                refs: vec![reference],
+                ..Content::default()
+            },
+        ),
+    )
+    .expect_err("Human source authority cannot be borrowed from an Agent Section");
+
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(
+        error.message.contains("human-admitted authority"),
+        "{error}"
+    );
+}
+
+#[test]
+fn human_override_binds_the_review_explanation_and_persists_minimal_provenance() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    admit_human(temp.path(), creation(id));
+    object_rule(temp.path());
+    let payload = add(id, "human accepts this despite the failed review");
+    let review = attestation(
+        temp.path(),
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Failed,
+        Some("The rule conflicts with an explicit compatibility requirement."),
+    );
+    let expected = review.review_digest.clone();
+
+    let prepared = gate::prepare_reviewed(temp.path(), payload, gate::Allowance::Normal, review)
+        .expect("reviewed candidate");
+    // The agent's explanation is surfaced at the moment the human is asked; it
+    // is not persisted, because the Challenge freezes the value being confirmed
+    // rather than the argument for confirming it.
+    assert_eq!(
+        prepared
+            .review
+            .as_ref()
+            .expect("the review the human is being shown")
+            .explanation
+            .as_deref(),
+        Some("The rule conflicts with an explicit compatibility requirement.")
+    );
+    // What the Challenge does freeze is the outcome the Event will record, so a
+    // human cannot be shown a failed review and have a passing one written down.
+    let frozen = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .expect("the review being overridden");
+    assert_eq!(frozen.result, engr::proof::ReviewResult::Failed);
+    assert_eq!(frozen.digest, expected);
+
+    let admitted = common::admitted_code(temp.path(), prepared.candidate.code());
+    let admission = &admitted.event.metadata.admitted;
+    let durable = admission.review.as_ref().expect("durable review");
+    assert_eq!(durable.outcome, engr::model::ReviewOutcome::Overridden);
+    // The record says what was overruled, which `overridden` alone cannot: a
+    // human overruling a failure and one overruling an exhausted ceiling are not
+    // the same act.
+    assert_eq!(durable.result, engr::proof::ReviewResult::Failed);
+    assert!(
+        !serde_json::to_string(&admitted.event)
+            .expect("event json")
+            .contains(&expected),
+        "the ReviewDigest lived in the Challenge, and the Challenge is gone"
+    );
+    assert_eq!(admitted.object.sections[0].admitted.by, Admission::Human);
+}
+
+/// Tamper with stored authority without resealing it.
+///
+/// Schema-valid bytes whose Section seal no longer covers its own wording —
+/// what an out-of-band edit actually looks like, rather than corruption.
+fn tamper(root: &Path, id: &str) {
+    let path = store::object_path(root, id);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("object bytes"))
+            .expect("object json");
+    value["sections"][0]["text"] = serde_json::Value::String("wording nobody admitted".to_owned());
+    std::fs::write(
+        &path,
+        proof::canonical_bytes(&value, "tampered object").expect("canonical"),
+    )
+    .expect("tamper");
+}
+
+/// #35 §10's second half: an integrity-invalid Object can be recovered, and
+/// only to what admitted history proves.
+///
+/// The first half — refusing ordinary mutation — was already closed, and on its
+/// own it left one hand edit able to freeze a record permanently. The ruling on
+/// `5442662072` settles the rest: Human Gate only, recorded as `object_repaired`,
+/// restoring exactly the replay-derived projection.
+#[test]
+fn an_integrity_invalid_object_is_recovered_only_through_explicit_repair() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681848";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "the wording that was actually admitted"));
+    let admitted = store::load_object(root, id).expect("admitted");
+
+    tamper(root, id);
+    integrity::check_stored_object_integrity(&store::load_object(root, id).expect("load"))
+        .expect_err("the fixture must really break integrity");
+
+    // Ordinary mutation stays refused — repair does not relax that.
+    gate::prepare(root, add(id, "an ordinary change on broken authority"))
+        .expect_err("ordinary mutation is refused while integrity fails");
+
+    let prepared = gate::prepare_repair(root, id).expect("repair prepares");
+    assert!(matches!(
+        prepared.candidate.payload.action,
+        engr::model::Action::ObjectRepaired {}
+    ));
+    common::confirm(root, prepared.candidate.code());
+
+    let repaired = store::load_object(root, id).expect("repaired");
+    integrity::check_stored_object_integrity(&repaired).expect("repair reseals");
+    assert_eq!(
+        repaired.sections[0].text, admitted.sections[0].text,
+        "restored to what history proves, not to the tampered wording"
+    );
+    assert_eq!(repaired.rev, admitted.rev + 1, "repair is itself an event");
+
+    let events = store::load_events(root, id).expect("history");
+    let last = events.last().expect("an event");
+    assert!(
+        matches!(last.action, engr::model::Action::ObjectRepaired {}),
+        "the repair is visible in immutable history"
+    );
+    assert_eq!(last.action.event_type(), "object.repaired.v1");
+
+    // And ordinary work is possible again afterwards.
+    admit_human(
+        root,
+        add(id, "a change admitted the normal way, after repair"),
+    );
+}
+
+/// Repair is an exceptional boundary, not a general-purpose rewrite.
+#[test]
+fn repair_is_refused_on_authority_that_still_verifies() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681849";
+    admit_human(root, creation(id));
+
+    let error = gate::prepare_repair(root, id).expect_err("nothing to repair");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("nothing to repair"), "{error}");
+}
+
+/// Repair fails closed when history cannot rebuild the projection.
+///
+/// The ruling is explicit that this is a different damage class from a broken
+/// current projection and must not be guessed at through the same mechanism.
+/// Restoring "something close" would be repair inventing authority, which is
+/// the failure the whole boundary exists to prevent.
+///
+/// The refusal arrives from the history decoder rather than from `provable`'s
+/// own check — a log whose revisions no longer start at 1 is not a readable
+/// history at all. Same direction, one layer earlier, which is why this pins
+/// the refusal and the untouched workspace rather than a particular code path.
+#[test]
+fn repair_refuses_when_admitted_history_cannot_rebuild_the_object() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184b";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording whose creation is about to vanish"));
+    tamper(root, id);
+
+    // Drop the creation, keeping the rest: history that can no longer say what
+    // this Object started as.
+    let path = store::events_path(root, id);
+    let history = std::fs::read_to_string(&path).expect("history");
+    let without_creation: Vec<&str> = history.lines().skip(1).collect();
+    std::fs::write(&path, format!("{}\n", without_creation.join("\n"))).expect("truncate");
+
+    let error = gate::prepare_repair(root, id).expect_err("nothing provable to restore");
+    assert!(
+        error.code == engr::EXIT_SCHEMA || error.code == engr::EXIT_INVARIANT,
+        "refused as unusable history, not as something to guess at: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(store::events_path(root, id)).expect("after"),
+        format!("{}\n", without_creation.join("\n")),
+        "and it wrote nothing while refusing"
+    );
+}
+
+/// The recovery path is reachable from the command line, not only the library.
+#[test]
+fn repair_is_available_as_a_supported_command() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184c";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording admitted before the edit"));
+    tamper(root, id);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(["repair", id, "--json"])
+        .output()
+        .expect("run engr repair");
+    assert!(
+        output.status.success(),
+        "repair must be reachable without hand-editing .engr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("repair json");
+    let challenge = &document["challenge"];
+    assert_eq!(challenge["subject"]["type"], "object");
+    assert_eq!(challenge["subject"]["data"]["action"], "repair");
+
+    // The 3B comparison travels with it: what is restored, what is on disk, and
+    // that the stored record does not verify.
+    assert_eq!(document["repair"]["stored_verifies"], false);
+    assert_eq!(
+        document["repair"]["restores"]["sections"][0]["text"],
+        "wording admitted before the edit"
+    );
+    assert_eq!(
+        document["repair"]["stored"]["sections"][0]["text"],
+        "wording nobody admitted"
+    );
+
+    let code = challenge["id"].as_str().expect("the minted code");
+    let confirmed = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(["confirm", &format!("CONFIRM {code}")])
+        .output()
+        .expect("run engr confirm");
+    assert!(
+        confirmed.status.success(),
+        "confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    integrity::check_stored_object_integrity(&store::load_object(root, id).expect("repaired"))
+        .expect("the workspace verifies again");
+}
+
+/// Repair is Human-only as a property of the schema, not of one caller.
+///
+/// The CLI reaching repair only through `prepare_repair` is not the invariant;
+/// it is one caller behaving. An Agent asking for it directly must be refused,
+/// and so must a stored Event-v2 record that claims an Agent repair happened —
+/// otherwise a hand-written log could establish one after the fact, which is
+/// the whole thing the Human Gate is here to prevent.
+#[test]
+fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184d";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording admitted through the gate"));
+
+    let repair = Payload::new(id, engr::model::Action::ObjectRepaired {});
+    let error = gate::admit_agent(root, repair.clone(), None).expect_err("no agent repair");
+    assert_eq!(error.code, engr::EXIT_INVARIANT);
+    assert!(error.message.contains("human gate only"), "{error}");
+
+    // And the same refusal when it arrives as durable history rather than as a
+    // call: append an Event-v2 record tagged `agent` carrying the action.
+    let path = store::events_path(root, id);
+    let history = std::fs::read_to_string(&path).expect("history");
+    let forged = Event::sealed(
+        id,
+        engr::model::new_id(),
+        repair.action.clone(),
+        store::load_object(root, id).expect("object").rev + 1,
+        EventAdmission {
+            by: Admission::Agent,
+            at: "2026-08-27T00:00:00Z".to_owned(),
+            confirmation: None,
+            // A passing review, so the forgery gets past the check that an Agent
+            // event carries one and reaches the authority rule this test is
+            // actually about.
+            review: Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: engr::proof::ReviewResult::Passed,
+                attempts: 1,
+            }),
+        },
+    )
+    .expect("a well formed but unauthorized record");
+    let line = proof::canonical_bytes(&forged, "forged repair").expect("canonical");
+    std::fs::write(&path, format!("{history}{line}\n")).expect("append");
+
+    let error = store::load_events(root, id).expect_err("a stored agent repair is not history");
+    assert!(
+        error.message.contains("Human admission"),
+        "refused as an authority violation: {error}"
+    );
+}
+
+/// Break integrity through one non-text member of the stored Section.
+fn tamper_member(root: &Path, id: &str, member: &str, value: serde_json::Value) {
+    let path = store::object_path(root, id);
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("object bytes"))
+            .expect("object json");
+    stored["sections"][0][member] = value;
+    std::fs::write(
+        &path,
+        proof::canonical_bytes(&stored, "tampered object").expect("canonical"),
+    )
+    .expect("tamper");
+}
+
+/// The confirmation screen shows every discarded member, not only wording.
+///
+/// An out-of-band edit to a Section's `role` fails integrity and prepares a
+/// repair exactly like an edit to its text — but the first version of this
+/// screen compared only `title`, lifecycle `state` and Section `text`, so it
+/// asked for `CONFIRM` while showing no differing field at all. #35's 3B ruling
+/// is that the Human sees the invalid state, the provable state and their
+/// difference; a comparison that silently omits the difference does not satisfy
+/// it.
+#[test]
+fn the_repair_screen_shows_a_discarded_role_and_not_only_text() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184e";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording that is not what changed"));
+    tamper_member(
+        root,
+        id,
+        "role",
+        serde_json::Value::String("decision".to_owned()),
+    );
+
+    let stored = store::load_object(root, id).expect("stored");
+    integrity::check_stored_object_integrity(&stored).expect_err("the edit breaks integrity");
+    let provable = engr::ops::provable(root, id).expect("provable");
+    let differences = engr::view::repair_differences(&stored, &provable).expect("compare");
+    assert!(
+        differences
+            .iter()
+            .any(|difference| difference.at == "§1.role"),
+        "the discarded role must be on the screen: {:?}",
+        differences.iter().map(|d| &d.at).collect::<Vec<_>>()
+    );
+
+    // And it reaches the actual confirmation surface, not just the helper.
+    let output = Command::new(env!("CARGO_BIN_EXE_engr"))
+        .arg("--root")
+        .arg(root)
+        .args(["repair", id])
+        .output()
+        .expect("run engr repair");
+    assert!(output.status.success(), "repair prepares");
+    let screen = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        screen.contains("§1.role") && screen.contains("decision"),
+        "the human-facing screen names what is being discarded:\n{screen}"
+    );
+}
+
+/// The same, for a member the comparison was never written to know about.
+///
+/// The point is structural rather than field-by-field: the comparison walks the
+/// canonical projection, so `refs[]`, `relations[]`, `based_on`, `admission`,
+/// `admitted_at` and anything added later are covered by construction rather
+/// than by remembering to add them.
+#[test]
+fn the_repair_screen_covers_sealed_members_it_was_never_taught() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b301468184f";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "wording that is not what changed"));
+    tamper_member(
+        root,
+        id,
+        "content",
+        serde_json::json!([{ "type": "code.rs", "body": "fn nobody_admitted_this() {}" }]),
+    );
+
+    let stored = store::load_object(root, id).expect("stored");
+    integrity::check_stored_object_integrity(&stored).expect_err("the edit breaks integrity");
+    let provable = engr::ops::provable(root, id).expect("provable");
+    let differences = engr::view::repair_differences(&stored, &provable).expect("compare");
+    let named: Vec<&str> = differences
+        .iter()
+        .map(|difference| difference.at.as_str())
+        .collect();
+    assert!(
+        named.contains(&"§1.content"),
+        "supplementary content is sealed material too: {named:?}"
+    );
+    assert!(
+        !named.iter().any(|at| at.contains("sha256")),
+        "seals are how the difference was found, not the difference: {named:?}"
+    );
+}
+
+/// The durable boundary binds review provenance to the review the human saw.
+///
+/// A Challenge that froze a Rule Review and one that froze none are two
+/// different questions, and `{outcome, result, attempts}` is what a person was
+/// standing behind rather than metadata beside it — overruling a failure and
+/// following a pass are two different assents to the same wording.
+/// `EventAdmission::validate` can only show a review block is internally
+/// coherent; the append boundary is where it can be shown to be *this* one,
+/// because the Challenge is still on disk at that moment.
+#[test]
+fn a_human_event_carries_the_review_its_challenge_froze() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681852";
+    admit_human(root, creation(id));
+
+    // A governed mutation, overruled by a human: the Challenge freezes a failed
+    // review, and history is meant to record `overridden` / `failed` / 2.
+    object_rule(root);
+    let payload = add(id, "wording a human admitted over a failed review");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Failed,
+        Some("the policy was not satisfied and a person decided anyway"),
+    );
+    let review = gate::ReviewAttestation {
+        attempt: 2,
+        ..review
+    };
+    let prepared = gate::prepare_reviewed(root, payload.clone(), gate::Allowance::Normal, review)
+        .expect("prepare the override");
+    let code = prepared.candidate.code().to_owned();
+    let rev = store::load_object(root, id).expect("object").rev + 1;
+    let truthful = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .map(gate::FrozenReview::admitted)
+        .expect("the challenge froze a review");
+    assert_eq!(truthful.attempts, 2);
+    assert_eq!(truthful.result, proof::ReviewResult::Failed);
+
+    let event = |review: Option<engr::model::ReviewProvenance>| {
+        // Stamped as confirmation stamps it: the Section and the Event state
+        // one admission instant, which the durable boundary now requires.
+        let at = "2026-09-02T00:00:00Z";
+        let mut action = prepared.candidate.payload.action.clone();
+        if let Some(value) = action.value_mut() {
+            value.admitted.at = at.to_owned();
+        }
+        Event::sealed(
+            id,
+            engr::model::new_id(),
+            action,
+            rev,
+            EventAdmission {
+                by: Admission::Human,
+                at: at.to_owned(),
+                confirmation: Some(engr::model::HumanConfirmation {
+                    challenge: code.clone(),
+                }),
+                review,
+            },
+        )
+        .expect("a well formed record")
+    };
+
+    // The exact mapping is what the boundary accepts.
+    store::check_appendable(root, &event(Some(truthful.clone())))
+        .expect("the review the challenge froze is appendable");
+
+    // And every other structurally valid answer is refused, for the same
+    // challenge and the same mutation.
+    let forgeries = [
+        ("dropped", None),
+        (
+            "invented as a pass",
+            Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Passed,
+                result: proof::ReviewResult::Passed,
+                attempts: 2,
+            }),
+        ),
+        (
+            "restated as exhausted",
+            Some(engr::model::ReviewProvenance {
+                outcome: engr::model::ReviewOutcome::Overridden,
+                result: proof::ReviewResult::Exhausted,
+                attempts: 2,
+            }),
+        ),
+        (
+            "restated on another attempt",
+            Some(engr::model::ReviewProvenance {
+                attempts: 9,
+                ..truthful.clone()
+            }),
+        ),
+    ];
+    for (what, review) in forgeries {
+        let error = store::check_appendable(root, &event(review))
+            .expect_err(&format!("{what} review provenance must be refused"));
+        assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}: {error}");
+        assert!(
+            error.message.contains("does not describe the transition"),
+            "{what}: {error}"
+        );
+    }
+}
+
+/// Two rules whose snapshot order is not their id order.
+///
+/// A `BoundRule`'s canonical bytes begin with `based_on`, so a rule that has one
+/// sorts before a rule that does not, whatever the ids say. That is right for a
+/// hash and wrong for the set a human reads.
+fn rules_whose_orders_disagree(root: &Path) {
+    std::fs::create_dir_all(rules::dir(root)).expect("rules dir");
+    std::fs::write(root.join("AGENTS.md"), "basis\n").expect("basis");
+    std::fs::write(
+        rules::dir(root).join("zebra.md"),
+        "---\nid: zebra\napplies:\n  domains:\n    - object\n---\n\n# Zebra\n\nReviewed.\n",
+    )
+    .expect("rule");
+    std::fs::write(
+        rules::dir(root).join("alpha.md"),
+        "---\nid: alpha\napplies:\n  domains:\n    - object\nbased_on:\n  - path: AGENTS.md\n---\n\n# Alpha\n\nReviewed.\n",
+    )
+    .expect("rule");
+}
+
+/// The frozen Rule-ID set is written in its own canonical order.
+///
+/// #66 orders set-like arrays by JCS element bytes, and the amendment defines
+/// `review.rules` as the applicable Rule-ID set. The freeze step mapped the
+/// snapshot order straight to ids, and the snapshot order is the hash's — which
+/// begins with a rule's bases rather than its name.
+#[test]
+fn a_frozen_review_names_its_rules_in_canonical_order() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681853";
+    admit_human(root, creation(id));
+    rules_whose_orders_disagree(root);
+
+    let payload = add(id, "wording governed by two rules");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Passed,
+        None,
+    );
+
+    // The premise: for this pair the two orders really do disagree, so the test
+    // is about the difference rather than about a case where there is none.
+    let before = store::load_object(root, id).expect("object");
+    let mut after = before.clone();
+    let probe = Event::sealed(
+        id,
+        engr::model::new_id(),
+        payload.action.clone(),
+        before.rev + 1,
+        EventAdmission::human("2026-09-02T00:00:00Z", "ABC234"),
+    )
+    .expect("event");
+    engr::model::project(&mut after, &probe).expect("project");
+    let mutation = proof::object_review_mutation(&before, &after, &payload).expect("mutation");
+    let binding = rules::bind_object(root, &mutation, before.rev).expect("binding");
+    let snapshot_order: Vec<String> = binding.rules().iter().map(|rule| rule.id.clone()).collect();
+    assert_ne!(
+        snapshot_order,
+        binding.rule_ids(),
+        "the fixture must be one where the hash order and the id order differ"
+    );
+
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the governed mutation");
+    let frozen = prepared
+        .candidate
+        .subject
+        .review
+        .as_ref()
+        .expect("a frozen review");
+    assert_eq!(
+        frozen.rules,
+        binding.rule_ids(),
+        "the frozen set is the canonical spelling, not the hash's order"
+    );
+    assert_eq!(frozen.rules, vec!["alpha".to_owned(), "zebra".to_owned()]);
+
+    // And it survives the round trip through disk, where the load boundary
+    // requires the same order.
+    engr::confirm(root, &format!("CONFIRM {}", prepared.candidate.code())).expect("confirm");
+}
+
+/// A frozen review that could not have been produced is refused.
+///
+/// The Challenge digest proves nobody edited the envelope after it was written;
+/// it says nothing about whether the block was coherent when written. A rewrite
+/// that keeps the ReviewDigest can still change the context a human is shown as
+/// settled, and confirmation would then persist the matching
+/// `{outcome, result, attempts}`.
+#[test]
+fn a_rewritten_frozen_review_is_refused() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681854";
+    admit_human(root, creation(id));
+    object_rule(root);
+
+    let payload = add(id, "wording a human admitted over a failed review");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Failed,
+        Some("the policy was not satisfied"),
+    );
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the override");
+    let code = prepared.candidate.code().to_owned();
+    let path = store::challenge_path(root, &code).expect("challenge path");
+    let original: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("challenge")).expect("json");
+
+    let reseal = |rewritten: serde_json::Value| {
+        let mut challenge: engr::confirmation::Challenge =
+            serde_json::from_value(rewritten).expect("challenge");
+        challenge.digest = challenge.recomputed_digest().expect("reseal");
+        std::fs::write(
+            &path,
+            proof::canonical_bytes(&challenge, "challenge").expect("canonical"),
+        )
+        .expect("rewrite");
+    };
+
+    // Each rewrite keeps the ReviewDigest, so only the human-readable decision
+    // context moves.
+    for (what, rules_value) in [
+        (
+            "another rule entirely",
+            serde_json::json!(["some-other-rule"]),
+        ),
+        (
+            "a rule named twice",
+            serde_json::json!(["object-policy", "object-policy"]),
+        ),
+        (
+            "an id no grammar allows",
+            serde_json::json!(["Object Policy"]),
+        ),
+        ("no rules at all", serde_json::json!([])),
+    ] {
+        let mut rewritten = original.clone();
+        rewritten["subject"]["data"]["review"]["rules"] = rules_value;
+        reseal(rewritten);
+
+        let error = engr::confirm(root, &format!("CONFIRM {code}"))
+            .expect_err(&format!("{what} must be refused"));
+        assert!(
+            error.code == engr::EXIT_SCHEMA || error.code == engr::EXIT_INVARIANT,
+            "{what}: {error}"
+        );
+    }
+
+    // An attempt its ceilings make impossible is decided against the live
+    // binding, not against the frozen bytes alone.
+    let mut rewritten = original;
+    rewritten["subject"]["data"]["review"]["result"] = serde_json::json!("exhausted");
+    rewritten["subject"]["data"]["review"]["attempts"] = serde_json::json!(1);
+    reseal(rewritten);
+    let error = engr::confirm(root, &format!("CONFIRM {code}"))
+        .expect_err("an attempt that is not past any ceiling is not exhausted");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{error}");
+}
+
+/// A Section is admitted when the Event that admits it is.
+///
+/// The amendment makes them one instant, and the constructors read one clock —
+/// but nothing durable required it, so a record carrying two different RFC3339
+/// instants passed the append and read boundaries and history disagreed with
+/// itself about when a thing was admitted.
+#[test]
+fn a_durable_event_states_one_admission_instant() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681855";
+    admit_human(root, creation(id));
+
+    let prepared = gate::prepare(root, add(id, "wording admitted at one moment")).expect("prepare");
+    let rev = store::load_object(root, id).expect("object").rev + 1;
+    let event = |section_at: &str, event_at: &str| {
+        let mut action = prepared.candidate.payload.action.clone();
+        if let Some(value) = action.value_mut() {
+            value.admitted.at = section_at.to_owned();
+        }
+        Event::sealed(
+            id,
+            engr::model::new_id(),
+            action,
+            rev,
+            EventAdmission::human(event_at, prepared.candidate.code()),
+        )
+        .expect("a well formed record")
+    };
+
+    store::check_appendable(root, &event("2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"))
+        .expect("one instant in both places is appendable");
+
+    for (what, section_at, event_at) in [
+        (
+            "a section admitted before its event",
+            "2026-09-01T00:00:00Z",
+            "2026-09-02T00:00:00Z",
+        ),
+        (
+            "a section admitted after its event",
+            "2026-09-03T00:00:00Z",
+            "2026-09-02T00:00:00Z",
+        ),
+        (
+            "the unassigned placeholder, kept in both",
+            "0001-01-01T00:00:00Z",
+            "0001-01-01T00:00:00Z",
+        ),
+    ] {
+        let error = store::check_appendable(root, &event(section_at, event_at))
+            .expect_err(&format!("{what} must be refused"));
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{what}: {error}");
+    }
+}
+
+/// Repair carries no Rule Review, so project policy cannot close the one route
+/// back from an integrity-invalid Object.
+///
+/// A repair restores exactly what admitted history derives: the projection is
+/// identical either side, so there is no proposed semantics for a Rule to
+/// judge, and `prepare_repair` deliberately freezes `review: None`. The
+/// universal freshness check read that as "no Object Rule may apply", so a
+/// workspace with any applicable Object Rule could prepare a repair and never
+/// confirm it — the recovery contract defeated by the existence of policy,
+/// unless an operator temporarily deleted their own rules.
+#[test]
+fn a_repair_is_confirmable_in_a_workspace_governed_by_an_object_rule() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681860";
+    admit_human(root, creation(id));
+    admit_human(root, add(id, "the wording that was actually admitted"));
+    let admitted = store::load_object(root, id).expect("admitted");
+
+    // Valid history first, then the policy, then the damage.
+    object_rule(root);
+    tamper(root, id);
+    integrity::check_stored_object_integrity(&store::load_object(root, id).expect("load"))
+        .expect_err("the fixture must really break integrity");
+
+    let prepared = gate::prepare_repair(root, id).expect("repair prepares");
+    assert!(
+        prepared.candidate.subject.review.is_none(),
+        "a repair proposes no semantics for a Rule to judge"
+    );
+    gate::check_rule_material(root, &prepared.candidate)
+        .expect("and no live Rule makes that question unanswerable");
+    assert!(
+        matches!(
+            gate::answerable(root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "so the screen offers the code"
+    );
+
+    // A Rule edited while the question was outstanding cannot stale it either:
+    // the Rule was never part of what was asked.
+    std::fs::write(
+        rules::dir(root).join("object-policy.md"),
+        "---\nid: object-policy\napplies:\n  domains:\n    - object\n---\n\n# Object policy\n\nReview the exact mutation, restated.\n",
+    )
+    .expect("rewrite the rule");
+    assert!(
+        matches!(
+            gate::answerable(root, &prepared.candidate).expect("answerable"),
+            gate::Answerable::Confirm
+        ),
+        "a Rule that was never part of the question cannot stale it"
+    );
+
+    let repaired = gate::confirm(root, &format!("CONFIRM {}", prepared.candidate.code()))
+        .expect("the repair is confirmable");
+    assert_eq!(
+        repaired.object.sections[0].text, admitted.sections[0].text,
+        "restored to what history proves"
+    );
+    assert!(
+        repaired.event.metadata.admitted.review.is_none(),
+        "and history records no review, because none was run"
+    );
+    integrity::check_stored_object_integrity(&repaired.object).expect("repair reseals");
+
+    // The exemption is narrow: an ordinary mutation in the same workspace still
+    // has to carry its review.
+    let error = gate::prepare(root, add(id, "an ordinary change"))
+        .expect_err("ordinary mutations are still governed");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(
+        error.message.contains("governed by object-policy"),
+        "{error}"
+    );
+}
+
+/// Finishing the cleanup of an admission that already happened is not
+/// reinterpreted by current Rules.
+///
+/// The documented crash window leaves a durable Event, a saved projection and a
+/// Challenge file. For a reviewed mutation, rebinding the frozen review against
+/// the *post-application* Object no longer reproduces it — the mutation being
+/// reviewed has already been applied — so a surface that asked Rule freshness
+/// before the Challenge's own state called the retry unanswerable, while the
+/// next line and `confirm` itself both correctly said to retype the code.
+#[test]
+fn cleanup_of_a_reviewed_admission_is_not_reinterpreted_by_live_rules() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    store::init(root).expect("init");
+    let id = "018f7d58-4ca7-7a2e-98f1-9b3014681861";
+    admit_human(root, creation(id));
+    object_rule(root);
+
+    let payload = add(id, "wording a governed mutation admitted");
+    let review = attestation(
+        root,
+        &payload,
+        Admission::Human,
+        proof::ReviewResult::Passed,
+        None,
+    );
+    let prepared = gate::prepare_reviewed(root, payload, gate::Allowance::Normal, review)
+        .expect("prepare the governed mutation");
+    let code = prepared.candidate.code().to_owned();
+    assert!(
+        prepared.candidate.subject.review.is_some(),
+        "the Challenge froze a review"
+    );
+    let admitted = gate::confirm(root, &format!("CONFIRM {code}")).expect("confirm");
+    assert_eq!(admitted.object.rev, 2);
+
+    // The crash: everything durable landed, the Challenge was never removed.
+    std::fs::write(
+        store::challenge_path(root, &code).expect("path"),
+        proof::canonical_bytes(&prepared.candidate.challenge, "challenge").expect("canonical"),
+    )
+    .expect("restore the challenge a deletion crash would have left");
+
+    // Rule freshness alone says this is unanswerable, and it is not wrong about
+    // its own question: the frozen review does not describe a mutation against
+    // the Object as it now stands. It is the wrong question to ask.
+    gate::check_rule_material(root, &prepared.candidate)
+        .expect_err("a live rebinding cannot reproduce a review of an applied mutation");
+    match gate::answerable(root, &prepared.candidate).expect("answerable") {
+        gate::Answerable::Cleanup => {}
+        other => panic!("an applied admission is cleanup, not {other:?}"),
+    }
+
+    let again = gate::confirm(root, &format!("CONFIRM {code}")).expect("cleanup finishes");
+    assert_eq!(again.object.rev, 2, "the retry admits nothing");
+    assert_eq!(
+        store::load_events(root, id).expect("events").len(),
+        2,
+        "and appends nothing"
+    );
+    assert!(
+        gate::pending(root).expect("candidates").is_empty(),
+        "and the spent Challenge is gone"
+    );
+}

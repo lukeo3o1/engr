@@ -128,10 +128,21 @@ impl EngrRef {
             }
         };
         validate_id(kind, id)?;
-        // A **positive** integer. Section ids are allocated from a counter that
-        // starts at 1, so `:0` names nothing that can ever exist — accepting it
-        // would let a reference parse, canonicalize and round-trip while being
-        // unresolvable by construction, which is worse than refusing it here.
+        // A **positive** integer, inside the protocol's shared safe-integer
+        // domain. Section ids are allocated from a counter that starts at 1, so
+        // `:0` names nothing that can ever exist — accepting it would let a
+        // reference parse, canonicalize and round-trip while being unresolvable
+        // by construction, which is worse than refusing it here.
+        //
+        // The upper bound is the same rule seen from the other side, and it has
+        // to be enforced *here* because nothing else can: the generic
+        // safe-integer walk inspects JSON numbers, and this id is embedded in a
+        // string. Without it `obj:<id>:9007199254740992` parsed and
+        // canonicalized happily, and embedding a Section id in reference text is
+        // explicitly not an escape from the owning workspace's numeric domain.
+        // The shared parser is where every domain that reuses it — Ref targets,
+        // Backlog subjects and produced outcomes, Collection members — inherits
+        // the bound.
         //
         // Whether a resource kind supports a section selector at all stays a
         // domain rule: shared syntax is not shared semantics.
@@ -144,6 +155,11 @@ impl EngrRef {
                     parsed > 0,
                     EXIT_SCHEMA,
                     "section selector must be a positive integer, and {parsed} is not"
+                );
+                ensure!(
+                    parsed <= crate::proof::MAX_SAFE_INTEGER,
+                    EXIT_SCHEMA,
+                    "section selector {parsed} is outside the shared safe-integer domain"
                 );
                 Ok(parsed)
             })
@@ -262,13 +278,7 @@ fn validate_id(kind: ResourceKind, id: &str) -> Result<()> {
                 "Object and Backlog references must encode UUIDv7 identities"
             );
         }
-        ResourceKind::Collection => {
-            ensure!(
-                id.len() == 10 && id.bytes().all(|byte| CROCKFORD.contains(&byte)),
-                EXIT_SCHEMA,
-                "collection id must be 10 lowercase Crockford Base32 characters"
-            );
-        }
+        ResourceKind::Collection => validate_collection_id(id)?,
     }
     Ok(())
 }
@@ -372,6 +382,63 @@ pub fn canonical_embedded(
 mod tests {
     use super::*;
 
+    /// A Section id embedded in reference text is inside the shared
+    /// safe-integer domain, on both spellings.
+    ///
+    /// The generic walk that holds every other integer to this bound inspects
+    /// JSON *numbers*, and this one lives in a string — so nothing else could
+    /// catch it, and `obj:<id>:9007199254740992` parsed and canonicalized as
+    /// though it named something. Embedding an id in canonical reference text is
+    /// not an escape from the numeric domain of the workspace that has to
+    /// resolve it. Enforcing it in the shared parser is what carries the bound
+    /// to Ref targets, Backlog subjects and produced outcomes, and Collection
+    /// members alike.
+    #[test]
+    fn an_embedded_section_id_cannot_escape_the_safe_integer_domain() {
+        let id = "01h47kwz2mfk0v47mffcnstqva";
+        let max = crate::proof::MAX_SAFE_INTEGER;
+        for (what, section, allowed) in [
+            ("one", 1, true),
+            ("the largest exact integer", max, true),
+            ("one past it", max + 1, false),
+            ("u64::MAX", u64::MAX, false),
+        ] {
+            for spelling in [
+                format!("obj:{id}:{section}"),
+                format!("engr:obj:{id}:{section}"),
+            ] {
+                let parsed = if spelling.starts_with("engr:") {
+                    EngrRef::parse_standalone(&spelling)
+                } else {
+                    EngrRef::parse_embedded(&spelling)
+                };
+                match (allowed, parsed) {
+                    (true, Ok(reference)) => {
+                        assert_eq!(reference.section(), Some(section), "{what}: {spelling}");
+                        // And it survives canonicalization, which is the other
+                        // half: a value that parses but cannot be written back
+                        // is a different fault.
+                        let canonical = reference
+                            .canonicalize(|_| None)
+                            .unwrap_or_else(|error| panic!("{what}: {spelling}: {error}"));
+                        assert_eq!(canonical.section(), Some(section), "{what}: {spelling}");
+                    }
+                    (true, Err(error)) => panic!("{what}: {spelling} must parse: {error}"),
+                    (false, Ok(_)) => {
+                        panic!("{what}: {spelling} names a Section no workspace can hold")
+                    }
+                    (false, Err(error)) => {
+                        assert_eq!(error.code, crate::EXIT_SCHEMA, "{what}: {spelling}");
+                        assert!(
+                            error.message.contains("safe-integer domain"),
+                            "{what}: {spelling}: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn fixed_uuid_vectors_round_trip() {
         let vectors = [
@@ -429,7 +496,9 @@ mod tests {
         for input in [
             "engr:obj:not-a-compact-uuid",
             "engr:backlog:01h47kwz2mfk0v47mffcnstqvi",
-            "engr:collection:abcdefghij",
+            "engr:collection:-leading-dash",
+            "engr:collection:UPPERCASE",
+            "engr:collection:this-id-is-far-too-long-to-be-a-collection-key",
         ] {
             assert!(EngrRef::parse_standalone(input).is_err(), "{input}");
         }
@@ -508,17 +577,28 @@ impl EngrTarget {
     }
 }
 
-/// A fresh workspace-scoped collection id: fifty random bits as ten Crockford
-/// Base32 characters.
+/// The workspace-scoped collection id grammar: `[a-z0-9][a-z0-9-]{0,31}`.
 ///
-/// Deliberately opaque and deliberately not a uuid. A collection id is short
-/// enough to say out loud and carries nothing — no date, no milestone number,
-/// no type — because every one of those would be a fact that can stop being
-/// true while the id cannot change.
-pub fn random_collection_id() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    (0..10)
-        .map(|_| CROCKFORD[rng.gen_range(0..32)] as char)
-        .collect()
+/// Caller-supplied rather than minted, unlike every other identity here. A
+/// Collection is planning metadata a person names and says out loud — `auth-01`,
+/// not a random token — and it is workspace-scoped rather than globally unique,
+/// so there is nothing a generator would be protecting against.
+///
+/// The leading character may not be `-`, so an id can never be mistaken for a
+/// command-line option, and the whole thing is lowercase so a filesystem that
+/// folds case cannot make two ids one file.
+pub fn validate_collection_id(id: &str) -> Result<()> {
+    let mut characters = id.bytes();
+    let head = characters
+        .next()
+        .ok_or_else(|| Error::new(EXIT_SCHEMA, "a collection id cannot be empty".to_owned()))?;
+    ensure!(
+        (head.is_ascii_lowercase() || head.is_ascii_digit())
+            && id.len() <= 32
+            && characters
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        EXIT_SCHEMA,
+        "collection id {id:?} is not canonical; the grammar is [a-z0-9][a-z0-9-]{{0,31}}"
+    );
+    Ok(())
 }

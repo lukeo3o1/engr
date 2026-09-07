@@ -7,43 +7,15 @@
 //! Work owns no authority, changes no Object state, is not addressable, and
 //! cannot be mistaken for the record on any screen that prints it.
 
-use engr::model::{Action, Content, Object, Payload};
+mod common;
+
 use engr::semantics::{ObjectType, State as ObjectState};
 use engr::work::{self, ItemState, State};
-use engr::{gate, ops, store};
+use engr::{ops, store};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
+use std::path::Path;
 
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
-
-fn admit(root: &Path, payload: Payload) -> Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(
-        root,
-        Payload {
-            action: Action::ObjectCreated,
-            object: id.clone(),
-            becomes: None,
-            content: Content {
-                text: title.to_owned(),
-                ..Content::default()
-            },
-        },
-    );
-    id
-}
+use common::{admit, new_object, workspace};
 
 fn compact(id: &str) -> String {
     engr::reference::encode_uuid_str(id).expect("compact")
@@ -624,15 +596,7 @@ fn completing_every_item_changes_nothing_about_the_object() {
     let id = new_object(&root, "the design");
     admit(
         &root,
-        Payload {
-            action: Action::ObjectClassified {
-                object_type: Some(ObjectType::Design),
-                state: ObjectState::Draft,
-            },
-            object: id.clone(),
-            becomes: None,
-            content: Content::default(),
-        },
+        common::classify(&id, Some(ObjectType::Design), ObjectState::Draft),
     );
     let before = ops::effective(&root, &id).expect("object");
 
@@ -827,26 +791,24 @@ fn the_persisted_schema_is_not_looser_than_the_write_path() {
     let sound: Value = store::read_json(&work::path(&root, &obj(&id))).expect("read");
     let restore = || write_raw(&work::path(&root, &obj(&id)), &sound).expect("restore");
 
-    // `dependencies`, `blockers`, `items` and `items[].commits` are required and
-    // may be empty. Omitted is a third spelling the write path never produces.
+    // `dependencies`, `blockers`, `items` and `items[].commits` are omitted when
+    // empty, per the canonical omission rule. An explicit `[]` is the second
+    // spelling the write path never produces.
     for field in ["dependencies", "blockers", "items"] {
         restore();
         rewrite(&root, &obj(&id), |value| {
-            value.as_object_mut().expect("object").remove(field);
+            value[field] = json!([]);
         });
         let error = work::load(&root, &obj(&id)).expect_err(field);
         assert_eq!(error.code, engr::EXIT_SCHEMA, "{field}");
     }
     restore();
     rewrite(&root, &obj(&id), |value| {
-        value["items"][0]
-            .as_object_mut()
-            .expect("item")
-            .remove("commits");
+        value["items"][0]["commits"] = json!([]);
     });
     assert!(
         work::load(&root, &obj(&id)).is_err(),
-        "commits is required too"
+        "an empty commit list is omitted too"
     );
 
     // The write path refuses a duplicate dependency and a duplicate commit, so
@@ -1396,4 +1358,59 @@ fn a_corrupt_sidecar_still_holds_the_subject_in_place() {
             .expect_err("a broken sidecar is not an absent one");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(engr::backlog::load(&root, &item).is_ok());
+}
+
+/// Not being able to establish absence is not absence.
+///
+/// Absence is what lets the final Backlog Section be consumed, which removes the
+/// item — so a sidecar that may still be there must stop it. `exists` answered
+/// this with `is_ok()`, which reads a permission failure, an I/O error or a path
+/// that is not a directory as "no sidecar", and the guard then let the subject
+/// be removed with its execution memory possibly still on disk. It is the same
+/// fail-open shape the migration floor already refuses.
+///
+/// Unix-only because the fault has to be a stat failure that is *not*
+/// `NotFound`: a regular file where the sidecar directory belongs gives
+/// `ENOTDIR` there, while Windows reports the same shape as absence.
+#[test]
+#[cfg(unix)]
+fn work_that_cannot_be_established_blocks_resolving_the_last_point() {
+    let (_dir, root) = workspace();
+    let item = backlog_item(&root, "unresolved topic", "the only point");
+    work::start(&root, &bl(&item), None, engr::rules::Attempt::FIRST).expect("sidecar");
+    let subject = bl(&item);
+    assert!(work::exists(&root, &subject).expect("stat"), "it is there");
+
+    // The answer becomes unknowable: the directory the sidecar lives in is
+    // replaced by a regular file, so stat fails with something that is not
+    // absence.
+    let dir = work::root_dir(&root).join("backlog");
+    std::fs::remove_dir_all(&dir).expect("remove the directory");
+    std::fs::write(&dir, "").expect("a file where the directory belongs");
+    let error = work::exists(&root, &subject).expect_err("not knowing is not no");
+    assert_ne!(error.code, 0);
+
+    let refused =
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect_err("the last point cannot be resolved while a sidecar may still exist");
+    assert_ne!(refused.code, 0);
+    // And the item is still there: a refusal that had already removed it would
+    // be worse than the fail-open it replaced.
+    assert_eq!(
+        engr::backlog::load(&root, &item)
+            .expect("the item survives")
+            .sections
+            .len(),
+        1
+    );
+
+    // With the directory back, absence is establishable again and the ordinary
+    // rule applies: discard the memory, then resolve.
+    std::fs::remove_file(&dir).expect("remove the file");
+    std::fs::create_dir_all(&dir).expect("restore the directory");
+    assert!(!work::exists(&root, &subject).expect("stat"), "it is gone");
+    assert!(
+        engr::backlog::consume_section(&root, &item, 1, &on_backlog_section(&root, &item, 1))
+            .expect("the last point resolves")
+    );
 }

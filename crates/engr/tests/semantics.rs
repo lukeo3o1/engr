@@ -5,19 +5,14 @@
 //! nothing leaves the attention set quietly, that a superseded record always
 //! says what replaced it, and that a Section stays one bounded assertion.
 
-use engr::model::{Action, Content, Object, Payload, Ref};
+mod common;
+
+use common::{admit, new_object, payload, text_ref, wording, workspace, Act};
+use engr::model::{Content, Object};
 use engr::semantics::{ObjectType, Relation, RelationType, Role, State, Supplement, Target};
 use engr::{gate, ops, store, view};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
-
-fn workspace() -> (TempDir, PathBuf) {
-    let dir = TempDir::new().expect("temp dir");
-    let root = dir.path().to_path_buf();
-    store::init(&root).expect("init");
-    (dir, root)
-}
+use std::path::Path;
 
 fn git(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -55,51 +50,8 @@ fn repository(root: &Path) -> String {
     engr::git::head(root).expect("HEAD")
 }
 
-fn payload(action: Action, object: &str, content: Content) -> Payload {
-    Payload {
-        action,
-        object: object.to_owned(),
-        becomes: None,
-        content,
-    }
-}
-
-fn wording(text: &str) -> Content {
-    Content {
-        text: text.to_owned(),
-        ..Content::default()
-    }
-}
-
-fn admit(root: &Path, payload: Payload) -> Object {
-    let prepared = gate::prepare(root, payload).expect("prepare");
-    let response = format!("CONFIRM {}", prepared.candidate.challenge);
-    gate::confirm(root, &response).expect("confirm").object
-}
-
-fn new_object(root: &Path, title: &str) -> String {
-    let id = engr::model::new_id();
-    admit(root, payload(Action::ObjectCreated, &id, wording(title)));
-    id
-}
-
-fn text_ref(root: &Path, object: &str, section: u64, commit: &str) -> Ref {
-    let target = ops::effective(root, object).expect("reference target");
-    Ref::selective(
-        engr::dependency::admit(
-            root,
-            &target,
-            target.sha256.as_deref().expect("aggregate seal"),
-            section,
-            &[engr::dependency::SemanticField::Text],
-            commit,
-        )
-        .expect("admit selective reference"),
-    )
-}
-
-fn classify(object_type: Option<ObjectType>, state: State) -> Action {
-    Action::ObjectClassified { object_type, state }
+fn classify(object_type: Option<ObjectType>, state: State) -> Act {
+    Act::Classify { object_type, state }
 }
 
 fn classified(root: &Path, id: &str, object_type: Option<ObjectType>, state: State) -> Object {
@@ -133,25 +85,45 @@ fn rewrite(root: &Path, id: &str, edit: impl FnOnce(&mut Value)) {
     write_raw(&path, &value).expect("write");
 }
 
-/// Adding semantic fields must not have moved any digest that already exists.
+/// The Section seal is taken over the persisted Section, minus its own digest.
 ///
-/// The section hash is what `verify` recomputes, what a ref pins, and what
-/// tamper detection compares — so a change to the canonical form would report
-/// every section confirmed before this release as forged. The vector is the
-/// literal canonical JSON from before the fields existed, hashed outside engr.
+/// Pinned as literal bytes, because a member quietly gaining or losing
+/// `skip_serializing_if` is a tidy-looking change that would give every Section
+/// with an empty collection a different seal from the one another
+/// implementation computes.
 #[test]
-fn a_section_carrying_none_of_the_new_fields_hashes_exactly_as_it_did_before() {
-    let content = Content {
-        text: "the confirmed wording".to_owned(),
-        based_on: None,
-        refs: Vec::new(),
-        ..Content::default()
-    };
+fn a_section_seals_over_its_persisted_bytes_without_its_own_digest() {
+    let section = engr::model::Section::from_value(
+        1,
+        engr::model::SectionValue::new(
+            engr::semantics::Admitted::new(
+                engr::semantics::Admission::Human,
+                "2026-08-31T00:00:00Z",
+            ),
+            Content {
+                text: "the confirmed wording".to_owned(),
+                ..Content::default()
+            },
+        ),
+    )
+    .expect("section");
+
+    let mut value = serde_json::to_value(&section).expect("json");
     assert_eq!(
-        content.sha256().expect("hash"),
-        "6a2607e8a12be0e0a74527dc2c6a9109c1d04f1048e3915a3b67ee4c2c449f1d",
-        "role, content and relations are skipped when empty, so the canonical form is unchanged"
+        value
+            .as_object()
+            .expect("object")
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["admitted", "digest", "id", "text"],
+        "everything optional and empty is omitted, never written out"
     );
+    value.as_object_mut().expect("object").remove("digest");
+    let expected = engr::proof::sha256_of(
+        &engr::proof::canonical_bytes(&value, "section").expect("canonical"),
+    );
+    assert_eq!(section.digest, format!("1:{expected}"));
+    engr::integrity::check_section_seal(&section).expect("it seals over itself");
 }
 
 #[test]
@@ -312,16 +284,11 @@ fn an_object_outside_the_attention_set_refuses_a_content_revision() {
     let id = new_object(&root, "accepted design");
     admit(
         &root,
-        payload(Action::SectionAdded, &id, wording("the original wording")),
+        payload(Act::Add, &id, wording("the original wording")),
     );
     classified(&root, &id, Some(ObjectType::Design), State::Accepted);
 
-    for action in [
-        Action::SectionAdded,
-        Action::SectionRevised { section: 1 },
-        Action::SectionDeleted { section: 1 },
-        Action::ObjectRenamed,
-    ] {
+    for action in [Act::Add, Act::Revise(1), Act::Delete(1), Act::Rename] {
         let content = if action.carries_content() {
             wording("work resumed")
         } else {
@@ -339,14 +306,7 @@ fn an_object_outside_the_attention_set_refuses_a_content_revision() {
 
     // The way through is a classification of its own, confirmed on its own.
     classified(&root, &id, Some(ObjectType::Design), State::Draft);
-    let object = admit(
-        &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &id,
-            wording("work resumed"),
-        ),
-    );
+    let object = admit(&root, payload(Act::Revise(1), &id, wording("work resumed")));
     assert_eq!(object.sections[0].text, "work resumed");
 }
 
@@ -355,13 +315,10 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
     let (_dir, root) = workspace();
     let commit = repository(&root);
     let target = new_object(&root, "the target");
+    admit(&root, payload(Act::Add, &target, wording("depended upon")));
     admit(
         &root,
-        payload(Action::SectionAdded, &target, wording("depended upon")),
-    );
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, wording("also depended upon")),
+        payload(Act::Add, &target, wording("also depended upon")),
     );
     git(&root, &["add", "-A"]);
     git(
@@ -391,13 +348,13 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
     let object = admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "stands on both".to_owned(),
                 refs: vec![pin(2), pin(1)],
                 relations: vec![implemented("verify"), implemented("check")],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
@@ -420,13 +377,13 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
     let error = gate::prepare(
         &root,
         payload(
-            Action::SectionRevised { section: 1 },
+            Act::Revise(1),
             &id,
             Content {
                 text: "stands on both".to_owned(),
                 refs: vec![pin(1), pin(2)],
                 relations: vec![implemented("verify"), implemented("check")],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
@@ -439,17 +396,17 @@ fn refs_and_relations_are_sets_whose_order_is_not_a_semantic_change() {
         Content {
             text: "twice".to_owned(),
             refs: vec![pin(1), pin(1)],
-            based_on: Some(commit.clone()),
+            based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
             ..Content::default()
         },
         Content {
             text: "twice".to_owned(),
             relations: vec![implemented("verify"), implemented("verify")],
-            based_on: Some(commit.clone()),
+            based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
             ..Content::default()
         },
     ] {
-        let error = gate::prepare(&root, payload(Action::SectionAdded, &id, duplicated))
+        let error = gate::prepare(&root, payload(Act::Add, &id, duplicated))
             .expect_err("a set cannot hold the same member twice");
         assert_eq!(error.code, engr::EXIT_SCHEMA);
         assert!(error.message.contains("twice"), "{error}");
@@ -482,7 +439,7 @@ fn supersession_confirms_the_state_the_replacement_and_the_reason_together() {
     let error = gate::prepare(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "replaced".to_owned(),
@@ -500,7 +457,7 @@ fn supersession_confirms_the_state_the_replacement_and_the_reason_together() {
     let object = admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &id,
             Content {
                 text: "Replaced: the new decision removes the extra dependency.".to_owned(),
@@ -531,7 +488,7 @@ fn the_superseded_state_and_its_replacement_cannot_be_separated_afterwards() {
     let object = admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &id,
             Content {
                 text: "replaced, and here is why".to_owned(),
@@ -556,16 +513,12 @@ fn the_superseded_state_and_its_replacement_cannot_be_separated_afterwards() {
         ),
         (
             "deleting the section that holds the relation",
-            payload(
-                Action::SectionDeleted { section: rationale },
-                &id,
-                Content::default(),
-            ),
+            payload(Act::Delete(rationale), &id, Content::default()),
         ),
         (
             "revising the rationale without the relation",
             payload(
-                Action::SectionRevised { section: rationale },
+                Act::Revise(rationale),
                 &id,
                 Content {
                     text: "replaced, and here is a better why".to_owned(),
@@ -601,7 +554,7 @@ fn a_replacement_cannot_point_at_itself_or_close_a_cycle() {
     };
     let supersede = |id: &str, target: &str| {
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             id,
             Content {
                 text: "replaced".to_owned(),
@@ -650,12 +603,12 @@ fn implemented_by_pins_a_path_that_was_really_in_that_commit() {
     let object = admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "the verifier implements this".to_owned(),
                 relations: vec![relation("src/verifier.rs", &commit)],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
@@ -682,7 +635,7 @@ fn implemented_by_pins_a_path_that_was_really_in_that_commit() {
         let error = gate::prepare(
             &root,
             payload(
-                Action::SectionAdded,
+                Act::Add,
                 &id,
                 Content {
                     text: "bad provenance".to_owned(),
@@ -690,7 +643,7 @@ fn implemented_by_pins_a_path_that_was_really_in_that_commit() {
                         relation: RelationType::ImplementedBy,
                         target,
                     }],
-                    based_on: Some(commit.clone()),
+                    based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                     ..Content::default()
                 },
             ),
@@ -708,7 +661,7 @@ fn implemented_by_pins_a_path_that_was_really_in_that_commit() {
     admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "a symbol nothing verifies".to_owned(),
@@ -720,7 +673,7 @@ fn implemented_by_pins_a_path_that_was_really_in_that_commit() {
                         commit: commit.clone(),
                     },
                 }],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
@@ -739,7 +692,7 @@ fn supplementary_content_keeps_its_order_and_allows_repeated_types() {
     let object = admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "one assertion, three excerpts".to_owned(),
@@ -759,15 +712,13 @@ fn supplementary_content_keeps_its_order_and_allows_repeated_types() {
         content: reordered,
         ..Content::default()
     };
+    let reshuffled =
+        engr::model::Section::from_value(1, common::value(shuffled.clone())).expect("section");
     assert_ne!(
-        shuffled.sha256().expect("hash"),
-        object.sections[0].sha256,
+        reshuffled.digest, object.sections[0].digest,
         "moving an entry changes the assertion"
     );
-    let object = admit(
-        &root,
-        payload(Action::SectionRevised { section: 1 }, &id, shuffled),
-    );
+    let object = admit(&root, payload(Act::Revise(1), &id, shuffled));
     assert_eq!(object.sections[0].content[0].body, "let second = 2;");
 }
 
@@ -777,7 +728,7 @@ fn a_normal_threshold_refuses_once_and_an_explicit_retry_gets_through_the_gate()
     let id = new_object(&root, "size policy");
     let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
 
-    let error = gate::prepare(&root, payload(Action::SectionAdded, &id, wording(&long)))
+    let error = gate::prepare(&root, payload(Act::Add, &id, wording(&long)))
         .expect_err("the first attempt is refused");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
@@ -786,16 +737,9 @@ fn a_normal_threshold_refuses_once_and_an_explicit_retry_gets_through_the_gate()
         error.message
     );
 
-    let prepared =
-        gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
-            .expect("an explicit retry goes to the human");
-    assert!(
-        prepared.candidate.context.oversize,
-        "the exception travels with the candidate so the screen can say so"
-    );
-    let object = gate::confirm(&root, &format!("CONFIRM {}", prepared.candidate.challenge))
-        .expect("the normal confirmation flow admits it")
-        .object;
+    let prepared = gate::prepare_oversize(&root, payload(Act::Add, &id, wording(&long)))
+        .expect("an explicit retry goes to the human");
+    let object = common::confirm(&root, prepared.candidate.code());
     assert_eq!(
         object.sections[0].text.chars().count(),
         long.chars().count()
@@ -810,11 +754,7 @@ fn a_normal_threshold_refuses_once_and_an_explicit_retry_gets_through_the_gate()
     );
     let error = gate::prepare(
         &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &id,
-            wording(&format!("{long}y")),
-        ),
+        payload(Act::Revise(1), &id, wording(&format!("{long}y"))),
     )
     .expect_err("a previously admitted Section carries no exemption");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
@@ -863,8 +803,7 @@ fn a_hard_ceiling_refuses_even_an_explicit_retry() {
             },
         ),
     ] {
-        let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, content))
-            .expect_err(what);
+        let error = gate::prepare_oversize(&root, payload(Act::Add, &id, content)).expect_err(what);
         assert_eq!(error.code, engr::EXIT_INVARIANT, "{what}");
         assert!(
             error.message.contains("hold at all"),
@@ -881,7 +820,7 @@ fn every_new_semantic_field_is_inside_what_the_human_confirmed() {
     let id = new_object(&root, "hashing");
     let base = Content {
         text: "the assertion".to_owned(),
-        based_on: Some(commit.clone()),
+        based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
         ..Content::default()
     };
     let variants = [
@@ -904,24 +843,25 @@ fn every_new_semantic_field_is_inside_what_the_human_confirmed() {
             ..base.clone()
         },
     ];
-    let plain = gate::prepare(&root, payload(Action::SectionAdded, &id, base.clone()))
+    let plain = gate::prepare(&root, payload(Act::Add, &id, base.clone()))
         .expect("prepare")
         .candidate
-        .candidate_digest
+        .challenge
+        .digest
         .clone();
     for variant in variants {
-        let candidate = gate::prepare(&root, payload(Action::SectionAdded, &id, variant))
+        let candidate = gate::prepare(&root, payload(Act::Add, &id, variant.clone()))
             .expect("prepare")
             .candidate;
         assert_ne!(
-            candidate.candidate_digest, plain,
-            "a semantic field outside the payload hash is one a human never assented to"
+            candidate.challenge.digest, plain,
+            "a semantic field outside the frozen subject is one a human never assented to"
         );
-        // And inside the section hash, so `verify` can see it move.
-        assert_ne!(
-            candidate.payload.content.sha256().expect("hash"),
-            base.sha256().expect("hash")
-        );
+        // And inside the Section seal, so `verify` can see it move.
+        let sealed = engr::model::Section::from_value(1, common::value(variant)).expect("section");
+        let plain_section =
+            engr::model::Section::from_value(1, common::value(base.clone())).expect("section");
+        assert_ne!(sealed.digest, plain_section.digest);
     }
 }
 
@@ -942,20 +882,16 @@ fn a_candidate_bound_to_a_classification_dies_when_the_object_moves() {
     // Something else lands first. Preparing it supersedes this candidate, which
     // is the ordinary path — so put the file back to reach the case where a code
     // outlives the state it was bound to.
-    let code = prepared.candidate.challenge.clone();
+    let code = prepared.candidate.code().to_owned();
     admit(
         &root,
-        payload(
-            Action::SectionAdded,
-            &id,
-            wording("work happened meanwhile"),
-        ),
+        payload(Act::Add, &id, wording("work happened meanwhile")),
     );
     write_raw(
-        &store::candidate_path(&root, &code).expect("candidate path"),
-        &prepared.candidate,
+        &store::challenge_path(&root, &code).expect("challenge path"),
+        &prepared.candidate.challenge,
     )
-    .expect("restore the overtaken candidate");
+    .expect("restore the overtaken challenge");
 
     let candidate = gate::find(&root, &code).expect("the file is still a valid candidate");
     assert!(
@@ -983,7 +919,7 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
     admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "a section with everything".to_owned(),
@@ -996,7 +932,7 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
                         commit: commit.clone(),
                     },
                 }],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
@@ -1067,97 +1003,58 @@ fn stored_semantic_fields_outside_the_schema_are_refused_rather_than_dropped() {
     }
 }
 
-/// A workspace written before Phase 3 keeps loading, and gains nothing it did
-/// not say.
+/// A `.engr` that is neither generation is refused by name, not read.
+///
+/// Two different situations, and they need different answers. A workspace whose
+/// `VERSION` this build does not write was made by another engr; one with no
+/// marker at all and no released bootstrap is not a workspace this build has a
+/// route from. Reading either under this generation's rules is exactly the
+/// silent reinterpretation the marker exists to prevent.
 #[test]
-fn a_migrated_workspace_carries_no_invented_classification() {
+fn a_workspace_of_no_recognized_generation_is_refused_rather_than_read() {
     let (_dir, root) = workspace();
-    let id = new_object(&root, "legacy object");
-    admit(
-        &root,
-        payload(Action::SectionAdded, &id, wording("confirmed long ago")),
-    );
-    admit(
-        &root,
-        payload(Action::ObjectClosed, &id, Content::default()),
-    );
+    let id = new_object(&root, "an object");
+    admit(&root, payload(Act::Add, &id, wording("confirmed wording")));
 
-    // Put it back into the v0 shape a Phase 0 workspace really had — which
-    // means dropping every member that generation did not have, not only
-    // renaming the two whose spelling changed. `type`, `role`, `content` and
-    // `relations` all arrived later, and their values here are the empty ones
-    // the content hash omits, so the legacy seals below are unaffected.
-    let current = store::load_object(&root, &id).expect("current object");
-    rewrite(&root, &id, |value| {
-        let object = value.as_object_mut().expect("object");
-        object.remove("sha256");
-        object.remove("type");
-        object.insert("format".to_owned(), Value::String("engr-object".to_owned()));
-        object.insert("version".to_owned(), Value::from(1));
-        let state = object.remove("state").expect("state");
-        object.insert("status".to_owned(), state);
-        for stored in object["sections"].as_array_mut().expect("sections") {
-            let stored = stored.as_object_mut().expect("section");
-            let section_id = stored["id"].as_u64().expect("section id");
-            let section = current.section(section_id).expect("current section");
-            stored.remove("admission");
-            for later in ["role", "content", "relations"] {
-                stored.remove(later);
-            }
-            let admitted_at = stored.remove("admitted_at").expect("admitted_at");
-            stored.insert("confirmed_at".to_owned(), admitted_at);
-            stored.insert(
-                "sha256".to_owned(),
-                Value::String(section.recomputed_sha256().expect("legacy Section seal")),
-            );
-        }
-    });
-    let events_path = store::events_path(&root, &id);
-    let mut retained = String::new();
-    for line in std::fs::read_to_string(&events_path)
-        .expect("events")
-        .lines()
-    {
-        let mut event: engr::model::Event = serde_json::from_str(line).expect("event");
-        event.version = engr::EVENT_ENVELOPE_VERSION_V0;
-        event.provenance = engr::model::Provenance::confirmed(
-            "TEST00",
-            event.payload.sha256().expect("payload hash"),
+    let version = store::version_path(&root);
+    for (marker, expected) in [
+        ("2\n", "newer engr"),
+        ("1", "not a workspace generation"),
+        (" 1\n", "not a workspace generation"),
+        ("", "not a workspace generation"),
+    ] {
+        std::fs::write(&version, marker).expect("write VERSION");
+        let error = store::validate_format(&root).expect_err(marker);
+        assert_eq!(error.code, engr::EXIT_SCHEMA, "{marker:?}");
+        assert!(
+            error.message.contains(expected),
+            "{marker:?} should say {expected:?}, said {:?}",
+            error.message
         );
-        retained.push_str(&serde_json::to_string(&event).expect("event"));
-        retained.push('\n');
     }
-    std::fs::write(events_path, retained).expect("retained events");
-    std::fs::remove_file(store::engr_dir(&root).join("format.json")).expect("format");
 
+    // No marker and no released bootstrap either: not a workspace with a route.
+    std::fs::remove_file(&version).expect("remove VERSION");
+    let error = store::validate_format(&root).expect_err("no generation at all");
+    assert!(
+        error.message.contains("released predecessor"),
+        "{}",
+        error.message
+    );
+
+    // And the released bootstrap is read as the predecessor, not as this
+    // generation — read-only until an explicit migration.
+    std::fs::write(
+        store::engr_dir(&root).join("format.json"),
+        "{\"format\":\"engr-workspace\",\"version\":1}",
+    )
+    .expect("bootstrap");
     assert_eq!(
-        store::validate_format(&root).expect("detect"),
-        store::WorkspaceFormat::LegacyV0
+        store::validate_format(&root).expect("the predecessor is recognized"),
+        store::WorkspaceFormat::Predecessor
     );
-    // Readable before migration, and unchanged on disk.
-    let before = ops::effective(&root, &id).expect("legacy read");
-    assert_eq!(before.state, State::Closed);
-    assert_eq!(before.object_type, None);
-
-    store::migrate(&root).expect("migrate");
-    let after = store::load_object(&root, &id).expect("migrated");
-    assert_eq!(after.state, State::Closed);
-    assert_eq!(
-        after.object_type, None,
-        "migration classifies nothing: the old record does not say what kind of thing it is"
-    );
-    let raw: Value = store::read_json(&store::object_path(&root, &id)).expect("raw");
-    assert!(raw.get("status").is_none(), "{raw}");
-    assert!(raw["type"].is_null(), "{raw}");
-    assert_eq!(raw["state"], Value::String("closed".to_owned()));
-
-    // And the old vocabulary still works on it, because that is what its own
-    // confirmed history is written in.
-    let object = admit(
-        &root,
-        payload(Action::ObjectReopened, &id, Content::default()),
-    );
-    assert_eq!(object.state, State::Open);
+    let error = store::require_current(&root).expect_err("read-only until migrated");
+    assert!(error.message.contains("engr migrate"), "{}", error.message);
 }
 
 /// One persisted order for a set, and re-proposing the same members either way
@@ -1175,13 +1072,10 @@ fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
     let (_dir, root) = workspace();
     let commit = repository(&root);
     let target = new_object(&root, "the target");
+    admit(&root, payload(Act::Add, &target, wording("depended upon")));
     admit(
         &root,
-        payload(Action::SectionAdded, &target, wording("depended upon")),
-    );
-    admit(
-        &root,
-        payload(Action::SectionAdded, &target, wording("also depended upon")),
+        payload(Act::Add, &target, wording("also depended upon")),
     );
     git(&root, &["add", "-A"]);
     git(
@@ -1203,17 +1097,17 @@ fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
     let object = admit(
         &root,
         payload(
-            Action::SectionAdded,
+            Act::Add,
             &id,
             Content {
                 text: "stands on both".to_owned(),
                 refs: vec![pin(1), pin(2)],
-                based_on: Some(commit.clone()),
+                based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                 ..Content::default()
             },
         ),
     );
-    let stored_sha256 = object.section(1).expect("section").sha256.clone();
+    let stored_sha256 = object.section(1).expect("section").digest.clone();
     let canonical = object.section(1).expect("section").refs.clone();
     let stored_text =
         std::fs::read_to_string(store::object_path(&root, &id)).expect("stored bytes");
@@ -1242,12 +1136,12 @@ fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
         let error = gate::prepare(
             &root,
             payload(
-                Action::SectionRevised { section: 1 },
+                Act::Revise(1),
                 &id,
                 Content {
                     text: "stands on both".to_owned(),
                     refs,
-                    based_on: Some(commit.clone()),
+                    based_on: Some(engr::semantics::BasedOn::new(commit.clone())),
                     ..Content::default()
                 },
             ),
@@ -1259,7 +1153,7 @@ fn a_stored_ref_set_has_one_order_and_proposing_either_is_the_same_assertion() {
 
     let after = store::load_object(&root, &id).expect("load");
     assert_eq!(
-        after.sections[0].sha256, stored_sha256,
+        after.sections[0].digest, stored_sha256,
         "and nothing rewrote the stored Section behind its own hash"
     );
     assert_eq!(after.sections[0].refs, canonical);
@@ -1284,7 +1178,7 @@ fn an_oversize_exception_is_only_ever_the_retry_of_a_refusal() {
     let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
     let another = format!("{long}y");
 
-    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
+    let error = gate::prepare_oversize(&root, payload(Act::Add, &id, wording(&long)))
         .expect_err("the flag is not a way past the first refusal");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("retry of a refusal"), "{error}");
@@ -1294,29 +1188,31 @@ fn an_oversize_exception_is_only_ever_the_retry_of_a_refusal() {
     );
 
     // An exception over nothing is an agent setting the flag by default.
-    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording("brief")))
+    let error = gate::prepare_oversize(&root, payload(Act::Add, &id, wording("brief")))
         .expect_err("there is nothing here to except");
     assert_eq!(error.code, engr::EXIT_USAGE);
     assert!(error.message.contains("no exception to make"), "{error}");
 
-    gate::prepare(&root, payload(Action::SectionAdded, &id, wording(&long)))
+    gate::prepare(&root, payload(Act::Add, &id, wording(&long)))
         .expect_err("the first attempt is refused");
 
     // A refusal admits the proposal it refused, and not whatever comes next.
-    let error =
-        gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&another)))
-            .expect_err("a receipt is not a mode the workspace is now in");
+    let error = gate::prepare_oversize(&root, payload(Act::Add, &id, wording(&another)))
+        .expect_err("a receipt is not a mode the workspace is now in");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("retry of a refusal"), "{error}");
 
-    let prepared =
-        gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
-            .expect("the retry of what was actually refused");
-    assert!(prepared.candidate.context.oversize);
+    let prepared = gate::prepare_oversize(&root, payload(Act::Add, &id, wording(&long)))
+        .expect("the retry of what was actually refused");
+    assert_eq!(
+        prepared.candidate.expected_rev(),
+        1,
+        "the retry is prepared"
+    );
 
     // One refusal admits one retry. Preparing the same thing again has to be
     // refused again first, or the receipt would be a standing permission.
-    let error = gate::prepare_oversize(&root, payload(Action::SectionAdded, &id, wording(&long)))
+    let error = gate::prepare_oversize(&root, payload(Act::Add, &id, wording(&long)))
         .expect_err("the receipt does not survive being used");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("retry of a refusal"), "{error}");
@@ -1345,7 +1241,7 @@ fn an_accepted_object_is_superseded_without_being_reclassified_first() {
     let object = admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &id,
             Content {
                 text: "replaced by advisory locks".to_owned(),
@@ -1371,7 +1267,7 @@ fn an_accepted_object_is_superseded_without_being_reclassified_first() {
     let error = gate::prepare(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &id,
             Content {
                 text: "replaced again".to_owned(),
@@ -1403,7 +1299,7 @@ fn each_refused_proposal_keeps_its_own_retry() {
     let second = new_object(&root, "another object");
     let long = "x".repeat(engr::semantics::TEXT_NORMAL + 1);
     let other = format!("{long}y");
-    let proposal = |id: &str, text: &str| payload(Action::SectionAdded, id, wording(text));
+    let proposal = |id: &str, text: &str| payload(Act::Add, id, wording(text));
 
     // Both are refused, in the order that used to lose the first receipt.
     gate::prepare(&root, proposal(&first, &long)).expect_err("refused for size");
@@ -1412,10 +1308,10 @@ fn each_refused_proposal_keeps_its_own_retry() {
     // The older refusal is still the caller's to retry.
     let earlier =
         gate::prepare_oversize(&root, proposal(&first, &long)).expect("the first refusal stands");
-    assert!(earlier.candidate.context.oversize);
+    let _ = &earlier;
     let later = gate::prepare_oversize(&root, proposal(&second, &other))
         .expect("and so does the second, independently");
-    assert!(later.candidate.context.oversize);
+    let _ = &later;
 
     // Spending one leaves nothing behind for it, and takes nothing from anyone
     // else — both were spent above, so both now need a fresh refusal.
@@ -1446,50 +1342,33 @@ fn a_literal_body_keeps_every_byte_it_was_written_with() {
         ..Content::default()
     };
 
-    let object = admit(
-        &root,
-        payload(Action::SectionAdded, &id, excerpt("let x = 1;\n")),
-    );
+    let object = admit(&root, payload(Act::Add, &id, excerpt("let x = 1;\n")));
     assert_eq!(
         object.sections[0].content[0].body, "let x = 1;\n",
         "the trailing newline is stored, because nothing is entitled to drop it"
     );
-    let with_newline = object.sections[0].sha256.clone();
+    let with_newline = object.sections[0].digest.clone();
 
     // The same characters without it are a different assertion, so this is a
     // revision with something to confirm rather than a no-op.
-    let object = admit(
-        &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &id,
-            excerpt("let x = 1;"),
-        ),
-    );
+    let object = admit(&root, payload(Act::Revise(1), &id, excerpt("let x = 1;")));
     assert_eq!(object.sections[0].content[0].body, "let x = 1;");
     assert_ne!(
-        object.sections[0].sha256, with_newline,
+        object.sections[0].digest, with_newline,
         "two bodies that differ only in a trailing newline hash differently"
     );
 
     // And the same wording written twice over is still nothing to confirm, so
     // the no-op check has not been loosened along the way.
-    let error = gate::prepare(
-        &root,
-        payload(
-            Action::SectionRevised { section: 1 },
-            &id,
-            excerpt("let x = 1;"),
-        ),
-    )
-    .expect_err("the identical body is identical");
+    let error = gate::prepare(&root, payload(Act::Revise(1), &id, excerpt("let x = 1;")))
+        .expect_err("the identical body is identical");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("nothing to confirm"), "{error}");
 
     // Whitespace alone is a body. Empty is the one that means nothing.
-    let object = admit(&root, payload(Action::SectionAdded, &id, excerpt("   ")));
+    let object = admit(&root, payload(Act::Add, &id, excerpt("   ")));
     assert_eq!(object.sections[1].content[0].body, "   ");
-    let error = gate::prepare(&root, payload(Action::SectionAdded, &id, excerpt("")))
+    let error = gate::prepare(&root, payload(Act::Add, &id, excerpt("")))
         .expect_err("an empty body is not content");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("cannot be empty"), "{error}");
@@ -1515,21 +1394,18 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
     let id = new_object(&root, "the auth design");
     admit(
         &root,
-        payload(
-            Action::SectionAdded,
-            &id,
-            wording("Use short-lived tokens."),
-        ),
+        payload(Act::Add, &id, wording("Use short-lived tokens.")),
     );
     classified(&root, &id, Some(ObjectType::Design), State::Accepted);
     let before = ops::effective(&root, &id).expect("object");
     assert!(!before.needs_attention());
 
-    let revise = || Payload {
-        action: Action::SectionRevised { section: 1 },
-        object: id.clone(),
-        becomes: None,
-        content: wording("Use short-lived tokens, capped at 15 minutes."),
+    let revise = || {
+        payload(
+            Act::Revise(1),
+            &id,
+            wording("Use short-lived tokens, capped at 15 minutes."),
+        )
     };
 
     // Still refused on its own: nothing about the guard was loosened.
@@ -1538,20 +1414,24 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
 
     // And refused when the destination would leave it out of the listing, which
     // is the "only if" half of the rule.
-    let mut still_hidden = revise();
-    still_hidden.becomes = Some(engr::model::Destination {
-        object_type: Some(ObjectType::Design),
-        state: State::Rejected,
-    });
+    let still_hidden = common::becoming(
+        revise(),
+        engr::model::Destination {
+            object_type: Some(ObjectType::Design),
+            state: State::Rejected,
+        },
+    );
     let error = gate::prepare(&root, still_hidden).expect_err("rejected needs no attention");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
 
     // One confirmation that does both.
-    let mut atomic = revise();
-    atomic.becomes = Some(engr::model::Destination {
-        object_type: Some(ObjectType::Design),
-        state: State::Proposed,
-    });
+    let atomic = common::becoming(
+        revise(),
+        engr::model::Destination {
+            object_type: Some(ObjectType::Design),
+            state: State::Proposed,
+        },
+    );
     let object = admit(&root, atomic);
     assert_eq!(object.state, State::Proposed);
     assert!(object.needs_attention());
@@ -1569,32 +1449,37 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
     // Nothing is blocked any more, so one would be a second, unrelated change
     // riding along inside someone else's confirmation — and `object_classified`
     // already says that on its own, where a reader can see it.
-    let mut piggybacked = Payload {
-        action: Action::SectionRevised { section: 1 },
-        object: id.clone(),
-        becomes: Some(engr::model::Destination {
+    let base = payload(
+        Act::Revise(1),
+        &id,
+        wording("Use short-lived tokens, capped at 10 minutes."),
+    );
+    let piggybacked = common::becoming(
+        base.clone(),
+        engr::model::Destination {
             object_type: Some(ObjectType::Design),
             state: State::Draft,
-        }),
-        content: wording("Use short-lived tokens, capped at 10 minutes."),
-    };
+        },
+    );
     let error = gate::prepare(&root, piggybacked.clone()).expect_err("it already needs attention");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("already needs attention"), "{error}");
 
     // The very same revision without one is admitted, which is what makes the
     // refusal about the destination rather than about the revision.
-    piggybacked.becomes = None;
-    let object = admit(&root, piggybacked);
+    let object = admit(&root, base);
     assert_eq!(object.state, State::Proposed);
 
     // An action that names its own state takes no destination.
-    let mut confused = payload(Action::ObjectClosed, &id, engr::model::Content::default());
-    confused.becomes = Some(engr::model::Destination {
+    let mut confused = payload(Act::Close, &id, engr::model::Content::default());
+    let refused = confused.action.set_becomes(Some(engr::model::Destination {
         object_type: None,
         state: State::Open,
-    });
-    let error = gate::prepare(&root, confused).expect_err("close sets the state itself");
+    }));
+    let error = match refused {
+        Err(error) => error,
+        Ok(()) => gate::prepare(&root, confused).expect_err("close sets the state itself"),
+    };
     assert!(
         error.code == engr::EXIT_INVARIANT || error.code == engr::EXIT_USAGE,
         "{error}"
@@ -1614,7 +1499,7 @@ fn a_no_attention_object_is_revised_and_returned_to_attention_in_one_confirmatio
         .collect();
     assert_eq!(carrying.len(), 1, "{events}");
     assert!(
-        carrying[0].contains("\"section_revised\"")
+        carrying[0].contains("\"section.updated.v1\"")
             && carrying[0].contains("\"state\":\"proposed\""),
         "{}",
         carrying[0]
@@ -1651,7 +1536,7 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
     admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &middle,
             Content {
                 text: "replaced by the far end".to_owned(),
@@ -1665,7 +1550,7 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
     admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &near,
             Content {
                 text: "replaced by the middle".to_owned(),
@@ -1678,7 +1563,7 @@ fn a_supersession_chain_through_unreadable_authority_is_refused() {
 
     let replaces_source = || {
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &source,
             Content {
                 text: "replaced by the near end".to_owned(),
@@ -1741,7 +1626,7 @@ fn a_replacement_that_cannot_be_established_stops_the_source_reading_clean() {
     admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &source,
             Content {
                 text: "replaced".to_owned(),
@@ -1864,7 +1749,7 @@ fn a_new_supersession_through_a_target_that_is_gone_is_refused() {
     admit(
         &root,
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &middle,
             Content {
                 text: "replaced by the far end".to_owned(),
@@ -1877,7 +1762,7 @@ fn a_new_supersession_through_a_target_that_is_gone_is_refused() {
 
     let replaces_source = || {
         payload(
-            Action::ObjectSuperseded,
+            Act::Supersede,
             &source,
             Content {
                 text: "replaced by the middle".to_owned(),

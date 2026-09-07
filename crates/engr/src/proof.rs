@@ -13,13 +13,13 @@
 //! - **Every member is present.** A persisted Section omits `role` when it has
 //!   none; a projected one says `"role": null`. Omission is a storage
 //!   economy, and a hash contract cannot afford one.
-//! - **Representation is excluded.** Integrity seals, `admitted_at`, the
-//!   workspace version, Section ids where the operation does not identify by
+//! - **Representation is excluded.** Integrity seals, `admitted.at`, the
+//!   workspace generation, Section ids where the operation does not identify by
 //!   them — none of it is what was authorized, so none of it is hashed.
 //! - **The contract version lives outside.** Nothing here prepends a version or
 //!   a field name to the bytes; the version is the `1:` on the scalar.
 
-use crate::model::{Action, Merge, Object, Payload, Ref, Section};
+use crate::model::{Action, Object, Payload, Ref, Section};
 use crate::semantics::{Admission, ObjectType, Relation, Role, State, Supplement};
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_SCHEMA, EXIT_USAGE};
 use serde::Serialize;
@@ -181,7 +181,7 @@ impl Lifecycle {
 
 /// Everything a Section *means*, and nothing about how it is stored.
 ///
-/// `id`, `admitted_at` and the integrity seal are deliberately absent. An id
+/// `id`, `admitted.at` and the integrity seal are deliberately absent. An id
 /// identifies rather than asserts, a timestamp is when rather than what, and a
 /// seal is a claim about the bytes — none of the three is part of what somebody
 /// authorized.
@@ -192,10 +192,11 @@ impl Lifecycle {
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct SectionSemantic {
     pub admission: Admission,
+    pub header: Option<String>,
     pub role: Option<Role>,
     pub text: String,
     pub content: Vec<Supplement>,
-    pub based_on: Option<String>,
+    pub based_on: Option<crate::semantics::BasedOn>,
     pub refs: Vec<Ref>,
     pub relations: Vec<Relation>,
 }
@@ -211,18 +212,19 @@ impl SectionSemantic {
     /// `refs` and `relations` are canonicalized here, and that is the whole
     /// reason this returns a `Result`. They were copied verbatim, which made
     /// every proof over a Section sensitive to the order its array happened to
-    /// be in — and the retained v2 model orders `refs` by `derive(Ord)`
-    /// (`object`, `section`, `sha256`, `commit`) while the protocol set rule
-    /// orders by each element's JCS bytes, which begin with `commit`. Those two
-    /// disagree for the same set, so one Section could hash one way through a
-    /// candidate proof and another way through dependency semantics.
+    /// be in — a set ordered by whatever `derive(Ord)` gives its members
+    /// disagrees with the protocol set rule, which orders by each element's JCS
+    /// bytes. Those two disagree for the same set, so one Section could hash one
+    /// way through a Challenge subject and another way through dependency
+    /// semantics.
     pub fn of(section: &Section) -> Result<Self> {
         let mut refs = section.refs.clone();
         let mut relations = section.relations.clone();
         canonical_set(&mut refs, "reference")?;
         canonical_set(&mut relations, "relation")?;
         Ok(Self {
-            admission: section.admission,
+            admission: section.admitted.by,
+            header: section.header.clone(),
             role: section.role,
             text: section.text.clone(),
             content: section.content.clone(),
@@ -322,78 +324,39 @@ pub struct Operation {
     pub parameters: serde_json::Value,
 }
 
-/// Exactly what a candidate digest is taken of.
+/// The frozen projection of one Object-domain operation.
 ///
-/// All five members are always present. `before` and `after` are the projected
-/// semantic states, `null` where the operation defines none — creation has no
-/// before, because there was nothing there.
+/// Which projection each operation uses for `after`, and what its parameters
+/// carry, is fixed here and nowhere else. It may not be inferred from whatever
+/// the host language's structs happen to look like, because the whole point is
+/// that another implementation reaches the same bytes without seeing this code.
 ///
-/// `review_digest` is non-null only when the confirmation semantically depends
-/// on that exact review identity: a human overriding a failed or exhausted
-/// review is authorizing *that* review's result as well as the mutation, and a
-/// proof that did not say so would be a proof of a different act.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
-pub struct CandidateSubject {
-    operation: Operation,
-    target: String,
-    before: serde_json::Value,
-    after: serde_json::Value,
-    review_digest: Option<String>,
+/// `after` is taken from the Object the reducer produced rather than
+/// re-derived, so the projection describes the transition that actually
+/// happened — including a lifecycle the same act moved. Re-deriving it would be
+/// a second opinion about the thing being proved.
+///
+/// There is no `before` here. Rule Review's predecessor is a concurrency fact
+/// and lives in [`ReviewPrecondition`]; the transition a human authorized is the
+/// Challenge subject, which is the frozen payload itself rather than a
+/// projection of it.
+#[derive(Debug)]
+pub struct ObjectProjection {
+    pub operation: Operation,
+    pub target: String,
+    pub after: serde_json::Value,
 }
 
-impl CandidateSubject {
-    pub fn operation(&self) -> &Operation {
-        &self.operation
-    }
-
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-
-    pub fn before(&self) -> &serde_json::Value {
-        &self.before
-    }
-
-    pub fn after(&self) -> &serde_json::Value {
-        &self.after
-    }
-
-    pub fn review_digest(&self) -> Option<&str> {
-        self.review_digest.as_deref()
-    }
-    /// The versioned scalar this subject hashes to.
-    pub fn digest(&self) -> Result<String> {
-        let bytes = canonical_bytes(self, "candidate subject")?;
-        crate::digest::CANDIDATE
-            .emit(sha256_of(&bytes))
-            .map(|versioned| versioned.to_string())
-    }
-}
-
-/// Build the subject for one operation, from the states either side of it.
-///
-/// The table this implements is frozen: which projection each operation uses
-/// for `before` and `after`, and what its parameters carry. A projection may
-/// not be inferred from whatever the host language's structs happen to look
-/// like, because the whole point is that another implementation reaches the
-/// same bytes without seeing this code.
-///
-/// `before` and `after` are the Object either side of the reducer. Taking both
-/// rather than recomputing one here is deliberate: the projection must describe
-/// the transition that actually happened, including a lifecycle the same
-/// confirmed act moved, and re-deriving it would be a second opinion about the
-/// very thing being proved.
-pub fn candidate_subject(
+/// Build the frozen projection for one operation, from the states either side.
+pub fn object_projection(
     before: &Object,
     after: &Object,
     payload: &Payload,
-    review_digest: Option<String>,
-) -> Result<CandidateSubject> {
+) -> Result<ObjectProjection> {
     // The identities first, because everything below formats them into a target
-    // that a proof then names. `object_target` and `section_target` only build
-    // strings — a payload naming `not-an-id`, or naming an Object the states
-    // either side are not, produced a perfectly well-formed
-    // `CandidateDigestContract 1` over a target that denotes nothing.
+    // that a proof then names. A payload naming `not-an-id`, or naming an
+    // Object the states either side are not, would otherwise produce a
+    // perfectly well-formed digest over a target that denotes nothing.
     crate::model::validate_object_id(&payload.object)?;
     ensure!(
         payload.object == before.id && payload.object == after.id,
@@ -404,7 +367,7 @@ pub fn candidate_subject(
         after.id
     );
     let id = &payload.object;
-    let becomes = match &payload.becomes {
+    let becomes = match payload.becomes() {
         Some(destination) => serde_json::to_value(Lifecycle {
             object_type: destination.object_type,
             state: destination.state,
@@ -424,130 +387,101 @@ pub fn candidate_subject(
     };
     let json = |value: &dyn erased_json::Erased| value.to_json();
 
-    let (target, parameters, before_state, after_state) = match &payload.action {
-        Action::ObjectCreated => (
-            object_target(id),
-            serde_json::json!({}),
-            serde_json::Value::Null,
-            json(&ObjectCreation {
-                title: after.title.clone(),
-                object_type: after.object_type,
-                state: after.state,
-                sections: Vec::new(),
-            })?,
-        ),
-        Action::ObjectRenamed => (
-            object_target(id),
-            serde_json::json!({ "becomes": becomes }),
-            json(&TitleLifecycle::of(before))?,
-            json(&TitleLifecycle::of(after))?,
-        ),
-        Action::ObjectClosed | Action::ObjectReopened => (
-            object_target(id),
-            serde_json::json!({}),
-            json(&Lifecycle::of(before))?,
-            json(&Lifecycle::of(after))?,
-        ),
-        Action::ObjectClassified { object_type, state } => (
-            object_target(id),
-            serde_json::json!({ "type": object_type, "state": state }),
-            json(&Lifecycle::of(before))?,
-            json(&Lifecycle::of(after))?,
-        ),
-        Action::SectionAdded => {
-            // The resulting id is the protocol's answer, not the caller's, so
-            // it is read off what the reducer produced rather than predicted.
-            let added = added_section(before, after)?;
-            (
-                object_target(id),
-                serde_json::json!({ "section": added, "becomes": becomes }),
+    let (target, parameters, after_state) =
+        match &payload.action {
+            Action::ObjectCreated { .. } => (
+                object_target(id)?,
+                serde_json::json!({}),
+                json(&ObjectCreation {
+                    title: after.title.clone(),
+                    object_type: after.object_type,
+                    state: after.state,
+                    sections: Vec::new(),
+                })?,
+            ),
+            Action::ObjectRenamed { .. } => (
+                object_target(id)?,
+                serde_json::json!({ "becomes": becomes }),
+                json(&TitleLifecycle::of(after))?,
+            ),
+            Action::ObjectStateChanged { state } => (
+                object_target(id)?,
+                serde_json::json!({ "state": state }),
+                json(&Lifecycle::of(after))?,
+            ),
+            Action::ObjectClassified { object_type, state } => (
+                object_target(id)?,
+                serde_json::json!({ "type": object_type, "state": state }),
+                json(&Lifecycle::of(after))?,
+            ),
+            Action::SectionCreated { .. } => {
+                // The resulting id is the protocol's answer, not the caller's, so
+                // it is read off what the reducer produced rather than predicted.
+                let added = added_section(before, after)?;
+                (
+                    object_target(id)?,
+                    serde_json::json!({ "section": added, "becomes": becomes }),
+                    json(&section_state(after, added)?)?,
+                )
+            }
+            Action::SectionUpdated { section, .. } => (
+                section_target(id, *section)?,
+                serde_json::json!({ "becomes": becomes }),
+                json(&section_state(after, *section)?)?,
+            ),
+            Action::SectionDeleted { section, .. } => (
+                section_target(id, *section)?,
+                serde_json::json!({ "becomes": becomes }),
                 json(&SectionOperation {
-                    lifecycle: Lifecycle::of(before),
+                    lifecycle: Lifecycle::of(after),
                     section: None,
                 })?,
-                json(&section_state(after, added)?)?,
-            )
-        }
-        Action::SectionRevised { section } => (
-            section_target(id, *section),
-            serde_json::json!({ "becomes": becomes }),
-            json(&section_state(before, *section)?)?,
-            json(&section_state(after, *section)?)?,
-        ),
-        Action::SectionDeleted { section } => (
-            section_target(id, *section),
-            serde_json::json!({ "becomes": becomes }),
-            json(&section_state(before, *section)?)?,
-            json(&SectionOperation {
-                lifecycle: Lifecycle::of(after),
-                section: None,
-            })?,
-        ),
-        Action::SectionMerged { merge } => {
-            // Only the representation that names its survivor has a frozen
-            // projection. The retained shape allocated a fresh id and named no
-            // destination, so there is no target for it to have — and this
-            // contract was written for the generation that replaced it.
-            let Merge::Into {
-                destination,
-                sources,
-            } = merge
-            else {
-                return Err(Error::new(
-                    EXIT_SCHEMA,
-                    "the retained merge representation has no candidate projection: it names no surviving section".to_owned(),
-                ));
-            };
-            (
-                section_target(id, *destination),
-                serde_json::json!({ "sources": sources, "becomes": becomes }),
-                json(&ObjectInvariant::of(before)?)?,
+            ),
+            Action::SectionMerged { merge, .. } => (
+                section_target(id, merge.destination)?,
+                serde_json::json!({ "sources": merge.sources, "becomes": becomes }),
                 json(&ObjectInvariant::of(after)?)?,
-            )
-        }
-        Action::ObjectSuperseded => {
-            let added = added_section(before, after)?;
-            (
-                object_target(id),
-                serde_json::json!({ "rationale_section": added }),
-                json(&ObjectInvariant::of(before)?)?,
+            ),
+            Action::ObjectSuperseded { .. } => {
+                let added = added_section(before, after)?;
+                (
+                    object_target(id)?,
+                    serde_json::json!({ "rationale_section": added }),
+                    json(&ObjectInvariant::of(after)?)?,
+                )
+            }
+            // The whole Object, and no parameters at all.
+            //
+            // Repair restores exactly the replay-derived projection, so the
+            // integrity-invalid stored bytes are deliberately not an input: they are
+            // diagnostic material shown beside the proposal, and a digest that bound
+            // them could not be recomputed from history later.
+            Action::ObjectRepaired {} => (
+                object_target(id)?,
+                serde_json::json!({}),
                 json(&ObjectInvariant::of(after)?)?,
-            )
-        }
-        // The whole Object either side, and no parameters at all.
-        //
-        // Both sides are the replay-derived projection: repair restores exactly
-        // that, so what the Human confirms is "this Object becomes precisely
-        // what its admitted history says". The integrity-invalid stored bytes
-        // are deliberately **not** an input. They are diagnostic material shown
-        // beside the proposal, and a digest that bound them could not be
-        // recomputed from history later — which is the one thing every durable
-        // CandidateDigest has to survive.
-        //
-        // No parameters, because repair takes none. A parameter here would be
-        // somewhere for a repair to carry an instruction, and #35's ruling is
-        // that it carries none.
-        Action::ObjectRepaired => (
-            object_target(id),
-            serde_json::json!({}),
-            json(&ObjectInvariant::of(before)?)?,
-            json(&ObjectInvariant::of(after)?)?,
-        ),
-    };
+            ),
+            // Not a reviewable mutation. Migration is confirmed as a whole, by a
+            // Human, through its own Challenge subject family — there is no Object
+            // Rule that governs it and nothing here to project.
+            Action::ObjectMigrated { .. } => return Err(Error::new(
+                EXIT_SCHEMA,
+                "object.migrated.v1 is not an Object-domain mutation and has no review projection"
+                    .to_owned(),
+            )),
+        };
 
     // And the formatted target parses back as the identity it claims to be.
     // A Section id of 0, or one past the shared safe-integer ceiling, formats
     // into a string like any other and denotes no Section at all.
     check_canonical_target(&target)?;
-    Ok(CandidateSubject {
+    Ok(ObjectProjection {
         operation: Operation {
-            name: payload.action.label().to_owned(),
+            name: payload.action.command().to_owned(),
             parameters,
         },
         target,
-        before: before_state,
         after: after_state,
-        review_digest,
     })
 }
 
@@ -583,34 +517,40 @@ mod erased_json {
 }
 
 /// The canonical target of an operation that names a whole Object.
-pub fn object_target(id: &str) -> String {
-    format!("obj:{id}")
+pub fn object_target(id: &str) -> Result<String> {
+    crate::model::validate_object_id(id)?;
+    Ok(format!("obj:{}", crate::reference::encode_uuid_str(id)?))
 }
 
 /// A formatted target must parse back as the identity it claims to be.
 ///
-/// `object_target` and `section_target` format; they do not check. Whether the
-/// result denotes anything is a separate question, and it is the one a proof
-/// naming that target depends on.
+/// ReviewDigest input accepts the same compact reference grammar as every
+/// persisted Ref. A second raw-UUID target dialect would make the digest
+/// contract non-portable even if both strings happened to name the same bits.
 fn check_canonical_target(target: &str) -> Result<()> {
-    match target.rsplit_once(':') {
-        Some((_, section)) if section.chars().all(|c| c.is_ascii_digit()) => {
-            crate::dependency::parse_target(target).map(|_| ())
-        }
-        _ => {
-            let id = target.strip_prefix("obj:").ok_or_else(|| {
-                Error::new(
-                    EXIT_SCHEMA,
-                    format!("{target:?} is not a canonical object target"),
-                )
-            })?;
-            crate::model::validate_object_id(id)
-        }
+    let reference = crate::reference::canonical_embedded(
+        target,
+        &[crate::reference::ResourceKind::Object],
+        "Review target",
+    )?;
+    if let Some(section) = reference.section() {
+        ensure!(
+            section <= MAX_SAFE_INTEGER,
+            EXIT_SCHEMA,
+            "section id {section} is outside the shared safe-integer domain"
+        );
     }
+    Ok(())
 }
 /// The canonical target of an operation that names one Section.
-pub fn section_target(id: &str, section: u64) -> String {
-    format!("obj:{id}:{section}")
+pub fn section_target(id: &str, section: u64) -> Result<String> {
+    ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    ensure!(
+        section <= MAX_SAFE_INTEGER,
+        EXIT_SCHEMA,
+        "section id {section} is outside the shared safe-integer domain"
+    );
+    Ok(format!("{}:{section}", object_target(id)?))
 }
 
 #[cfg(test)]
@@ -635,6 +575,7 @@ mod tests {
 
         let section = SectionSemantic {
             admission: Admission::Human,
+            header: None,
             role: None,
             text: "wording".to_owned(),
             content: Vec::new(),
@@ -644,43 +585,11 @@ mod tests {
         };
         assert_eq!(
             canonical_bytes(&section, "section").expect("bytes"),
-            r#"{"admission":"human","based_on":null,"content":[],"refs":[],"relations":[],"role":null,"text":"wording"}"#
-        );
-    }
-
-    /// The subject carries all five members whatever the operation is, so a
-    /// reader never has to know which ones this operation happened to use.
-    #[test]
-    fn a_candidate_subject_always_carries_its_five_members() {
-        let subject = CandidateSubject {
-            operation: Operation {
-                name: "object.created".to_owned(),
-                parameters: serde_json::json!({}),
-            },
-            target: object_target("01a02f75-d750-73c1-8d03-32aa3b1a9fa5"),
-            before: serde_json::Value::Null,
-            after: serde_json::to_value(ObjectCreation {
-                title: "a title".to_owned(),
-                object_type: None,
-                state: State::Open,
-                sections: Vec::new(),
-            })
-            .expect("json"),
-            review_digest: None,
-        };
-        assert_eq!(
-            canonical_bytes(&subject, "subject").expect("bytes"),
             concat!(
-                r#"{"after":{"sections":[],"state":"open","title":"a title","type":null},"#,
-                r#""before":null,"#,
-                r#""operation":{"name":"object.created","parameters":{}},"#,
-                r#""review_digest":null,"#,
-                r#""target":"obj:01a02f75-d750-73c1-8d03-32aa3b1a9fa5"}"#
+                r#"{"admission":"human","based_on":null,"content":[],"header":null,"#,
+                r#""refs":[],"relations":[],"role":null,"text":"wording"}"#
             )
         );
-        let digest = subject.digest().expect("digest");
-        assert!(digest.starts_with("1:"), "{digest}");
-        assert_eq!(digest.len(), 2 + 64);
     }
 
     /// An integer past the shared safe range does not fail canonicalization —
@@ -699,74 +608,33 @@ mod tests {
         let negative = serde_json::json!({ "n": -(MAX_SAFE_INTEGER as i64) - 1 });
         assert!(canonical_bytes(&negative, "subject").is_err());
     }
-
-    /// Sections are ordered by numeric id, never by whatever order they
-    /// happened to be stored in.
-    #[test]
-    fn an_object_projection_orders_sections_by_identity() {
-        let mut object = object();
-        object.next_section_id = 4;
-        for id in [3, 1] {
-            object.sections.push(Section {
-                id,
-                admission: Admission::Human,
-                role: None,
-                text: format!("section {id}"),
-                content: Vec::new(),
-                based_on: None,
-                refs: Vec::new(),
-                relations: Vec::new(),
-                sha256: String::new(),
-                admitted_at: "2026-08-23T00:00:00Z".to_owned(),
-            });
-        }
-        let projected = ObjectInvariant::of(&object).expect("project");
-        assert_eq!(
-            projected
-                .sections
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-    }
 }
 
 #[cfg(test)]
 mod table_tests {
     use super::*;
-    use crate::model::{Content, Destination, Payload};
+    use crate::model::{Content, Destination, Payload, SectionValue};
+    use crate::semantics::Admitted;
 
-    fn payload(action: Action, object: &str, text: &str) -> Payload {
-        Payload {
-            action,
-            object: object.to_owned(),
-            becomes: None,
-            content: Content {
+    const AT: &str = "2026-08-23T00:00:00Z";
+
+    fn value(text: &str) -> SectionValue {
+        SectionValue::new(
+            Admitted::new(Admission::Human, AT),
+            Content {
                 text: text.to_owned(),
                 ..Content::default()
             },
-        }
+        )
     }
 
     fn section(id: u64, text: &str) -> Section {
-        Section {
-            id,
-            admission: Admission::Human,
-            role: None,
-            text: text.to_owned(),
-            content: Vec::new(),
-            based_on: None,
-            refs: Vec::new(),
-            relations: Vec::new(),
-            sha256: String::new(),
-            admitted_at: "2026-08-23T00:00:00Z".to_owned(),
-        }
+        Section::from_value(id, value(text)).expect("section")
     }
 
     /// The whole frozen table, checked for the two things a reader of another
     /// implementation needs: which target each operation names, and which
-    /// projection sits either side of it.
+    /// projection describes the state it arrives at.
     #[test]
     fn every_operation_projects_the_shape_the_contract_freezes() {
         let id = crate::model::new_id();
@@ -774,160 +642,179 @@ mod table_tests {
         before.rev = 1;
         before.next_section_id = 3;
         before.sections = vec![section(1, "one"), section(2, "two")];
+        before.reseal().expect("seal");
         let mut after = before.clone();
         after.rev = 2;
+        after.title = "after".to_owned();
+        after.reseal().expect("seal");
 
-        let cases: Vec<(Action, String, &str, &str)> = vec![
-            (Action::ObjectRenamed, object_target(&id), "title", "title"),
-            (Action::ObjectClosed, object_target(&id), "state", "state"),
-            (Action::ObjectReopened, object_target(&id), "state", "state"),
+        let cases: Vec<(Action, String)> = vec![
             (
-                Action::SectionRevised { section: 1 },
-                section_target(&id, 1),
-                "lifecycle",
-                "lifecycle",
+                Action::ObjectRenamed {
+                    title: "after".to_owned(),
+                    becomes: None,
+                },
+                object_target(&id).expect("object target"),
             ),
             (
-                Action::SectionDeleted { section: 2 },
-                section_target(&id, 2),
-                "lifecycle",
-                "lifecycle",
+                Action::ObjectStateChanged {
+                    state: State::Closed,
+                },
+                object_target(&id).expect("object target"),
             ),
             (
-                Action::ObjectSuperseded,
-                object_target(&id),
-                "sections",
-                "sections",
+                Action::ObjectClassified {
+                    object_type: Some(ObjectType::Design),
+                    state: State::Draft,
+                },
+                object_target(&id).expect("object target"),
+            ),
+            (
+                Action::SectionUpdated {
+                    section: 1,
+                    value: value("one, revised"),
+                    becomes: None,
+                },
+                section_target(&id, 1).expect("section target"),
+            ),
+            (
+                Action::SectionDeleted {
+                    section: 2,
+                    becomes: None,
+                },
+                section_target(&id, 2).expect("section target"),
+            ),
+            (
+                Action::SectionMerged {
+                    merge: crate::model::Merge {
+                        destination: 1,
+                        sources: vec![2],
+                    },
+                    value: value("merged"),
+                    becomes: None,
+                },
+                section_target(&id, 1).expect("section target"),
+            ),
+            (
+                Action::ObjectRepaired {},
+                object_target(&id).expect("object target"),
             ),
         ];
-
-        for (action, target, before_member, after_member) in cases {
-            let label = action.label();
-            let mut ending = after.clone();
-            if matches!(action, Action::ObjectSuperseded) {
-                // Superseding appends its rationale, so the counter moves.
-                ending.next_section_id = before.next_section_id + 1;
-            }
-            let subject = candidate_subject(&before, &ending, &payload(action, &id, "w"), None)
-                .unwrap_or_else(|error| panic!("{label}: {}", error.message));
-            assert_eq!(subject.target, target, "{label}");
-            assert_eq!(subject.operation.name, label);
-            assert!(
-                subject.before.get(before_member).is_some(),
-                "{label}: before projection"
-            );
-            assert!(
-                subject.after.get(after_member).is_some(),
-                "{label}: after projection"
-            );
+        for (action, target) in cases {
+            let name = action.command().to_owned();
+            let projected = object_projection(&before, &after, &Payload::new(id.clone(), action))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(projected.target, target, "{name} names its own target");
+            assert_eq!(projected.operation.name, name);
         }
     }
 
-    /// Creation has no before, because there was nothing there — and its after
-    /// is the neutral shape the operation is defined to arrive at.
+    /// The resulting Section id is read off what the reducer produced, never
+    /// predicted — and creation therefore names the Object, not a Section.
     #[test]
-    fn creation_has_no_before() {
+    fn creation_names_the_object_and_reports_the_allocated_section() {
         let id = crate::model::new_id();
-        let before = Object::new(id.clone(), String::new()).expect("object");
+        let mut before = Object::new(id.clone(), "before".to_owned()).expect("object");
+        before.rev = 1;
+        before.reseal().expect("seal");
         let mut after = before.clone();
-        after.title = "a title".to_owned();
-        after.rev = 1;
+        after.rev = 2;
+        after.next_section_id = 2;
+        after.sections = vec![section(1, "new wording")];
+        after.reseal().expect("seal");
 
-        let subject = candidate_subject(
+        let projected = object_projection(
             &before,
             &after,
-            &payload(Action::ObjectCreated, &id, "a title"),
-            None,
+            &Payload::new(
+                id.clone(),
+                Action::SectionCreated {
+                    value: value("new wording"),
+                    becomes: None,
+                },
+            ),
         )
-        .expect("subject");
-        assert_eq!(subject.before, serde_json::Value::Null);
-        assert_eq!(subject.after["title"], "a title");
-        assert_eq!(subject.after["type"], serde_json::Value::Null);
-        assert_eq!(subject.after["state"], "open");
-        assert_eq!(subject.after["sections"], serde_json::json!([]));
+        .expect("projection");
+        assert_eq!(projected.target, object_target(&id).expect("object target"));
+        assert_eq!(projected.operation.parameters["section"], 1);
     }
 
-    /// A destination is part of what was authorized, so it is a parameter of the
-    /// operation rather than something the after-state is left to imply.
+    /// A destination is named in the parameters, because it is part of what the
+    /// operation does rather than a fact about the Object it happens to have.
     #[test]
     fn a_destination_is_named_in_the_parameters() {
         let id = crate::model::new_id();
-        let mut before = Object::new(id.clone(), "t".to_owned()).expect("object");
+        let mut before = Object::new(id.clone(), "before".to_owned()).expect("object");
         before.rev = 1;
+        before.next_section_id = 2;
+        before.sections = vec![section(1, "one")];
         before.state = State::Closed;
+        before.reseal().expect("seal");
         let mut after = before.clone();
+        after.rev = 2;
         after.state = State::Open;
-        after.next_section_id = 2;
-        after.sections = vec![section(1, "w")];
+        after.sections = vec![section(1, "one, revised")];
+        after.reseal().expect("seal");
 
-        let mut added = payload(Action::SectionAdded, &id, "w");
-        added.becomes = Some(Destination {
-            object_type: None,
-            state: State::Open,
-        });
-        let subject = candidate_subject(&before, &after, &added, None).expect("subject");
+        let projected = object_projection(
+            &before,
+            &after,
+            &Payload::new(
+                id,
+                Action::SectionUpdated {
+                    section: 1,
+                    value: value("one, revised"),
+                    becomes: Some(Destination {
+                        object_type: None,
+                        state: State::Open,
+                    }),
+                },
+            ),
+        )
+        .expect("projection");
         assert_eq!(
-            subject.operation.parameters,
-            serde_json::json!({ "section": 1, "becomes": { "type": null, "state": "open" } })
+            projected.operation.parameters["becomes"],
+            serde_json::json!({ "state": "open", "type": null })
         );
-        assert_eq!(subject.before["section"], serde_json::Value::Null);
-        assert_eq!(subject.after["section"]["text"], "w");
     }
 
-    /// Only the representation that names its survivor has a frozen projection.
-    /// The retained shape named no destination, so there is no target it could
-    /// have — this contract was written for the generation that replaced it.
+    /// Migration is confirmed as a whole through its own Challenge family, so it
+    /// is not an Object-domain mutation and has no review projection.
     #[test]
-    fn the_retained_merge_representation_has_no_projection() {
+    fn a_migration_bootstrap_has_no_review_projection() {
         let id = crate::model::new_id();
-        let mut before = Object::new(id.clone(), "t".to_owned()).expect("object");
-        before.rev = 1;
-        before.next_section_id = 3;
-        before.sections = vec![section(1, "one"), section(2, "two")];
-        let after = before.clone();
-
-        let retained = payload(
-            Action::SectionMerged {
-                merge: Merge::Absorbing {
-                    absorbs: vec![1, 2],
+        let mut before = Object::new(id.clone(), String::new()).expect("object");
+        before.rev = 0;
+        before.reseal().expect("seal");
+        let error = object_projection(
+            &before,
+            &before,
+            &Payload::new(
+                id,
+                Action::ObjectMigrated {
+                    snapshot: Box::new(crate::model::Snapshot {
+                        title: "migrated".to_owned(),
+                        object_type: None,
+                        state: State::Open,
+                        next_section_id: 1,
+                        sections: Vec::new(),
+                    }),
                 },
-            },
-            &id,
-            "together",
-        );
-        assert!(candidate_subject(&before, &after, &retained, None).is_err());
-
-        let named = payload(
-            Action::SectionMerged {
-                merge: Merge::Into {
-                    destination: 1,
-                    sources: vec![2],
-                },
-            },
-            &id,
-            "together",
-        );
-        let subject = candidate_subject(&before, &after, &named, None).expect("subject");
-        assert_eq!(subject.target, section_target(&id, 1));
-        assert_eq!(
-            subject.operation.parameters["sources"],
-            serde_json::json!([2])
-        );
+            ),
+        )
+        .expect_err("migration is not an Object-domain mutation");
+        assert_eq!(error.code, EXIT_SCHEMA);
     }
 }
 
-/// The Object-domain ReviewDigest `mutation`, exactly as #25 §4 freezes it.
+/// The Object-domain ReviewDigest `mutation`.
 ///
 /// Three members and no others. The operation descriptor and target are the
-/// *same* projection CandidateDigest uses — not a parallel one that resembles
-/// it — so that two implementations describing one operation reach one shape.
-/// That sharing is enforced by construction in [`object_review_mutation`],
-/// which reads them off the candidate subject rather than rebuilding them.
+/// frozen ones — `object_projection`, read rather than rebuilt — so that two
+/// implementations describing one operation reach one shape.
 ///
-/// `before` is deliberately absent. The two contracts answer different
-/// questions: CandidateDigest's `before`/`after` say what transition a human is
-/// authorizing, while the review's predecessor is a concurrency fact and lives
-/// in [`ReviewPrecondition`].
+/// `before` is deliberately absent. The review's predecessor is a concurrency
+/// fact and lives in [`ReviewPrecondition`].
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct ReviewMutation {
     operation: Operation,
@@ -970,20 +857,19 @@ pub struct ReviewPrecondition {
 
 /// Build the frozen Object-domain review mutation from the states either side.
 ///
-/// Takes the same arguments as [`candidate_subject`] and reads its result,
-/// which is what makes "the projection schema is shared with CandidateDigest"
-/// a fact about the build rather than a promise in a comment. Change the frozen
-/// operation table and both digests move together, because there is one table.
+/// Reads [`object_projection`] rather than rebuilding its table, so "the
+/// operation descriptor is the frozen one" is a fact about the build instead of
+/// a promise in a comment.
 pub fn object_review_mutation(
     before: &Object,
     after: &Object,
     payload: &Payload,
 ) -> Result<ReviewMutation> {
-    let subject = candidate_subject(before, after, payload, None)?;
+    let projection = object_projection(before, after, payload)?;
     Ok(ReviewMutation {
-        operation: subject.operation,
-        target: subject.target,
-        after: subject.after,
+        operation: projection.operation,
+        target: projection.target,
+        after: projection.after,
     })
 }
 
@@ -1078,141 +964,14 @@ pub enum ReviewResult {
     Exhausted,
 }
 
-/// The concurrency predecessor a candidate is bound to.
-#[derive(Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Binding {
-    pub expected_rev: u64,
-}
-
-/// Everything a human is shown beside the mutation itself.
-///
-/// Every member is present, filled with its canonical null, empty or false even
-/// where the stored envelope omits it. The envelope omits for economy; this
-/// projection cannot, for the same reason none of the others can — two
-/// implementations that disagree about whether an absent member is written
-/// produce different bytes for one candidate.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug, Default)]
-pub struct PresentedContext {
-    pub previous_text: Option<String>,
-    pub previous_based_on: Option<String>,
-    pub previous_refs: Vec<Ref>,
-    pub previous_role: Option<Role>,
-    pub previous_content: Vec<Supplement>,
-    pub previous_relations: Vec<Relation>,
-    pub previous_semantics_recorded: bool,
-    pub oversize: bool,
-    pub object_title: Option<String>,
-    pub rule_review: Option<CandidateReview>,
-}
-
-/// Exactly what a candidate envelope's integrity value is taken of.
-///
-/// **Not** a second semantic identity. `candidate_digest` names the transition
-/// that was authorized; this protects the envelope a human is looking at from
-/// being edited on disk into something self-consistent but different.
-///
-/// The mutation payload is deliberately absent: the loader recomputes
-/// `candidate_digest` from that payload and its predecessor separately, so
-/// duplicating it here would mean two values covering one thing and a future
-/// where they can disagree.
-///
-/// `created_at`, `format` and the envelope version are absent for the opposite
-/// reason — they are operational ordering and schema selection, not the subject
-/// a human authorized.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
-pub struct EnvelopeIntegrity {
-    pub challenge: String,
-    pub candidate_digest: String,
-    pub binding: Binding,
-    pub context: PresentedContext,
-}
-
-impl EnvelopeIntegrity {
-    /// The bare hex this envelope's integrity field carries.
-    ///
-    /// Bare rather than versioned, and that is not an oversight: the envelope's
-    /// own version selects this calculation, so a field-local contract version
-    /// would be a second answer to a question already answered one level up.
-    pub fn digest(&self) -> Result<String> {
-        Ok(sha256_of(&canonical_bytes(self, "candidate envelope")?))
-    }
-}
-
-#[cfg(test)]
-mod envelope_tests {
-    use super::*;
-
-    /// The exact bytes, for the shape where every optional member is at its
-    /// default. This is the case an envelope most often stores as omissions, so
-    /// it is the one where an implementation is most likely to disagree.
-    #[test]
-    fn the_integrity_projection_writes_every_default_out() {
-        let integrity = EnvelopeIntegrity {
-            challenge: "ABC234".to_owned(),
-            candidate_digest: format!("1:{}", "a".repeat(64)),
-            binding: Binding { expected_rev: 7 },
-            context: PresentedContext::default(),
-        };
-        assert_eq!(
-            canonical_bytes(&integrity, "envelope").expect("bytes"),
-            concat!(
-                r#"{"binding":{"expected_rev":7},"#,
-                r#""candidate_digest":"1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","#,
-                r#""challenge":"ABC234","#,
-                r#""context":{"object_title":null,"oversize":false,"previous_based_on":null,"#,
-                r#""previous_content":[],"previous_refs":[],"previous_relations":[],"#,
-                r#""previous_role":null,"previous_semantics_recorded":false,"previous_text":null,"#,
-                r#""rule_review":null}}"#
-            )
-        );
-        let digest = integrity.digest().expect("digest");
-        assert_eq!(
-            digest.len(),
-            64,
-            "bare hex, because the envelope version selects the calculation"
-        );
-        assert!(!digest.contains(':'));
-    }
-
-    /// The mutation is not in here, so two candidates differing only in their
-    /// mutation share an integrity value — which is correct, because the
-    /// loader recomputes `candidate_digest` from the mutation separately and
-    /// duplicating it would be two values covering one thing.
-    #[test]
-    fn integrity_covers_the_envelope_and_the_digest_covers_the_mutation() {
-        let one = EnvelopeIntegrity {
-            challenge: "ABC234".to_owned(),
-            candidate_digest: format!("1:{}", "a".repeat(64)),
-            binding: Binding { expected_rev: 7 },
-            context: PresentedContext::default(),
-        };
-        let mut moved = one.clone();
-        moved.binding.expected_rev = 8;
-        assert_ne!(
-            one.digest().expect("digest"),
-            moved.digest().expect("digest"),
-            "the predecessor it is bound to is part of the envelope"
-        );
-
-        let mut shown = one.clone();
-        shown.context.previous_text = Some("what it said before".to_owned());
-        assert_ne!(
-            one.digest().expect("digest"),
-            shown.digest().expect("digest"),
-            "and so is what the human was shown"
-        );
-    }
-}
-
 /// Check a stored Rule Review block against itself.
 ///
-/// `integrity_sha256` covering these bytes proves only that nobody edited the
+/// A Challenge digest covering these bytes proves only that nobody edited the
 /// envelope after it was written. It says nothing about whether the block was
 /// *coherent when written*, and a review block that names a review identity its
 /// own contents do not produce is exactly what a human must not be shown as
-/// settled. #25 §14 requires this on load and render, not only at confirmation,
-/// and requires it to fail closed.
+/// settled. This is required on load and render, not only at confirmation, and
+/// it fails closed.
 ///
 /// This is the half that needs no workspace: everything here is decidable from
 /// the candidate's own bytes. Recomputing the review *identity* additionally
@@ -1402,7 +1161,7 @@ mod review_context_tests {
                 name: "section_revised".to_owned(),
                 parameters: serde_json::json!({"section": 1}),
             },
-            target: "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1".to_owned(),
+            target: "obj:01jbrcg6hbfgyrwkttddy8v7gf:1".to_owned(),
             after: serde_json::json!({"admission": "human", "text": "revised"}),
         };
         (mutation, 7)
@@ -1547,18 +1306,27 @@ mod object_binding_tests {
     }
 
     fn section(id: u64, admission: Admission, text: &str) -> Section {
-        Section {
+        Section::from_value(
             id,
-            admission,
-            role: None,
-            text: text.to_owned(),
-            content: Vec::new(),
-            based_on: None,
-            refs: Vec::new(),
-            relations: Vec::new(),
-            sha256: String::new(),
-            admitted_at: "2026-08-24T00:00:00Z".to_owned(),
-        }
+            crate::model::SectionValue::new(
+                crate::semantics::Admitted::new(admission, "2026-08-24T00:00:00Z"),
+                Content {
+                    text: text.to_owned(),
+                    ..Content::default()
+                },
+            ),
+        )
+        .expect("section")
+    }
+
+    fn value(admission: Admission, text: &str) -> crate::model::SectionValue {
+        crate::model::SectionValue::new(
+            crate::semantics::Admitted::new(admission, "2026-08-24T00:00:00Z"),
+            Content {
+                text: text.to_owned(),
+                ..Content::default()
+            },
+        )
     }
 
     fn revised(admission: Admission) -> (Object, Object, Payload) {
@@ -1567,33 +1335,33 @@ mod object_binding_tests {
         before.rev = 7;
         before.next_section_id = 2;
         before.sections = vec![section(1, admission, "as first written")];
+        before.reseal().expect("seal");
         let mut after = before.clone();
         after.rev = 8;
-        after.sections[0].text = "as revised".to_owned();
-        let payload = Payload {
-            action: Action::SectionRevised { section: 1 },
-            object: object_id(),
-            becomes: None,
-            content: Content {
-                text: "as revised".to_owned(),
-                ..Content::default()
+        after.sections = vec![section(1, admission, "as revised")];
+        after.reseal().expect("seal");
+        let payload = Payload::new(
+            object_id(),
+            Action::SectionUpdated {
+                section: 1,
+                value: value(admission, "as revised"),
+                becomes: None,
             },
-        };
+        );
         (before, after, payload)
     }
 
-    /// The review mutation is the candidate's own operation, target and after —
-    /// read off the same projection rather than rebuilt beside it.
+    /// The review mutation is the frozen projection's operation, target and
+    /// after — read off it rather than rebuilt beside it.
     #[test]
-    fn the_review_mutation_is_the_candidates_projection_without_its_before() {
-        let (before, after, mut payload) = revised(Admission::Human);
-        payload.content.text = "as revised".to_owned();
-        let subject = candidate_subject(&before, &after, &payload, None).expect("subject");
+    fn the_review_mutation_is_the_frozen_projection() {
+        let (before, after, payload) = revised(Admission::Human);
+        let projected = object_projection(&before, &after, &payload).expect("projection");
         let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
 
-        assert_eq!(mutation.operation, subject.operation);
-        assert_eq!(mutation.target, subject.target);
-        assert_eq!(mutation.after, subject.after);
+        assert_eq!(mutation.operation, projected.operation);
+        assert_eq!(mutation.target, projected.target);
+        assert_eq!(mutation.after, projected.after);
 
         let members = serde_json::to_value(&mutation).expect("value");
         let members = members.as_object().expect("object");
@@ -1632,12 +1400,12 @@ mod object_binding_tests {
         let canonical = canonical_bytes(&binding, "review binding").expect("canonical");
         assert_eq!(
             canonical,
-            r#"{"domain":"object","mutation":{"after":{"lifecycle":{"state":"open","type":null},"section":{"admission":"human","based_on":null,"content":[],"refs":[],"relations":[],"role":null,"text":"as revised"}},"operation":{"name":"section.revised","parameters":{"becomes":null}},"target":"obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1"},"precondition":{"expected_rev":7},"rules":[]}"#,
+            r#"{"domain":"object","mutation":{"after":{"lifecycle":{"state":"open","type":null},"section":{"admission":"human","based_on":null,"content":[],"header":null,"refs":[],"relations":[],"role":null,"text":"as revised"}},"operation":{"name":"section.update","parameters":{"becomes":null}},"target":"obj:01jbrcg6hbfgyrwkttddy8v7gf:1"},"precondition":{"expected_rev":7},"rules":[]}"#,
             "the frozen JCS bytes of an object review binding"
         );
         assert_eq!(
             binding.digest().expect("digest").to_string(),
-            "1:9b42b2b35dfab7b55ba90a625bd886a3946e9eec89d22797c9484590cf271eae"
+            "1:339dff0725eda8ac29ff2893fa3fb2f15a7a1dc57e6c40c2cb17fc85bb9d82ba"
         );
     }
 
@@ -1665,7 +1433,7 @@ mod object_binding_tests {
                 "an operation the table does not define",
                 serde_json::json!({
                     "operation": {"name": "not.a.frozen.operation", "parameters": {}},
-                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
                     "after": serde_json::Value::Null
                 }),
             ),
@@ -1673,7 +1441,7 @@ mod object_binding_tests {
                 "an operation carrying a member of its own",
                 serde_json::json!({
                     "operation": {"name": "section.revised", "parameters": {}, "extra": 1},
-                    "target": "obj:0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f:1",
+                    "target": "obj:01jbrcg6hbfgyrwkttddy8v7gf:1",
                     "after": serde_json::Value::Null
                 }),
             ),
@@ -1707,12 +1475,12 @@ mod object_binding_tests {
         let before = Object::new(object_id(), "the append boundary".to_owned()).expect("object");
         let mut after = before.clone();
         after.rev = 1;
-        let payload = Payload {
-            action: Action::ObjectCreated,
-            object: object_id(),
-            becomes: None,
-            content: Content::default(),
-        };
+        let payload = Payload::new(
+            object_id(),
+            Action::ObjectCreated {
+                title: "the append boundary".to_owned(),
+            },
+        );
         let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
         crate::rules::rebind_object(&mutation, 0, Vec::new())
             .expect("zero is the creation predecessor");

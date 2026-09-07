@@ -20,9 +20,10 @@
 //! corrupt file but a plausible one. Accepting `"status": "resolved"` and
 //! ignoring it is worse than refusing the file: engr would call the workspace
 //! valid, then drop the field on the next ordinary rewrite, having silently
-//! edited data it told the reader it understood. `.engr/format.json` is the
-//! only schema authority, so a resource carrying its own `format`/`version` is
-//! refused for that same reason.
+//! edited data it told the reader it understood. `.engr/VERSION` is the only
+//! schema authority in this generation, so a resource carrying its own
+//! `format`/`version` is refused for that same reason. (`format.json` was the
+//! predecessor's; this build reads it only to recognize a workspace to migrate.)
 
 use crate::model::new_id;
 use crate::reference::{canonical_embedded, EngrRef, ResourceKind};
@@ -40,7 +41,7 @@ pub const DIR: &str = "backlog";
 /// A topic is the line `engr backlog ls` prints, so the limit exists for the
 /// same reason the Object title's does: a body pasted here degrades the listing
 /// for every other item as well as its own.
-const TOPIC_MAX: usize = 120;
+const TITLE_MAX: usize = 120;
 
 pub fn dir(root: &Path) -> PathBuf {
     store::engr_dir(root).join(DIR)
@@ -246,13 +247,22 @@ impl Produced {
 #[serde(deny_unknown_fields)]
 pub struct Section {
     pub id: u64,
+    /// A short label for the point, the same optional navigation aid an Object
+    /// Section carries. Omitted when there is none, never written empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
     pub text: String,
+    /// Bounded literal excerpts, ordered, exactly as an Object Section carries
+    /// them. Unresolved work is where a snippet most often *is* the point, and
+    /// forcing it into prose is what sends people to write it down elsewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<crate::semantics::Supplement>,
     /// When the unresolved statement itself last changed. Operational triage
     /// metadata: last meaningful activity on the unresolved work, which includes
     /// a change to `produced[]` as much as to the wording. Not a concurrency
     /// token -- staleness is decided by the mutation precondition, not by this.
     pub updated_at: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<Subject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced: Vec<Produced>,
@@ -269,7 +279,7 @@ pub struct Section {
     /// normally, or no project rule governed it at all. A later successful
     /// mutation clears it; a later exhausted one replaces it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule_review: Option<crate::rules::RuleReview>,
+    pub review_exhaustion: Option<crate::rules::RuleReview>,
 }
 
 impl Section {
@@ -284,6 +294,25 @@ impl Section {
             "§{}: a backlog section needs text",
             self.id
         );
+        // The same two navigation and Supplement shapes an Object Section
+        // carries, held to the same rules on the way out. Both were missing
+        // here, and the stored side is exactly where they matter: this file is
+        // hand-editable by design, so a header written empty or a content entry
+        // with an invalid type or an empty body loaded cleanly and then rendered
+        // as a point somebody wrote.
+        if let Some(header) = &self.header {
+            ensure!(
+                !header.is_empty(),
+                EXIT_SCHEMA,
+                "§{}: a section with no header omits the member rather than carrying an empty one",
+                self.id
+            );
+        }
+        for entry in &self.content {
+            entry
+                .validate()
+                .map_err(|error| Error::new(error.code, format!("§{}: {error}", self.id)))?;
+        }
         ensure!(
             time::OffsetDateTime::parse(
                 &self.updated_at,
@@ -330,7 +359,7 @@ impl Section {
         // while accepting `{attempts: 0, limit: 0}` would make the strictness
         // decorative: this file is hand-editable by design, and the realistic
         // failure is a plausible value, not a corrupt one.
-        if let Some(review) = self.rule_review {
+        if let Some(review) = self.review_exhaustion {
             ensure!(
                 review.limit >= 1,
                 EXIT_SCHEMA,
@@ -357,7 +386,7 @@ impl Section {
 #[serde(deny_unknown_fields)]
 pub struct Item {
     pub id: String,
-    pub topic: String,
+    pub title: String,
     /// Monotonic and never reset, for the same reason Object sections are:
     /// `max(existing) + 1` would hand out the id of a consumed Section, and
     /// every subject pointing at it would silently mean something else.
@@ -410,21 +439,21 @@ impl Item {
             self.id
         );
         ensure!(
-            !self.topic.trim().is_empty(),
+            !self.title.trim().is_empty(),
             EXIT_SCHEMA,
-            "{}: a backlog item needs a topic",
+            "{}: a backlog item needs a title",
             self.id
         );
         ensure!(
-            !self.topic.contains('\n'),
+            !self.title.contains('\n'),
             EXIT_SCHEMA,
-            "{}: a stored topic cannot span lines",
+            "{}: a stored title cannot span lines",
             self.id
         );
         ensure!(
-            self.topic.chars().count() <= TOPIC_MAX,
+            self.title.chars().count() <= TITLE_MAX,
             EXIT_SCHEMA,
-            "{}: a stored topic cannot exceed {TOPIC_MAX} characters",
+            "{}: a stored title cannot exceed {TITLE_MAX} characters",
             self.id
         );
         ensure!(
@@ -520,24 +549,24 @@ fn validate_pinned_commit(commit: &str) -> Result<()> {
     crate::semantics::validate_pinned_commit("a file or symbol subject", commit)
 }
 
-fn check_topic(topic: &str) -> Result<()> {
+fn check_title(title: &str) -> Result<()> {
     ensure!(
-        !topic.trim().is_empty(),
+        !title.trim().is_empty(),
         EXIT_USAGE,
-        "a backlog item needs a topic"
+        "a backlog item needs a title"
     );
     ensure!(
-        !topic.contains('\n'),
+        !title.contains('\n'),
         EXIT_USAGE,
-        "--topic names what the unresolved work is about, so it cannot span lines. \
+        "--title names what the unresolved work is about, so it cannot span lines. \
          Put the detail in a section."
     );
-    let length = topic.chars().count();
+    let length = title.chars().count();
     ensure!(
-        length <= TOPIC_MAX,
+        length <= TITLE_MAX,
         EXIT_USAGE,
-        "--topic names what the unresolved work is about, not the work itself \
-         ({length} characters, limit {TOPIC_MAX}). Put the detail in a section."
+        "--title names what the unresolved work is about, not the work itself \
+         ({length} characters, limit {TITLE_MAX}). Put the detail in a section."
     );
     Ok(())
 }
@@ -563,7 +592,7 @@ fn now() -> String {
 
 pub fn ids(root: &Path) -> Result<Vec<String>> {
     let dir = dir(root);
-    if !dir.is_dir() {
+    if !store::namespace(&dir)? {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
@@ -632,39 +661,6 @@ pub fn load(root: &Path, id: &str) -> Result<Item> {
     Ok(item)
 }
 
-/// Decode predecessor bytes already captured by coordinated migration.
-///
-/// The ordinary loader deliberately reads the workspace itself so it can choose
-/// the live generation. Migration must not do that second read: its plan and
-/// manifest have to derive from the same bytes.
-pub(crate) fn decode_for_migration(path: &Path, id: &str, text: &str) -> Result<Item> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    crate::proof::stored_within_safe_integers(&value, &path.display().to_string())?;
-    let item: Item = serde_json::from_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    item.validate()?;
-    ensure!(
-        item.id == id,
-        EXIT_SCHEMA,
-        "{}: backlog id {:?} does not match its filename",
-        path.display(),
-        item.id
-    );
-    Ok(item)
-}
-
-/// Validate a staged Backlog artifact as a current resource before publication.
-pub(crate) fn decode_current_staged(path: &Path, id: &str, text: &str) -> Result<Item> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("{}: {error}", path.display())))?;
-    store::check_canonical_bytes(path, text, &value)?;
-    let item = decode_for_migration(path, id, text)?;
-    store::check_current_resource_shape(path, text, &item)?;
-    check_canonical_sets(path, &item)?;
-    Ok(item)
-}
-
 /// Write one item. Callers must already hold the workspace lock: every mutation
 /// here is read-modify-write, and a destructive path additionally needs its
 /// precondition check and its write to be one step.
@@ -680,7 +676,7 @@ fn save(root: &Path, item: &Item) -> Result<()> {
 
 fn remove(root: &Path, id: &str) -> Result<()> {
     let path = item_path(root, id);
-    std::fs::remove_file(&path).map_err(|error| tool_error(path.display(), error))
+    crate::store::remove_durably(&path)
 }
 
 pub fn all(root: &Path) -> Result<Vec<Item>> {
@@ -704,7 +700,7 @@ pub fn resolve_id(root: &Path, prefix: &str) -> Result<String> {
     if prefix.len() == 26 {
         if let Ok(id) = crate::reference::decode_uuid(prefix) {
             let id = id.to_string();
-            if item_path(root, &id).exists() {
+            if store::resource_present(&item_path(root, &id))? {
                 return Ok(id);
             }
         }
@@ -827,7 +823,7 @@ pub enum Precondition {
     /// them, so their moving says nothing about this add.
     SectionAbsent {
         item: String,
-        topic: String,
+        title: String,
         section: u64,
     },
     /// Changing or consuming a Section: that whole Section, and the topic.
@@ -838,7 +834,7 @@ pub enum Precondition {
     /// topic comes too, because it is the context the Section is read in.
     Section {
         item: String,
-        topic: String,
+        title: String,
         section: Section,
     },
     /// Merging: the topic, and every Section the merge consumes or keeps.
@@ -847,14 +843,14 @@ pub enum Precondition {
     /// once: if any of them moved, the judgement was about something else.
     Merge {
         item: String,
-        topic: String,
+        title: String,
         sections: Vec<Section>,
     },
 }
 
 impl Precondition {
     /// Read the current predecessor for a topic change.
-    pub fn topic(root: &Path, item: &str) -> Result<Self> {
+    pub fn title(root: &Path, item: &str) -> Result<Self> {
         Ok(Self::of_item(&load(root, item)?))
     }
 
@@ -870,7 +866,7 @@ impl Precondition {
     pub fn of_add(item: &Item) -> Self {
         Self::SectionAbsent {
             item: item.id.clone(),
-            topic: item.topic.clone(),
+            title: item.title.clone(),
             section: item.next_section_id,
         }
     }
@@ -878,7 +874,7 @@ impl Precondition {
     pub fn of_section(item: &Item, section: u64) -> Result<Self> {
         Ok(Self::Section {
             item: item.id.clone(),
-            topic: item.topic.clone(),
+            title: item.title.clone(),
             section: item.section(section)?.clone(),
         })
     }
@@ -908,7 +904,7 @@ impl Precondition {
         bound.sort_by_key(|section| section.id);
         Ok(Self::Merge {
             item: loaded.id.clone(),
-            topic: loaded.topic.clone(),
+            title: loaded.title.clone(),
             sections: bound,
         })
     }
@@ -929,12 +925,12 @@ impl Precondition {
             return Ok(bound.remove(0));
         }
         let mut item = None;
-        let mut topic = None;
+        let mut title = None;
         let mut sections = Vec::new();
         for one in bound {
             let Self::Section {
                 item: owner,
-                topic: context,
+                title: context,
                 section,
             } = one
             else {
@@ -947,19 +943,19 @@ impl Precondition {
             // caller read points that were never siblings.
             if let Some(first) = &item {
                 ensure!(
-                    first == &owner && topic.as_ref() == Some(&context),
+                    first == &owner && title.as_ref() == Some(&context),
                     EXIT_INVARIANT,
                     "these points do not belong to the same topic"
                 );
             }
             item = Some(owner);
-            topic = Some(context);
+            title = Some(context);
             sections.push(section);
         }
         sections.sort_by_key(|section| section.id);
         Ok(Self::Merge {
             item: item.expect("checked non-empty"),
-            topic: topic.expect("checked non-empty"),
+            title: title.expect("checked non-empty"),
             sections,
         })
     }
@@ -983,6 +979,34 @@ impl Precondition {
             "{:x}",
             Sha256::digest(canonical_json(self)?.as_bytes())
         ))
+    }
+
+    /// Which `expect` value this operation binds, spelled the way
+    /// `backlog show --format json` spells it.
+    ///
+    /// **Two levels, and one sentence for both was wrong for two of the six
+    /// operations.** `rename` and `add` bind the topic, whose tokens are members
+    /// of the item-level `expect` object; the other four bind a point, whose
+    /// token is on that point's own row. Telling every caller to read the point
+    /// and pass its value sent the two topic-level ones to the wrong token —
+    /// and the refusal they then got was the *stale* one, which says somebody
+    /// else moved the world. Re-reading produces the same value, so the advice
+    /// closed a loop: wrong instruction, then the reader blamed for following
+    /// it.
+    pub fn binding(&self) -> String {
+        match self {
+            Self::Item { .. } => "the topic's `expect.rename`".to_owned(),
+            Self::SectionAbsent { .. } => "the topic's `expect.add`".to_owned(),
+            Self::Section { section, .. } => format!("§{}'s own `expect`", section.id),
+            Self::Merge { sections, .. } => format!(
+                "the own `expect` of each of {}, one --expect per point",
+                sections
+                    .iter()
+                    .map(|section| format!("§{}", section.id))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+        }
     }
 
     /// The item this precondition is about.
@@ -1011,12 +1035,12 @@ impl Precondition {
             }
             Self::SectionAbsent {
                 item,
-                topic,
+                title,
                 section,
             } => {
                 let current = load(root, item)?;
-                if &current.topic != topic {
-                    return stale("the topic");
+                if &current.title != title {
+                    return stale("the title");
                 }
                 // The allocation state, not merely whether the id looks free.
                 // Absence alone says yes to a slot that was taken and then
@@ -1032,12 +1056,12 @@ impl Precondition {
             }
             Self::Section {
                 item,
-                topic,
+                title,
                 section,
             } => {
                 let current = load(root, item)?;
-                if &current.topic != topic {
-                    return stale("the topic");
+                if &current.title != title {
+                    return stale("the title");
                 }
                 match current.section(section.id) {
                     Ok(now) if now == section => Ok(()),
@@ -1046,12 +1070,12 @@ impl Precondition {
             }
             Self::Merge {
                 item,
-                topic,
+                title,
                 sections,
             } => {
                 let current = load(root, item)?;
-                if &current.topic != topic {
-                    return stale("the topic");
+                if &current.title != title {
+                    return stale("the title");
                 }
                 for section in sections {
                     match current.section(section.id) {
@@ -1184,7 +1208,7 @@ impl Reviewed {
     /// describes how the wording standing now got in, and this mutation is now
     /// the answer to that.
     fn mark(&self, section: &mut Section) {
-        section.rule_review = self.marker;
+        section.review_exhaustion = self.marker;
     }
 
     /// Every existing-state mutation must carry what it was prepared against.
@@ -1245,7 +1269,7 @@ impl Reviewed {
 /// guarantee is gone precisely where it looks satisfied.
 enum Binds {
     /// The topic, and therefore the complete item.
-    Topic,
+    Title,
     /// The Section id an add is about to receive.
     NewSection,
     /// One whole Section, by id.
@@ -1270,7 +1294,7 @@ impl Precondition {
             short(item)
         );
         let matches = match (self, binds) {
-            (Self::Item { .. }, Binds::Topic) => true,
+            (Self::Item { .. }, Binds::Title) => true,
             (Self::SectionAbsent { .. }, Binds::NewSection) => true,
             (Self::Section { section, .. }, Binds::Section(target)) => section.id == *target,
             (
@@ -1345,14 +1369,41 @@ fn edit<T>(
     })
 }
 
+/// Every `expect` value this item currently offers, each named the way the JSON
+/// surface names it.
+///
+/// Only ever used to explain a refusal. A caller who passed a real token from
+/// the wrong level has not read anything stale, and answering them with "what
+/// you read is not what is there now" is both false and unactionable: re-reading
+/// hands back the same value. Naming which token they passed, and which one this
+/// operation binds, is the difference between a loop and a fix.
+pub fn offered_tokens(root: &Path, item: &str) -> Result<Vec<(String, String)>> {
+    let loaded = load(root, item)?;
+    let mut offered = vec![
+        (
+            Precondition::of_item(&loaded).binding(),
+            Precondition::of_item(&loaded).token()?,
+        ),
+        (
+            Precondition::of_add(&loaded).binding(),
+            Precondition::of_add(&loaded).token()?,
+        ),
+    ];
+    for section in &loaded.sections {
+        let precondition = Precondition::of_section(&loaded, section.id)?;
+        offered.push((precondition.binding(), precondition.token()?));
+    }
+    Ok(offered)
+}
+
 pub fn create(
     root: &Path,
-    topic: &str,
+    title: &str,
     text: &str,
     subjects: Vec<Subject>,
     prepared: &Prepared,
 ) -> Result<Item> {
-    check_topic(topic)?;
+    check_title(title)?;
     check_text(text)?;
     locked(root, || {
         // engr allocates the identity here, so a creation has no predecessor to
@@ -1385,12 +1436,14 @@ pub fn create(
             updated_at: now(),
             subjects,
             produced: Vec::new(),
-            rule_review: None,
+            header: None,
+            content: Vec::new(),
+            review_exhaustion: None,
         };
         reviewed.mark(&mut section);
         let item = Item {
             id: new_id(),
-            topic: topic.trim().to_owned(),
+            title: title.trim().to_owned(),
             next_section_id: 2,
             sections: vec![section],
         };
@@ -1409,13 +1462,13 @@ pub fn create(
 /// which is worse — the whole point of the marker is that an exhausted change
 /// cannot be silent. What an item-level marker should look like is a persisted
 /// representation nobody has settled, so this refuses rather than inventing one.
-pub fn rename(root: &Path, id: &str, topic: &str, prepared: &Prepared) -> Result<Item> {
-    check_topic(topic)?;
-    edit(root, id, prepared, Binds::Topic, |item, reviewed| {
+pub fn rename(root: &Path, id: &str, title: &str, prepared: &Prepared) -> Result<Item> {
+    check_title(title)?;
+    edit(root, id, prepared, Binds::Title, |item, reviewed| {
         reviewed.must_have_passed(
-            "a topic is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
+            "a title is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
         )?;
-        topic.trim().clone_into(&mut item.topic);
+        title.trim().clone_into(&mut item.title);
         Ok(item.clone())
     })
 }
@@ -1436,7 +1489,9 @@ pub fn add_section(
             updated_at: now(),
             subjects,
             produced: Vec::new(),
-            rule_review: None,
+            header: None,
+            content: Vec::new(),
+            review_exhaustion: None,
         };
         reviewed.mark(&mut added);
         item.sections.push(added);
@@ -1808,7 +1863,7 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
 fn require_no_work(root: &Path, id: &str) -> Result<()> {
     let subject = crate::work::Subject::Backlog(id.to_owned());
     ensure!(
-        !crate::work::exists(root, &subject),
+        !crate::work::exists(root, &subject)?,
         EXIT_INVARIANT,
         "this was the last unresolved point, so resolving it removes the item — but it still \
          has execution memory, which cannot outlive what it belongs to. Discard it with \

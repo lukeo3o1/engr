@@ -6,10 +6,9 @@
 //! [`crate::git`].
 
 use crate::semantics::{
-    needs_attention, validate_state, Admission, ObjectType, Relation, RelationType, Role, State,
-    Supplement,
+    needs_attention, validate_state, Admission, Admitted, BasedOn, ObjectType, Relation,
+    RelationType, Role, State, Supplement,
 };
-use crate::LEGACY_OBJECT_VERSION_V0;
 use crate::{ensure, Error, Result, EXIT_INVARIANT, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -57,161 +56,35 @@ pub fn is_canonical_git_oid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn validate_git_oid(field: &str, value: &str) -> Result<()> {
-    ensure!(
-        is_canonical_git_oid(value),
-        EXIT_SCHEMA,
-        "{field} must be a full resolved Git object id"
-    );
-    Ok(())
-}
-
-pub const OBJECT_FORMAT: &str = "engr-object";
-pub const EVENT_FORMAT: &str = "engr-event";
-pub const CANDIDATE_FORMAT: &str = "engr-candidate";
-
-/// The retained whole-content reference written by predecessor workspaces and
-/// Event v1. Current v3 Sections use [`crate::dependency::SelectiveRef`]; this
-/// exact legacy shape remains so historical provenance can still be decoded and
-/// migrated without reinterpretation.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyRef {
-    pub object: String,
-    pub section: u64,
-    pub sha256: String,
-    pub commit: String,
-}
-
-impl LegacyRef {
-    fn validate(&self) -> Result<()> {
-        validate_object_id(&self.object)?;
-        validate_git_oid("reference commit", &self.commit)
-    }
-}
-
-/// A Section dependency under either persisted compatibility generation.
+/// A Section dependency.
 ///
-/// Current workspace-v3 resources use [`Ref::Selective`]. [`Ref::Legacy`]
-/// remains only so immutable Event-v1 and Git history can still be decoded
-/// under the contract that wrote them. The shapes share no member names except
-/// `commit`, so the untagged representation is unambiguous.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
-#[serde(untagged)]
-pub enum Ref {
-    Selective(crate::dependency::SelectiveRef),
-    Legacy(LegacyRef),
-}
-
-impl<'de> Deserialize<'de> for Ref {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("a reference must be a JSON object"))?;
-        if object.contains_key("target") {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct StoredSelective {
-                target: String,
-                fields: Vec<crate::dependency::SemanticField>,
-                commit: String,
-                digest: String,
-            }
-            let stored: StoredSelective =
-                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            crate::dependency::SelectiveRef::stored(
-                stored.target,
-                stored.fields,
-                stored.commit,
-                stored.digest,
-            )
-            .map(Ref::Selective)
-            .map_err(serde::de::Error::custom)
-        } else {
-            serde_json::from_value(value)
-                .map(Ref::Legacy)
-                .map_err(serde::de::Error::custom)
-        }
-    }
-}
-
-impl Ref {
-    pub fn legacy(
-        object: impl Into<String>,
-        section: u64,
-        sha256: impl Into<String>,
-        commit: impl Into<String>,
-    ) -> Self {
-        Self::Legacy(LegacyRef {
-            object: object.into(),
-            section,
-            sha256: sha256.into(),
-            commit: commit.into(),
-        })
-    }
-
-    pub fn selective(reference: crate::dependency::SelectiveRef) -> Self {
-        Self::Selective(reference)
-    }
-
-    pub fn as_legacy(&self) -> Option<&LegacyRef> {
-        match self {
-            Self::Legacy(reference) => Some(reference),
-            Self::Selective(_) => None,
-        }
-    }
-
-    pub fn as_selective(&self) -> Option<&crate::dependency::SelectiveRef> {
-        match self {
-            Self::Selective(reference) => Some(reference),
-            Self::Legacy(_) => None,
-        }
-    }
-
-    pub fn commit(&self) -> &str {
-        match self {
-            Self::Selective(reference) => reference.commit(),
-            Self::Legacy(reference) => &reference.commit,
-        }
-    }
-
-    pub fn target_identity(&self) -> Result<(String, u64)> {
-        match self {
-            Self::Selective(reference) => crate::dependency::parse_target(reference.target()),
-            Self::Legacy(reference) => Ok((reference.object.clone(), reference.section)),
-        }
-    }
-
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Selective(reference) => crate::dependency::SelectiveRef::stored(
-                reference.target(),
-                reference.fields().to_vec(),
-                reference.commit(),
-                reference.digest(),
-            )
-            .map(|_| ()),
-            Self::Legacy(reference) => reference.validate(),
-        }
-    }
-}
+/// One shape, because there is one generation. The predecessor's whole-content
+/// reference is decoded only by [`crate::predecessor`], and only for the
+/// migration that converts it — it is never a value a current resource can
+/// hold, so it has no variant here to be mistaken for one.
+pub type Ref = crate::dependency::SelectiveRef;
 
 /// The part of a section that is put through admission — the wording a human is
 /// shown at the gate, and the wording Rule Review is run against.
 ///
 /// Every selectable semantic field a Section carries lives here, and only here.
-/// The v3 Section seal additionally covers identity and provenance, while a Ref
-/// can select only these semantics. A semantic field held outside this value
-/// would be authoritative meaning a Ref cannot pin.
+/// The Section seal additionally covers identity and provenance, while a Ref can
+/// select only these semantics plus `admission`. A semantic field held outside
+/// this value would be authoritative meaning a Ref cannot pin.
 ///
-/// The new fields are all skipped when empty, so a Section that carries none of
-/// them serializes and hashes byte for byte as it did before they existed.
+/// Everything optional is skipped when empty, per the canonical omission rule:
+/// an absent optional, an empty array and an empty object are all simply not
+/// written, and none of them is ever encoded as `null`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Content {
+    /// A short label for the Section, for navigation and for the reader's eye.
+    ///
+    /// Semantic rather than presentational, and therefore selectable by a Ref:
+    /// a header is what a reader uses to decide whether the wording beneath it
+    /// is the wording they meant to depend on, so a header that moves under a
+    /// dependency is drift like any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub text: String,
@@ -220,20 +93,14 @@ pub struct Content {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<Supplement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub based_on: Option<String>,
-    #[serde(default)]
+    pub based_on: Option<BasedOn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<Ref>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<Relation>,
 }
 
 impl Content {
-    /// SHA-256 over canonical JSON. `serde_json::Map` is a `BTreeMap`, so going
-    /// through `Value` sorts keys and the digest is independent of field order.
-    pub fn sha256(&self) -> Result<String> {
-        canonical_sha256_with_basis(self)
-    }
-
     /// Put the order-insensitive collections in one order before anything is
     /// hashed.
     ///
@@ -268,15 +135,40 @@ impl Content {
     }
 
     fn validate(&self) -> Result<()> {
+        // A section says something. `text` is required and may be empty only
+        // where non-empty literal content carries the meaning instead — a
+        // section with neither asserts nothing, and every surface that reads one
+        // would be presenting a blank as admitted knowledge.
+        //
+        // Here rather than only at the mutation boundary, because this is the
+        // boundary both persisted shapes pass through: a stored Object's
+        // Sections and an Event's `SectionValue` are the same value, and a rule
+        // only the write path applies is a rule one hand-edit away from being
+        // untrue of the record.
+        ensure!(
+            !self.text.is_empty() || !self.content.is_empty(),
+            EXIT_SCHEMA,
+            "a section's text is empty and it carries no content, so it asserts nothing"
+        );
+        // Empty is not a header. An optional member whose absence and whose
+        // empty value mean the same thing is one member with two spellings,
+        // and #66's omission rule says absence is written by omitting it.
+        if let Some(header) = &self.header {
+            ensure!(
+                !header.is_empty(),
+                EXIT_SCHEMA,
+                "a section with no header omits the member rather than carrying an empty one"
+            );
+        }
         if let Some(based_on) = &self.based_on {
-            validate_git_oid("based_on", based_on)?;
+            based_on.validate()?;
         }
         for entry in &self.content {
             entry.validate()?;
         }
-        for reference in &self.refs {
-            reference.validate()?;
-        }
+        // A stored Ref validates at construction: `SelectiveRef::stored` is the
+        // only way one enters the model, and it refuses anything this loop
+        // could have re-checked. Nothing to do here.
         for relation in &self.relations {
             relation.validate()?;
         }
@@ -313,66 +205,91 @@ fn check_unique<T: PartialEq>(items: &[T], what: &str) -> Result<()> {
     Ok(())
 }
 
-fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
-    crate::confirmation::fingerprint(value)
+/// The complete resulting semantic state of one Section, without its identity
+/// or its seal.
+///
+/// This is what an Event carries. #66 requires a Section payload to include
+/// `admitted`, so replay reads a Section's provenance out of the value that was
+/// admitted rather than inferring it from the Event's own metadata. The two are
+/// different facts — the Event's metadata says how the Event entered history,
+/// this says what the Section now means and by whose authority — and migration
+/// is the case where they legitimately differ.
+///
+/// No `deny_unknown_fields`, here or on any of the other flattened envelopes:
+/// serde cannot carry it through `#[serde(flatten)]`, and a struct that declares
+/// both refuses its own members. Strictness is recovered where it can actually
+/// be exact — `store::check_event_record` requires the stored bytes to be the
+/// canonical serialization of what they parsed to, which refuses an extra
+/// member as surely and can say which one.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SectionValue {
+    pub admitted: Admitted,
+    #[serde(flatten)]
+    pub content: Content,
+}
+
+impl SectionValue {
+    pub fn new(admitted: Admitted, content: Content) -> Self {
+        Self { admitted, content }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.admitted.validate()?;
+        self.content.validate()
+    }
 }
 
 /// Schema-exact, and that is a trust boundary rather than strictness for its own
 /// sake.
 ///
 /// A current resource carries exactly the fields its version defines, and an
-/// unknown one fails closed. Without that, [`Section::admission`] being absent
-/// from the persisted shape would mean a file could *carry* it and be read as
-/// though it did not: serde would ignore the field, this build would reconstruct
-/// `human` — and the reconstruction is only exact for the exact representation
-/// this version defines, never for a file already answering the question
+/// unknown one fails closed. Without that, `admitted` being absent from the
+/// persisted shape would mean a file could *carry* it and be read as though it
+/// did not: serde would ignore the member and this build would reconstruct
+/// something — and a reconstruction is only exact for the exact representation
+/// this generation defines, never for a file already answering the question
 /// differently.
 ///
 /// It is the read-side counterpart of the write boundary in
 /// [`crate::store::save_object`]. Writes must not drop authority state they
 /// cannot represent; reads must not silently reinterpret authority state they
 /// were not expecting.
+///
+/// `deny_unknown_fields` cannot travel through `#[serde(flatten)]`, so the
+/// members are written out here rather than embedding [`SectionValue`]. The two
+/// are kept in step by [`Section::value`] and [`Section::from_value`], which are
+/// the only ways either is built from the other.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
     pub id: u64,
-    /// Which door these exact semantics came through.
-    ///
-    /// Legacy workspaces omit this member and are decoded under their own
-    /// generation as Human. Current workspace-v3 Sections persist it.
-    #[serde(default = "human_admission")]
-    pub admission: Admission,
-    #[serde(default)]
+    /// Which door these exact semantics came through, and when.
+    pub admitted: Admitted,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<Supplement>,
-    #[serde(default)]
-    pub based_on: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub based_on: Option<BasedOn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<Ref>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<Relation>,
-    /// Integrity seal under the owning workspace generation. Predecessor
-    /// workspaces seal semantic content; v3 seals every other Section member,
-    /// including identity, admission and timestamp.
-    pub sha256: String,
-    /// When these semantics were admitted, by whichever path admitted them.
+    /// Integrity seal over the complete canonical Section except itself.
     ///
-    /// Legacy workspaces spell this `confirmed_at`; the migration retains the
-    /// instant and current workspace-v3 resources spell the authority-neutral
-    /// name.
-    #[serde(alias = "confirmed_at")]
-    pub admitted_at: String,
-}
-
-fn human_admission() -> Admission {
-    Admission::Human
+    /// Identity and provenance are inside it, not only the wording. A seal over
+    /// semantics alone would let a Section be repointed at another id, or have
+    /// its admission rewritten from agent to human, and still verify.
+    pub digest: String,
 }
 
 impl Section {
     pub fn content(&self) -> Content {
         Content {
+            header: self.header.clone(),
             role: self.role,
             text: self.text.clone(),
             content: self.content.clone(),
@@ -382,23 +299,74 @@ impl Section {
         }
     }
 
-    /// Recompute the hash from what is stored, so `verify` needs nothing else.
-    pub fn recomputed_sha256(&self) -> Result<String> {
-        self.content().sha256()
+    /// The complete semantic value, as an Event carries it.
+    pub fn value(&self) -> SectionValue {
+        SectionValue {
+            admitted: self.admitted.clone(),
+            content: self.content(),
+        }
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Build a Section from an admitted value, sealed.
+    ///
+    /// The seal is computed here rather than supplied, because a constructor
+    /// that took one would be a way to store a Section whose digest describes
+    /// something else.
+    pub fn from_value(id: u64, value: SectionValue) -> Result<Self> {
+        let mut section = Self {
+            id,
+            admitted: value.admitted,
+            header: value.content.header,
+            role: value.content.role,
+            text: value.content.text,
+            content: value.content.content,
+            based_on: value.content.based_on,
+            refs: value.content.refs,
+            relations: value.content.relations,
+            digest: String::new(),
+        };
+        section.digest = section.recomputed_digest()?;
+        Ok(section)
+    }
+
+    /// Recompute the seal from what is stored, so `verify` needs nothing else.
+    pub fn recomputed_digest(&self) -> Result<String> {
+        crate::digest::SECTION
+            .emit(self.digest_under(crate::digest::SECTION.current)?)
+            .map(|value| value.to_string())
+    }
+
+    /// The seal under one named contract version.
+    ///
+    /// Versioned rather than current-only for the reason every other contract
+    /// here is: a stored seal must be checked under the contract it names, not
+    /// under whichever emitter happens to be newest.
+    pub fn digest_under(&self, version: u32) -> Result<String> {
+        match version {
+            1 => {
+                let mut value = serde_json::to_value(self).map_err(|error| {
+                    Error::new(EXIT_SCHEMA, format!("canonical section: {error}"))
+                })?;
+                if let serde_json::Value::Object(members) = &mut value {
+                    members.remove("digest");
+                }
+                Ok(crate::proof::sha256_of(&crate::proof::canonical_bytes(
+                    &value, "section",
+                )?))
+            }
+            other => Err(Error::new(
+                EXIT_SCHEMA,
+                format!("SectionDigestContract: no contract for version {other}"),
+            )),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
         ensure!(self.id > 0, EXIT_SCHEMA, "section ids start at 1");
-        ensure!(
-            time::OffsetDateTime::parse(
-                &self.admitted_at,
-                &time::format_description::well_known::Rfc3339
-            )
-            .is_ok(),
-            EXIT_SCHEMA,
-            "§{}: admitted_at is not RFC3339",
-            self.id
-        );
+        self.admitted
+            .validate()
+            .map_err(|error| Error::new(error.code, format!("§{}: {error}", self.id)))?;
+        crate::digest::SECTION.verify(&self.digest)?;
         // Two pieces of the semantic surface are Human-authoritative in
         // themselves, so an Agent Section may not carry them at all.
         //
@@ -413,7 +381,7 @@ impl Section {
         // Checked on the stored Section rather than only on the way in, because
         // a rule the write path alone enforces is one hand-edit away from being
         // untrue of the record.
-        if self.admission == Admission::Agent {
+        if self.admitted.by == Admission::Agent {
             ensure!(
                 self.relations.is_empty(),
                 EXIT_SCHEMA,
@@ -437,21 +405,12 @@ impl Section {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
-    /// Retained when a migrated v0 object carried redundant resource schema
-    /// markers. New objects rely only on the workspace authority.
-    #[serde(rename = "format", skip_serializing_if = "Option::is_none")]
-    pub legacy_format: Option<String>,
-    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
-    pub legacy_version: Option<u32>,
     pub id: String,
     pub title: String,
     /// Optional, and absent is a first-class answer rather than a missing one.
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub object_type: Option<ObjectType>,
-    /// The one lifecycle field. `status` is read as an alias so a workspace
-    /// migrated from v0 keeps loading, and is never written back under that
-    /// name: two spellings of one truth is how they start disagreeing.
-    #[serde(alias = "status")]
+    /// The one lifecycle field.
     pub state: State,
     /// Increments on every admitted action. Candidates and reviews pin it, so
     /// one prepared against an older state cannot be admitted after the Object
@@ -462,21 +421,18 @@ pub struct Object {
     /// that was deleted, and every outside reference to it would silently point
     /// at different content.
     pub next_section_id: u64,
+    /// Omitted when empty, per the canonical omission rule. An Object with no
+    /// Sections and an Object whose `sections` is `[]` would otherwise be one
+    /// record with two spellings, and both would seal differently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
-    /// Aggregate integrity over the canonical Object representation.
-    ///
-    /// Optional in the in-memory compatibility model so historical v1/v2
-    /// Objects can still be decoded. A current workspace-v3 Object is accepted
-    /// by the store only when this is present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    /// Aggregate integrity over the complete canonical Object except itself.
+    pub digest: String,
 }
 
 impl Object {
     pub fn new(id: String, title: String) -> Result<Self> {
-        let object = Self {
-            legacy_format: None,
-            legacy_version: None,
+        let mut object = Self {
             id,
             title,
             object_type: None,
@@ -484,10 +440,48 @@ impl Object {
             rev: 0,
             next_section_id: 1,
             sections: Vec::new(),
-            sha256: None,
+            digest: String::new(),
         };
+        object.reseal()?;
         object.validate()?;
         Ok(object)
+    }
+
+    /// Recompute the aggregate seal to match what the Object now holds.
+    ///
+    /// Every write path goes through this rather than assigning `digest`, so a
+    /// stored Object whose seal describes a different value cannot be produced
+    /// by forgetting a step.
+    pub fn reseal(&mut self) -> Result<()> {
+        self.digest = String::new();
+        self.digest = self.recomputed_digest()?;
+        Ok(())
+    }
+
+    pub fn recomputed_digest(&self) -> Result<String> {
+        crate::digest::OBJECT
+            .emit(self.digest_under(crate::digest::OBJECT.current)?)
+            .map(|value| value.to_string())
+    }
+
+    pub fn digest_under(&self, version: u32) -> Result<String> {
+        match version {
+            1 => {
+                let mut value = serde_json::to_value(self).map_err(|error| {
+                    Error::new(EXIT_SCHEMA, format!("canonical object: {error}"))
+                })?;
+                if let serde_json::Value::Object(members) = &mut value {
+                    members.remove("digest");
+                }
+                Ok(crate::proof::sha256_of(&crate::proof::canonical_bytes(
+                    &value, "object",
+                )?))
+            }
+            other => Err(Error::new(
+                EXIT_SCHEMA,
+                format!("ObjectDigestContract: no contract for version {other}"),
+            )),
+        }
     }
 
     /// Whether this Object belongs in the default attention set. Derived from
@@ -514,9 +508,9 @@ impl Object {
 
     /// Admitted content is not revised while nobody is looking at it.
     ///
-    /// This is the old "reopen first" rule stated in the terms Phase 3 gives it.
-    /// For an untyped Object attention is exactly `open`, so nothing about the
-    /// old behaviour changed; for a typed one it is the derived class, so an
+    /// This is the "reopen first" rule stated in the terms typed lifecycles give
+    /// it. For an untyped Object attention is exactly `open`, so nothing about
+    /// the untyped behaviour changed; for a typed one it is the derived class, so an
     /// `accepted` design has to be moved back to `draft` or `proposed` before it
     /// can be reworded. Renewed engineering work returns to the attention set
     /// rather than happening out of sight of everyone who reads the default
@@ -570,20 +564,7 @@ impl Object {
 
     pub fn validate(&self) -> Result<()> {
         validate_object_id(&self.id)?;
-        if let Some(format) = &self.legacy_format {
-            ensure!(
-                format == OBJECT_FORMAT,
-                EXIT_SCHEMA,
-                "not an engr object: format is {format:?}"
-            );
-        }
-        if let Some(version) = self.legacy_version {
-            ensure!(
-                version == LEGACY_OBJECT_VERSION_V0,
-                EXIT_SCHEMA,
-                "unsupported legacy object version {version}"
-            );
-        }
+        crate::digest::OBJECT.verify(&self.digest)?;
         validate_state(EXIT_SCHEMA, self.object_type, self.state)?;
         check_supersession(self, EXIT_SCHEMA)?;
         ensure!(
@@ -609,17 +590,6 @@ impl Object {
                 self.id,
                 self.next_section_id,
                 section.id
-            );
-        }
-        if let Some(seal) = &self.sha256 {
-            ensure!(
-                seal.len() == 64
-                    && seal
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-                EXIT_SCHEMA,
-                "{}: object sha256 must be 64 lowercase hexadecimal characters",
-                self.id
             );
         }
         Ok(())
@@ -679,136 +649,90 @@ fn check_section_id(section: u64) -> Result<()> {
 
 /// Which sections a merge consolidates, and which one comes out the other side.
 ///
-/// Two shapes, because the answer to "which id survives" changed and the events
-/// that gave the old answer are still on disk. Untagged, and unambiguously so:
-/// the two shapes share no field, so a record decodes as exactly one of them.
-/// Serializing is the same story in reverse — a retained event re-serializes to
-/// the bytes it was written with, which is what keeps its `payload_sha256`
-/// verifiable rather than needing an exemption.
+/// One shape. An explicit Section survives, keeping its id and taking the merged
+/// wording; the sources are consumed and their ids are never handed out again.
+/// Nothing is allocated, so a reference to the survivor keeps meaning what it
+/// meant.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(untagged)]
-pub enum Merge {
-    /// The current shape. An explicit Section survives, keeping its id and
-    /// taking the merged wording; the sources are consumed and their ids are
-    /// never handed out again. Nothing is allocated.
-    Into { destination: u64, sources: Vec<u64> },
-    /// Retained history only.
-    ///
-    /// The Phase 0 merge consumed every listed Section and allocated a fresh id
-    /// for the result, so a reference to any of them pointed at a Section that
-    /// no longer existed and there was nothing to forward the reader to. It is
-    /// still projected exactly as it was written — history is evidence, and
-    /// replaying it under today's rule would reconstruct an Object that never
-    /// existed — but it is not a shape this build ever writes.
-    Absorbing { absorbs: Vec<u64> },
+#[serde(deny_unknown_fields)]
+pub struct Merge {
+    pub destination: u64,
+    pub sources: Vec<u64>,
 }
 
 impl Merge {
     /// Every Section this merge reads, survivor included.
     pub fn participants(&self) -> Vec<u64> {
-        match self {
-            Merge::Into {
-                destination,
-                sources,
-            } => {
-                let mut all = vec![*destination];
-                all.extend(sources.iter().copied());
-                all
-            }
-            Merge::Absorbing { absorbs } => absorbs.clone(),
-        }
+        let mut all = vec![self.destination];
+        all.extend(self.sources.iter().copied());
+        all
     }
 
     /// The Sections this merge removes.
     pub fn consumed(&self) -> &[u64] {
-        match self {
-            Merge::Into { sources, .. } => sources,
-            Merge::Absorbing { absorbs } => absorbs,
-        }
+        &self.sources
     }
 
     fn validate(&self) -> Result<()> {
-        match self {
-            Merge::Into {
-                destination,
-                sources,
-            } => {
-                // The field's own lower bound, checked where the field is
-                // validated. Section ids start at 1, so 0 is not a section that
-                // happens to be missing — it is a value outside the schema, and
-                // letting the reducer discover it means a persisted Event was
-                // accepted as well formed on the strength of what some Object
-                // happened to contain.
-                check_section_id(*destination)?;
-                for source in sources {
-                    check_section_id(*source)?;
-                }
-                ensure!(
-                    !sources.is_empty(),
-                    EXIT_INVARIANT,
-                    "a merge needs at least one section to consume"
-                );
-                ensure!(
-                    !sources.contains(destination),
-                    EXIT_INVARIANT,
-                    "§{destination} survives the merge, so it cannot also be consumed by it"
-                );
-                // `sources[]` is a protocol-defined set, and it takes the one
-                // shared algorithm: JCS each element, then order by those bytes.
-                // Ruled at PR #52 `5413218070` and synchronized to #9/#13/#32,
-                // superseding the earlier field-local numeric-ascending wording.
-                // The two disagree as soon as the ids differ in digit count:
-                // `[2, 10]` is ascending, and canonical is `[10, 2]`, because
-                // "10" sorts before "2". A reader may still render numerically.
-                let mut canonical = sources.clone();
-                crate::proof::canonical_set(&mut canonical, "merge source")?;
-                ensure!(
-                    canonical == *sources,
-                    EXIT_INVARIANT,
-                    "the sections a merge consumes are listed once each, in canonical set order"
-                );
-            }
-            Merge::Absorbing { absorbs } => {
-                for absorbed in absorbs {
-                    check_section_id(*absorbed)?;
-                }
-                ensure!(
-                    absorbs.len() >= 2,
-                    EXIT_INVARIANT,
-                    "a merge must absorb at least two sections"
-                );
-                let mut unique = absorbs.clone();
-                unique.sort_unstable();
-                unique.dedup();
-                ensure!(
-                    unique.len() == absorbs.len(),
-                    EXIT_INVARIANT,
-                    "a merge cannot absorb the same section twice"
-                );
-            }
+        // The field's own lower bound, checked where the field is validated.
+        // Section ids start at 1, so 0 is not a section that happens to be
+        // missing — it is a value outside the schema, and letting the reducer
+        // discover it means a persisted Event was accepted as well formed on the
+        // strength of what some Object happened to contain.
+        check_section_id(self.destination)?;
+        for source in &self.sources {
+            check_section_id(*source)?;
         }
+        ensure!(
+            !self.sources.is_empty(),
+            EXIT_INVARIANT,
+            "a merge needs at least one section to consume"
+        );
+        ensure!(
+            !self.sources.contains(&self.destination),
+            EXIT_INVARIANT,
+            "§{} survives the merge, so it cannot also be consumed by it",
+            self.destination
+        );
+        // `sources[]` is a protocol-defined set, and it takes the one shared
+        // algorithm: JCS each element, then order by those bytes. The two
+        // disagree as soon as the ids differ in digit count: `[2, 10]` is
+        // ascending, and canonical is `[10, 2]`, because "10" sorts before "2".
+        // A reader may still render numerically.
+        let mut canonical = self.sources.clone();
+        crate::proof::canonical_set(&mut canonical, "merge source")?;
+        ensure!(
+            canonical == self.sources,
+            EXIT_INVARIANT,
+            "the sections a merge consumes are listed once each, in canonical set order"
+        );
         Ok(())
     }
 }
 
+/// What an Event says was done, and the data that says it.
+///
+/// The variant names are the protocol's Event types minus their `.v1` suffix;
+/// [`Action::event_type`] spells the persisted one. Splitting the version off
+/// the tag is deliberate: the version belongs to the *type*, and a Rust variant
+/// called `SectionUpdatedV1` would put a schema generation into every match arm
+/// in the crate.
+///
+/// `data` is always present in the envelope and may be `{}` — that is one of the
+/// two explicit exceptions to the canonical omission rule, and it is why
+/// `object.repaired.v1` carries an empty object rather than no member.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "type", content = "data")]
 pub enum Action {
-    ObjectCreated,
-    ObjectRenamed,
-    SectionAdded,
-    SectionRevised {
-        section: u64,
+    /// The Object is brought into existence, neutrally: untyped and open.
+    #[serde(rename = "object.created.v1")]
+    ObjectCreated { title: String },
+    #[serde(rename = "object.renamed.v1")]
+    ObjectRenamed {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        becomes: Option<Destination>,
     },
-    SectionMerged {
-        #[serde(flatten)]
-        merge: Merge,
-    },
-    SectionDeleted {
-        section: u64,
-    },
-    ObjectClosed,
-    ObjectReopened,
     /// Declare what this Object is and what state it is in, both explicitly.
     ///
     /// One action rather than two, because a type change without a destination
@@ -817,138 +741,316 @@ pub enum Action {
     /// `accepted` decision — which is a judgement, not a conversion. Both values
     /// are always restated, so the human reads the whole destination rather than
     /// a delta against something they have to remember.
+    #[serde(rename = "object.classified.v1")]
     ObjectClassified {
         #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
         object_type: Option<ObjectType>,
         state: State,
     },
+    /// Move the Object within the state vocabulary its current type defines.
+    ///
+    /// The general form of what `object.closed` and `object.reopened` used to
+    /// say for an untyped Object. Those two named a destination in their own
+    /// spelling and had no meaning at all on a typed Object; this one names the
+    /// destination outright and works wherever the destination is legal for the
+    /// type the Object already has. Changing the *type* is still
+    /// `object.classified.v1`, because that is a different judgement.
+    #[serde(rename = "object.state_changed.v1")]
+    ObjectStateChanged { state: State },
     /// Replace this Object with another, in one confirmation.
     ///
     /// The state, the replacement relation and the human-readable reason are one
     /// semantic act. Splitting them into separately confirmable steps would be
     /// easier to implement and would mean a record can sit in the state where it
     /// says it was replaced and cannot say by what.
-    ObjectSuperseded,
+    #[serde(rename = "object.superseded.v1")]
+    ObjectSuperseded { value: SectionValue },
     /// Restore a current projection that failed integrity to what admitted
     /// history derives.
     ///
-    /// A distinct action rather than an ordinary mutation with a flag, because
-    /// it means something an ordinary edit never means: the stored authority had
+    /// A distinct type rather than an ordinary mutation with a flag, because it
+    /// means something an ordinary edit never means: the stored authority had
     /// stopped being trustworthy, and was put back from previously provable
-    /// history. #35's ruling requires that to stay visible in immutable history
-    /// rather than reading as a normal revision.
+    /// history. That stays visible in immutable history rather than reading as a
+    /// normal revision.
     ///
     /// It carries no parameters because it cannot: repair restores *exactly* the
     /// replay-derived projection and nothing else. Anything a person wants to
     /// change afterwards goes through the normal admission path, so the record
-    /// reads `object_repaired` then `section_revised` rather than letting one
-    /// repair quietly legitimize semantics nobody admitted.
-    ObjectRepaired,
+    /// reads `object.repaired.v1` then `section.updated.v1` rather than letting
+    /// one repair quietly legitimize semantics nobody admitted.
+    #[serde(rename = "object.repaired.v1")]
+    ObjectRepaired {},
+    /// The bootstrap Event of a migrated Object, and the only one that carries a
+    /// whole Object snapshot.
+    ///
+    /// Emitted only by the supported released-workspace migration, exactly once
+    /// per migrated Object, and permanently revision 1 of its stream. It exists
+    /// because the predecessor's own history is discarded rather than translated
+    /// — so without it a migrated Object would have current authority and no
+    /// history at all, and nothing could ever answer "what does replay derive".
+    #[serde(rename = "object.migrated.v1")]
+    ObjectMigrated { snapshot: Box<Snapshot> },
+    #[serde(rename = "section.created.v1")]
+    SectionCreated {
+        value: SectionValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        becomes: Option<Destination>,
+    },
+    #[serde(rename = "section.updated.v1")]
+    SectionUpdated {
+        section: u64,
+        value: SectionValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        becomes: Option<Destination>,
+    },
+    #[serde(rename = "section.deleted.v1")]
+    SectionDeleted {
+        section: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        becomes: Option<Destination>,
+    },
+    /// Destination-survives: the destination keeps its id and takes `value`,
+    /// the sources are consumed, and no id is reused.
+    #[serde(rename = "section.merged.v1")]
+    SectionMerged {
+        #[serde(flatten)]
+        merge: Merge,
+        value: SectionValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        becomes: Option<Destination>,
+    },
+}
+
+/// The complete current Object state a migration bootstrap Event carries.
+///
+/// Object identity is excluded because the stream already binds it — every
+/// Event's digest names the owning Object, so repeating it here would be a
+/// second answer to a question that already has one. Revision is excluded
+/// because the Event's own `rev` fixes it at 1. Seals are excluded because they
+/// are integrity over a persisted representation, and this is a payload rather
+/// than that representation.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub title: String,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<ObjectType>,
+    pub state: State,
+    pub next_section_id: u64,
+    /// Required, and may be `[]`.
+    ///
+    /// The one place a Section list is written out empty rather than omitted: a
+    /// migration snapshot is a complete statement of what the Object became, so
+    /// "it has no Sections" is an answer it must give rather than leave out.
+    pub sections: Vec<SnapshotSection>,
+}
+
+/// One Section inside a migration snapshot: identity and value, no seal.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SnapshotSection {
+    pub id: u64,
+    #[serde(flatten)]
+    pub value: SectionValue,
 }
 
 impl Action {
-    pub fn label(&self) -> &'static str {
+    /// The persisted Event type.
+    pub fn event_type(&self) -> &'static str {
         match self {
-            Action::ObjectCreated => "object.created",
-            Action::ObjectRenamed => "object.renamed",
-            Action::SectionAdded => "section.added",
-            Action::SectionRevised { .. } => "section.revised",
-            Action::SectionMerged { .. } => "section.merged",
-            Action::SectionDeleted { .. } => "section.deleted",
-            Action::ObjectClosed => "object.closed",
-            Action::ObjectReopened => "object.reopened",
-            Action::ObjectClassified { .. } => "object.classified",
-            Action::ObjectSuperseded => "object.superseded",
-            Action::ObjectRepaired => "object.repaired",
+            Action::ObjectCreated { .. } => "object.created.v1",
+            Action::ObjectRenamed { .. } => "object.renamed.v1",
+            Action::ObjectClassified { .. } => "object.classified.v1",
+            Action::ObjectStateChanged { .. } => "object.state_changed.v1",
+            Action::ObjectSuperseded { .. } => "object.superseded.v1",
+            Action::ObjectRepaired {} => "object.repaired.v1",
+            Action::ObjectMigrated { .. } => "object.migrated.v1",
+            Action::SectionCreated { .. } => "section.created.v1",
+            Action::SectionUpdated { .. } => "section.updated.v1",
+            Action::SectionDeleted { .. } => "section.deleted.v1",
+            Action::SectionMerged { .. } => "section.merged.v1",
+        }
+    }
+
+    /// Rebuild an action from a Challenge subject's `action` and `value`.
+    ///
+    /// The inverse of [`Action::command`], and deliberately the only way back:
+    /// a Challenge names what is being asked for, and turning that into what
+    /// enters history is a mapping with one place to live. A command outside the
+    /// vocabulary is refused by name rather than by a deserializer talking about
+    /// variants.
+    pub fn from_command(command: &str, value: serde_json::Value) -> Result<Self> {
+        let event_type = match command {
+            "create" => "object.created.v1",
+            "rename" => "object.renamed.v1",
+            "classify" => "object.classified.v1",
+            "change_state" => "object.state_changed.v1",
+            "supersede" => "object.superseded.v1",
+            "repair" => "object.repaired.v1",
+            "section.create" => "section.created.v1",
+            "section.update" => "section.updated.v1",
+            "section.delete" => "section.deleted.v1",
+            "section.merge" => "section.merged.v1",
+            other => {
+                return Err(Error::new(
+                    EXIT_SCHEMA,
+                    format!(
+                        "{other:?} is not an Object command; the vocabulary is {}",
+                        crate::confirmation::OBJECT_COMMANDS.join(", ")
+                    ),
+                ))
+            }
+        };
+        serde_json::from_value(serde_json::json!({ "type": event_type, "data": value }))
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("{command}: {error}")))
+    }
+
+    /// The command vocabulary a Challenge subject names.
+    ///
+    /// Distinct from [`Action::event_type`] on purpose: one names what is being
+    /// asked for, the other names what entered history. They correspond one to
+    /// one today, and nothing should make a reader assume they must.
+    pub fn command(&self) -> &'static str {
+        match self {
+            Action::ObjectCreated { .. } => "create",
+            Action::ObjectRenamed { .. } => "rename",
+            Action::ObjectClassified { .. } => "classify",
+            Action::ObjectStateChanged { .. } => "change_state",
+            Action::ObjectSuperseded { .. } => "supersede",
+            Action::ObjectRepaired {} => "repair",
+            Action::ObjectMigrated { .. } => "migrate",
+            Action::SectionCreated { .. } => "section.create",
+            Action::SectionUpdated { .. } => "section.update",
+            Action::SectionDeleted { .. } => "section.delete",
+            Action::SectionMerged { .. } => "section.merge",
+        }
+    }
+
+    /// The label used in human-facing output.
+    pub fn label(&self) -> &'static str {
+        self.event_type()
+    }
+
+    /// The Section value this action admits, where it admits one.
+    pub fn value(&self) -> Option<&SectionValue> {
+        match self {
+            Action::ObjectSuperseded { value }
+            | Action::SectionCreated { value, .. }
+            | Action::SectionUpdated { value, .. }
+            | Action::SectionMerged { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn value_mut(&mut self) -> Option<&mut SectionValue> {
+        match self {
+            Action::ObjectSuperseded { value }
+            | Action::SectionCreated { value, .. }
+            | Action::SectionUpdated { value, .. }
+            | Action::SectionMerged { value, .. } => Some(value),
+            _ => None,
         }
     }
 
     /// Actions that carry wording a human must read.
     pub fn carries_content(&self) -> bool {
-        matches!(
-            self,
-            Action::ObjectCreated
-                | Action::ObjectRenamed
-                | Action::SectionAdded
-                | Action::SectionRevised { .. }
-                | Action::SectionMerged { .. }
-                | Action::ObjectSuperseded
-        )
+        self.value().is_some() || self.carries_title()
+    }
+
+    /// Where this action leaves the Object, when it carries a destination.
+    pub fn becomes(&self) -> Option<&Destination> {
+        match self {
+            Action::ObjectRenamed { becomes, .. }
+            | Action::SectionCreated { becomes, .. }
+            | Action::SectionUpdated { becomes, .. }
+            | Action::SectionDeleted { becomes, .. }
+            | Action::SectionMerged { becomes, .. } => becomes.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_becomes(&mut self, destination: Option<Destination>) -> Result<()> {
+        match self {
+            Action::ObjectRenamed { becomes, .. }
+            | Action::SectionCreated { becomes, .. }
+            | Action::SectionUpdated { becomes, .. }
+            | Action::SectionDeleted { becomes, .. }
+            | Action::SectionMerged { becomes, .. } => {
+                *becomes = destination;
+                Ok(())
+            }
+            other => {
+                ensure!(
+                    destination.is_none(),
+                    EXIT_INVARIANT,
+                    "{} sets the object's own state, so it cannot also carry one",
+                    other.event_type()
+                );
+                Ok(())
+            }
+        }
     }
 
     /// The actions that refuse to run on an Object nobody is looking at.
     ///
-    /// Exactly the ones a [`Payload::becomes`] destination is for, and the list
-    /// is shared with the guard rather than written twice. That sharing is the
-    /// whole rule: a destination is admissible on an action *because* the guard
-    /// would otherwise refuse it. An action that sets the Object's own state
-    /// cannot also be handed one, and `object_superseded` is exempt from the
-    /// guard entirely, so neither takes a destination.
+    /// Exactly the ones a destination is for, and the list is shared with the
+    /// guard rather than written twice. That sharing is the whole rule: a
+    /// destination is admissible on an action *because* the guard would
+    /// otherwise refuse it. An action that sets the Object's own state cannot
+    /// also be handed one, and `object.superseded.v1` is exempt from the guard
+    /// entirely, so neither takes a destination.
     pub fn requires_attention(&self) -> bool {
         matches!(
             self,
-            Action::ObjectRenamed
-                | Action::SectionAdded
-                | Action::SectionRevised { .. }
-                | Action::SectionMerged { .. }
+            Action::ObjectRenamed { .. }
+                | Action::SectionCreated { .. }
+                | Action::SectionUpdated { .. }
                 | Action::SectionDeleted { .. }
+                | Action::SectionMerged { .. }
         )
     }
 
     /// Actions that add wording as a new Section rather than replacing existing
     /// wording or a label.
-    ///
-    /// A current merge is not one of them: it revises the destination in place.
-    /// Only the retained Phase 0 shape allocated an id, and it is here because
-    /// history still has to project correctly, not because anything writes it.
     pub fn adds_section(&self) -> bool {
-        match self {
-            Action::SectionAdded | Action::ObjectSuperseded => true,
-            Action::SectionMerged { merge } => matches!(merge, Merge::Absorbing { .. }),
-            _ => false,
-        }
+        matches!(
+            self,
+            Action::SectionCreated { .. } | Action::ObjectSuperseded { .. }
+        )
     }
 
     /// Actions whose content is the object's title rather than a section's
     /// wording. The gate holds both to the same shape, so a body cannot be
     /// pasted into a label through the door that was added later.
     pub fn carries_title(&self) -> bool {
-        matches!(self, Action::ObjectCreated | Action::ObjectRenamed)
+        matches!(
+            self,
+            Action::ObjectCreated { .. } | Action::ObjectRenamed { .. }
+        )
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        match self {
+            Action::ObjectCreated { title } | Action::ObjectRenamed { title, .. } => Some(title),
+            _ => None,
+        }
     }
 }
 
-/// Exactly what a human is asked to assent to. The action is inside the hash,
+/// Exactly what a human is asked to assent to. The action is inside the digest,
 /// so "delete §3" cannot become "delete §5" after it was displayed.
+///
+/// The object identity travels beside the action rather than inside `data`,
+/// because the durable Event does not repeat it — the stream and the Event
+/// digest bind it — while a Challenge subject must name it outright.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Payload {
+    pub object: String,
     #[serde(flatten)]
     pub action: Action,
-    pub object: String,
-    /// Where this action leaves the Object, applied atomically with it.
-    ///
-    /// It exists because a no-attention Object may be revised in **one**
-    /// confirmed operation when that operation returns it to attention. Without
-    /// it the only path was to confirm a reclassification the Object was never
-    /// really in, and then confirm the revision — two authoritative statements
-    /// for one piece of work.
-    ///
-    /// Narrow on purpose. `becomes` is admissible only on an Object that does
-    /// **not** currently need attention, only on the actions the attention guard
-    /// would otherwise refuse, and only towards a destination that does need
-    /// attention. An Object already in the listing has no use for it: nothing is
-    /// being unblocked, so a destination there would be an unrelated change
-    /// riding along inside someone else's confirmation. That is what
-    /// `object_classified` is for.
-    ///
-    /// Absent by default and skipped when empty, so a payload that does not
-    /// carry one serializes and hashes exactly as it did before it existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub becomes: Option<Destination>,
-    #[serde(flatten)]
-    pub content: Content,
 }
 
-/// Where a [`Payload::becomes`] lands the Object.
+/// Where a destination lands the Object.
 ///
 /// Field-for-field what [`Action::ObjectClassified`] carries, and deliberately
 /// so: a destination means the same thing whether it is the whole operation or
@@ -964,122 +1066,173 @@ pub struct Destination {
 }
 
 impl Payload {
-    pub fn sha256(&self) -> Result<String> {
-        canonical_sha256_with_basis(self)
+    pub fn new(object: impl Into<String>, action: Action) -> Self {
+        Self {
+            object: object.into(),
+            action,
+        }
+    }
+
+    /// The Section value this payload admits, where it admits one.
+    pub fn value(&self) -> Option<&SectionValue> {
+        self.action.value()
+    }
+
+    pub fn content(&self) -> Content {
+        self.action
+            .value()
+            .map(|value| value.content.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn becomes(&self) -> Option<&Destination> {
+        self.action.becomes()
     }
 
     pub fn validate(&self) -> Result<()> {
         validate_object_id(&self.object)?;
-        self.content.validate()?;
-        if self.action.carries_content() {
+        if let Some(value) = self.action.value() {
+            // Before the schema check, not after it, so a caller who typed
+            // nothing is answered as a caller. The stricter half of this rule
+            // lives in `Content::validate`, which refuses an empty `text` beside
+            // empty content wherever a persisted Section is read; this one also
+            // refuses wording that is only whitespace, which is a mistake at the
+            // keyboard rather than a shape the record forbids.
             ensure!(
-                !self.content.text.trim().is_empty(),
+                !value.content.text.trim().is_empty() || !value.content.content.is_empty(),
                 EXIT_USAGE,
-                "{} requires text",
-                self.action.label()
+                "{} requires text, or literal content to stand in its place",
+                self.action.event_type()
             );
-        } else {
+            value.validate()?;
+        }
+        if let Some(title) = self.action.title() {
             ensure!(
-                self.content.text.is_empty()
-                    && self.content.based_on.is_none()
-                    && self.content.refs.is_empty()
-                    && self.content.role.is_none()
-                    && self.content.content.is_empty()
-                    && self.content.relations.is_empty(),
-                EXIT_INVARIANT,
-                "{} does not carry content",
-                self.action.label()
+                !title.trim().is_empty(),
+                EXIT_USAGE,
+                "{} requires a title",
+                self.action.event_type()
             );
         }
-        if let Action::ObjectClassified { object_type, state } = &self.action {
-            validate_state(EXIT_USAGE, *object_type, *state)?;
+        match &self.action {
+            Action::ObjectClassified { object_type, state } => {
+                validate_state(EXIT_USAGE, *object_type, *state)?;
+            }
+            Action::SectionMerged { merge, .. } => merge.validate()?,
+            // The same rule, for the other two actions that name a Section.
+            // A payload naming §0 was once accepted here and only refused later,
+            // by a lookup that failed for a different reason.
+            Action::SectionUpdated { section, .. } | Action::SectionDeleted { section, .. } => {
+                check_section_id(*section)?
+            }
+            Action::ObjectMigrated { snapshot } => snapshot.validate()?,
+            _ => {}
         }
         // `superseded_by` may only arrive through the one action that also sets
         // the state, and that action may carry nothing else. Any other way in
         // would let the relation and the state be confirmed apart, which is the
         // whole thing supersession is defined to prevent.
-        if matches!(self.action, Action::ObjectSuperseded) {
+        if let Action::ObjectSuperseded { value } = &self.action {
             ensure!(
-                self.content.role == Some(Role::Supersession),
+                value.content.role == Some(Role::Supersession),
                 EXIT_INVARIANT,
-                "object.superseded carries the reason it was replaced, so its section is role=supersession"
+                "object.superseded.v1 carries the reason it was replaced, so its section is role=supersession"
             );
             ensure!(
-                self.content.relations.len() == 1
-                    && self.content.relations[0].relation == RelationType::SupersededBy,
+                value.content.relations.len() == 1
+                    && value.content.relations[0].relation == RelationType::SupersededBy,
                 EXIT_INVARIANT,
-                "object.superseded carries exactly one relation, the superseded_by naming the replacement"
+                "object.superseded.v1 carries exactly one relation, the superseded_by naming the replacement"
             );
-        } else {
+        } else if let Some(value) = self.action.value() {
             ensure!(
-                !self
+                !value
                     .content
                     .relations
                     .iter()
                     .any(|relation| relation.relation == RelationType::SupersededBy),
                 EXIT_INVARIANT,
-                "a superseded_by relation only enters through object.superseded, which confirms the state, the replacement and the reason together"
+                "a superseded_by relation only enters through object.superseded.v1, which confirms the state, the replacement and the reason together"
             );
-        }
-        match &self.action {
-            Action::SectionMerged { merge } => merge.validate()?,
-            // The same rule, for the other two actions that name a Section.
-            // These predate the merge representation and had the same gap: a
-            // payload naming §0 was accepted here and only refused later, by a
-            // lookup that failed for a different reason.
-            Action::SectionRevised { section } | Action::SectionDeleted { section } => {
-                check_section_id(*section)?
-            }
-            _ => {}
         }
         Ok(())
     }
 }
 
-/// `based_on: null` was part of the v0 hash canonical form before no-basis was
-/// represented by an absent persisted field. Keeping it in the digest form
-/// lets compatible legacy sections and confirmed events validate unchanged;
-/// serialization and hashing are separate representations for this one field.
-fn canonical_sha256_with_basis<T: Serialize>(value: &T) -> Result<String> {
-    let mut value = serde_json::to_value(value)
-        .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical form: {error}")))?;
-    if let serde_json::Value::Object(object) = &mut value {
-        object.entry("based_on").or_insert(serde_json::Value::Null);
+impl Snapshot {
+    fn validate(&self) -> Result<()> {
+        validate_state(EXIT_SCHEMA, self.object_type, self.state)?;
+        ensure!(
+            self.next_section_id > 0,
+            EXIT_SCHEMA,
+            "next_section_id must start at 1"
+        );
+        let mut ids = BTreeSet::new();
+        for section in &self.sections {
+            check_section_id(section.id)?;
+            section.value.validate()?;
+            ensure!(
+                ids.insert(section.id),
+                EXIT_SCHEMA,
+                "migration snapshot lists §{} more than once",
+                section.id
+            );
+            ensure!(
+                section.id < self.next_section_id,
+                EXIT_SCHEMA,
+                "migration snapshot next_section_id {} would reuse live §{}",
+                self.next_section_id,
+                section.id
+            );
+        }
+        Ok(())
     }
-    canonical_sha256(&value)
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Confirmation {
-    pub challenge: String,
-    pub payload_sha256: String,
-}
-
-/// What a Human typed, under the mixed-authority generation.
+/// What a Human typed.
 ///
-/// The challenge is still a random token a human hands back — that mechanism is
-/// unchanged, and a human never types a digest. What changed is the second
-/// member: `payload_sha256` identified the bytes of one mutation, while
-/// `candidate_digest` names the semantic transition that was authorized, so the
-/// same assent stays recognizable across a representation change.
+/// The challenge is a random token a human hands back, and the *only* thing the
+/// record keeps of it. #66 is explicit that the Challenge digest is local and is
+/// not durable Event provenance: the file it seals is gone by the time anybody
+/// reads this, so storing its hash would be storing a proof of something
+/// unverifiable. What the record needs to say is which question was answered.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct HumanConfirmation {
     pub challenge: String,
-    pub candidate_digest: String,
 }
 
 /// What Rule Review concluded, as durable provenance.
 ///
-/// Minimal on purpose: an outcome and an identity. #25 is explicit that the
-/// EventStore does not keep a ReviewSeries, per-Rule counters, or the Agent's
-/// natural-language reasoning — those belong to the moment, not to the record.
+/// Three structured facts, chosen so a reader years later can interpret them
+/// without anything that has since been thrown away. `outcome` says how the
+/// mutation got in, `result` says what the review itself concluded, and
+/// `attempts` says which try it was.
+///
+/// **The ReviewDigest is deliberately absent.** It binds an exact mutation
+/// against exact Rule artifacts *at review time*, which is what makes it useful
+/// to a Challenge and useless to history: once the Challenge is gone and the
+/// Rule files have moved, sixty-four hex characters explain nothing to anybody
+/// and cannot be recomputed to mean what they meant. A durable field that can
+/// only ever be compared against material that no longer exists is not
+/// provenance, it is residue.
+///
+/// **The Agent's explanation is absent for a different reason.** It is
+/// decision-time material, written by an agent to persuade a human in a
+/// particular moment, and it was frozen in the Challenge where that moment
+/// lived. Keeping it here would quietly turn an agent's argument into the
+/// human's recorded rationale, which is not a thing anybody wrote. If durable
+/// human rationale is wanted, it is its own design.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewProvenance {
     pub outcome: ReviewOutcome,
-    pub review_digest: String,
+    /// What the review concluded, which `outcome` alone cannot say: an
+    /// `overridden` admission looks the same whether a human overruled a failure
+    /// or an exhausted ceiling, and those are not the same act.
+    pub result: crate::proof::ReviewResult,
+    /// The Agent-attested attempt the review was of.
+    pub attempts: u32,
 }
 
 /// How a reviewed mutation ended up admitted.
@@ -1095,95 +1248,83 @@ pub enum ReviewOutcome {
     Overridden,
 }
 
-/// The one tagged admission structure of the mixed-authority Event generation.
+/// How this Event was allowed into durable history.
 ///
-/// One structure rather than a scattering of optional fields, because "which
-/// door" is a single fact and a reader must not have to infer it from which
-/// members happen to be present.
+/// Deliberately not the same fact as [`crate::semantics::Admitted`] on a
+/// Section. That one says what the Section's current wording is worth; this one
+/// says why the Event was let in. Normally they agree. Migration is where they
+/// do not: the bootstrap Event records the migration's own Human confirmation
+/// and its time, while every Section inside it keeps the admission provenance it
+/// already had.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct TaggedAdmission {
-    pub kind: Admission,
-    /// Present exactly when `kind = human`.
+pub struct EventAdmission {
+    pub by: Admission,
+    pub at: String,
+    /// Present exactly when `by = human`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<HumanConfirmation>,
     /// Absent when no Rule Review applied — never a null placeholder, because
     /// "no rule governed this" and "a rule governed it and said nothing" are
     /// different facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule_review: Option<ReviewProvenance>,
+    pub review: Option<ReviewProvenance>,
 }
 
-/// How an Event says what admitted it.
+/// The Event envelope's metadata member.
 ///
-/// Two shapes, because the answer changed generation and the records that gave
-/// the old answer are still on disk. Untagged and unambiguous: the two share no
-/// member, so a record decodes as exactly one of them, and a retained record
-/// re-serializes to the bytes it was written with — which is what keeps its
-/// `payload_sha256` verifiable rather than needing an exemption.
+/// One member today, and a struct rather than a flattened `admitted` so the
+/// envelope keeps the shape #66 fixes: `metadata.admitted`, not `admitted`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(untagged)]
-pub enum Provenance {
-    /// The retained generation: a spent challenge and the hash of the mutation
-    /// it was typed against.
-    Confirmed { confirmation: Confirmation },
-    /// The mixed-authority generation, where the Human Gate is one door of two.
-    Tagged { admission: TaggedAdmission },
+#[serde(deny_unknown_fields)]
+pub struct Metadata {
+    pub admitted: EventAdmission,
 }
 
-impl Provenance {
-    /// The retained generation's shape, for a caller building one.
-    pub fn confirmed(challenge: impl Into<String>, payload_sha256: impl Into<String>) -> Self {
-        Provenance::Confirmed {
-            confirmation: Confirmation {
+impl EventAdmission {
+    pub fn human(at: impl Into<String>, challenge: impl Into<String>) -> Self {
+        Self {
+            by: Admission::Human,
+            at: at.into(),
+            confirmation: Some(HumanConfirmation {
                 challenge: challenge.into(),
-                payload_sha256: payload_sha256.into(),
-            },
+            }),
+            review: None,
         }
     }
 
-    /// Which door this record came through.
-    ///
-    /// The retained generation has only one answer available, and it is the
-    /// right one rather than a fallback: while it was the current generation the
-    /// Human Gate was the only way in, so every record written under it went
-    /// through it.
-    pub fn admitting_path(&self) -> Admission {
-        match self {
-            Provenance::Confirmed { .. } => Admission::Human,
-            Provenance::Tagged { admission } => admission.kind,
-        }
-    }
-
-    /// The structural rules of the tagged generation.
+    /// The structural rules of the envelope.
     ///
     /// Structural, not authoritative: what an Agent-admitted mutation may *do*
     /// is decided by [`check_admitting_authority`] against current state, and it
     /// has to be, because deletion depends on what the target currently is.
-    /// These are the rules a record must satisfy to be well formed at all —
-    /// a shape that says `agent` while carrying a human's confirmation is not a
+    /// These are the rules a record must satisfy to be well formed at all — a
+    /// shape that says `agent` while carrying a human's confirmation is not a
     /// record whose authority is wrong, it is a record that contradicts itself.
     pub fn validate(&self) -> Result<()> {
-        let Provenance::Tagged { admission } = self else {
-            return Ok(());
-        };
-        match admission.kind {
+        ensure!(
+            time::OffsetDateTime::parse(&self.at, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
+            EXIT_SCHEMA,
+            "event admitted.at is not RFC3339"
+        );
+        match self.by {
             Admission::Human => {
                 ensure!(
-                    admission.confirmation.is_some(),
+                    self.confirmation.is_some(),
                     EXIT_SCHEMA,
                     "a human admission records the confirmation it was admitted by"
                 );
             }
             Admission::Agent => {
                 ensure!(
-                    admission.confirmation.is_none(),
+                    self.confirmation.is_none(),
                     EXIT_SCHEMA,
                     "an agent admission passes through no human gate, so it carries no confirmation"
                 );
                 ensure!(
-                    !admission
-                        .rule_review
+                    !self
+                        .review
                         .as_ref()
                         .is_some_and(|review| review.outcome == ReviewOutcome::Overridden),
                     EXIT_SCHEMA,
@@ -1191,55 +1332,217 @@ impl Provenance {
                 );
             }
         }
-        if let Some(confirmation) = &admission.confirmation {
+        if let Some(confirmation) = &self.confirmation {
             ensure!(
                 crate::confirmation::valid_challenge(&confirmation.challenge),
                 EXIT_SCHEMA,
                 "a human admission carries an invalid challenge"
             );
-            crate::digest::CANDIDATE.verify(&confirmation.candidate_digest)?;
         }
-        if let Some(review) = &admission.rule_review {
-            crate::digest::REVIEW.verify(&review.review_digest)?;
+        if let Some(review) = &self.review {
+            // `overridden` is the record of a human overruling a review, so it
+            // cannot describe one that passed, and `passed` cannot describe one
+            // that did not. The two members say different things, and a record
+            // where they contradict each other is not a record of anything.
+            let overruled = review.result != crate::proof::ReviewResult::Passed;
+            ensure!(
+                (review.outcome == ReviewOutcome::Overridden) == overruled,
+                EXIT_SCHEMA,
+                "a review that {} cannot be recorded as {}",
+                if overruled { "did not pass" } else { "passed" },
+                match review.outcome {
+                    ReviewOutcome::Passed => "passed",
+                    ReviewOutcome::Overridden => "overridden",
+                }
+            );
+            ensure!(
+                review.attempts > 0,
+                EXIT_SCHEMA,
+                "a Rule Review is of an attempt, and attempts are counted from 1"
+            );
+            if self.by == Admission::Agent {
+                ensure!(
+                    review.result == crate::proof::ReviewResult::Passed,
+                    EXIT_SCHEMA,
+                    "an Agent admission carries the review that let it in, and only a passing one does"
+                );
+            }
         }
         Ok(())
     }
 }
 
+/// One durable Event.
+///
+/// The owning Object is **not** a member. Its identity is bound by the stream
+/// the Event lives in and, decisively, by [`Event::digest_under`], which hashes
+/// the Object id beside the Event — so an Event moved into another Object's
+/// stream stops verifying rather than quietly becoming that Object's history.
+/// A member repeating it would be a second answer that could disagree with the
+/// first.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Event {
-    pub format: String,
-    pub version: u32,
-    pub event_id: String,
+    pub id: String,
+    #[serde(flatten)]
+    pub action: Action,
     pub rev: u64,
-    pub time: String,
-    #[serde(flatten)]
-    pub payload: Payload,
-    #[serde(flatten)]
-    pub provenance: Provenance,
+    pub metadata: Metadata,
+    pub digest: String,
 }
 
 impl Event {
-    /// The retained generation's confirmation, where there is one.
+    /// Build a sealed Event for `object`.
     ///
-    /// A named accessor rather than a field, because provenance is one fact
-    /// with two shapes and a caller that reaches past that has to say which
-    /// shape it is assuming.
-    pub fn confirmation(&self) -> Option<&Confirmation> {
-        match &self.provenance {
-            Provenance::Confirmed { confirmation } => Some(confirmation),
-            Provenance::Tagged { .. } => None,
+    /// The seal is computed here rather than supplied, for the reason
+    /// [`Section::from_value`]'s is: a constructor that took one would be a way
+    /// to append an Event whose digest describes something else.
+    pub fn sealed(
+        object: &str,
+        id: String,
+        action: Action,
+        rev: u64,
+        admitted: EventAdmission,
+    ) -> Result<Self> {
+        let mut event = Self {
+            id,
+            action,
+            rev,
+            metadata: Metadata { admitted },
+            digest: String::new(),
+        };
+        event.digest = event.recomputed_digest(object)?;
+        Ok(event)
+    }
+
+    /// The Human-Gate proof, where there is one.
+    pub fn human_confirmation(&self) -> Option<&HumanConfirmation> {
+        match self.metadata.admitted.by {
+            Admission::Human => self.metadata.admitted.confirmation.as_ref(),
+            Admission::Agent => None,
         }
     }
 
-    /// The Human-Gate proof carried by Event generation 2, where there is one.
-    pub fn human_confirmation(&self) -> Option<&HumanConfirmation> {
-        match &self.provenance {
-            Provenance::Tagged { admission } if admission.kind == Admission::Human => {
-                admission.confirmation.as_ref()
+    /// Which door this record came through.
+    pub fn admitting_path(&self) -> Admission {
+        self.metadata.admitted.by
+    }
+
+    pub fn recomputed_digest(&self, object: &str) -> Result<String> {
+        crate::digest::EVENT
+            .emit(self.digest_under(object, crate::digest::EVENT.current)?)
+            .map(|value| value.to_string())
+    }
+
+    /// EventDigestContract 1: SHA-256 over the JCS of `{object, event}`, where
+    /// `event` is this Event without its own digest.
+    pub fn digest_under(&self, object: &str, version: u32) -> Result<String> {
+        match version {
+            1 => {
+                let mut event = serde_json::to_value(self).map_err(|error| {
+                    Error::new(EXIT_SCHEMA, format!("canonical event: {error}"))
+                })?;
+                if let serde_json::Value::Object(members) = &mut event {
+                    members.remove("digest");
+                }
+                let bound = serde_json::json!({ "object": object, "event": event });
+                Ok(crate::proof::sha256_of(&crate::proof::canonical_bytes(
+                    &bound, "event",
+                )?))
             }
-            Provenance::Confirmed { .. } | Provenance::Tagged { .. } => None,
+            other => Err(Error::new(
+                EXIT_SCHEMA,
+                format!("EventDigestContract: no contract for version {other}"),
+            )),
         }
+    }
+
+    /// The payload as the Object domain reads it.
+    pub fn payload(&self, object: &str) -> Payload {
+        Payload::new(object, self.action.clone())
+    }
+
+    pub fn validate(&self, object: &str) -> Result<()> {
+        validate_object_id(object)?;
+        // `validate_object_id`, not `canonical_object_id`. The second only asks
+        // whether the text *parses* as a UUIDv7 and hands back the canonical
+        // spelling; discarding that result accepted every other spelling the
+        // parser tolerates — uppercase, braces, urn form — as a stored Event id.
+        // #66 says Event ids are canonical UUIDv7 text, and the duplicate check
+        // below compares the stored strings, so two spellings of one identity
+        // were two identities to it and neither the seal nor the uniqueness rule
+        // noticed.
+        validate_object_id(&self.id).map_err(|_| {
+            Error::new(
+                EXIT_SCHEMA,
+                format!("event id {:?} must be a canonical UUIDv7", self.id),
+            )
+        })?;
+        ensure!(
+            self.rev > 0,
+            EXIT_SCHEMA,
+            "event revisions are counted from 1"
+        );
+        // The seal binds the owning Object, so this is where an Event lifted
+        // into another stream stops verifying rather than quietly becoming that
+        // Object's history. Rechecked under the contract the value names, never
+        // under whichever emitter is newest.
+        let attested = crate::digest::EVENT
+            .recheck(&self.digest, |version| self.digest_under(object, version))?;
+        ensure!(
+            attested.agrees(),
+            EXIT_SCHEMA,
+            "event {} does not match its own seal for object {object}",
+            self.id
+        );
+        self.metadata.admitted.validate()?;
+        self.check_one_admission()?;
+        self.payload(object).validate()
+    }
+
+    /// A Section admitted by this Event was admitted *when* this Event was.
+    ///
+    /// The amendment says normal Human admission stores one instant in both
+    /// `Section.admitted.at` and `Event.metadata.admitted.at`, and the same
+    /// holds for Agent admission — they are two statements about one moment, not
+    /// two moments that happen to be close. The constructors stamp them from a
+    /// single clock read, but nothing durable required it, so a record carrying
+    /// two different RFC3339 instants passed the append and read boundaries and
+    /// history would then disagree with itself about when a thing was admitted.
+    ///
+    /// The unassigned placeholder is refused outright. A pending Challenge holds
+    /// it precisely because admission has not happened; a record that kept it
+    /// would be claiming an admission instant that was documented as impossible.
+    ///
+    /// `object.migrated.v1` is exempt by construction rather than by exception:
+    /// its Sections live inside the snapshot, not in `Action::value()`, because
+    /// migration is the one case where Section provenance and Event provenance
+    /// are deliberately different facts.
+    fn check_one_admission(&self) -> Result<()> {
+        let admitted = &self.metadata.admitted;
+        ensure!(
+            admitted.at != crate::gate::UNASSIGNED_ADMISSION,
+            EXIT_SCHEMA,
+            "event {} records the unassigned admission placeholder, which no admission has",
+            self.id
+        );
+        let Some(value) = self.action.value() else {
+            return Ok(());
+        };
+        ensure!(
+            value.admitted.by == admitted.by,
+            EXIT_SCHEMA,
+            "event {} admits a section through a different door than it came through itself",
+            self.id
+        );
+        ensure!(
+            value.admitted.at == admitted.at,
+            EXIT_SCHEMA,
+            "event {} was admitted at {} and admits a section at {}, and those are one moment",
+            self.id,
+            admitted.at,
+            value.admitted.at
+        );
+        Ok(())
     }
 }
 
@@ -1288,15 +1591,16 @@ pub fn replay_recoverable_tail(mut object: Object, events: &[Event]) -> Result<(
 
 /// Apply an admitted Event to an Object. Deterministic by construction: no
 /// clocks, no git, no interpretation of prose. Everything it needs is in the
-/// event.
+/// event — including, since #66, every Section's own admission provenance, so
+/// replay no longer has to infer one fact from the other.
 pub fn project(object: &mut Object, event: &Event) -> Result<()> {
-    let content = &event.payload.content;
-    let admitted_by = admitting_path(event);
-    // Before anything is applied, `becomes` included: what the admitting path
-    // may do at all is a different question from what the action does, and
+    let payload = event.payload(&object.id);
+    let admitted_by = event.admitting_path();
+    // Before anything is applied, the destination included: what the admitting
+    // path may do at all is a different question from what the action does, and
     // asking it after the destination had been applied would be asking it too
     // late.
-    check_admitting_authority(object, &event.payload, admitted_by)?;
+    check_admitting_authority(object, &payload, admitted_by)?;
     // Applied before the action, so the attention guard below sees the state
     // this confirmation *arrives at* rather than the one it left.
     //
@@ -1313,18 +1617,13 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
     // either way, but "you may not put it *there*" and "you may not do this at
     // all" are different refusals, and a reducer that says the second when it
     // means the first sends someone to fix the wrong half.
-    if let Some(becomes) = &event.payload.becomes {
-        ensure!(
-            event.payload.action.requires_attention(),
-            EXIT_INVARIANT,
-            "{} sets the object's own state, so it cannot also carry one",
-            event.payload.action.label()
-        );
+    if let Some(becomes) = event.action.becomes() {
         // The narrow reading, and the one that keeps a confirmation honest: a
         // destination is admissible because it is what makes this action legal,
         // not as a second operation smuggled into the same signature. An Object
         // already in the listing is not blocked, so there is nothing to unblock
-        // — and `object_classified` already says what it would be trying to say.
+        // — and `object.classified.v1` already says what it would be trying to
+        // say.
         ensure!(
             !object.needs_attention(),
             EXIT_INVARIANT,
@@ -1337,40 +1636,67 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             EXIT_INVARIANT,
             "a destination of {} needs no attention, so it cannot be what lets {} run; use one of {}",
             becomes.state.as_str(),
-            event.payload.action.label(),
+            event.action.event_type(),
             crate::semantics::attention_states(becomes.object_type)
         );
         object.object_type = becomes.object_type;
         object.state = becomes.state;
     }
-    match &event.payload.action {
-        Action::ObjectCreated => {
+    match &event.action {
+        Action::ObjectCreated { title } => {
             ensure!(
                 object.rev == 0 && object.sections.is_empty(),
                 EXIT_INVARIANT,
-                "object.created must be the first action"
+                "object.created.v1 must be the first action"
             );
             check_neutral_creation(object)?;
-            object.title.clone_from(&content.text);
+            object.title.clone_from(title);
+        }
+        // The bootstrap of a migrated Object, and the only Event that replaces
+        // the whole projection rather than changing part of it. It is the first
+        // action of its stream for the same reason creation is: what it carries
+        // is the complete state, so applying it to anything already built would
+        // be discarding history rather than establishing it.
+        Action::ObjectMigrated { snapshot } => {
+            ensure!(
+                object.rev == 0 && object.sections.is_empty(),
+                EXIT_INVARIANT,
+                "object.migrated.v1 is the bootstrap of a migrated stream, so it must be its first action"
+            );
+            check_neutral_creation(object)?;
+            object.title.clone_from(&snapshot.title);
+            object.object_type = snapshot.object_type;
+            object.state = snapshot.state;
+            object.next_section_id = snapshot.next_section_id;
+            let mut sections = Vec::with_capacity(snapshot.sections.len());
+            for section in &snapshot.sections {
+                sections.push(Section::from_value(section.id, section.value.clone())?);
+            }
+            object.sections = sections;
+            for section in &object.sections {
+                section.validate()?;
+            }
         }
         // Open, like everything else that changes the object. A title is part of
         // what settled, so allowing it through on a closed object would make
         // `closed` mean "the sections have settled" rather than "this has" — and
         // it is the second reading that makes closed mean the whole object has
         // settled.
-        Action::ObjectRenamed => {
-            object.require_attention("object.renamed")?;
-            object.title.clone_from(&content.text);
+        Action::ObjectRenamed { title, .. } => {
+            object.require_attention("object.renamed.v1")?;
+            object.title.clone_from(title);
         }
-        Action::SectionAdded => {
-            object.require_attention("section.added")?;
+        Action::SectionCreated { value, .. } => {
+            object.require_attention("section.created.v1")?;
             let id = take_id(object)?;
-            object.sections.push(section_from(id, admitted_by, event)?);
+            object
+                .sections
+                .push(admitted_section(id, value, admitted_by, None)?);
         }
-        Action::SectionRevised { section } => {
-            object.require_attention("section.revised")?;
-            let admission = revised_admission(object.section(*section)?, admitted_by)?;
-            let replacement = section_from(*section, admission, event)?;
+        Action::SectionUpdated { section, value, .. } => {
+            object.require_attention("section.updated.v1")?;
+            let previous = object.section(*section)?.admitted.by;
+            let replacement = admitted_section(*section, value, admitted_by, Some(previous))?;
             let slot = object
                 .sections
                 .iter_mut()
@@ -1378,8 +1704,8 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
                 .expect("section presence checked above");
             *slot = replacement;
         }
-        Action::SectionMerged { merge } => {
-            object.require_attention("section.merged")?;
+        Action::SectionMerged { merge, value, .. } => {
+            object.require_attention("section.merged.v1")?;
             // Every participant is resolved before anything moves, survivor
             // included. A merge is one judgement about several Sections, so
             // consuming two of three and then discovering the third is not there
@@ -1387,81 +1713,63 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             for id in merge.participants() {
                 object.section(id)?;
             }
-            // Asked of every participant, whichever shape the merge is written
-            // in. The rule is about what is being consolidated, not about how
-            // the operation spells itself: a merge that consumed everything and
-            // allocated a fresh id could otherwise absorb Human wording into
-            // Agent knowledge, which is the same laundering by another route.
             let admission = merged_admission(object, &merge.participants(), admitted_by)?;
-            match merge {
-                Merge::Into {
-                    destination,
-                    sources,
-                } => {
-                    let replacement = section_from(*destination, admission, event)?;
-                    object.sections.retain(|section| {
-                        section.id == *destination || !sources.contains(&section.id)
-                    });
-                    let slot = object
-                        .sections
-                        .iter_mut()
-                        .find(|section| section.id == *destination)
-                        .expect("destination presence checked above");
-                    *slot = replacement;
-                }
-                Merge::Absorbing { absorbs } => {
-                    let id = take_id(object)?;
-                    object
-                        .sections
-                        .retain(|section| !absorbs.contains(&section.id));
-                    object.sections.push(section_from(id, admission, event)?);
-                }
-            }
+            let replacement =
+                admitted_section(merge.destination, value, admitted_by, Some(admission))?;
+            object.sections.retain(|section| {
+                section.id == merge.destination || !merge.sources.contains(&section.id)
+            });
+            let slot = object
+                .sections
+                .iter_mut()
+                .find(|section| section.id == merge.destination)
+                .expect("destination presence checked above");
+            *slot = replacement;
         }
-        Action::SectionDeleted { section } => {
-            object.require_attention("section.deleted")?;
+        Action::SectionDeleted { section, .. } => {
+            object.require_attention("section.deleted.v1")?;
             object.section(*section)?;
             object.sections.retain(|item| item.id != *section);
         }
-        // Kept, and kept narrow. These two are the Phase 0 spelling of the
-        // untyped vocabulary, they are what every confirmed event in an existing
-        // workspace says, and history is not rewritten to suit a newer action.
-        // On a typed object they have no meaning at all, because `open` and
-        // `closed` are not among its states.
-        // Validity before attention, in this order deliberately: on a typed
-        // object these two are categorically the wrong action, and being told
-        // to classify it into the attention set first would send someone off to
-        // do something that still would not let them close a design.
-        Action::ObjectClosed => {
-            validate_state(EXIT_INVARIANT, object.object_type, State::Closed)?;
-            object.require_attention("object.closed")?;
-            object.state = State::Closed;
-        }
-        Action::ObjectReopened => {
-            validate_state(EXIT_INVARIANT, object.object_type, State::Open)?;
+        // The general state move. Validity before attention, in this order
+        // deliberately: a destination outside the type's own vocabulary is
+        // categorically wrong, and being told to classify it into the attention
+        // set first would send someone off to do something that still would not
+        // let them make that move.
+        Action::ObjectStateChanged { state } => {
+            validate_state(EXIT_INVARIANT, object.object_type, *state)?;
+            // Returning an Object *to* attention is how work resumes, and it has
+            // to be possible from outside the attention set — that is the whole
+            // point of it. Moving it *within* or *out of* attention is a change
+            // to admitted standing, so it takes an Object somebody is looking at.
+            if !needs_attention(object.object_type, *state) {
+                object.require_attention("object.state_changed.v1")?;
+            }
             ensure!(
-                object.state == State::Closed,
+                object.state != *state,
                 EXIT_INVARIANT,
-                "object.reopened requires a closed object"
+                "{} is already {}",
+                object.id,
+                state.as_str()
             );
-            object.state = State::Open;
+            object.state = *state;
         }
         Action::ObjectClassified { object_type, state } => {
-            // No transition graph, deliberately: v0 validates that the
-            // destination is legal for the destination type and that the
-            // semantic invariants still hold afterwards. Inventing a permitted
-            // sequence would be inventing a process nobody agreed to.
+            // No transition graph, deliberately: validate that the destination
+            // is legal for the destination type and that the semantic invariants
+            // still hold afterwards. Inventing a permitted sequence would be
+            // inventing a process nobody agreed to.
             validate_state(EXIT_INVARIANT, *object_type, *state)?;
             object.object_type = *object_type;
             object.state = *state;
         }
-        Action::ObjectSuperseded => {
+        Action::ObjectSuperseded { value } => {
             // `superseded` is only in the design and decision vocabularies, so
             // an untyped object or a risk cannot hold the state — and therefore,
             // by the coupled invariant, cannot hold the relation either.
             //
             // No attention check, deliberately: see `require_attention`. The
-            // object this exists for is an `accepted` one, and v0 defines no
+            // object this exists for is an `accepted` one, and there is no
             // transition graph — a destination valid for the type, with the
             // semantic invariants holding afterwards, is the whole test.
             // Superseding an already-superseded object is refused by the coupled
@@ -1469,7 +1777,9 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
             // invented lifecycle.
             validate_state(EXIT_INVARIANT, object.object_type, State::Superseded)?;
             let id = take_id(object)?;
-            object.sections.push(section_from(id, admitted_by, event)?);
+            object
+                .sections
+                .push(admitted_section(id, value, admitted_by, None)?);
             object.state = State::Superseded;
         }
         // Nothing, and that is the whole point of it.
@@ -1479,29 +1789,61 @@ pub fn project(object: &mut Object, event: &Event) -> Result<()> {
         // something about the *stored file*, not about the history: the bytes on
         // disk had failed integrity and were put back to what this history
         // derives. Being a semantic no-op is what makes it safe to record —
-        // `object_repaired` cannot smuggle a change, because applying it does
+        // `object.repaired.v1` cannot smuggle a change, because applying it does
         // nothing but advance the revision.
         //
         // No attention check either. Integrity failure is not a semantic change
         // and does not wait for the Object to be in the listing; a closed record
         // whose bytes were edited is exactly the one that needs this.
-        Action::ObjectRepaired => {}
+        Action::ObjectRepaired {} => {}
     }
     object.sections.sort_by_key(|section| section.id);
     object.rev = event.rev;
     check_supersession(object, EXIT_INVARIANT)?;
+    object.reseal()?;
     Ok(())
 }
 
-/// Which door this event came through, and therefore what the Sections it
-/// admits are worth.
+/// Build the Section an Event admits, holding its carried `admitted` to what the
+/// admitting path is allowed to produce.
 ///
-/// One seam, deliberately, rather than an [`Admission`] threaded through every
-/// arm of the reducer. It now reads the record's own provenance: the retained
-/// generation answers `human` because while it was current the Human Gate was
-/// the only way in, and the tagged generation says so outright.
-fn admitting_path(event: &Event) -> Admission {
-    event.provenance.admitting_path()
+/// The value carries the provenance now, so the reducer's job changed from
+/// *deriving* it to *checking* it. That is the safer half of the trade: a
+/// derived value can only be as good as the derivation, while a carried one is
+/// what the human was shown and what the digest covers, and it still cannot
+/// claim an authority the door it came through does not grant.
+///
+/// `previous` is the surviving Section's existing admission where there is one,
+/// which is what makes the one-way ordering checkable: Human may take over Agent
+/// wording, and nothing demotes Human to Agent.
+fn admitted_section(
+    id: u64,
+    value: &SectionValue,
+    admitted_by: Admission,
+    previous: Option<Admission>,
+) -> Result<Section> {
+    ensure!(
+        value.admitted.by == admitted_by,
+        EXIT_INVARIANT,
+        "§{id}: the section says it was admitted by {}, but the event came through the {} door",
+        value.admitted.by.as_str(),
+        admitted_by.as_str()
+    );
+    if let Some(previous) = previous {
+        ensure!(
+            admitted_by == Admission::Human || previous == Admission::Agent,
+            EXIT_INVARIANT,
+            "§{id} was admitted through the human gate, so its wording is changed there too"
+        );
+    }
+    let section = Section::from_value(id, value.clone())?;
+    // Checked here, so a state transition is closed under the model's own
+    // invariants rather than producing something a later save is expected to
+    // catch. The Agent restrictions are the case that matters: `role` and
+    // `relations[]` come from the payload, and whether they are admissible
+    // depends on the admission this Section is being given.
+    section.validate()?;
+    Ok(section)
 }
 
 /// What the admitting path is allowed to do at all.
@@ -1537,41 +1879,47 @@ pub fn check_admitting_authority(
         return Ok(());
     }
     ensure!(
-        payload.becomes.is_none(),
+        payload.becomes().is_none(),
         EXIT_INVARIANT,
         "an agent-admitted {} cannot carry a destination: type and state are human-authoritative, and reaching them through another action does not change that",
-        payload.action.label()
+        payload.action.event_type()
     );
     ensure!(
         !matches!(
             payload.action,
-            Action::ObjectClosed
-                | Action::ObjectReopened
+            Action::ObjectStateChanged { .. }
                 | Action::ObjectClassified { .. }
-                | Action::ObjectSuperseded
+                | Action::ObjectSuperseded { .. }
         ),
         EXIT_INVARIANT,
         "{} sets the object's own lifecycle, which is a human admission",
-        payload.action.label()
+        payload.action.event_type()
     );
     // Repair is not lifecycle, so it gets its own refusal and its own reason:
-    // it re-establishes authority that stopped verifying, and #35's ruling puts
-    // that behind the Human Gate whatever admission class the Sections being
-    // restored carry.
+    // it re-establishes authority that stopped verifying, and that is behind the
+    // Human Gate whatever admission class the Sections being restored carry.
     //
     // Here rather than only at the gate, because `project` is also how stored
-    // history is read. An Event-v2 record tagged `agent` carrying this action is
-    // refused on the way in *and* every time it is replayed, so writing one into
-    // a log by hand cannot establish an Agent repair after the fact.
+    // history is read. A record tagged `agent` carrying this action is refused
+    // on the way in *and* every time it is replayed, so writing one into a log
+    // by hand cannot establish an Agent repair after the fact.
     ensure!(
-        !matches!(payload.action, Action::ObjectRepaired),
+        !matches!(payload.action, Action::ObjectRepaired {}),
         EXIT_INVARIANT,
-        "object.repaired restores authority that failed integrity, which is a human admission"
+        "object.repaired.v1 restores authority that failed integrity, which is a human admission"
     );
-    if let Action::SectionDeleted { section } = &payload.action {
+    // Migration is Human-confirmed as a whole, and its bootstrap Event carries
+    // whatever Section provenance the predecessor had. An agent-tagged one would
+    // be an Object arriving with history nobody confirmed.
+    ensure!(
+        !matches!(payload.action, Action::ObjectMigrated { .. }),
+        EXIT_INVARIANT,
+        "object.migrated.v1 is emitted by a human-confirmed migration, so it is never an agent admission"
+    );
+    if let Action::SectionDeleted { section, .. } = &payload.action {
         let target = object.section(*section)?;
         ensure!(
-            target.admission == Admission::Agent,
+            target.admitted.by == Admission::Agent,
             EXIT_INVARIANT,
             "§{section} was admitted through the human gate, so it is removed there too"
         );
@@ -1605,26 +1953,6 @@ fn check_neutral_creation(object: &Object) -> Result<()> {
     Ok(())
 }
 
-/// What a revised Section is admitted as.
-///
-/// Human wins in both directions, and that is the whole rule. New wording for a
-/// Section an agent wrote, put through the Human Gate, has been through the
-/// door where a human is asked — so the Section becomes Human, and the
-/// promotion is the point rather than a side effect. The other direction never
-/// went through that door at all: an agent rewording a Human Section would
-/// replace gated wording with ungated wording, while the Section went on
-/// claiming Human authority or quietly stopped claiming it. Neither is a thing
-/// engr may decide, so it is refused.
-fn revised_admission(section: &Section, admitted_by: Admission) -> Result<Admission> {
-    ensure!(
-        admitted_by == Admission::Human || section.admission == Admission::Agent,
-        EXIT_INVARIANT,
-        "§{} was admitted through the human gate, so its wording is changed there too",
-        section.id
-    );
-    Ok(admitted_by)
-}
-
 /// What the surviving Section of a merge is admitted as.
 ///
 /// The two paths are not symmetric, and the asymmetry is the rule rather than
@@ -1649,7 +1977,7 @@ pub fn merged_admission(
     for id in participants.iter().copied() {
         let section = object.section(id)?;
         ensure!(
-            section.admission == Admission::Agent,
+            section.admitted.by == Admission::Agent,
             EXIT_INVARIANT,
             "§{id} was admitted through the human gate, so an agent merge cannot consume it; the merge itself has to be confirmed"
         );
@@ -1668,575 +1996,560 @@ fn take_id(object: &mut Object) -> Result<u64> {
     Ok(id)
 }
 
-fn section_from(id: u64, admission: Admission, event: &Event) -> Result<Section> {
-    let content = event.payload.content.clone();
-    let section = Section {
-        id,
-        admission,
-        sha256: content.sha256()?,
-        role: content.role,
-        text: content.text,
-        content: content.content,
-        based_on: content.based_on,
-        refs: content.refs,
-        relations: content.relations,
-        // The event's own time, not the clock. Replaying history has to
-        // reconstruct the Section that was admitted, and a reducer that read a
-        // clock would produce a different Object every time it ran.
-        admitted_at: event.time.clone(),
-    };
-    // Checked here, so a state transition is closed under the model's own
-    // invariants rather than producing something a later save is expected to
-    // catch. The Agent restrictions are the case that matters: `role` and
-    // `relations[]` come from the payload, and whether they are admissible
-    // depends on the admission this Section is being given — which is a fact
-    // the payload does not carry and only this point knows.
-    section.validate()?;
-    Ok(section)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantics::Target;
+    use crate::semantics::{Relation, Target};
 
-    fn section_added(id: &str, rev: u64, text: &str) -> Event {
-        let payload = Payload {
-            action: Action::SectionAdded,
-            object: id.to_owned(),
-            becomes: None,
-            content: Content {
-                text: text.to_owned(),
-                ..Content::default()
-            },
-        };
-        Event {
-            format: EVENT_FORMAT.to_owned(),
-            version: crate::EVENT_ENVELOPE_VERSION_V0,
-            event_id: new_id(),
-            rev,
-            time: "2026-08-17T00:00:00Z".to_owned(),
-            provenance: Provenance::confirmed(
-                "TEST00".to_owned(),
-                payload.sha256().expect("payload hash"),
-            ),
-            payload,
+    const AT: &str = "2026-08-31T00:00:00Z";
+
+    fn wording(text: &str) -> Content {
+        Content {
+            text: text.to_owned(),
+            ..Content::default()
         }
     }
 
-    fn section(id: u64, admission: Admission) -> Section {
-        let content = Content {
-            text: format!("section {id}"),
-            ..Content::default()
-        };
-        Section {
-            id,
-            admission,
-            sha256: content.sha256().expect("hash"),
-            role: None,
-            text: content.text,
-            content: Vec::new(),
-            based_on: None,
-            refs: Vec::new(),
-            relations: Vec::new(),
-            admitted_at: "2026-08-23T00:00:00Z".to_owned(),
+    fn value(text: &str, by: Admission) -> SectionValue {
+        SectionValue::new(Admitted::new(by, AT), wording(text))
+    }
+
+    fn admission(by: Admission) -> EventAdmission {
+        match by {
+            Admission::Human => EventAdmission::human(AT, "TEST22"),
+            Admission::Agent => EventAdmission {
+                by: Admission::Agent,
+                at: AT.to_owned(),
+                confirmation: None,
+                review: Some(ReviewProvenance {
+                    outcome: ReviewOutcome::Passed,
+                    result: crate::proof::ReviewResult::Passed,
+                    attempts: 1,
+                }),
+            },
         }
+    }
+
+    fn event(object: &str, rev: u64, action: Action, by: Admission) -> Event {
+        Event::sealed(object, new_id(), action, rev, admission(by)).expect("sealed event")
+    }
+
+    fn section(id: u64, by: Admission) -> Section {
+        Section::from_value(id, value(&format!("section {id}"), by)).expect("section")
     }
 
     fn holding(sections: Vec<Section>) -> Object {
-        let mut object = Object::new(new_id(), "mixed".to_owned()).expect("object");
-        object.next_section_id = sections.iter().map(|section| section.id).max().unwrap_or(0) + 1;
+        let mut object = Object::new(new_id(), "holder".to_owned()).expect("object");
+        object.next_section_id = sections.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         object.sections = sections;
+        object.rev = 1;
+        object.reseal().expect("seal");
         object
     }
 
-    /// Reached only through the Agent path, which has no envelope to arrive
-    /// through yet — so the rules are stated against the model directly rather
-    /// than left unexercised until something can reach them.
+    /// Human wins in both directions. New wording for an Agent Section, put
+    /// through the gate, becomes Human; an Agent may not reword Human wording.
     #[test]
     fn admission_never_goes_backwards() {
-        let human = section(1, Admission::Human);
-        let agent = section(2, Admission::Agent);
-
-        assert_eq!(
-            revised_admission(&human, Admission::Human).expect("human revises human"),
-            Admission::Human
-        );
-        assert_eq!(
-            revised_admission(&agent, Admission::Human).expect("human revises agent"),
-            Admission::Human,
-            "wording put through the human gate carries what that door confers"
-        );
-        assert_eq!(
-            revised_admission(&agent, Admission::Agent).expect("agent revises agent"),
-            Admission::Agent
-        );
-        assert!(
-            revised_admission(&human, Admission::Agent).is_err(),
-            "an agent rewording gated wording would leave it claiming a door it never went through"
-        );
-    }
-
-    #[test]
-    fn an_agent_merge_may_consolidate_only_agent_knowledge() {
-        let object = holding(vec![
-            section(1, Admission::Agent),
-            section(2, Admission::Agent),
-            section(3, Admission::Human),
-        ]);
-
-        assert_eq!(
-            merged_admission(&object, &[1, 2], Admission::Agent).expect("all agent"),
-            Admission::Agent
-        );
-        assert!(
-            merged_admission(&object, &[1, 3], Admission::Agent).is_err(),
-            "consuming a human section into an agent one launders away the gate"
-        );
-        assert!(
-            merged_admission(&object, &[3, 1], Admission::Agent).is_err(),
-            "and so does merging agent wording into a human destination"
-        );
-        assert_eq!(
-            merged_admission(&object, &[3, 1, 2], Admission::Human).expect("human merge"),
-            Admission::Human,
-            "a human merge may consume either, because the result went through the gate"
-        );
-        assert_eq!(
-            merged_admission(&object, &[1, 2], Admission::Human).expect("human merge"),
-            Admission::Human,
-            "and what comes out of a human merge is human, whatever went in"
-        );
-
-        // The rule is about what is being consolidated, not about how the merge
-        // spells itself. The retained shape names no survivor and allocates a
-        // fresh id, and it is the same laundering if it may absorb human wording.
-        assert!(
-            merged_admission(&object, &[1, 2, 3], Admission::Agent).is_err(),
-            "the shape that consumes every participant is held to the same rule"
-        );
-    }
-
-    /// The whole Agent action matrix, exercised now rather than when an
-    /// envelope can finally carry an Agent admission. Every one of these is a
-    /// consequence of `type` and `state` being Human-authoritative, or of a
-    /// Human Section's wording not being an agent's to remove.
-    #[test]
-    fn an_agent_admission_cannot_reach_the_objects_lifecycle() {
-        let object = holding(vec![
-            section(1, Admission::Agent),
-            section(2, Admission::Human),
-        ]);
-        let carrying = |action: Action| Payload {
-            action,
-            object: object.id.clone(),
-            becomes: None,
-            content: Content {
-                text: "wording".to_owned(),
-                ..Content::default()
-            },
-        };
-        let bare = |action: Action| Payload {
-            action,
-            object: object.id.clone(),
-            becomes: None,
-            content: Content::default(),
-        };
-
-        for action in [
-            Action::ObjectClosed,
-            Action::ObjectReopened,
-            Action::ObjectClassified {
-                object_type: None,
-                state: State::Closed,
-            },
-        ] {
-            let payload = bare(action);
-            let label = payload.action.label();
-            assert!(
-                check_admitting_authority(&object, &payload, Admission::Agent).is_err(),
-                "{label} is a human admission"
-            );
-            assert!(
-                check_admitting_authority(&object, &payload, Admission::Human).is_ok(),
-                "{label} is unchanged for the human path"
-            );
-        }
-        assert!(
-            check_admitting_authority(
-                &object,
-                &carrying(Action::ObjectSuperseded),
-                Admission::Agent
-            )
-            .is_err(),
-            "retiring an object is a human admission"
-        );
-
-        // A destination is admissible on the human path and refused on the
-        // agent one, on exactly the same action.
-        let mut becoming = carrying(Action::SectionAdded);
-        becoming.becomes = Some(Destination {
-            object_type: None,
-            state: State::Open,
-        });
-        assert!(check_admitting_authority(&object, &becoming, Admission::Human).is_ok());
-        assert!(
-            check_admitting_authority(&object, &becoming, Admission::Agent).is_err(),
-            "a field does not become agent-writable by being reached through another action"
-        );
-
-        // Deletion depends on what the target currently is, which is why it
-        // cannot be answered by any envelope.
-        let agent_target = bare(Action::SectionDeleted { section: 1 });
-        let human_target = bare(Action::SectionDeleted { section: 2 });
-        assert!(check_admitting_authority(&object, &agent_target, Admission::Agent).is_ok());
-        assert!(
-            check_admitting_authority(&object, &human_target, Admission::Agent).is_err(),
-            "an agent may retire agent knowledge, not wording that went through the gate"
-        );
-        assert!(check_admitting_authority(&object, &human_target, Admission::Human).is_ok());
-
-        // And the positive case: a title is navigation metadata, so the agent
-        // path reaches it. Whether a particular title passes is Rule Review's
-        // question, not this one's.
-        for action in [Action::ObjectCreated, Action::ObjectRenamed] {
-            assert!(
-                check_admitting_authority(&object, &carrying(action), Admission::Agent).is_ok(),
-                "object title is non-authoritative navigation metadata"
-            );
-        }
-    }
-
-    /// Creation is neutral on **both** paths, because the operation carries no
-    /// lifecycle for either to have authorized. Revision zero with no Sections
-    /// is a different condition: creation preserves what it does not overwrite,
-    /// so a pre-set lifecycle would survive an operation that never represented
-    /// one.
-    ///
-    /// The Agent restriction is a separate rule and lives separately: an Agent
-    /// may not select lifecycle values at all.
-    #[test]
-    fn creation_arrives_at_the_neutral_initialization_whoever_admits_it() {
-        let id = new_id();
-        let created = |object: &Object| {
-            let payload = Payload {
-                action: Action::ObjectCreated,
-                object: object.id.clone(),
+        let mut object = holding(vec![section(1, Admission::Agent)]);
+        let promoted = event(
+            &object.id,
+            2,
+            Action::SectionUpdated {
+                section: 1,
+                value: value("promoted", Admission::Human),
                 becomes: None,
-                content: Content {
-                    text: "a title".to_owned(),
-                    ..Content::default()
-                },
-            };
-            Event {
-                format: EVENT_FORMAT.to_owned(),
-                version: crate::EVENT_ENVELOPE_VERSION_V0,
-                event_id: new_id(),
-                rev: 1,
-                time: "2026-08-23T00:00:00Z".to_owned(),
-                provenance: Provenance::confirmed(
-                    "TEST00".to_owned(),
-                    payload.sha256().expect("hash"),
-                ),
-                payload,
-            }
-        };
+            },
+            Admission::Human,
+        );
+        project(&mut object, &promoted).expect("human may take over agent wording");
+        assert_eq!(object.section(1).expect("§1").admitted.by, Admission::Human);
 
-        let mut neutral = Object::new(id.clone(), String::new()).expect("object");
-        let event = created(&neutral);
-        project(&mut neutral, &event).expect("the neutral initialization is what creation is for");
-        assert_eq!(neutral.title, "a title");
-
-        let mut settled = Object::new(id, String::new()).expect("object");
-        settled.object_type = Some(ObjectType::Design);
-        settled.state = State::Accepted;
-        let event = created(&settled);
-        let error = project(&mut settled, &event)
-            .expect_err("object.created carries no lifecycle, so it cannot arrive at one");
+        let demoted = event(
+            &object.id,
+            3,
+            Action::SectionUpdated {
+                section: 1,
+                value: value("demoted", Admission::Agent),
+                becomes: None,
+            },
+            Admission::Agent,
+        );
+        let error = project(&mut object.clone(), &demoted)
+            .expect_err("nothing demotes human wording to agent");
         assert_eq!(error.code, EXIT_INVARIANT);
     }
 
-    /// A state transition is closed under the model's own invariants. Without
-    /// this an Agent add could produce a Section carrying human-authoritative
-    /// semantics and leave a later save to notice.
+    /// The value carries its own admission, and it has to be the one the door
+    /// grants: a Section claiming `human` inside an Agent Event is a record that
+    /// contradicts itself.
     #[test]
-    fn a_projected_section_cannot_be_one_the_model_would_refuse() {
-        let id = new_id();
-        let mut object = Object::new(id.clone(), "closure".to_owned()).expect("object");
-        object.rev = 1;
-        let mut payload = Payload {
-            action: Action::SectionAdded,
-            object: id.clone(),
-            becomes: None,
-            content: Content {
-                text: "wording".to_owned(),
-                role: Some(Role::Supersession),
-                ..Content::default()
+    fn a_carried_admission_cannot_outrank_the_door_it_came_through() {
+        let mut object = Object::new(new_id(), "holder".to_owned()).expect("object");
+        object.rev = 0;
+        object.reseal().expect("seal");
+        let lying = event(
+            &object.id,
+            1,
+            Action::SectionCreated {
+                value: value("wording", Admission::Human),
+                becomes: None,
             },
-        };
-        payload.content.role = Some(Role::Supersession);
-        let event = Event {
-            format: EVENT_FORMAT.to_owned(),
-            version: crate::EVENT_ENVELOPE_VERSION_V0,
-            event_id: new_id(),
-            rev: 2,
-            time: "2026-08-23T00:00:00Z".to_owned(),
-            provenance: Provenance::confirmed("TEST00".to_owned(), payload.sha256().expect("hash")),
-            payload,
-        };
-
-        assert!(
-            section_from(1, Admission::Human, &event).is_ok(),
-            "a human section may carry the supersession role"
+            Admission::Agent,
         );
-        assert!(
-            section_from(1, Admission::Agent, &event).is_err(),
-            "an agent section may not, and the reducer is where that is caught"
-        );
+        let error =
+            project(&mut object, &lying).expect_err("an agent event admits agent sections only");
+        assert_eq!(error.code, EXIT_INVARIANT);
     }
 
-    /// A payload is validated when an Event is *loaded*, so a value outside a
-    /// field's schema that only the reducer catches is a stored record that
-    /// passed validation. Section ids start at 1, so §0 is not a section that
-    /// happens to be missing — it is not a section id.
+    /// An Agent merge may consolidate only Agent knowledge; a Human merge may
+    /// consume anything, and what comes out is Human.
     #[test]
-    fn every_action_naming_a_section_holds_it_to_the_positive_id_bound() {
-        let object = new_id();
-        let carrying = |action: Action| Payload {
-            action,
-            object: object.clone(),
-            becomes: None,
-            content: Content {
-                text: "wording".to_owned(),
-                ..Content::default()
+    fn an_agent_merge_may_consolidate_only_agent_knowledge() {
+        let mixed = holding(vec![
+            section(1, Admission::Human),
+            section(2, Admission::Agent),
+        ]);
+        let merge = Merge {
+            destination: 2,
+            sources: vec![1],
+        };
+        let agent = event(
+            &mixed.id,
+            2,
+            Action::SectionMerged {
+                merge: merge.clone(),
+                value: value("merged", Admission::Agent),
+                becomes: None,
             },
-        };
-        let bare = |action: Action| Payload {
-            action,
-            object: object.clone(),
-            becomes: None,
-            content: Content::default(),
-        };
+            Admission::Agent,
+        );
+        let error = project(&mut mixed.clone(), &agent)
+            .expect_err("an agent merge cannot absorb human wording");
+        assert_eq!(error.code, EXIT_INVARIANT);
 
-        for (what, payload) in [
-            (
-                "merge destination",
-                carrying(Action::SectionMerged {
-                    merge: Merge::Into {
-                        destination: 0,
-                        sources: vec![1],
-                    },
-                }),
-            ),
-            (
-                "merge source",
-                carrying(Action::SectionMerged {
-                    merge: Merge::Into {
-                        destination: 1,
-                        sources: vec![0],
-                    },
-                }),
-            ),
-            (
-                "retained merge",
-                carrying(Action::SectionMerged {
-                    merge: Merge::Absorbing {
-                        absorbs: vec![0, 1],
-                    },
-                }),
-            ),
-            ("revision", carrying(Action::SectionRevised { section: 0 })),
-            ("deletion", bare(Action::SectionDeleted { section: 0 })),
+        let mut human = mixed.clone();
+        let confirmed = event(
+            &human.id,
+            2,
+            Action::SectionMerged {
+                merge,
+                value: value("merged", Admission::Human),
+                becomes: None,
+            },
+            Admission::Human,
+        );
+        project(&mut human, &confirmed).expect("a human merge may consume either");
+        assert_eq!(human.sections.len(), 1);
+        assert_eq!(human.section(2).expect("§2").admitted.by, Admission::Human);
+    }
+
+    /// `type` and `state` are Human-authoritative, and reaching them through
+    /// another action does not change that.
+    #[test]
+    fn an_agent_admission_cannot_reach_the_objects_lifecycle() {
+        let object = holding(vec![section(1, Admission::Agent)]);
+        for action in [
+            Action::ObjectStateChanged {
+                state: State::Closed,
+            },
+            Action::ObjectClassified {
+                object_type: Some(ObjectType::Design),
+                state: State::Draft,
+            },
+            Action::ObjectRepaired {},
         ] {
-            let error = payload
-                .validate()
-                .expect_err("§0 is outside the field's schema");
-            assert_eq!(error.code, EXIT_SCHEMA, "{what}: {}", error.message);
+            let attempt = event(&object.id, 2, action, Admission::Agent);
+            let error = project(&mut object.clone(), &attempt)
+                .expect_err("the lifecycle is a human admission");
+            assert_eq!(error.code, EXIT_INVARIANT);
         }
     }
 
+    /// A destination is a lifecycle move, so it is refused on the Agent path
+    /// even where the action itself is admissible there.
     #[test]
-    fn an_agent_section_carries_no_human_authoritative_semantics() {
-        let mut relation = section(1, Admission::Agent);
-        relation.relations = vec![Relation {
-            relation: RelationType::ImplementedBy,
-            target: Target::File {
-                path: "src/lib.rs".to_owned(),
-                commit: "0".repeat(40),
+    fn an_agent_admission_cannot_carry_a_destination() {
+        let mut object = holding(vec![section(1, Admission::Agent)]);
+        object.state = State::Closed;
+        object.reseal().expect("seal");
+        let attempt = event(
+            &object.id,
+            2,
+            Action::SectionCreated {
+                value: value("more", Admission::Agent),
+                becomes: Some(Destination {
+                    object_type: None,
+                    state: State::Open,
+                }),
             },
-        }];
-        assert!(
-            holding(vec![relation.clone()]).validate().is_err(),
-            "a relation is a claim the record acts on, not wording anybody can check"
+            Admission::Agent,
         );
-        relation.admission = Admission::Human;
-        assert!(holding(vec![relation]).validate().is_ok());
-
-        let mut supersession = section(1, Admission::Agent);
-        supersession.role = Some(Role::Supersession);
-        assert!(
-            holding(vec![supersession]).validate().is_err(),
-            "retiring an object is a human admission, reason included"
-        );
+        let error =
+            project(&mut object, &attempt).expect_err("a destination is human-authoritative");
+        assert_eq!(error.code, EXIT_INVARIANT);
     }
 
+    /// Creation begins from the neutral initialization whichever path admits it.
+    #[test]
+    fn creation_arrives_at_the_neutral_initialization_whoever_admits_it() {
+        let mut object = Object::new(new_id(), String::new()).expect("object");
+        object.object_type = Some(ObjectType::Design);
+        object.state = State::Accepted;
+        object.rev = 0;
+        object.reseal().expect("seal");
+        let created = event(
+            &object.id,
+            1,
+            Action::ObjectCreated {
+                title: "a title".to_owned(),
+            },
+            Admission::Human,
+        );
+        let error = project(&mut object, &created)
+            .expect_err("creation carries no lifecycle, so it cannot arrive at one");
+        assert_eq!(error.code, EXIT_INVARIANT);
+    }
+
+    /// A projected Section cannot be one the model would refuse if it were read
+    /// back: an Agent Section carrying a relation is refused at projection.
+    #[test]
+    fn a_projected_section_cannot_be_one_the_model_would_refuse() {
+        let mut object = holding(vec![section(1, Admission::Agent)]);
+        let mut content = wording("agent wording");
+        content.relations = vec![Relation {
+            relation: RelationType::ImplementedBy,
+            target: Target::File {
+                commit: "a".repeat(40),
+                path: "src/lib.rs".to_owned(),
+            },
+        }];
+        let attempt = event(
+            &object.id,
+            2,
+            Action::SectionCreated {
+                value: SectionValue::new(Admitted::new(Admission::Agent, AT), content),
+                becomes: None,
+            },
+            Admission::Agent,
+        );
+        let error = project(&mut object, &attempt).expect_err("relations are human-authoritative");
+        assert_eq!(error.code, EXIT_SCHEMA);
+    }
+
+    /// Every action that names a Section holds it to the positive id bound, at
+    /// payload validation rather than at a lookup that fails for another reason.
+    #[test]
+    fn every_action_naming_a_section_holds_it_to_the_positive_id_bound() {
+        let id = new_id();
+        for action in [
+            Action::SectionUpdated {
+                section: 0,
+                value: value("x", Admission::Human),
+                becomes: None,
+            },
+            Action::SectionDeleted {
+                section: 0,
+                becomes: None,
+            },
+            Action::SectionMerged {
+                merge: Merge {
+                    destination: 0,
+                    sources: vec![1],
+                },
+                value: value("x", Admission::Human),
+                becomes: None,
+            },
+        ] {
+            let error = Payload::new(id.clone(), action)
+                .validate()
+                .expect_err("section ids start at 1");
+            assert!(matches!(error.code, EXIT_SCHEMA | EXIT_INVARIANT));
+        }
+    }
+
+    /// The reducer skips evidence at or below the projection and refuses a gap.
     #[test]
     fn the_reducer_skips_old_evidence_and_rejects_future_gaps() {
+        let object = holding(vec![section(1, Admission::Human)]);
+        let old = event(
+            &object.id,
+            1,
+            Action::SectionCreated {
+                value: value("already applied", Admission::Human),
+                becomes: None,
+            },
+            Admission::Human,
+        );
+        let (unchanged, applied) =
+            replay_recoverable_tail(object.clone(), std::slice::from_ref(&old))
+                .expect("no tail to apply");
+        assert!(!applied);
+        assert_eq!(unchanged.rev, 1);
+
+        let gap = event(
+            &object.id,
+            3,
+            Action::SectionCreated {
+                value: value("from the future", Admission::Human),
+                becomes: None,
+            },
+            Admission::Human,
+        );
+        let error = replay_recoverable_tail(object, &[old, gap])
+            .expect_err("a tail begins at the next revision");
+        assert_eq!(error.code, EXIT_INVARIANT);
+    }
+
+    /// A migration bootstrap establishes an Object and may appear only first.
+    #[test]
+    fn a_migration_bootstrap_is_the_first_action_or_none() {
         let id = new_id();
-        let mut completed = Object::new(id.clone(), "completed".to_owned()).expect("object");
-        completed.rev = 2;
-        assert!(
-            replay_recoverable_tail(completed, &[section_added(&id, 2, "old evidence")]).is_ok(),
-            "evidence at or below the projection is old news to the reducer; whether the
-             history is complete is the store boundary's question, and it requires
-             a non-empty history to begin at revision 1"
+        let snapshot = Snapshot {
+            title: "migrated".to_owned(),
+            object_type: None,
+            state: State::Open,
+            next_section_id: 2,
+            sections: vec![SnapshotSection {
+                id: 1,
+                value: value("carried over", Admission::Human),
+            }],
+        };
+        let mut object = Object::new(id.clone(), String::new()).expect("object");
+        object.rev = 0;
+        object.reseal().expect("seal");
+        let bootstrap = event(
+            &id,
+            1,
+            Action::ObjectMigrated {
+                snapshot: Box::new(snapshot.clone()),
+            },
+            Admission::Human,
         );
+        project(&mut object, &bootstrap).expect("a bootstrap establishes the object");
+        assert_eq!(object.rev, 1);
+        assert_eq!(object.title, "migrated");
+        assert_eq!(object.next_section_id, 2);
+        assert_eq!(object.sections.len(), 1);
+        // The Section keeps the provenance the snapshot carried, not the Event's.
+        assert_eq!(object.section(1).expect("§1").admitted.at, AT);
 
-        let mut crashed = Object::new(id.clone(), "crashed".to_owned()).expect("object");
-        crashed.rev = 1;
-        let (recovered, applied) = replay_recoverable_tail(
-            crashed,
-            &[
-                section_added(&id, 2, "first recovery event"),
-                section_added(&id, 3, "second recovery event"),
-            ],
-        )
-        .expect("contiguous future tail");
-        assert!(applied);
-        assert_eq!(recovered.rev, 3);
-        assert_eq!(recovered.sections.len(), 2);
+        let second = event(
+            &id,
+            2,
+            Action::ObjectMigrated {
+                snapshot: Box::new(snapshot),
+            },
+            Admission::Human,
+        );
+        let error = project(&mut object, &second)
+            .expect_err("a second bootstrap would discard everything before it");
+        assert_eq!(error.code, EXIT_INVARIANT);
+    }
 
-        let mut projection = Object::new(id.clone(), "gap".to_owned()).expect("object");
-        projection.rev = 1;
-        assert!(
-            replay_recoverable_tail(projection.clone(), &[section_added(&id, 3, "gap")]).is_err(),
-            "the first future event must be exactly the next revision"
+    /// The seal binds the owning Object, so an Event lifted into another
+    /// stream stops verifying rather than becoming that Object's history.
+    #[test]
+    fn an_event_seals_against_exactly_one_object() {
+        let mine = new_id();
+        let theirs = new_id();
+        let admitted = event(
+            &mine,
+            1,
+            Action::ObjectCreated {
+                title: "mine".to_owned(),
+            },
+            Admission::Human,
         );
-        assert!(
-            replay_recoverable_tail(
-                projection,
-                &[section_added(&id, 2, "first"), section_added(&id, 4, "gap"),],
-            )
-            .is_err(),
-            "the future tail must remain contiguous"
-        );
+        admitted.validate(&mine).expect("valid in its own stream");
+        let error = admitted
+            .validate(&theirs)
+            .expect_err("moving a record between streams breaks its seal");
+        assert_eq!(error.code, EXIT_SCHEMA);
+    }
+
+    /// `data` is present and may be `{}` — one of the two explicit exceptions to
+    /// the canonical omission rule.
+    #[test]
+    fn a_repair_carries_an_empty_data_member_rather_than_none() {
+        let admitted = event(&new_id(), 2, Action::ObjectRepaired {}, Admission::Human);
+        let value = serde_json::to_value(&admitted).expect("json");
+        assert_eq!(value["type"], "object.repaired.v1");
+        assert_eq!(value["data"], serde_json::json!({}));
     }
 }
 
 #[cfg(test)]
-mod provenance_tests {
+mod admission_tests {
     use super::*;
-    use crate::semantics::Admission;
 
-    fn tagged(kind: Admission) -> TaggedAdmission {
-        TaggedAdmission {
-            kind,
-            confirmation: None,
-            rule_review: None,
-        }
-    }
+    const AT: &str = "2026-08-31T00:00:00Z";
 
-    fn confirmation() -> HumanConfirmation {
-        HumanConfirmation {
-            challenge: "ABC234".to_owned(),
-            candidate_digest: format!("1:{}", "a".repeat(64)),
-        }
+    fn human() -> EventAdmission {
+        EventAdmission::human(AT, "ABC234")
     }
 
     fn review(outcome: ReviewOutcome) -> ReviewProvenance {
         ReviewProvenance {
             outcome,
-            review_digest: format!("1:{}", "b".repeat(64)),
+            result: match outcome {
+                ReviewOutcome::Passed => crate::proof::ReviewResult::Passed,
+                ReviewOutcome::Overridden => crate::proof::ReviewResult::Failed,
+            },
+            attempts: 1,
         }
     }
 
-    /// The retained generation has one door available, and it is the right
-    /// answer rather than a fallback: while it was current the Human Gate was
-    /// the only way in.
+    /// A shape that says `agent` while carrying a human's confirmation is not a
+    /// record whose authority is wrong — it is one that contradicts itself.
     #[test]
-    fn the_admitting_path_is_read_from_the_record_itself() {
-        assert_eq!(
-            Provenance::confirmed("ABC234", "0".repeat(64)).admitting_path(),
-            Admission::Human
-        );
-        for kind in [Admission::Agent, Admission::Human] {
-            let mut admission = tagged(kind);
-            admission.confirmation = (kind == Admission::Human).then(confirmation);
-            assert_eq!(
-                Provenance::Tagged { admission }.admitting_path(),
-                kind,
-                "the tagged generation says which door outright"
-            );
-        }
-    }
+    fn an_admission_cannot_contradict_itself() {
+        human().validate().expect("a human admission with its code");
 
-    /// Structural rules, not authority ones: a record that says `agent` while
-    /// carrying a human's confirmation is not a record whose authority is
-    /// wrong, it is a record that contradicts itself.
-    #[test]
-    fn a_tagged_admission_cannot_contradict_itself() {
-        let mut human = tagged(Admission::Human);
+        let mut missing = human();
+        missing.confirmation = None;
         assert!(
-            Provenance::Tagged {
-                admission: human.clone()
-            }
-            .validate()
-            .is_err(),
-            "a human admission records the confirmation it was admitted by"
+            missing.validate().is_err(),
+            "human admission needs its code"
         );
-        human.confirmation = Some(confirmation());
-        assert!(Provenance::Tagged { admission: human }.validate().is_ok());
 
-        let mut agent = tagged(Admission::Agent);
-        assert!(Provenance::Tagged {
-            admission: agent.clone()
-        }
-        .validate()
-        .is_ok());
-        agent.confirmation = Some(confirmation());
-        assert!(
-            Provenance::Tagged {
-                admission: agent.clone()
-            }
+        let mut agent = EventAdmission {
+            by: Admission::Agent,
+            at: AT.to_owned(),
+            confirmation: None,
+            review: Some(review(ReviewOutcome::Passed)),
+        };
+        agent
             .validate()
-            .is_err(),
+            .expect("an agent admission with its review");
+        agent.confirmation = Some(HumanConfirmation {
+            challenge: "ABC234".to_owned(),
+        });
+        assert!(
+            agent.validate().is_err(),
             "an agent admission passes through no human gate"
         );
 
-        let mut overriding = tagged(Admission::Agent);
-        overriding.rule_review = Some(review(ReviewOutcome::Overridden));
+        let overriding = EventAdmission {
+            by: Admission::Agent,
+            at: AT.to_owned(),
+            confirmation: None,
+            review: Some(review(ReviewOutcome::Overridden)),
+        };
         assert!(
-            Provenance::Tagged {
-                admission: overriding.clone()
-            }
-            .validate()
-            .is_err(),
+            overriding.validate().is_err(),
             "overriding a failed review is a human act"
         );
-        overriding.rule_review = Some(review(ReviewOutcome::Passed));
-        assert!(Provenance::Tagged {
-            admission: overriding
-        }
-        .validate()
-        .is_ok());
     }
 
-    /// A digest scalar in the record is checked against its own contract family
-    /// rather than taken as text.
+    /// Durable review provenance is three facts that have to agree with each
+    /// other, and a record where they do not is not a record of anything.
+    ///
+    /// `outcome` says how the mutation got in and `result` says what the review
+    /// concluded, so `overridden` can only describe a review that did not pass
+    /// and `passed` can only describe one that did. `attempts` counts from 1,
+    /// because a review is of an attempt and there is no attempt zero.
     #[test]
-    fn provenance_digests_are_checked_against_their_contracts() {
-        let mut admission = tagged(Admission::Human);
-        admission.confirmation = Some(HumanConfirmation {
-            challenge: "ABC234".to_owned(),
-            candidate_digest: "not-a-versioned-digest".to_owned(),
+    fn review_provenance_members_must_agree() {
+        let mut passed_but_overridden = human();
+        passed_but_overridden.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Overridden,
+            result: crate::proof::ReviewResult::Passed,
+            attempts: 1,
         });
-        assert!(Provenance::Tagged { admission }.validate().is_err());
+        assert_eq!(
+            passed_but_overridden
+                .validate()
+                .expect_err("nothing was overruled")
+                .code,
+            EXIT_SCHEMA
+        );
 
-        let mut admission = tagged(Admission::Agent);
-        admission.rule_review = Some(ReviewProvenance {
+        let mut failed_but_passed = human();
+        failed_but_passed.review = Some(ReviewProvenance {
             outcome: ReviewOutcome::Passed,
-            review_digest: "1:short".to_owned(),
+            result: crate::proof::ReviewResult::Exhausted,
+            attempts: 4,
         });
-        assert!(Provenance::Tagged { admission }.validate().is_err());
+        assert_eq!(
+            failed_but_passed
+                .validate()
+                .expect_err("an exhausted review did not pass")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut attempt_zero = human();
+        attempt_zero.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            result: crate::proof::ReviewResult::Passed,
+            attempts: 0,
+        });
+        assert_eq!(
+            attempt_zero
+                .validate()
+                .expect_err("there is no attempt zero")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut agent_override = EventAdmission {
+            by: Admission::Agent,
+            at: AT.to_owned(),
+            confirmation: None,
+            review: None,
+        };
+        agent_override.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Passed,
+            result: crate::proof::ReviewResult::Failed,
+            attempts: 2,
+        });
+        assert_eq!(
+            agent_override
+                .validate()
+                .expect_err("only a passing review admits an Agent mutation")
+                .code,
+            EXIT_SCHEMA
+        );
+
+        let mut sound = human();
+        sound.review = Some(ReviewProvenance {
+            outcome: ReviewOutcome::Overridden,
+            result: crate::proof::ReviewResult::Exhausted,
+            attempts: 6,
+        });
+        sound
+            .validate()
+            .expect("a human overruling an exhausted review is exactly what this records");
+    }
+
+    /// The ReviewDigest is admission-time material and never becomes history.
+    ///
+    /// It binds an exact mutation against exact Rule artifacts while the
+    /// Challenge is pending, which is where it is checkable. Afterwards the
+    /// Challenge is gone and the Rule files have moved, so a stored copy could
+    /// only ever be compared against material that no longer exists.
+    #[test]
+    fn durable_review_provenance_carries_no_digest() {
+        let mut admitted = human();
+        admitted.review = Some(review(ReviewOutcome::Overridden));
+        let value = serde_json::to_value(&admitted).expect("json");
+        let members: Vec<&String> = value["review"]
+            .as_object()
+            .expect("a review object")
+            .keys()
+            .collect();
+        assert_eq!(members, vec!["attempts", "outcome", "result"]);
+    }
+
+    /// A human confirmation records the spent code and nothing else — the
+    /// Challenge's own digest is local and never becomes durable provenance.
+    #[test]
+    fn a_human_confirmation_records_only_the_spent_code() {
+        let value = serde_json::to_value(human()).expect("json");
+        assert_eq!(
+            value["confirmation"],
+            serde_json::json!({"challenge": "ABC234"})
+        );
     }
 }

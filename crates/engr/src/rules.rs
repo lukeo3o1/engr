@@ -27,6 +27,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -582,12 +583,12 @@ pub struct Rule {
     ///
     /// [`Review`] is what the Rule *means*, and it is deliberately the same
     /// value whether the policy was written out or left to the defaults. This
-    /// is the other question, and exactly one caller asks it: the workspace
-    /// version 1 Rule schema had no `review` member, so a predecessor v1 Rule
-    /// carrying one is bytes that generation refused to load. Migration has to
-    /// refuse them too rather than admitting a file into v3 under defaults the
-    /// generation it came from never offered. Not part of identity and not
-    /// hashed — nothing about what the Rule requires depends on it.
+    /// is the other question, and exactly one caller asks it: the released
+    /// predecessor had no Rules at all, so a Rule file in a workspace being
+    /// migrated is a later domain and is refused by name rather than admitted
+    /// under defaults the generation it came from never offered. Not part of
+    /// identity and not hashed — nothing about what the Rule requires depends
+    /// on it.
     #[serde(skip)]
     pub written_review: bool,
     /// The normative text, exactly as written.
@@ -627,11 +628,11 @@ pub fn load_all(root: &Path) -> Result<Vec<Rule>> {
     // rather than in the command that happens to have asked.
     //
     // Leaving it to the CLI made persisted meaning depend on which public door a
-    // caller came through: `engr rules ls` refused a version 1 workspace while
-    // `rules::load_all` accepted the same file and assigned it the version 2
-    // defaults, which is precisely the silent reinterpretation the version
-    // exists to prevent. Same shape as the raw single-file loader that was made
-    // private for the same reason: one door.
+    // caller came through: `engr rules ls` refused a workspace this build does
+    // not write while `rules::load_all` accepted the same file and assigned it
+    // this generation's defaults, which is precisely the silent reinterpretation
+    // the generation marker exists to prevent. Same shape as the raw
+    // single-file loader that was made private for the same reason: one door.
     //
     // `bind` and `check` reach rules only through `applicable`, which reaches
     // them only through here, so this one check covers every semantic entry
@@ -816,6 +817,8 @@ fn parse(raw: &str, path: &Path) -> Result<Rule> {
         )
     })?;
 
+    // The profile, before the deserializer resolves the evidence away.
+    check_restricted_yaml(front, &where_)?;
     let front: FrontMatter = serde_norway::from_str(front)
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("{where_}: {error}")))?;
 
@@ -1051,24 +1054,291 @@ pub struct BoundRule {
     pub content_sha256: Option<String>,
 }
 
-/// The v1 rule-id grammar, in one place so the loader and the snapshot check
-/// cannot drift.
-fn check_rule_id(id: &str, what: &str) -> Result<()> {
+/// The restricted YAML profile a Rule's front matter is read under.
+///
+/// #66 fixes it: YAML 1.2, duplicate keys invalid, custom tags invalid, anchors
+/// and aliases invalid, and only schema-required forms accepted. A typed
+/// deserializer enforces almost none of that. It resolves an alias into the
+/// value its anchor held and applies a tag, then hands back a perfectly valid
+/// `FrontMatter` that no longer stands in any recoverable relation to the bytes
+/// it came from.
+///
+/// That matters more here than it would elsewhere, because Rule Review identity
+/// is **artifact-exact**: #66 says any byte-level change to a Rule file,
+/// "including semantically equivalent YAML reformatting", changes the
+/// ReviewDigest. Two files whose bytes differ must never be one policy — and an
+/// anchor is exactly a way to write one policy twice. Left unrestricted, a
+/// person reading the file and a build hashing it are looking at two different
+/// documents.
+///
+/// The check runs on the raw front matter, before deserialization, because
+/// afterwards the evidence is gone: the constructs have been resolved away and
+/// the typed value cannot say which of them produced it.
+///
+/// The parser's event stream is the boundary. Presentation details such as
+/// block versus flow style and ordinary versus explicit keys have already been
+/// resolved there, while anchors, aliases, tags, scalar style and mapping
+/// membership are still observable. That is exactly the point at which the
+/// profile can be complete without trying to reimplement YAML with a textual
+/// scanner.
+/// The parser is libyaml, and it is the same libyaml `serde_norway` will use on
+/// the same bytes a moment later — one pinned copy of one crate, checked in
+/// `Cargo.lock`. A second YAML implementation would be a second opinion about
+/// what the document says, and the gap between two opinions is precisely where
+/// something forbidden survives being looked for.
+fn check_restricted_yaml(front: &str, where_: &str) -> Result<()> {
+    // SAFETY: `front` outlives the parser. The parser is initialized before any
+    // use and deleted on every path that leaves this call after initialization;
+    // each event is deleted exactly once, immediately after inspection, and
+    // inspection never returns out of the loop. Union members are read only
+    // under the tag that selects them.
+    unsafe { check_restricted_yaml_events(front, where_) }
+}
+
+enum YamlContainer {
+    Mapping {
+        expecting_key: bool,
+        keys: BTreeSet<Vec<u8>>,
+    },
+    Sequence,
+}
+
+/// Where in the document the next node will land, and what has been there.
+///
+/// The event stream says a node *begins*; it does not say whether that node is
+/// a mapping key. That is positional, so it is tracked here: inside a mapping
+/// the two alternate, and libyaml has already normalized explicit `? key`
+/// syntax and flow style into the same alternation as ordinary block `key:`.
+/// Keeping the answer in one place is what makes the duplicate-key rule and the
+/// scalar-keys-only rule hold in every presentation rather than in the ones
+/// somebody thought to write a scanner for.
+struct YamlProfile {
+    stack: Vec<YamlContainer>,
+    documents: usize,
+}
+
+impl YamlProfile {
+    /// Account for a node beginning at the current position.
+    ///
+    /// `scalar` is the key bytes when the node is a scalar, and `None` for a
+    /// collection — which is only ever refused, because a rule's front matter
+    /// has no use for a mapping keyed by a sequence.
+    fn begin_node(&mut self, scalar: Option<&[u8]>, where_: &str, line: u64) -> Result<()> {
+        let Some(YamlContainer::Mapping {
+            expecting_key,
+            keys,
+        }) = self.stack.last_mut()
+        else {
+            // The document root, or a sequence entry: nothing alternates.
+            return Ok(());
+        };
+        if *expecting_key {
+            let key = scalar.ok_or_else(|| {
+                Error::new(
+                    EXIT_SCHEMA,
+                    format!("{where_}:{line}: a rule's front matter uses only scalar mapping keys"),
+                )
+            })?;
+            // Compared as scalar *values*, so `id` and `"id"` are the one key
+            // they mean, rather than two spellings that slip past each other.
+            ensure!(
+                keys.insert(key.to_vec()),
+                EXIT_SCHEMA,
+                "{where_}:{line}: a mapping key appears twice, and a rule has one value for it"
+            );
+            *expecting_key = false;
+        } else {
+            *expecting_key = true;
+        }
+        Ok(())
+    }
+}
+
+unsafe fn check_restricted_yaml_events(front: &str, where_: &str) -> Result<()> {
+    use unsafe_libyaml_norway::{
+        yaml_event_delete, yaml_event_t, yaml_parser_delete, yaml_parser_initialize,
+        yaml_parser_parse, yaml_parser_set_input_string, yaml_parser_t, YAML_STREAM_END_EVENT,
+    };
+
+    let mut parser = MaybeUninit::<yaml_parser_t>::uninit();
+    let parser = parser.as_mut_ptr();
     ensure!(
-        !id.is_empty()
-            && id.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            }),
+        !yaml_parser_initialize(parser).fail,
         EXIT_SCHEMA,
-        "{what}: rule id {id:?} is not canonical; v1 ids are [a-z0-9-]+"
+        "{where_}: could not initialize the YAML parser"
+    );
+    yaml_parser_set_input_string(parser, front.as_ptr(), front.len() as u64);
+
+    let mut state = YamlProfile {
+        stack: Vec::new(),
+        documents: 0,
+    };
+    loop {
+        let mut event = MaybeUninit::<yaml_event_t>::uninit();
+        let event = event.as_mut_ptr();
+        if yaml_parser_parse(parser, event).fail {
+            yaml_parser_delete(parser);
+            return Err(Error::new(
+                EXIT_SCHEMA,
+                format!("{where_}: invalid YAML front matter"),
+            ));
+        }
+        let kind = (*event).type_;
+        // Inspection is a call rather than a block, and that is what keeps the
+        // cleanup below correct. Every refusal in this profile is written with
+        // `ensure!`, which expands to `return` — inside the loop body that would
+        // leave this event and the whole parser allocated on the way out. A
+        // function boundary turns each of those returns into a value, so there
+        // is exactly one place that leaves the loop early and it frees both.
+        let checked = inspect_yaml_event(event, &mut state, where_);
+        yaml_event_delete(event);
+        if let Err(error) = checked {
+            yaml_parser_delete(parser);
+            return Err(error);
+        }
+        if kind == YAML_STREAM_END_EVENT {
+            break;
+        }
+    }
+    yaml_parser_delete(parser);
+    Ok(())
+}
+
+/// What the profile allows one event to be.
+///
+/// # Safety
+///
+/// `event` must point at an event the parser produced and has not yet deleted.
+unsafe fn inspect_yaml_event(
+    event: *const unsafe_libyaml_norway::yaml_event_t,
+    state: &mut YamlProfile,
+    where_: &str,
+) -> Result<()> {
+    use unsafe_libyaml_norway::{
+        YAML_ALIAS_EVENT, YAML_DOCUMENT_END_EVENT, YAML_DOCUMENT_START_EVENT,
+        YAML_FOLDED_SCALAR_STYLE, YAML_LITERAL_SCALAR_STYLE, YAML_MAPPING_END_EVENT,
+        YAML_MAPPING_START_EVENT, YAML_SCALAR_EVENT, YAML_SEQUENCE_END_EVENT,
+        YAML_SEQUENCE_START_EVENT,
+    };
+
+    let kind = (*event).type_;
+    let line = (*event).start_mark.line + 1;
+    if kind == YAML_DOCUMENT_START_EVENT {
+        state.documents += 1;
+        ensure!(
+            state.documents == 1 && (*event).data.document_start.implicit,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter is one implicit document"
+        );
+    } else if kind == YAML_DOCUMENT_END_EVENT {
+        ensure!(
+            (*event).data.document_end.implicit,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter is one implicit document"
+        );
+    } else if kind == YAML_ALIAS_EVENT {
+        // An alias is the one construct with no node properties to inspect: it
+        // *is* the reference.
+        return Err(Error::new(
+            EXIT_SCHEMA,
+            format!("{where_}:{line}: a rule's front matter uses no YAML aliases"),
+        ));
+    } else if kind == YAML_SCALAR_EVENT {
+        let scalar = (*event).data.scalar;
+        check_yaml_properties(scalar.anchor, scalar.tag, where_, line)?;
+        ensure!(
+            scalar.style != YAML_LITERAL_SCALAR_STYLE && scalar.style != YAML_FOLDED_SCALAR_STYLE,
+            EXIT_SCHEMA,
+            "{where_}:{line}: a rule's front matter uses no block scalars"
+        );
+        // libyaml NUL-terminates every scalar, so the pointer is live even at
+        // length zero; the guard is here because `from_raw_parts` is undefined
+        // on a null base regardless of length, and that is not a property to
+        // depend on a C library for.
+        let value = if scalar.value.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(scalar.value, scalar.length as usize)
+        };
+        state.begin_node(Some(value), where_, line)?;
+    } else if kind == YAML_MAPPING_START_EVENT {
+        let mapping = (*event).data.mapping_start;
+        check_yaml_properties(mapping.anchor, mapping.tag, where_, line)?;
+        state.begin_node(None, where_, line)?;
+        state.stack.push(YamlContainer::Mapping {
+            expecting_key: true,
+            keys: BTreeSet::new(),
+        });
+    } else if kind == YAML_SEQUENCE_START_EVENT {
+        let sequence = (*event).data.sequence_start;
+        check_yaml_properties(sequence.anchor, sequence.tag, where_, line)?;
+        state.begin_node(None, where_, line)?;
+        state.stack.push(YamlContainer::Sequence);
+    } else if kind == YAML_MAPPING_END_EVENT {
+        ensure!(
+            matches!(state.stack.pop(), Some(YamlContainer::Mapping { .. })),
+            EXIT_SCHEMA,
+            "{where_}:{line}: invalid YAML mapping structure"
+        );
+    } else if kind == YAML_SEQUENCE_END_EVENT {
+        ensure!(
+            matches!(state.stack.pop(), Some(YamlContainer::Sequence)),
+            EXIT_SCHEMA,
+            "{where_}:{line}: invalid YAML sequence structure"
+        );
+    }
+    Ok(())
+}
+
+/// Anchors and tags are node properties, and every node kind can carry both.
+///
+/// One function for all three kinds, because "an anchor is allowed on a
+/// sequence but not a scalar" is exactly the sort of asymmetry that opens a
+/// bypass, and having a single place to state the rule is how it stays absent.
+fn check_yaml_properties(anchor: *const u8, tag: *const u8, where_: &str, line: u64) -> Result<()> {
+    ensure!(
+        anchor.is_null(),
+        EXIT_SCHEMA,
+        "{where_}:{line}: a rule's front matter uses no YAML anchors"
+    );
+    ensure!(
+        tag.is_null(),
+        EXIT_SCHEMA,
+        "{where_}:{line}: a rule's front matter uses no YAML tags"
+    );
+    Ok(())
+}
+
+/// The rule-id grammar, in one place so the loader and the snapshot check
+/// cannot drift.
+///
+/// `[a-z0-9][a-z0-9-]{0,31}`: bounded, and it must start with something. A
+/// leading `-` reads as a flag wherever an id is typed, and an unbounded id is
+/// a filename this build would write and some other filesystem would refuse.
+pub(crate) const RULE_ID_MAX: usize = 32;
+
+pub(crate) fn check_rule_id(id: &str, what: &str) -> Result<()> {
+    let canonical = id.len() <= RULE_ID_MAX
+        && id
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
+    ensure!(
+        canonical,
+        EXIT_SCHEMA,
+        "{what}: rule id {id:?} is not canonical; ids are [a-z0-9][a-z0-9-]{{0,{}}}",
+        RULE_ID_MAX - 1
     );
     Ok(())
 }
 impl BoundRule {
     /// Hold one snapshot to the frozen Rule contract before it can be hashed.
     ///
-    /// Validation rather than privacy, unlike [`crate::proof::CandidateSubject`]
-    /// and [`crate::proof::ReviewMutation`]. Those are always computed, so they
+    /// Validation rather than privacy, unlike [`crate::proof::ReviewMutation`]
+    /// and [`crate::gate::ObjectSubject`]. Those are always computed, so they
     /// can be made unconstructible; a Rule snapshot arrives **as data**, read
     /// back from a candidate that stored it, so there is no construction path
     /// to route it through. What can be required is that it satisfies the same
@@ -1401,10 +1671,27 @@ impl ReviewBinding {
     /// reviewed, so this answers the set question in the one order both sides
     /// can produce independently.
     pub fn rule_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.rules.iter().map(|rule| rule.id.clone()).collect();
-        ids.sort();
-        ids
+        canonical_rule_ids(&self.rules)
     }
+}
+
+/// The ids of a bound Rule set, in the one order two sides produce
+/// independently.
+///
+/// One function, because the frozen Challenge and the live binding have to
+/// agree on it and each used to derive it its own way: the Challenge mapped the
+/// *snapshot* order straight to ids, and the snapshot order is the hash's —
+/// which begins with a rule's bases rather than its name and is therefore not
+/// id order at all. Two rules whose bases sort the other way round produced a
+/// frozen `rules` list that was not the canonical spelling of its own set.
+///
+/// Sorting `String`s is the JCS element-byte order for these values: a rule id
+/// is `[a-z0-9][a-z0-9-]{0,31}`, so no escape can make the quoted encoding sort
+/// differently from the bare one.
+pub fn canonical_rule_ids(rules: &[BoundRule]) -> Vec<String> {
+    let mut ids: Vec<String> = rules.iter().map(|rule| rule.id.clone()).collect();
+    ids.sort();
+    ids
 }
 
 /// Hold a binding's two caller-supplied arguments to the shape its domain
@@ -1762,8 +2049,8 @@ pub fn check(
     // different answers, and neither is "the subject moved" — reporting either
     // as a mismatch would tell an agent to re-review something that was never
     // the problem, and recomputing an old proof with today's calculation would
-    // do exactly that to every historical attestation the moment a version 2
-    // exists.
+    // do exactly that to every historical attestation the moment a second
+    // contract version exists.
     let checked =
         crate::digest::REVIEW.recheck(attested, |version| binding.digest_under(version))?;
     let ids = binding.rule_ids();
