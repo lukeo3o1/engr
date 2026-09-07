@@ -1419,6 +1419,133 @@ fn re_confirming_after_append_before_projection_does_not_duplicate_the_event() {
     assert!(gate::find(&root, &code).is_err());
 }
 
+/// The same retry, for the one admission whose predecessor is always damaged.
+///
+/// A repair publishes its Event and then saves the projection, and a crash
+/// between those two writes leaves the durable repair, the still-damaged
+/// projection and the pending code. The screen offers the cleanup retry —
+/// correctly, the record already proves the repair — and retyping the code ran
+/// ordinary reconciliation, which refuses exactly those two predecessors before
+/// it ever reaches the admitted tail. So the projection stayed damaged, the
+/// Challenge stayed on disk, and the resealed-divergent case was told to
+/// `engr repair` an Object whose repair was already admitted and whose code it
+/// was holding.
+///
+/// No timed kill: confirming a real repair and then restoring only the two
+/// files that write would not yet have touched *is* the state, and the
+/// EventStore is the one a real confirmation produced.
+///
+/// Both damaged states, plus the two controls that must not move: an absent
+/// projection, which worked because reconstruction has no predecessor to refuse,
+/// and a projection already saved, whose retry is a Challenge removal and
+/// nothing else.
+#[test]
+fn an_interrupted_repair_is_finished_by_retyping_its_code() {
+    // Collected and asserted once at the end, so one run maps every state
+    // rather than stopping at the first: the two damaged ones fail together,
+    // and a control that broke would be visible in the same output.
+    let mut wedged: Vec<String> = Vec::new();
+    for damage in ["unsealed", "divergent", "absent", "already-saved"] {
+        let (_dir, root) = workspace();
+        let id = new_object(&root, "a record worth restoring");
+        admit(&root, payload(Act::Add, &id, "the wording admitted"));
+        let projection = store::object_path(&root, &id);
+        let sound = std::fs::read(&projection).expect("sound bytes");
+
+        match damage {
+            "unsealed" => {
+                let text = String::from_utf8(sound.clone()).expect("utf8");
+                std::fs::write(
+                    &projection,
+                    text.replace("the wording admitted", "the wording nobody admitted"),
+                )
+                .expect("edit without resealing");
+            }
+            "divergent" => {
+                let stored = store::load_object(&root, &id).expect("object");
+                let resealed = engr::integrity::mutate(&stored, |object| {
+                    object.sections[0].text = "wording nobody was ever shown".to_owned();
+                    Ok(())
+                })
+                .expect("an out-of-band edit can always be resealed");
+                std::fs::write(
+                    &projection,
+                    engr::proof::canonical_bytes(&resealed.object, "test fixture")
+                        .expect("canonical JCS, which is what the read boundary requires"),
+                )
+                .expect("put it on disk");
+            }
+            _ => std::fs::remove_file(&projection).expect("remove projection"),
+        }
+
+        let prepared = gate::prepare_repair(&root, &id).expect("repair");
+        let code = prepared.candidate.code().to_owned();
+        let damaged = std::fs::read(&projection).ok();
+        let challenge = store::challenge_path(&root, &code).expect("challenge path");
+        let frozen = std::fs::read(&challenge).expect("the pending question");
+
+        // A real confirmation, so the EventStore below is the one the write path
+        // actually produces.
+        let repaired = gate::confirm(&root, &format!("CONFIRM {code}")).expect("repair");
+        let finished = std::fs::read(&projection).expect("the repaired projection");
+        let stream = store::load_events(&root, &id).expect("events");
+
+        // Rewind exactly the two writes the crash would have preceded — and for
+        // the `already-saved` control, only the one it would not have.
+        if damage != "already-saved" {
+            match &damaged {
+                Some(bytes) => std::fs::write(&projection, bytes).expect("the damaged projection"),
+                None => std::fs::remove_file(&projection).expect("no projection yet"),
+            }
+        }
+        std::fs::write(&challenge, &frozen).expect("the question, not yet discarded");
+
+        let state = gate::candidate_state(&root, &gate::find(&root, &code).expect("found"))
+            .expect("classified");
+        if !matches!(state, gate::CandidateState::AlreadyApplied(_)) {
+            wedged.push(format!("{damage}: the record already proves this repair, and the retry was classified {state:?}"));
+            continue;
+        }
+
+        let retried = match gate::confirm(&root, &format!("CONFIRM {code}")) {
+            Ok(retried) => retried,
+            Err(error) => {
+                wedged.push(format!(
+                    "{damage}: the retry must finish it, and refused: {}",
+                    error.message
+                ));
+                continue;
+            }
+        };
+        if retried.object != repaired.object {
+            wedged.push(format!(
+                "{damage}: the retry finished at rev {} where the uninterrupted repair reached rev {}",
+                retried.object.rev, repaired.object.rev
+            ));
+        }
+        if finished != std::fs::read(&projection).expect("projection") {
+            wedged.push(format!(
+                "{damage}: the projection is not byte for byte what the uninterrupted repair wrote"
+            ));
+        }
+        if stream != store::load_events(&root, &id).expect("events") {
+            wedged.push(format!("{damage}: the retry moved the record"));
+        }
+        if gate::find(&root, &code).is_ok() {
+            wedged.push(format!("{damage}: the spent question is still on disk"));
+        }
+        if !ops::verify(&root, &id).expect("verify").passed() {
+            wedged.push(format!(
+                "{damage}: the workspace does not verify afterwards"
+            ));
+        }
+    }
+    assert!(
+        wedged.is_empty(),
+        "an admitted repair that lost its projection cannot be finished by the code the screen is still offering: {wedged:#?}"
+    );
+}
+
 #[test]
 fn re_confirming_after_append_before_projection_recovers_an_object_creation() {
     let (_dir, root) = workspace();

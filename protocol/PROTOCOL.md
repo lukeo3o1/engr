@@ -1160,12 +1160,26 @@ append-only, so such a record is durable history its own recovery path can never
 materialize.
 
 Re-confirming a code whose event is already applied is **idempotent** — it
-reports what happened rather than applying it twice. That closes the crash window
-between saving the projection and clearing the Challenge. Recognising it requires
+reports what happened rather than applying it twice. Recognising it requires
 the **exact** correspondence above, the answered code included: two Challenges
 can freeze the same mutation and are still two questions, so a restored copy of
 an older one MUST NOT be reported as the newer one's retry. It is stale, and
 answering it admits nothing.
+
+**There are two crash windows, not one, and the retry MUST close both.** The
+Event is appended, the projection is saved, and the Challenge is cleared, so an
+interruption leaves either a durable Event with no saved projection or a saved
+projection with the question still on disk. The second is a Challenge removal
+and nothing else. The first has to finish the write that did not happen — and
+for `repair` it MUST derive that projection from admitted history rather than by
+reconciling the stored one, because reconciliation refuses a predecessor whose
+seal fails or that admitted history never produced, which is the state repair
+exists for and therefore the state every interrupted repair is retried in. That
+refusal is correct everywhere else and MUST NOT be weakened to reach this;
+unreplayable history still fails closed, because there is nothing to derive
+from. A retry that cannot finish an admission the record already proves leaves
+the damage in place and the spent question on disk, while the screen goes on
+offering the code.
 
 ### Projection is deterministic
 

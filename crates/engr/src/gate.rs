@@ -2152,6 +2152,44 @@ pub fn confirm(root: &Path, response: &str) -> Result<Admitted> {
     store::with_lock(root, || confirm_locked(root, response))
 }
 
+/// Finish the projection for an admission that is already durable.
+///
+/// Ordinary reconciliation is the answer for every action but one. It refuses a
+/// predecessor whose seal fails or that admitted history never produced, and
+/// that refusal is right: applying a tail over such a projection would reseal
+/// wording nobody admitted into a newer revision and destroy the exact bytes
+/// `repair` compares against.
+///
+/// A repair is the one admission whose predecessor is *always* one of those two
+/// states — that is what it exists for — so the retry that has to get past the
+/// refusal is precisely the one whose repair is already in the record. It
+/// publishes its Event and then saves the projection, and a crash between those
+/// two writes left the durable repair, the damaged projection and the pending
+/// code. The screen offered the cleanup retry, and retyping the code hit
+/// reconciliation's refusal instead: the projection stayed damaged, the
+/// Challenge stayed on disk, and the divergent case was told to `engr repair` an
+/// Object whose repair was already admitted and whose code it was holding. An
+/// absent projection was the one shape that worked, because reconstruction from
+/// history has no predecessor to refuse.
+///
+/// So the projection comes from validated admitted history, which is what the
+/// interrupted write was going to save — finishing that write rather than making
+/// a second admission. Unreplayable history still fails closed, in
+/// [`ops::provable`], and ordinary reconciliation is untouched.
+fn finish_admitted(root: &Path, id: &str, applied: &Event) -> Result<Object> {
+    if !matches!(applied.action, Action::ObjectRepaired {}) {
+        return ops::reconcile_locked(root, id);
+    }
+    let object = ops::provable(root, id)?;
+    // The already-saved crash window is the ordinary one — Event and projection
+    // both written, only the Challenge left behind — and it must stay a
+    // Challenge removal and nothing else.
+    if store::load_object(root, id).ok().as_ref() != Some(&object) {
+        store::save_object(root, &object)?;
+    }
+    Ok(object)
+}
+
 pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
     store::require_current(root)?;
     let code = crate::confirmation::authorize(
@@ -2182,7 +2220,7 @@ pub(crate) fn confirm_locked(root: &Path, response: &str) -> Result<Admitted> {
         // Challenge on disk permanently, with nothing left to admit and no way
         // to say so.
         CandidateState::AlreadyApplied(applied) => {
-            let object = ops::reconcile_locked(root, &id)?;
+            let object = finish_admitted(root, &id, &applied)?;
             discard_locked(root, code)?;
             return Ok(Admitted {
                 event: *applied,
