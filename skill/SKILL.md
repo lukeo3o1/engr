@@ -130,6 +130,10 @@ ReviewDigest while holding the writer lock; if the Object, Rule bytes, or any
 reviewed basis moved, read and review again rather than copying the new digest.
 A passing Agent admission writes immediately and returns no challenge.
 
+`prepare --new` takes the same two steps. engr mints the object id while it
+performs the create, so the id is not part of what you reviewed and you carry
+nothing but the digest between the two attempts.
+
 If review fails, fix the proposed work and count the next review attempt
 honestly. Once the applicable ceiling is exceeded, report `exhausted`. A Rule
 whose exhaustion policy is `human_confirmation` may then produce a Human

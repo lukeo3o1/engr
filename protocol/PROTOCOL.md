@@ -1149,7 +1149,10 @@ The title exemption is likewise narrow in both directions. It says there is no
 applicable Rule to review against, not that titles are exempt from Rules: where
 a workspace governs the Object domain, a title mutation reviews against it like
 any other, so the absence MUST be established rather than inferred from the
-shape of the action.
+shape of the action. Creating an Object is one such mutation and reviews like
+the rest; what its descriptor does not carry is an identity, because engr has
+not issued one yet — see
+[A creation names no target](#a-creation-names-no-target).
 
 The append boundary MUST also refuse a record whose **replay** would leave the
 workspace outside the current schema. Some current-state integers are allocated
@@ -2453,6 +2456,44 @@ the guarantee exists only in the support table. A version listed as verifiable
 that this build cannot actually compute is refused rather than served the
 current calculation, since being promised in the contract is not evidence that
 an implementation has it.
+
+### A creation names no target
+
+A review binds the exact mutation, and for every operation but one that includes
+the identity being acted on: a revision of `obj:<id>:3` is not a revision of
+`obj:<other>:3`, and a proof that could not tell them apart would not be a proof.
+
+Creation is the exception, and it MUST be. engr mints the UUIDv7 while
+performing the create and a caller MUST NOT supply or choose one, so no identity
+yet exists for a review to name — and the id one attempt would name is a
+different id on the next. A binding that carried it does not merely make review
+strict, it makes the mechanism non-terminating: the first attempt offers a
+digest, the attempt that attests to that digest computes another, and the
+sequence has no exit. A workspace with any applicable Object Rule can then
+create no Object at all, through either admission path, which is the opposite of
+what a rule is for.
+
+So a creation's mutation descriptor carries `"target": null`, and what is
+reviewed is the intent — the title and the lifecycle the Object arrives in,
+which `after` already carries. It MUST be spelled `null` rather than omitted: a
+hash contract cannot afford a storage economy, or an implementation that omits
+the member and one that spells it out disagree about the bytes. Both directions
+are enforced, because each failure is its own — a creation carrying a target
+puts an identity engr has not issued into a proof that has to survive to the
+next attempt, and any other operation carrying none binds a review to a mutation
+nobody can locate.
+
+Two creations of the same intent are therefore one review subject. That is the
+reading, not a gap: what was reviewed is that an Object with this title, type and
+state may be created. Each creation is still its own admission, prepared and
+attested separately — the review authorizes no batch, and nothing about it
+survives into what the record keeps.
+
+This is the settlement [Mutation preconditions](#mutation-preconditions) already
+reaches for a Backlog create, for the same reason: identity is engr's to issue,
+and the alternative — letting a caller propose the id so a creation would have
+something to bind — is a reservation lifecycle bolted on to protect an identity
+nobody else can be racing for.
 
 ### Unordered sets have one order
 
