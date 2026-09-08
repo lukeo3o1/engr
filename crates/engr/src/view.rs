@@ -627,15 +627,25 @@ pub fn render_show(root: &Path, object: &Object) -> String {
             .find(|(id, _)| *id == section.id)
             .map(|(_, status)| status.clone())
             .unwrap_or_default();
-        match section.role {
-            Some(role) => out.push_str(&format!(
-                "\n── §{} [{}] ── {}\n",
-                section.id,
-                role.as_str(),
-                status.label()
-            )),
-            None => out.push_str(&format!("\n── §{} ── {}\n", section.id, status.label())),
-        }
+        // The header belongs on this line, and its absence from it was a hole in
+        // the trust surface rather than a missing nicety. A header is inside the
+        // Section seal and is one of the fields a Ref may pin, so a reader
+        // deciding how far to trust this Section could not see part of what
+        // something else may be depending on. Everything else the seal covers is
+        // already here.
+        out.push_str(&format!(
+            "\n── §{}{}{} ── {}\n",
+            section.id,
+            match section.role {
+                Some(role) => format!(" [{}]", role.as_str()),
+                None => String::new(),
+            },
+            match &section.header {
+                Some(header) => format!(" {header}"),
+                None => String::new(),
+            },
+            status.label()
+        ));
         out.push_str(section.text.trim_end());
         out.push('\n');
         render_content(&mut out, &section.content);
@@ -1171,7 +1181,17 @@ pub fn render_backlog_show(root: &Path, item: &backlog::Item) -> String {
     // where you land when you want to name this item to another command.
     out.push_str(&format!("{}\n", backlog_reference(&item.id)));
     for section in &item.sections {
-        out.push_str(&format!("\n── §{} ── unresolved\n", section.id));
+        // Carried here too, for the same reason it is carried on the record's
+        // screen: a header is stored, so a surface that never shows it is a
+        // surface a reader cannot check what they were given against.
+        out.push_str(&format!(
+            "\n── §{}{} ── unresolved\n",
+            section.id,
+            match &section.header {
+                Some(header) => format!(" {header}"),
+                None => String::new(),
+            }
+        ));
         out.push_str(section.text.trim_end());
         out.push('\n');
         out.push_str(&format!(

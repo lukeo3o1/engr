@@ -265,13 +265,16 @@ enum Backlog {
 /// `backlog show --format json` beside the thing it describes.
 #[derive(Args, Clone)]
 struct ReviewArg {
-    /// Which attempt of this review sequence this is, counted from 1
-    #[arg(long, default_value_t = 1, value_name = "N")]
+    /// Which attempt of this review sequence this is, counted from 1. Also
+    /// accepted as `--review-attempt`, which is what `prepare` calls it
+    #[arg(long, alias = "review-attempt", default_value_t = 1, value_name = "N")]
     attempt: u32,
     /// ReviewDigest surfaced by the first governed attempt
     #[arg(long = "review", value_name = "DIGEST")]
     review_digest: Option<String>,
-    /// Rule id actually reviewed. Repeat for the complete surfaced set
+    /// Rule id actually reviewed. Repeat for the complete surfaced set. Backlog
+    /// takes no --review-result: a review that did not pass is not repeated
+    /// with a verdict, it is acted on and reviewed again
     #[arg(long = "reviewed-rule", value_name = "RULE")]
     reviewed_rules: Vec<String>,
     /// The `expect` value from `backlog show --format json` for what you read.
@@ -674,6 +677,10 @@ struct Prepare {
     /// Destination state, valid for the destination type
     #[arg(long, value_enum, value_name = "STATE")]
     state: Option<StateArg>,
+    /// The object's title, for --new and --rename. The same field --text
+    /// carries there, under the name every other command uses for it
+    #[arg(long, conflicts_with_all = ["text", "text_file"])]
+    title: Option<String>,
     /// Wording, inline
     #[arg(long)]
     text: Option<String>,
@@ -730,8 +737,14 @@ struct Prepare {
     /// Rule id actually reviewed. Repeat for the complete surfaced set
     #[arg(long = "reviewed-rule", value_name = "RULE")]
     reviewed_rules: Vec<String>,
-    /// Which attempt of the continuous review sequence this is
-    #[arg(long = "review-attempt", default_value_t = 1, value_name = "N")]
+    /// Which attempt of the continuous review sequence this is. Also accepted
+    /// as `--attempt`, which is what every other governed domain calls it
+    #[arg(
+        long = "review-attempt",
+        alias = "attempt",
+        default_value_t = 1,
+        value_name = "N"
+    )]
     review_attempt: u32,
     /// Agent-attested outcome of reviewing the exact mutation
     #[arg(long = "review-result", value_enum, value_name = "RESULT")]
@@ -1632,6 +1645,28 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 .map_err(|error| engr::tool_error(path.display(), error))?,
         ),
         (None, None) => None,
+    };
+    // `--title` and `--text` are one field for the two actions that carry a
+    // title, and `--title` is what every other command in engr calls it —
+    // `backlog new`, `backlog rename`, `collection`. Accepting only `--text`
+    // here made the two halves of one tool disagree about the name of the same
+    // thing, and clap's guess for the unknown flag was `--state`, which sends a
+    // caller to change the object's lifecycle instead.
+    //
+    // Refused rather than accepted for the actions that admit Section wording:
+    // a title is a label, and letting `--title` stand in for wording would put
+    // a navigation aid where an assertion belongs.
+    let text = match &command.title {
+        None => text,
+        Some(title) => {
+            ensure!(
+                chosen.carries_title(),
+                EXIT_USAGE,
+                "{} admits section wording, not a title; use --text or --text-file",
+                chosen.label()
+            );
+            Some(title.clone())
+        }
     };
 
     if chosen.carries_title() && (command.based_on.is_some() || command.no_based_on) {

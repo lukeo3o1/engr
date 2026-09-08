@@ -114,7 +114,7 @@ mechanism. Agent admission is separately and explicitly recorded.
 
 ```bash
 engr init                                    # in a git repository
-engr prepare --new --text "the title"        # propose an object
+engr prepare --new --title "the title"       # propose an object
 engr confirm 'CONFIRM <code>'                # admit a Human candidate
 engr prepare --object <id> --rename --text "a better title"
 engr prepare --object <id> --add  --text-file f.txt

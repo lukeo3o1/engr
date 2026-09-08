@@ -391,7 +391,8 @@ the digest travels between the two calls.
 Where no backlog Rule applies there is nothing to attest, and passing `--review`
 is refused rather than ignored.
 
-Every one of these takes `--attempt <n>` when a project rule governs backlog —
+Every one of these takes `--attempt <n>` when a project rule governs backlog
+(`--review-attempt` is accepted too, since that is what `prepare` calls it) —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
 Past the ceiling, an ordinary edit still goes in and is marked `review_exhaustion`, so
 say the real number: the point is kept either way, and an honest one tells the

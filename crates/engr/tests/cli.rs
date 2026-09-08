@@ -1339,6 +1339,262 @@ fn the_activated_generation_is_written_as_one_contract() {
     assert!(!loaded.sections[0].admitted.at.is_empty());
 }
 
+/// One field, one name, across the whole tool.
+///
+/// A cold agent recording its first decision reached for `--title`, because
+/// that is what `backlog new`, `backlog rename` and `collection` call the same
+/// field. `prepare` took it only as `--text`, and clap's guess for the unknown
+/// flag was `--state` — which does not name a title at all, it changes the
+/// object's lifecycle. Two commands disagreeing about the name of one thing,
+/// and the tip pointing at a different thing.
+#[test]
+fn prepare_calls_a_title_a_title() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let created = prepare(root, &["prepare", "--new", "--title", "named by --title"]);
+    confirm(root, &created);
+    let listed = run_engr(root, &["ls"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("named by --title"),
+        "{}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    // Still the other spelling, because nothing about `--text` stopped being
+    // true — a rename takes either.
+    let renamed = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--rename",
+            "--text",
+            "or --text",
+        ],
+    );
+    confirm(root, &renamed);
+
+    // And they are one field, so offering both is refused rather than one of
+    // them quietly winning.
+    let both = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--rename",
+            "--title",
+            "one",
+            "--text",
+            "the other",
+        ],
+    );
+    assert_eq!(both.status.code(), Some(engr::EXIT_USAGE));
+
+    // A title is a label. An action that admits Section wording does not take
+    // one, or a navigation aid would land where an assertion belongs.
+    let wording = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--title",
+            "not wording",
+            "--no-based-on",
+        ],
+    );
+    assert_eq!(wording.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        String::from_utf8_lossy(&wording.stderr).contains("--text"),
+        "the refusal names the flag that does carry wording: {}",
+        String::from_utf8_lossy(&wording.stderr)
+    );
+}
+
+/// A Section's header is on the screen that says how far it can be trusted.
+///
+/// It is inside the Section seal and it is one of the fields a Ref may pin, so
+/// leaving it off `show` meant a reader deciding whether to rely on a Section
+/// could not see part of what something else may already be depending on.
+/// Everything else the seal covers was already there.
+#[test]
+fn show_renders_the_header_a_reference_can_depend_on() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--title", "headers"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--header",
+            "Retry budget",
+            "--role",
+            "decision",
+            "--text",
+            "five attempts, exponential backoff",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &added);
+
+    let shown = run_engr(root, &["show", &id]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("── §1 [decision] Retry budget ──"),
+        "the header sits on the section's own line: {shown}"
+    );
+
+    // Staging carries one too, and a surface that stores a field and never
+    // shows it is a surface a reader cannot check what they were handed
+    // against.
+    let item = engr::backlog::create(
+        root,
+        "staging headers",
+        "an unresolved point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
+    let path = engr::backlog::item_path(root, &item.id);
+    let mut stored: Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["header"] = Value::String("Cache invalidation".to_owned());
+    std::fs::write(&path, serde_json::to_string(&stored).expect("json")).expect("write");
+
+    let shown = run_engr(root, &["backlog", "show", &item.id]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("── §1 Cache invalidation ──"),
+        "and on the staging screen too: {shown}"
+    );
+}
+
+/// One idea, and every spelling of it works in every governed domain.
+///
+/// The attempt is the same thing on both sides — which try of one continuous
+/// self-review this is — and it was `--review-attempt` on `prepare` and
+/// `--attempt` on backlog, work and collection. A cold agent found the
+/// difference by diffing two `--help` outputs, which is not a discovery
+/// surface. Renaming either one would have been worse than the split it fixed:
+/// three domains already agree with each other, and `prepare`'s spelling is the
+/// one that reads correctly beside its other `--review*` flags. So each accepts
+/// the other's name.
+#[test]
+fn the_review_attempt_answers_to_both_its_names() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let id = governed_backlog(root, 2);
+
+    let revise = |flag: &str, value: &str, text: &str| {
+        let token = expect_token(root, &id, Some(1));
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "revise",
+                &id,
+                "--section",
+                "1",
+                "--text",
+                text,
+                "--expect",
+                &token,
+                flag,
+                value,
+            ],
+        )
+    };
+
+    assert!(revise("--attempt", "1", "backlog's own spelling")
+        .status
+        .success());
+    assert!(revise("--review-attempt", "1", "and prepare's, here too")
+        .status
+        .success());
+
+    // The same number means the same thing under either spelling: past the
+    // ceiling, both soft-admit and both mark.
+    assert!(revise("--review-attempt", "9", "past the ceiling")
+        .status
+        .success());
+    assert_eq!(
+        engr::backlog::load(root, &id)
+            .expect("load")
+            .section(1)
+            .expect("§1")
+            .review_exhaustion,
+        Some(engr::rules::RuleReview {
+            attempts: 9,
+            limit: 2
+        })
+    );
+
+    // And `prepare` answers to backlog's spelling, which is the direction a
+    // caller who learned engr through staging arrives from.
+    let object = TempDir::new().expect("temp dir");
+    let root = object.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let refused = run_engr(
+        root,
+        &["prepare", "--new", "--title", "either name", "--agent"],
+    );
+    let refusal = String::from_utf8_lossy(&refused.stderr).to_string();
+    let digest = refusal
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .unwrap_or_else(|| panic!("no digest offered: {refusal}"));
+    let admitted = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--title",
+            "either name",
+            "--agent",
+            "--review",
+            digest,
+            "--reviewed-rule",
+            "careful",
+            "--attempt",
+            "1",
+            "--review-result",
+            "passed",
+        ],
+    );
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+}
+
 #[test]
 fn show_json_uses_state_for_the_object_and_status_for_each_section() {
     let workspace = TempDir::new().expect("temp dir");
