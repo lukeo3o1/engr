@@ -2273,7 +2273,7 @@ fn record_surfaces_never_mix_in_unconfirmed_staging() {
     );
     confirm(root, &section);
 
-    let staged = run_engr(
+    let staged = run_backlog(
         root,
         &[
             "backlog",
@@ -2455,7 +2455,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "source"]);
 
-    let created = run_engr(
+    let created = run_backlog(
         root,
         &[
             "backlog",
@@ -2478,7 +2478,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     );
     let id = engr::backlog::ids(root).expect("ids").remove(0);
 
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2492,7 +2492,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2508,7 +2508,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2528,7 +2528,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2558,7 +2558,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     // A dirty path is pinned and marked rather than refused: losing the context
     // is worse than recording that the baseline is inexact.
     std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
-    let staged = run_engr(
+    let staged = run_backlog(
         root,
         &[
             "backlog",
@@ -2597,7 +2597,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         remaining, 2,
         "the dirty subject was staged as its own point"
     );
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2617,7 +2617,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         "one point consumed, the topic still has unresolved work"
     );
     let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -4355,7 +4355,7 @@ fn a_read_surface_prints_the_reference_every_flag_asks_for() {
         ],
     );
     confirm(root, &added);
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &["backlog", "new", "--title", "refresh", "--text", "a point"]
     )
@@ -4526,7 +4526,7 @@ fn every_addressable_entity_exposes_its_canonical_reference() {
         ],
     );
     confirm(root, &added);
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &["backlog", "new", "--title", "t", "--text", "a point"]
     )
@@ -4583,7 +4583,7 @@ fn every_addressable_entity_exposes_its_canonical_reference() {
     assert_eq!(planned["id"], plan);
 
     // Each one is accepted where it is meant to be used.
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -4635,7 +4635,7 @@ fn a_zero_section_selector_is_refused_everywhere() {
     assert!(engr::reference::EngrRef::parse_embedded(&format!("obj:{compact}:1")).is_ok());
 
     // And it is refused at the command line, through the same parser.
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5326,14 +5326,11 @@ fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
 
 /// Set up a workspace whose backlog is governed by one rule, with one item.
 fn governed_backlog(root: &Path, max_attempts: u32) -> String {
-    let rules = engr::rules::dir(root);
-    std::fs::create_dir_all(&rules).expect("rules dir");
-    std::fs::write(
-        rules.join("careful.md"),
-        format!("---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: {max_attempts}\n---\n\n# Careful\n\nRead it first.\n"),
-    )
-    .expect("rule");
-    engr::backlog::create(
+    // The topic first, and the Rule after it. The Rule is here to govern the
+    // mutations under test; making the arrangement itself carry an attestation
+    // would put the two-step review inside every fixture and leave each test
+    // asserting about its own setup.
+    let id = engr::backlog::create(
         root,
         "staging",
         "an unresolved point",
@@ -5341,7 +5338,50 @@ fn governed_backlog(root: &Path, max_attempts: u32) -> String {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog")
-    .id
+    .id;
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        format!("---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: {max_attempts}\n---\n\n# Careful\n\nRead it first.\n"),
+    )
+    .expect("rule");
+    id
+}
+
+/// Run a backlog mutation the way a governed agent runs one.
+///
+/// Once, to be refused and told what to review and what its digest is, and then
+/// again carrying the attestation. A workspace with no applicable backlog Rule
+/// succeeds on the first call and never reaches the second — and so does a
+/// refusal that is about anything else, which passes straight back to the
+/// caller.
+fn run_backlog(root: &Path, args: &[&str]) -> std::process::Output {
+    let first = run_engr(root, args);
+    if first.status.success() {
+        return first;
+    }
+    let refusal = String::from_utf8_lossy(&first.stderr).to_string();
+    let Some(digest) = refusal
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+    else {
+        return first;
+    };
+    let mut repeated: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    repeated.push("--review".to_owned());
+    repeated.push(digest.to_owned());
+    for rule in refusal
+        .split_once("governed by ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(names, _)| names.split(", ").collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        repeated.push("--reviewed-rule".to_owned());
+        repeated.push(rule.to_owned());
+    }
+    let repeated: Vec<&str> = repeated.iter().map(String::as_str).collect();
+    run_engr(root, &repeated)
 }
 
 /// What `backlog show --json` says to hand back for a given point.
@@ -5391,7 +5431,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
     let expect = expect_token(root, &id, Some(1));
 
     // Counted from 1, so there is no attempt 0 to smuggle past the ceiling.
-    let zero = run_engr(
+    let zero = run_backlog(
         root,
         &[
             "backlog",
@@ -5411,7 +5451,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
     let add = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
     let add: Value = serde_json::from_slice(&add.stdout).expect("json");
     let add = add["expect"]["add"].as_str().expect("add").to_owned();
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5432,7 +5472,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
 
     // Past it: still admitted, and marked with what it went in on.
     let second = expect_token(root, &id, Some(2));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5461,7 +5501,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
 
     // Except where the mutation would remove the point.
     let second = expect_token(root, &id, Some(2));
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5476,7 +5516,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_INVARIANT));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5511,7 +5551,7 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
 
     // A rule governs backlog, so a mutation with nothing to anchor it is usage,
     // not silently accepted.
-    let bare = run_engr(
+    let bare = run_backlog(
         root,
         &[
             "backlog",
@@ -5531,18 +5571,31 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
     );
 
     // Read it, then somebody else sharpens it before the reviewed change runs.
+    // Through the same governed path, because a concurrent writer is not a
+    // caller with special powers — it is another agent doing what this one is
+    // about to try, only sooner.
     let stale = expect_token(root, &id, Some(1));
-    engr::backlog::revise_section(
-        root,
-        &id,
-        1,
-        "sharpened by someone else",
-        &engr::backlog::Prepared::first()
-            .against(engr::backlog::Precondition::section(root, &id, 1).expect("observe")),
-    )
-    .expect("concurrent");
+    assert!(
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "revise",
+                &id,
+                "--section",
+                "1",
+                "--text",
+                "sharpened by someone else",
+                "--expect",
+                &stale,
+            ],
+        )
+        .status
+        .success(),
+        "concurrent"
+    );
 
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5569,7 +5622,7 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
 
     // Read it again, and it goes through.
     let current = expect_token(root, &id, Some(1));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5594,21 +5647,30 @@ fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     let root = workspace.path();
     store::init(root).expect("init");
     let id = governed_backlog(root, 5);
-    engr::backlog::add_section(
-        root,
-        &id,
-        "a second point",
-        Vec::new(),
-        &engr::backlog::Prepared::first()
-            .against(engr::backlog::Precondition::section_absent(root, &id).expect("observe")),
-    )
-    .expect("add");
+    let adding = add_token(root, &id);
+    assert!(
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "add",
+                &id,
+                "--text",
+                "a second point",
+                "--expect",
+                &adding,
+            ],
+        )
+        .status
+        .success(),
+        "a second point to merge"
+    );
 
     let first = expect_token(root, &id, Some(1));
     let second = expect_token(root, &id, Some(2));
 
     // Only one of the two: the judgement was about both.
-    let partial = run_engr(
+    let partial = run_backlog(
         root,
         &[
             "backlog",
@@ -5626,7 +5688,7 @@ fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     );
     assert!(!partial.status.success());
 
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5677,7 +5739,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
         "nothing governs backlog here"
     );
 
-    let bare = run_engr(
+    let bare = run_backlog(
         root,
         &[
             "backlog",
@@ -5698,7 +5760,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     );
 
     let current = expect_token(root, &item.id, Some(1));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5726,7 +5788,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
             .against(engr::backlog::Precondition::section(root, &item.id, 1).expect("observe")),
     )
     .expect("concurrent");
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5748,7 +5810,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     );
 
     // Destructive consumption is held to the same rule.
-    let bare = run_engr(root, &["backlog", "consume", &item.id, "--section", "1"]);
+    let bare = run_backlog(root, &["backlog", "consume", &item.id, "--section", "1"]);
     assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
     assert!(
         !engr::backlog::ids(root).expect("ids").is_empty(),
@@ -5776,7 +5838,7 @@ fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
     )
     .expect("rule");
 
-    let created = run_engr(
+    let created = run_backlog(
         root,
         &[
             "backlog",
@@ -5796,7 +5858,7 @@ fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
 
     // Offering a predecessor is usage, and answered rather than ignored — and
     // above all not a panic.
-    let offered = run_engr(
+    let offered = run_backlog(
         root,
         &[
             "backlog",
@@ -6198,7 +6260,7 @@ fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
         .status
         .success());
 
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -6218,7 +6280,7 @@ fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
     );
 
     assert!(run_engr(root, &["work", "rm", &item_ref]).status.success());
-    let consumed = run_engr(
+    let consumed = run_backlog(
         root,
         &[
             "backlog",
@@ -7095,7 +7157,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
     )
     .expect("write the rule");
 
-    let made = run_engr(
+    let made = run_backlog(
         root,
         &["backlog", "new", "--title", "a topic", "--text", "a point"],
     );
@@ -7115,7 +7177,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
         .to_owned();
 
     // Past the ceiling the rule set, which is what makes this exhausted.
-    let revised = run_engr(
+    let revised = run_backlog(
         root,
         &[
             "backlog",
@@ -7158,7 +7220,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
         .as_str()
         .expect("token")
         .to_owned();
-    let again = run_engr(
+    let again = run_backlog(
         root,
         &[
             "backlog",
@@ -7560,7 +7622,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
-    let started = run_engr(
+    let started = run_backlog(
         root,
         &[
             "backlog",
@@ -7601,7 +7663,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
 
     // The wrong level is a usage problem, not staleness, and saying which token
     // was passed is the only thing that gets the caller anywhere.
-    let wrong = run_engr(
+    let wrong = run_backlog(
         root,
         &[
             "backlog",
@@ -7621,7 +7683,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
 
     // The token it names works, and a token that really is stale still reports
     // staleness — the distinction is the point, so both halves are pinned.
-    let added = run_engr(
+    let added = run_backlog(
         root,
         &[
             "backlog",
@@ -7638,7 +7700,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
-    let stale = run_engr(
+    let stale = run_backlog(
         root,
         &[
             "backlog",

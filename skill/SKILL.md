@@ -365,6 +365,32 @@ again rather than landing a change on wording you never saw. Creation is the
 sole exception, because engr allocates the new identity atomically and there is
 no predecessor to supply.
 
+**When a project rule governs backlog, these take the same two steps an Object
+mutation does.** Run the intended command; engr writes nothing and tells you
+which Rules govern it and the ReviewDigest of that exact change. Read every one
+of them and what they rest on, review the change, then repeat the command with
+the digest and the complete rule set:
+
+```bash
+engr backlog revise <id> --section 2 --text "sharpened" --expect <token>
+# refused: governed by <rule-id>, ... and the digest of this subject
+
+engr rules show <rule-id>
+
+engr backlog revise <id> --section 2 --text "sharpened" --expect <token> \
+  --review <digest> --reviewed-rule <rule-id>
+```
+
+Repeat `--reviewed-rule` for the whole surfaced set. engr recomputes the digest
+under the writer lock, so if the point, the topic it sits under, or any Rule
+material moved in between, read and review again rather than copying the new
+digest. `backlog new` takes the same two steps: engr mints the topic id while
+performing the create, so it is not part of what you reviewed and nothing but
+the digest travels between the two calls.
+
+Where no backlog Rule applies there is nothing to attest, and passing `--review`
+is refused rather than ignored.
+
 Every one of these takes `--attempt <n>` when a project rule governs backlog —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
 Past the ceiling, an ordinary edit still goes in and is marked `review_exhaustion`, so

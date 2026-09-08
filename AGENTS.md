@@ -66,7 +66,10 @@ whether the section still holds, and if it does not, propose a revision.
 Unresolved work goes in `engr backlog`, which needs no confirmation. Never read
 what is there as though it were the record — a section that is gone from backlog
 is one somebody judged settled, and one that is still there is not, whatever it
-has already produced.
+has already produced. Needing no confirmation is not the same as needing no
+review: where a `domain: backlog` Rule applies, a mutation is refused until it
+carries the ReviewDigest of its own exact subject and the complete Rule id set,
+the same two steps `prepare --agent` takes.
 
 ## Conventions
 

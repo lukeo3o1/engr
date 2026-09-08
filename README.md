@@ -166,6 +166,12 @@ engr backlog revise <id> --section 2 --text "reworded"
 engr backlog consume <id> --section 2        # consuming it is what says "settled"
 ```
 
+Backlog is agent-managed and confirmed by nobody, but where a project rule
+governs it a mutation takes the same two steps an Object mutation does: run it,
+read the Rules and the ReviewDigest engr surfaces instead of writing, then
+repeat the command with `--review <digest>` and one `--reviewed-rule <id>` per
+Rule.
+
 Where execution currently stands goes somewhere else again — a sidecar on one
 Object or one Backlog item, holding the shortest useful handoff to whoever picks
 it up next:

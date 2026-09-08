@@ -268,6 +268,12 @@ struct ReviewArg {
     /// Which attempt of this review sequence this is, counted from 1
     #[arg(long, default_value_t = 1, value_name = "N")]
     attempt: u32,
+    /// ReviewDigest surfaced by the first governed attempt
+    #[arg(long = "review", value_name = "DIGEST")]
+    review_digest: Option<String>,
+    /// Rule id actually reviewed. Repeat for the complete surfaced set
+    #[arg(long = "reviewed-rule", value_name = "RULE")]
+    reviewed_rules: Vec<String>,
     /// The `expect` value from `backlog show --format json` for what you read.
     /// Repeat once per point for a merge
     #[arg(long = "expect", value_name = "TOKEN")]
@@ -275,6 +281,36 @@ struct ReviewArg {
 }
 
 impl ReviewArg {
+    /// What the caller says it reviewed, held to being a complete claim.
+    ///
+    /// Half an attestation is refused rather than completed. A digest with no
+    /// rule ids and a set of rule ids with no digest are each a caller telling
+    /// engr something it cannot check, and filling in the other half would be
+    /// engr attesting on their behalf.
+    fn attestation(&self) -> Result<Option<backlog::Attestation>> {
+        match &self.review_digest {
+            None => {
+                ensure!(
+                    self.reviewed_rules.is_empty(),
+                    EXIT_USAGE,
+                    "--reviewed-rule says what a review covered, so it needs the --review digest that review was of"
+                );
+                Ok(None)
+            }
+            Some(digest) => {
+                ensure!(
+                    !self.reviewed_rules.is_empty(),
+                    EXIT_USAGE,
+                    "--review needs one --reviewed-rule for every Rule the review covered"
+                );
+                Ok(Some(backlog::Attestation {
+                    review_digest: digest.clone(),
+                    reviewed_rules: self.reviewed_rules.clone(),
+                }))
+            }
+        }
+    }
+
     /// Turn what the caller said into the predecessor this mutation binds.
     ///
     /// `binds` builds the precondition from current state; the caller's token is
@@ -294,9 +330,10 @@ impl ReviewArg {
             EXIT_USAGE,
             "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
         );
-        Ok(backlog::Prepared::attempt(rules::Attempt::new(
-            self.attempt,
-        )?))
+        Ok(
+            backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?)
+                .reviewed(self.attestation()?),
+        )
     }
 
     fn prepared(
@@ -305,7 +342,8 @@ impl ReviewArg {
         item: &str,
         binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
     ) -> Result<backlog::Prepared> {
-        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
+        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?)
+            .reviewed(self.attestation()?);
         ensure!(
             self.expect.iter().all(|token| token.len() == 64
                 && token

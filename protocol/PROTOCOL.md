@@ -2298,7 +2298,9 @@ those.
 So a rule is not a check engr runs. It is material an agent is required to have
 read, named precisely enough that the requirement can be verified afterwards. It
 proves nothing about comprehension and does not claim to; it makes silently
-skipping the review impossible through the supported path.
+skipping the review impossible through the supported path — see
+[Every governed mutation attests to the review it was given](#every-governed-mutation-attests-to-the-review-it-was-given)
+for what carries that weight, in every domain that has a reviewable subject.
 
 Rules are **project policy data, not an authority domain**. There is no event
 store, no Challenge and no confirmation for a rule file: git is their history.
@@ -2494,6 +2496,101 @@ reaches for a Backlog create, for the same reason: identity is engr's to issue,
 and the alternative — letting a caller propose the id so a creation would have
 something to bind — is a reservation lifecycle bolted on to protect an identity
 nobody else can be racing for.
+
+### Every governed mutation attests to the review it was given
+
+A rule is material an agent is required to have read, named precisely enough
+that the requirement can be verified afterwards. Verified afterwards is the
+whole of it: a mechanism that only *asks* for a review is a mechanism that
+records a preference. So a mutation in a governed domain MUST carry a
+ReviewDigest over its own exact subject, and an implementation MUST refuse one
+that does not.
+
+Two calls, and the first one writes nothing:
+
+```text
+run the intended mutation
+  -> refused, with the applicable Rule ids and the ReviewDigest of this subject
+read those Rules and everything they rest on
+review this exact change
+  -> run it again carrying the digest and the complete Rule id set
+```
+
+The digest MUST be recomputed under the writer lock from current state, never
+looked up. An attestation is only worth what the thing it names is worth at the
+moment of admission, and the interval between reviewing and applying is exactly
+where the subject can move. The Rule ids are checked as well as the digest:
+redundant against a correct implementation, and not redundant against a confused
+one, because an agent naming the wrong set has said its review covered something
+else.
+
+**An attestation where no Rule applies is refused, not ignored.** Accepting one
+over nothing tells an agent its review counted when nothing was reviewed, which
+is worse than having no mechanism at all — it reads like one.
+
+The **attempt** is not in the digest and MUST NOT be. It is agent-attested
+process metadata, it decides exhaustion rather than identity, and a subject
+carrying it would be a different subject on the attempt that attests to it than
+on the attempt that was offered it. The same rule excludes everything else the
+mutation stamps out of process rather than out of semantics — a Backlog
+Section's `updated_at` comes off the clock and its `rule_review` marker is
+composed from the attempt, so **neither appears in what is reviewed**. Both
+appear in the *predecessor*, which is a state that has already stopped moving.
+
+This applies to every domain a Rule may govern that has a reviewable mutation,
+and the descriptor is the domain's. The Object domain's is the frozen table of
+#25 §12 as amended by [A creation names no target](#a-creation-names-no-target).
+The Backlog domain's is:
+
+| operation          | target                 | parameters                             | after            |
+| ---                | ---                    | ---                                    | ---              |
+| `create`           | `null`                 | `{}`                                   | topic            |
+| `rename`           | `backlog:<c>`          | `{}`                                   | topic            |
+| `section.create`   | `backlog:<c>`          | `{"section": <allocated>}`             | point            |
+| `section.update`   | `backlog:<c>:<n>`      | `{}`                                   | point            |
+| `section.subjects` | `backlog:<c>:<n>`      | `{}`                                   | point            |
+| `section.produced` | `backlog:<c>:<n>`      | `{"outcome": <ref>, "forget": <bool>}` | point            |
+| `section.merge`    | `backlog:<c>:<dest>`   | `{"source": <n>}`                      | topic            |
+| `section.consume`  | `backlog:<c>:<n>`      | `{}`                                   | point, or `null` |
+
+```text
+topic = { title, sections[] }        each section: { id, header, text,
+point = { title, section }                           content, subjects, produced }
+```
+
+`after` is `null` for the consume that takes the topic with it. Ending an
+unresolved topic and narrowing one are different judgements, and a review must
+not be able to stand in for the other.
+
+**Which of the two projections an operation uses is not a taste. The scope of
+what is reviewed is the scope of what was prepared against.** A rename binds the
+complete item, so its subject is the complete item; a point-scoped mutation
+binds that point under its topic, so that is its subject. Any wider and a review
+would be invalidated by a sibling nobody touched, sending an agent back to
+re-review unrelated work — and a signal that fires on unrelated work stops being
+read. Any narrower and something the review rested on could move underneath it.
+
+A creation names no target here for the reason it names none in the Object
+domain: engr mints the UUIDv7 while performing the create and a caller MUST NOT
+choose one, so there is no identity in existence for a review to name and the id
+one attempt would name is a different id on the next. A creation likewise binds
+no predecessor, and says so **by name** — `{"precondition": "none"}` — rather
+than with an empty object, because "there was nothing to bind" is a different
+claim from "everything I bound was empty".
+
+Every member of a review subject is spelled out, including the ones storage
+omits when they carry nothing. Canonical omission is a storage economy and
+belongs where storage is; a hash contract cannot afford one, because the
+omitting and the spelling-out implementations would then disagree about the
+bytes.
+
+**This is a reversal.** Backlog v1 shipped under #8 §5's accepted option D — no
+Backlog mutation digest, review composed from the applicable Rule set and the
+attempt alone — and that issue named the consequence exactly: engr could
+establish *not exhausted* and never *passed*, so a mutation at attempt 1 with an
+applicable Rule went in with no evidence any review had happened. Dogfooding
+found the predictable result, an agent writing to backlog without reading the
+rule governing it, and option B from the same list is what replaces it.
 
 ### Unordered sets have one order
 
@@ -2701,15 +2798,22 @@ engineering intent, so the mutation is admitted and marked:
 effective ceiling in the applicable set — the one that made this exhausted, since
 a shared attempt passes the smallest ceiling first. It is a compact diagnostic,
 not a review history: per-rule ids and limits are not recorded, because the
-complete applicable set already lives in the review binding. A later successful
-revision clears the marker; a later exhausted admission replaces it.
+attestation that admitted the mutation already named the complete applicable set.
+A later successful revision clears the marker; a later exhausted admission
+replaces it.
 
 That soft-admission covers mutations that **preserve** unresolved information.
 Removing a Backlog Section destroys it, so removal requires a review that
-actually passed. A Section leaves only two ways, and both are reviewed: a consume,
-or atomically as the source of a merge. Exhausted, neither happens, the Sections
-stay exactly as they were, and **no marker is written** — nothing was admitted for
-a diagnostic to describe.
+actually passed — attested against this exact mutation, and inside every
+applicable ceiling. A Section leaves only two ways, and both are reviewed: a
+consume, or atomically as the source of a merge. Exhausted, neither happens, the
+Sections stay exactly as they were, and **no marker is written** — nothing was
+admitted for a diagnostic to describe.
+
+An exhausted removal is refused **before** its subject is offered, and that
+ordering is deliberate. No attestation can admit it, so printing a digest for it
+would advertise a path that does not exist; what the caller needs to be told is
+that the point is still there.
 
 **Collection and Work have no exhaustion behaviour in v1.** It is refused rather
 than borrowed from another domain, because a composition that answers for a
