@@ -112,12 +112,55 @@ that exact predecessor and result.
 
 ```bash
 engr prepare --object <id> --add --text-file draft.txt --agent
+#   open  [decision] The thing being decided
+#
+#   ── §2 [decision] Sync Budget ──
+#   Because ...
+#       based_on none
+#
+#   NEEDS REVIEW  governed by <rule-id>. ... --review <digest> ...
+#
+#   Nothing has been written.
+
 engr rules show <rule-id>
 ```
 
 Read every surfaced Rule and every file it rests on, then review the exact
-mutation. If it passes, repeat the unchanged command with the complete
-attestation:
+mutation.
+
+**Do not review your own wording yourself. Delegate it.** The first `--agent`
+call prints exactly what would be stored and writes nothing — hand a subagent
+*that screen*, plus the Rule text and every file the Rule rests on, and nothing
+else. No draft history, no explanation of what you were going for, no opinion
+about whether it passes. Ask for one answer: does this meet every requirement,
+and if not, which one does it miss.
+
+**Hand over the screen, not the prose.** A Section is more than its text: the
+header, the role, the supplementary content and the basis are all inside the
+seal, and a Rule may require any of them. An agent that described the wording to
+its reviewer by hand was correctly told the two-word header its policy required
+was missing — and "fixed" it by moving the header into the first line of the
+prose. The header field stayed empty, the wording gained a paragraph the policy
+forbade, and the re-review, handed the same partial view, passed it. The screen
+is the whole value; a retyped summary of it is not.
+
+You will pass your own work. Not dishonestly — you have just written the thing,
+so you read what you meant rather than what is there, and the requirements you
+miss are the mechanical ones you would catch in anybody else's text. Watched
+under a policy that fixed a six-word ceiling on a title, an agent wrote seven
+words and attested `passed`; under one that required a question, it wrote a
+statement and attested `passed`. Both had read the rule minutes earlier. A
+reader who never saw the draft catches both in a sentence.
+
+The subagent's answer is what you attest to. If it says no, fix the wording and
+count the next attempt honestly — a failed delegated review is a real attempt,
+not a rehearsal.
+
+This is a practice, not a mechanism: engr cannot tell who reviewed, and an
+attestation says a review happened rather than who ran it. It is worth doing
+because it is the only part of the review a second reader can actually improve.
+
+If it passes, repeat the unchanged command with the complete attestation:
 
 ```bash
 engr prepare --object <id> --add --text-file draft.txt --agent \
@@ -129,6 +172,10 @@ Repeat `--reviewed-rule` for the whole surfaced set. engr recomputes the
 ReviewDigest while holding the writer lock; if the Object, Rule bytes, or any
 reviewed basis moved, read and review again rather than copying the new digest.
 A passing Agent admission writes immediately and returns no challenge.
+
+`prepare --new` takes the same two steps. engr mints the object id while it
+performs the create, so the id is not part of what you reviewed and you carry
+nothing but the digest between the two attempts.
 
 If review fails, fix the proposed work and count the next review attempt
 honestly. Once the applicable ceiling is exceeded, report `exhausted`. A Rule
@@ -361,7 +408,41 @@ again rather than landing a change on wording you never saw. Creation is the
 sole exception, because engr allocates the new identity atomically and there is
 no predecessor to supply.
 
-Every one of these takes `--attempt <n>` when a project rule governs backlog —
+**When a project rule governs backlog, these take the same two steps an Object
+mutation does.** Run the intended command; engr writes nothing and tells you
+which Rules govern it and the ReviewDigest of that exact change. Read every one
+of them and what they rest on, review the change, then repeat the command with
+the digest and the complete rule set:
+
+```bash
+engr backlog revise <id> --section 2 --text "sharpened" --expect <token>
+# refused: governed by <rule-id>, ... and the digest of this subject
+
+engr rules show <rule-id>
+
+engr backlog revise <id> --section 2 --text "sharpened" --expect <token> \
+  --review <digest> --reviewed-rule <rule-id>
+```
+
+Repeat `--reviewed-rule` for the whole surfaced set. engr recomputes the digest
+under the writer lock, so if the point, the topic it sits under, or any Rule
+material moved in between, read and review again rather than copying the new
+digest. `backlog new` takes the same two steps: engr mints the topic id while
+performing the create, so it is not part of what you reviewed and nothing but
+the digest travels between the two calls.
+
+Where no backlog Rule applies there is nothing to attest, and passing `--review`
+is refused rather than ignored.
+
+Delegating the review is worth it here too, and it is a judgement call rather
+than the rule it is for the record. Staging is meant to be cheap, and a
+subagent per parked thought is not cheap — but a point that will not pass its
+own policy is a point somebody has to come back and fix, so the saving is often
+borrowed rather than made. Delegate when the rule sets checkable requirements
+on the wording; review it yourself when it does not.
+
+Every one of these takes `--attempt <n>` when a project rule governs backlog
+(`--review-attempt` is accepted too, since that is what `prepare` calls it) —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
 Past the ceiling, an ordinary edit still goes in and is marked `review_exhaustion`, so
 say the real number: the point is kept either way, and an honest one tells the
@@ -621,6 +702,27 @@ and engr will not guess a mapping:
 ```bash
 engr prepare --object <id> --classify --type decision --state accepted
 ```
+
+**A new object arrives untyped and open, and `--new` takes no type.** Recording
+one settled thing is therefore three acts, not one, and the third is easy to
+walk away from:
+
+```bash
+engr prepare --new --title "..."                              # 1. untyped, open
+engr prepare --object <id> --add --text-file draft.txt        # 2. the wording
+engr prepare --object <id> --classify --type decision --state accepted   # 3.
+```
+
+Only the third gives it a type, and it is Human-only — no `--agent` path exists
+for it, because what an object *is* is not an agent's to declare. So the
+sequence ends at a challenge code even when the first two steps were agent
+admissions. With nobody available to answer it, stop and report the code, and
+say the object is still untyped and open: that is the honest end of the work,
+and "recorded" without it overstates what is in the record.
+
+Untyped is a real answer, not an unfinished one — say `--untyped` when you mean
+it. What is not an answer is asking for a type, being refused at step 1, and
+never coming back.
 
 Use `--untyped` to say explicitly that an object has no type. There is no
 transition order to follow: any state valid for the destination type is

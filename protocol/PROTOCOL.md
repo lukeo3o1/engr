@@ -1149,7 +1149,10 @@ The title exemption is likewise narrow in both directions. It says there is no
 applicable Rule to review against, not that titles are exempt from Rules: where
 a workspace governs the Object domain, a title mutation reviews against it like
 any other, so the absence MUST be established rather than inferred from the
-shape of the action.
+shape of the action. Creating an Object is one such mutation and reviews like
+the rest; what its descriptor does not carry is an identity, because engr has
+not issued one yet — see
+[A creation names no target](#a-creation-names-no-target).
 
 The append boundary MUST also refuse a record whose **replay** would leave the
 workspace outside the current schema. Some current-state integers are allocated
@@ -2202,6 +2205,34 @@ used, never as identity proof that a human was present. Making the Human
 Gate a mechanism needs the challenge to travel where the agent cannot read it,
 or `confirm` to run in a different process. That is not v0.
 
+**This is observed behaviour, not a theoretical hole.** Cold agents recording
+their first decision have taken the Human path and typed the code back
+themselves, in a workspace with no guide to know better, having been told to
+finish the work with nobody available to answer anything. Two things follow, and
+neither of them is a mechanism.
+
+The screen carries what a screen can carry: whose line the code is, what typing
+it yourself costs, and — the part a prohibition cannot supply — that stopping
+with the code unanswered is a finished piece of work rather than a failed task.
+An agent arriving here otherwise has two endings, the task unfinished or the
+code taken, and takes the second. An implementation SHOULD offer the third.
+
+What none of that does is make the claim checkable. A refusal an agent can read
+is a refusal an agent can decline, and every strengthening of this screen is a
+better-informed decision rather than a closed door.
+
+**Rule Review has the same shape, one layer down.** An attestation says a review
+happened over a named subject against a named Rule set; it does not say the
+review was any good, and the same agent that wrote the wording is a poor reader
+of it. Watched under a policy fixing a six-word ceiling on a title, an agent
+wrote seven words and attested that it passed, having read the rule minutes
+earlier. Delegating the review to a reader who never saw the draft catches that
+class of miss, and it is a **practice** rather than a rule: no field records who
+reviewed, and an implementation cannot tell. What the mechanism guarantees is
+that the material was named precisely enough to be checked afterwards, by
+somebody who cares to. It has never guaranteed comprehension and does not start
+here.
+
 ### Supersession is one-way
 
 The coupled invariant closes in both directions, so there is **no way out of
@@ -2295,7 +2326,9 @@ those.
 So a rule is not a check engr runs. It is material an agent is required to have
 read, named precisely enough that the requirement can be verified afterwards. It
 proves nothing about comprehension and does not claim to; it makes silently
-skipping the review impossible through the supported path.
+skipping the review impossible through the supported path — see
+[Every governed mutation attests to the review it was given](#every-governed-mutation-attests-to-the-review-it-was-given)
+for what carries that weight, in every domain that has a reviewable subject.
 
 Rules are **project policy data, not an authority domain**. There is no event
 store, no Challenge and no confirmation for a rule file: git is their history.
@@ -2453,6 +2486,139 @@ the guarantee exists only in the support table. A version listed as verifiable
 that this build cannot actually compute is refused rather than served the
 current calculation, since being promised in the contract is not evidence that
 an implementation has it.
+
+### A creation names no target
+
+A review binds the exact mutation, and for every operation but one that includes
+the identity being acted on: a revision of `obj:<id>:3` is not a revision of
+`obj:<other>:3`, and a proof that could not tell them apart would not be a proof.
+
+Creation is the exception, and it MUST be. engr mints the UUIDv7 while
+performing the create and a caller MUST NOT supply or choose one, so no identity
+yet exists for a review to name — and the id one attempt would name is a
+different id on the next. A binding that carried it does not merely make review
+strict, it makes the mechanism non-terminating: the first attempt offers a
+digest, the attempt that attests to that digest computes another, and the
+sequence has no exit. A workspace with any applicable Object Rule can then
+create no Object at all, through either admission path, which is the opposite of
+what a rule is for.
+
+So a creation's mutation descriptor carries `"target": null`, and what is
+reviewed is the intent — the title and the lifecycle the Object arrives in,
+which `after` already carries. It MUST be spelled `null` rather than omitted: a
+hash contract cannot afford a storage economy, or an implementation that omits
+the member and one that spells it out disagree about the bytes. Both directions
+are enforced, because each failure is its own — a creation carrying a target
+puts an identity engr has not issued into a proof that has to survive to the
+next attempt, and any other operation carrying none binds a review to a mutation
+nobody can locate.
+
+Two creations of the same intent are therefore one review subject. That is the
+reading, not a gap: what was reviewed is that an Object with this title, type and
+state may be created. Each creation is still its own admission, prepared and
+attested separately — the review authorizes no batch, and nothing about it
+survives into what the record keeps.
+
+This is the settlement [Mutation preconditions](#mutation-preconditions) already
+reaches for a Backlog create, for the same reason: identity is engr's to issue,
+and the alternative — letting a caller propose the id so a creation would have
+something to bind — is a reservation lifecycle bolted on to protect an identity
+nobody else can be racing for.
+
+### Every governed mutation attests to the review it was given
+
+A rule is material an agent is required to have read, named precisely enough
+that the requirement can be verified afterwards. Verified afterwards is the
+whole of it: a mechanism that only *asks* for a review is a mechanism that
+records a preference. So a mutation in a governed domain MUST carry a
+ReviewDigest over its own exact subject, and an implementation MUST refuse one
+that does not.
+
+Two calls, and the first one writes nothing:
+
+```text
+run the intended mutation
+  -> refused, with the applicable Rule ids and the ReviewDigest of this subject
+read those Rules and everything they rest on
+review this exact change
+  -> run it again carrying the digest and the complete Rule id set
+```
+
+The digest MUST be recomputed under the writer lock from current state, never
+looked up. An attestation is only worth what the thing it names is worth at the
+moment of admission, and the interval between reviewing and applying is exactly
+where the subject can move. The Rule ids are checked as well as the digest:
+redundant against a correct implementation, and not redundant against a confused
+one, because an agent naming the wrong set has said its review covered something
+else.
+
+**An attestation where no Rule applies is refused, not ignored.** Accepting one
+over nothing tells an agent its review counted when nothing was reviewed, which
+is worse than having no mechanism at all — it reads like one.
+
+The **attempt** is not in the digest and MUST NOT be. It is agent-attested
+process metadata, it decides exhaustion rather than identity, and a subject
+carrying it would be a different subject on the attempt that attests to it than
+on the attempt that was offered it. The same rule excludes everything else the
+mutation stamps out of process rather than out of semantics — a Backlog
+Section's `updated_at` comes off the clock and its `rule_review` marker is
+composed from the attempt, so **neither appears in what is reviewed**. Both
+appear in the *predecessor*, which is a state that has already stopped moving.
+
+This applies to every domain a Rule may govern that has a reviewable mutation,
+and the descriptor is the domain's. The Object domain's is the frozen table of
+#25 §12 as amended by [A creation names no target](#a-creation-names-no-target).
+The Backlog domain's is:
+
+| operation          | target                 | parameters                             | after            |
+| ---                | ---                    | ---                                    | ---              |
+| `create`           | `null`                 | `{}`                                   | topic            |
+| `rename`           | `backlog:<c>`          | `{}`                                   | topic            |
+| `section.create`   | `backlog:<c>`          | `{"section": <allocated>}`             | point            |
+| `section.update`   | `backlog:<c>:<n>`      | `{}`                                   | point            |
+| `section.subjects` | `backlog:<c>:<n>`      | `{}`                                   | point            |
+| `section.produced` | `backlog:<c>:<n>`      | `{"outcome": <ref>, "forget": <bool>}` | point            |
+| `section.merge`    | `backlog:<c>:<dest>`   | `{"source": <n>}`                      | topic            |
+| `section.consume`  | `backlog:<c>:<n>`      | `{}`                                   | point, or `null` |
+
+```text
+topic = { title, sections[] }        each section: { id, header, text,
+point = { title, section }                           content, subjects, produced }
+```
+
+`after` is `null` for the consume that takes the topic with it. Ending an
+unresolved topic and narrowing one are different judgements, and a review must
+not be able to stand in for the other.
+
+**Which of the two projections an operation uses is not a taste. The scope of
+what is reviewed is the scope of what was prepared against.** A rename binds the
+complete item, so its subject is the complete item; a point-scoped mutation
+binds that point under its topic, so that is its subject. Any wider and a review
+would be invalidated by a sibling nobody touched, sending an agent back to
+re-review unrelated work — and a signal that fires on unrelated work stops being
+read. Any narrower and something the review rested on could move underneath it.
+
+A creation names no target here for the reason it names none in the Object
+domain: engr mints the UUIDv7 while performing the create and a caller MUST NOT
+choose one, so there is no identity in existence for a review to name and the id
+one attempt would name is a different id on the next. A creation likewise binds
+no predecessor, and says so **by name** — `{"precondition": "none"}` — rather
+than with an empty object, because "there was nothing to bind" is a different
+claim from "everything I bound was empty".
+
+Every member of a review subject is spelled out, including the ones storage
+omits when they carry nothing. Canonical omission is a storage economy and
+belongs where storage is; a hash contract cannot afford one, because the
+omitting and the spelling-out implementations would then disagree about the
+bytes.
+
+**This is a reversal.** Backlog v1 shipped under #8 §5's accepted option D — no
+Backlog mutation digest, review composed from the applicable Rule set and the
+attempt alone — and that issue named the consequence exactly: engr could
+establish *not exhausted* and never *passed*, so a mutation at attempt 1 with an
+applicable Rule went in with no evidence any review had happened. Dogfooding
+found the predictable result, an agent writing to backlog without reading the
+rule governing it, and option B from the same list is what replaces it.
 
 ### Unordered sets have one order
 
@@ -2660,15 +2826,22 @@ engineering intent, so the mutation is admitted and marked:
 effective ceiling in the applicable set — the one that made this exhausted, since
 a shared attempt passes the smallest ceiling first. It is a compact diagnostic,
 not a review history: per-rule ids and limits are not recorded, because the
-complete applicable set already lives in the review binding. A later successful
-revision clears the marker; a later exhausted admission replaces it.
+attestation that admitted the mutation already named the complete applicable set.
+A later successful revision clears the marker; a later exhausted admission
+replaces it.
 
 That soft-admission covers mutations that **preserve** unresolved information.
 Removing a Backlog Section destroys it, so removal requires a review that
-actually passed. A Section leaves only two ways, and both are reviewed: a consume,
-or atomically as the source of a merge. Exhausted, neither happens, the Sections
-stay exactly as they were, and **no marker is written** — nothing was admitted for
-a diagnostic to describe.
+actually passed — attested against this exact mutation, and inside every
+applicable ceiling. A Section leaves only two ways, and both are reviewed: a
+consume, or atomically as the source of a merge. Exhausted, neither happens, the
+Sections stay exactly as they were, and **no marker is written** — nothing was
+admitted for a diagnostic to describe.
+
+An exhausted removal is refused **before** its subject is offered, and that
+ordering is deliberate. No attestation can admit it, so printing a digest for it
+would advertise a path that does not exist; what the caller needs to be told is
+that the point is still there.
 
 **Collection and Work have no exhaustion behaviour in v1.** It is refused rather
 than borrowed from another domain, because a composition that answers for a

@@ -54,9 +54,14 @@ fn compact(id: &str) -> String {
 }
 
 fn item(root: &Path, title: &str, text: &str) -> String {
-    backlog::create(root, title, text, Vec::new(), &Prepared::first())
-        .expect("create backlog item")
-        .id
+    // Through the same two steps a governed agent takes, because a fixture that
+    // could not be created in a workspace with a backlog Rule would only ever
+    // set up the tests that do not need one.
+    attested(Prepared::first(), |prepared| {
+        backlog::create(root, title, text, Vec::new(), prepared)
+    })
+    .expect("create backlog item")
+    .id
 }
 
 // Every existing-state backlog mutation carries the exact predecessor it was
@@ -1690,6 +1695,356 @@ fn reviewing(root: &Path, id: &str, section: u64, value: u32) -> Prepared {
     attempt(value).against(backlog::Precondition::section(root, id, section).expect("observe"))
 }
 
+/// The two steps a governed agent takes, as one call.
+///
+/// Runs the mutation, reads the ReviewDigest and the rule ids out of the
+/// refusal it earns, and runs it again carrying them. The first call writes
+/// nothing, so this is exactly the sequence an agent performs — and it keeps
+/// each test about the property it is named for. A test that hard-coded a
+/// digest would pin the descriptor's bytes in every case rather than in the one
+/// case written to pin them.
+///
+/// An ungoverned mutation succeeds on the first call and never reaches the
+/// second, which is itself the contract: an attestation over a workspace no
+/// Rule governs is refused.
+fn attested<T>(
+    prepared: Prepared,
+    mut run: impl FnMut(&Prepared) -> engr::Result<T>,
+) -> engr::Result<T> {
+    let refusal = match run(&prepared) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let message = refusal.to_string();
+    let Some(digest) = message
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+    else {
+        return Err(refusal);
+    };
+    let reviewed_rules = message
+        .split_once("governed by ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(names, _)| names.split(", ").map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    run(&prepared.reviewed(Some(engr::backlog::Attestation {
+        review_digest: digest.to_owned(),
+        reviewed_rules,
+    })))
+}
+
+/// What a governed mutation is refused with: the rule ids, and the digest of
+/// the subject it wants attested.
+fn offered<T>(
+    prepared: &Prepared,
+    mut run: impl FnMut(&Prepared) -> engr::Result<T>,
+) -> (String, Vec<String>) {
+    let refusal = run(prepared).err().expect("a governed mutation is refused");
+    assert_eq!(refusal.code, engr::EXIT_USAGE, "{}", refusal.message);
+    let digest = refusal
+        .message
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .unwrap_or_else(|| panic!("no digest offered: {}", refusal.message))
+        .to_owned();
+    let rules = refusal
+        .message
+        .split_once("governed by ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(names, _)| names.split(", ").map(str::to_owned).collect())
+        .unwrap_or_default();
+    (digest, rules)
+}
+
+/// A governed backlog mutation does not write until it has been reviewed.
+///
+/// This is the whole of option B, and what it replaces is a free pass: while
+/// Rule Review for this domain was composed from the attempt alone, engr could
+/// establish *not exhausted* and never *passed*, so a first attempt with an
+/// applicable Rule went in with no evidence any review had happened. Dogfooding
+/// found exactly that — an agent writing to backlog without reading the rule.
+#[test]
+fn a_governed_mutation_is_refused_until_it_carries_its_review() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+    let before = backlog::load(&root, &id).expect("load");
+
+    let (digest, rules) = offered(&reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "reworded", prepared)
+    });
+    assert_eq!(rules, vec!["careful".to_owned()]);
+    assert_eq!(
+        backlog::load(&root, &id).expect("load"),
+        before,
+        "a refused mutation writes nothing at all"
+    );
+
+    backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "reworded",
+        &reviewing(&root, &id, 1, 1).reviewed(Some(backlog::Attestation {
+            review_digest: digest,
+            reviewed_rules: vec!["careful".to_owned()],
+        })),
+    )
+    .expect("carrying the review it was offered");
+    assert_eq!(
+        backlog::load(&root, &id)
+            .expect("load")
+            .section(1)
+            .expect("§1")
+            .text,
+        "reworded"
+    );
+}
+
+/// The subject an agent is offered is the subject its next attempt computes.
+///
+/// The property the two step review rests on, and the one thing that makes it
+/// terminate at all. Two persisted members would break it if the projection
+/// carried them: `updated_at` comes off the clock, and `review_exhaustion` is
+/// composed from the attested attempt. Both are process metadata, and #66 §10
+/// keeps the attempt out of the digest by name — so the same mutation at
+/// attempt 1 and at attempt 9 is one subject, even though one of them would be
+/// marked exhausted and the other would not.
+#[test]
+fn the_offered_subject_does_not_move_between_attempts() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    rule(&root, "careful", "review:\n  max_attempts: 2\n");
+
+    let revising = |value: u32| {
+        offered(&reviewing(&root, &id, 1, value), |prepared| {
+            backlog::revise_section(&root, &id, 1, "reworded", prepared)
+        })
+        .0
+    };
+    assert_eq!(
+        revising(1),
+        revising(1),
+        "the same attempt, the same subject"
+    );
+    assert_eq!(
+        revising(1),
+        revising(9),
+        "the attempt is process metadata and is not in the digest, nor is the marker it composes"
+    );
+}
+
+/// The scope of what is reviewed is the scope of what was prepared against.
+///
+/// A point's review must not move because a sibling moved. It is the same rule
+/// the precondition follows, and for the same reason: a subject that changed on
+/// unrelated work would send an agent back to review something it never
+/// touched, and a signal that fires on unrelated work stops being read.
+#[test]
+fn a_points_review_does_not_move_when_a_sibling_does() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    attested(on_add(&root, &id), |prepared| {
+        backlog::add_section(&root, &id, "a second point", Vec::new(), prepared)
+    })
+    .expect("add");
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    let revising = || {
+        offered(&reviewing(&root, &id, 1, 1), |prepared| {
+            backlog::revise_section(&root, &id, 1, "reworded", prepared)
+        })
+        .0
+    };
+    let before = revising();
+
+    attested(reviewing(&root, &id, 2, 1), |prepared| {
+        backlog::revise_section(&root, &id, 2, "the sibling moved", prepared)
+    })
+    .expect("revise the sibling");
+    assert_eq!(
+        before,
+        revising(),
+        "§1's review is of §1 under its topic, and §2 is neither"
+    );
+}
+
+/// A rename binds the whole topic, so its review moves when any point does.
+///
+/// The other half of the same rule. Scoping a rename to the title alone would
+/// let the points it is a title *for* change underneath a review of it.
+#[test]
+fn a_renames_review_moves_when_a_point_does() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    let renaming = || {
+        offered(
+            &attempt(1).against(backlog::Precondition::title(&root, &id).expect("observe")),
+            |prepared| backlog::rename(&root, &id, "a different topic", prepared).map(|_| ()),
+        )
+        .0
+    };
+    let before = renaming();
+
+    attested(reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "the point moved", prepared)
+    })
+    .expect("revise");
+    assert_ne!(
+        before,
+        renaming(),
+        "a rename is prepared against the complete item, so that is what it is reviewed against"
+    );
+}
+
+/// An attestation naming another subject, or another rule set, is not this one.
+#[test]
+fn a_review_of_something_else_is_refused_by_name() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+    rule(&root, "thorough", "review:\n  max_attempts: 5\n");
+
+    let (digest, rules) = offered(&reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "reworded", prepared)
+    });
+    assert_eq!(rules, vec!["careful".to_owned(), "thorough".to_owned()]);
+
+    let carrying = |digest: &str, reviewed: &[&str]| {
+        backlog::revise_section(
+            &root,
+            &id,
+            1,
+            "reworded",
+            &reviewing(&root, &id, 1, 1).reviewed(Some(backlog::Attestation {
+                review_digest: digest.to_owned(),
+                reviewed_rules: reviewed.iter().map(|rule| (*rule).to_owned()).collect(),
+            })),
+        )
+    };
+
+    let elsewhere = carrying(&format!("1:{}", "a".repeat(64)), &["careful", "thorough"])
+        .expect_err("that digest is of some other subject");
+    assert!(
+        elsewhere.message.contains("was of something else"),
+        "{}",
+        elsewhere.message
+    );
+
+    let partial = carrying(&digest, &["careful"]).expect_err("half the applicable set");
+    assert!(
+        partial.message.contains("governed by careful, thorough"),
+        "{}",
+        partial.message
+    );
+
+    carrying(&digest, &["thorough", "careful"]).expect("the set is a set, not a sequence");
+}
+
+/// Where no rule governs the domain there is no review, and claiming one is
+/// refused rather than ignored.
+///
+/// An attestation accepted over nothing is an agent told its review counted
+/// when nothing was reviewed — which is worse than no mechanism, because it
+/// reads like one.
+#[test]
+fn an_attestation_is_refused_where_no_backlog_rule_applies() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+
+    let error = backlog::revise_section(
+        &root,
+        &id,
+        1,
+        "reworded",
+        &reviewing(&root, &id, 1, 1).reviewed(Some(backlog::Attestation {
+            review_digest: format!("1:{}", "a".repeat(64)),
+            reviewed_rules: vec!["nobody".to_owned()],
+        })),
+    )
+    .expect_err("there is no review here to attest to");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    assert!(
+        error.message.contains("no backlog Rule applies"),
+        "{}",
+        error.message
+    );
+}
+
+/// A creation names no target, for the reason an Object creation does not.
+///
+/// engr mints the UUIDv7 while performing the create and a caller may not
+/// choose one, so the id one attempt would name is a different id on the next.
+/// Two creations of the same intent are therefore one review subject, and that
+/// is what lets a governed `backlog new` be reviewed at all.
+#[test]
+fn a_creation_is_one_review_subject_whatever_id_engr_mints() {
+    let (_dir, root) = workspace();
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    let creating = || {
+        offered(&attempt(1), |prepared| {
+            backlog::create(&root, "topic", "unresolved", Vec::new(), prepared)
+        })
+        .0
+    };
+    assert_eq!(
+        creating(),
+        creating(),
+        "the identity engr is about to issue is not part of what is reviewed"
+    );
+
+    let digest = creating();
+    let created = backlog::create(
+        &root,
+        "topic",
+        "unresolved",
+        Vec::new(),
+        &attempt(1).reviewed(Some(backlog::Attestation {
+            review_digest: digest,
+            reviewed_rules: vec!["careful".to_owned()],
+        })),
+    )
+    .expect("the digest an attempt was offered is the digest the next one wants");
+    assert_eq!(created.sections.len(), 1);
+}
+
+/// Consuming the last point ends the topic, and that is a different judgement.
+///
+/// `after` is the whole absence rather than a topic with one fewer point, so a
+/// review of "remove this point" cannot stand in for a review of "remove this
+/// point and the topic with it".
+#[test]
+fn ending_a_topic_is_not_the_same_subject_as_narrowing_it() {
+    let (_dir, root) = workspace();
+    let id = item(&root, "topic", "unresolved");
+    attested(on_add(&root, &id), |prepared| {
+        backlog::add_section(&root, &id, "a second point", Vec::new(), prepared)
+    })
+    .expect("add");
+    rule(&root, "careful", "review:\n  max_attempts: 5\n");
+
+    let narrowing = offered(&reviewing(&root, &id, 2, 1), |prepared| {
+        backlog::consume_section(&root, &id, 2, prepared)
+    })
+    .0;
+    attested(reviewing(&root, &id, 2, 1), |prepared| {
+        backlog::consume_section(&root, &id, 2, prepared)
+    })
+    .expect("consume the second");
+
+    let ending = offered(&reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::consume_section(&root, &id, 1, prepared)
+    })
+    .0;
+    assert_ne!(
+        narrowing, ending,
+        "the consume that takes the topic with it is its own subject"
+    );
+}
+
 /// An exhausted Backlog mutation goes in anyway, and says so.
 ///
 /// This is the whole reason the domain exists. An agent that has been round a
@@ -1705,13 +2060,9 @@ fn an_exhausted_point_is_still_written_down_and_carries_the_diagnostic() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "within the ceiling",
-        &reviewing(&root, &id, 1, 2),
-    )
+    attested(reviewing(&root, &id, 1, 2), |prepared| {
+        backlog::revise_section(&root, &id, 1, "within the ceiling", prepared)
+    })
     .expect("revise");
     assert_eq!(
         marker(&root, &id, 1),
@@ -1719,13 +2070,9 @@ fn an_exhausted_point_is_still_written_down_and_carries_the_diagnostic() {
         "attempt 2 of 2 is still a review, so there is nothing to diagnose"
     );
 
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "past the ceiling",
-        &reviewing(&root, &id, 1, 3),
-    )
+    attested(reviewing(&root, &id, 1, 3), |prepared| {
+        backlog::revise_section(&root, &id, 1, "past the ceiling", prepared)
+    })
     .expect("soft-admit");
     assert_eq!(
         backlog::load(&root, &id)
@@ -1757,8 +2104,10 @@ fn the_recorded_limit_is_the_ceiling_that_ran_out_first() {
     rule(&root, "strict", "review:\n  max_attempts: 1\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1, "reworded", &reviewing(&root, &id, 1, 4))
-        .expect("soft-admit");
+    attested(reviewing(&root, &id, 1, 4), |prepared| {
+        backlog::revise_section(&root, &id, 1, "reworded", prepared)
+    })
+    .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
         Some(engr::rules::RuleReview {
@@ -1785,12 +2134,9 @@ fn an_exhausted_backlog_rule_asking_for_a_human_still_does_not_get_one() {
     );
     let id = item(&root, "topic", "unresolved");
 
-    backlog::add_section(
-        &root,
-        &id,
-        "a second point",
-        Vec::new(),
-        &attempt(2).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+    attested(
+        attempt(2).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+        |prepared| backlog::add_section(&root, &id, "a second point", Vec::new(), prepared),
     )
     .expect("admitted, not escalated");
     assert_eq!(
@@ -1813,8 +2159,10 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
 
-    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 5))
-        .expect("soft-admit");
+    attested(reviewing(&root, &id, 1, 5), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted", prepared)
+    })
+    .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
         Some(engr::rules::RuleReview {
@@ -1824,13 +2172,9 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     );
 
     // Exhausted again, differently: the diagnostic is replaced, not accumulated.
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "exhausted again",
-        &reviewing(&root, &id, 1, 9),
-    )
+    attested(reviewing(&root, &id, 1, 9), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted again", prepared)
+    })
     .expect("soft-admit");
     assert_eq!(
         marker(&root, &id, 1),
@@ -1842,13 +2186,9 @@ fn a_later_mutation_clears_the_marker_or_replaces_it() {
     );
 
     // And a review that passed says this wording did not need the excuse.
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "reviewed properly",
-        &reviewing(&root, &id, 1, 1),
-    )
+    attested(reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "reviewed properly", prepared)
+    })
     .expect("revise");
     assert_eq!(marker(&root, &id, 1), None);
 }
@@ -1859,24 +2199,16 @@ fn an_idempotent_write_neither_earns_a_marker_nor_clears_one() {
     let (_dir, root) = workspace();
     rule(&root, "careful", "review:\n  max_attempts: 1\n");
     let id = item(&root, "topic", "unresolved");
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "exhausted wording",
-        &reviewing(&root, &id, 1, 2),
-    )
+    attested(reviewing(&root, &id, 1, 2), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted wording", prepared)
+    })
     .expect("soft-admit");
     let marked = marker(&root, &id, 1);
     assert!(marked.is_some());
 
-    backlog::revise_section(
-        &root,
-        &id,
-        1,
-        "exhausted wording",
-        &reviewing(&root, &id, 1, 1),
-    )
+    attested(reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted wording", prepared)
+    })
     .expect("no-op");
     assert_eq!(
         marker(&root, &id, 1),
@@ -1896,18 +2228,17 @@ fn an_exhausted_review_does_not_get_to_remove_an_unresolved_point() {
     let (_dir, root) = workspace();
     rule(&root, "careful", "review:\n  max_attempts: 2\n");
     let id = item(&root, "topic", "unresolved");
-    backlog::add_section(
-        &root,
-        &id,
-        "a second point",
-        Vec::new(),
-        &attempt(1).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+    attested(
+        attempt(1).against(backlog::Precondition::section_absent(&root, &id).expect("observe")),
+        |prepared| backlog::add_section(&root, &id, "a second point", Vec::new(), prepared),
     )
     .expect("add");
     let before = backlog::load(&root, &id).expect("load");
 
-    let error = backlog::consume_section(&root, &id, 1, &reviewing(&root, &id, 1, 3))
-        .expect_err("not on this one");
+    let error = attested(reviewing(&root, &id, 1, 3), |prepared| {
+        backlog::consume_section(&root, &id, 1, prepared)
+    })
+    .expect_err("not on this one");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
         error.message.contains("still here"),
@@ -1924,16 +2255,22 @@ fn an_exhausted_review_does_not_get_to_remove_an_unresolved_point() {
     let merging = |value: u32| {
         attempt(value).against(backlog::Precondition::merge(&root, &id, 1, 2).expect("observe"))
     };
-    let error = backlog::merge_into(&root, &id, 1, 2, "one point", Vec::new(), &merging(3))
-        .expect_err("a merge removes its source");
+    let error = attested(merging(3), |prepared| {
+        backlog::merge_into(&root, &id, 1, 2, "one point", Vec::new(), prepared)
+    })
+    .expect_err("a merge removes its source");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert_eq!(backlog::load(&root, &id).expect("load"), before);
 
     // Under the ceiling, both go through.
-    backlog::merge_into(&root, &id, 1, 2, "one point", Vec::new(), &merging(2)).expect("merge");
-    assert!(
-        backlog::consume_section(&root, &id, 1, &reviewing(&root, &id, 1, 2)).expect("consume")
-    );
+    attested(merging(2), |prepared| {
+        backlog::merge_into(&root, &id, 1, 2, "one point", Vec::new(), prepared)
+    })
+    .expect("merge");
+    assert!(attested(reviewing(&root, &id, 1, 2), |prepared| {
+        backlog::consume_section(&root, &id, 1, prepared)
+    })
+    .expect("consume"));
 }
 
 /// No applicable rule means there is no review to be exhausted.
@@ -1984,8 +2321,10 @@ fn the_marker_is_a_section_field_that_is_absent_unless_it_is_needed() {
         stored["sections"][0]
     );
 
-    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 2))
-        .expect("soft-admit");
+    attested(reviewing(&root, &id, 1, 2), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted", prepared)
+    })
+    .expect("soft-admit");
     let stored: serde_json::Value =
         store::read_json(&backlog::item_path(&root, &id)).expect("item");
     assert_eq!(
@@ -2013,8 +2352,10 @@ fn the_marker_participates_in_the_precondition_like_every_other_field() {
     let id = item(&root, "topic", "unresolved");
 
     let bound = backlog::Precondition::section(&root, &id, 1).expect("observe");
-    backlog::revise_section(&root, &id, 1, "exhausted", &reviewing(&root, &id, 1, 2))
-        .expect("soft-admit");
+    attested(reviewing(&root, &id, 1, 2), |prepared| {
+        backlog::revise_section(&root, &id, 1, "exhausted", prepared)
+    })
+    .expect("soft-admit");
     let error = bound.still_holds(&root).expect_err("the point moved");
     assert_eq!(error.code, engr::EXIT_STALE);
 }
@@ -2286,8 +2627,10 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
     let renaming = |value: u32| {
         attempt(value).against(backlog::Precondition::title(&root, &id).expect("observe"))
     };
-    let error = backlog::rename(&root, &id, "a different topic", &renaming(3))
-        .expect_err("nowhere to record it");
+    let error = attested(renaming(3), |prepared| {
+        backlog::rename(&root, &id, "a different topic", prepared)
+    })
+    .expect_err("nowhere to record it");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(
         error.message.contains("nowhere to record"),
@@ -2304,7 +2647,10 @@ fn an_exhausted_rename_is_refused_rather_than_admitted_with_nothing_to_show() {
         "and no point was marked for a change that was not about it"
     );
 
-    backlog::rename(&root, &id, "a different topic", &renaming(2)).expect("within the ceiling");
+    attested(renaming(2), |prepared| {
+        backlog::rename(&root, &id, "a different topic", prepared)
+    })
+    .expect("within the ceiling");
 }
 
 /// A produced target is checked at the moment the claim is written.
@@ -2469,8 +2815,10 @@ fn a_library_mutation_cannot_skip_the_predecessor_by_going_direct() {
     }
 
     // Carrying it, the same mutation goes through.
-    backlog::revise_section(&root, &id, 1, "reworded", &reviewing(&root, &id, 1, 1))
-        .expect("with a predecessor");
+    attested(reviewing(&root, &id, 1, 1), |prepared| {
+        backlog::revise_section(&root, &id, 1, "reworded", prepared)
+    })
+    .expect("with a predecessor");
 }
 
 /// Creating a point stays possible in a workspace that has rules about points.
@@ -2484,14 +2832,18 @@ fn creating_a_point_is_still_possible_where_a_rule_governs_backlog() {
     let (_dir, root) = workspace();
     rule(&root, "careful", "review:\n  max_attempts: 5\n");
 
-    let created = backlog::create(&root, "topic", "unresolved", Vec::new(), &attempt(1))
-        .expect("a rule about points must not make points uncreatable");
+    let created = attested(attempt(1), |prepared| {
+        backlog::create(&root, "topic", "unresolved", Vec::new(), prepared)
+    })
+    .expect("a rule about points must not make points uncreatable");
     assert_eq!(created.sections.len(), 1);
 
     // And an exhausted creation still soft-admits and marks, like any other
     // mutation that preserves the point.
-    let exhausted = backlog::create(&root, "another", "unresolved", Vec::new(), &attempt(9))
-        .expect("soft-admit");
+    let exhausted = attested(attempt(9), |prepared| {
+        backlog::create(&root, "another", "unresolved", Vec::new(), prepared)
+    })
+    .expect("soft-admit");
     assert_eq!(
         exhausted.sections[0].review_exhaustion,
         Some(engr::rules::RuleReview {

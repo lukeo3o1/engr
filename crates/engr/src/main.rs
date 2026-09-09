@@ -265,9 +265,18 @@ enum Backlog {
 /// `backlog show --format json` beside the thing it describes.
 #[derive(Args, Clone)]
 struct ReviewArg {
-    /// Which attempt of this review sequence this is, counted from 1
-    #[arg(long, default_value_t = 1, value_name = "N")]
+    /// Which attempt of this review sequence this is, counted from 1. Also
+    /// accepted as `--review-attempt`, which is what `prepare` calls it
+    #[arg(long, alias = "review-attempt", default_value_t = 1, value_name = "N")]
     attempt: u32,
+    /// ReviewDigest surfaced by the first governed attempt
+    #[arg(long = "review", value_name = "DIGEST")]
+    review_digest: Option<String>,
+    /// Rule id actually reviewed. Repeat for the complete surfaced set. Backlog
+    /// takes no --review-result: a review that did not pass is not repeated
+    /// with a verdict, it is acted on and reviewed again
+    #[arg(long = "reviewed-rule", value_name = "RULE")]
+    reviewed_rules: Vec<String>,
     /// The `expect` value from `backlog show --format json` for what you read.
     /// Repeat once per point for a merge
     #[arg(long = "expect", value_name = "TOKEN")]
@@ -275,6 +284,36 @@ struct ReviewArg {
 }
 
 impl ReviewArg {
+    /// What the caller says it reviewed, held to being a complete claim.
+    ///
+    /// Half an attestation is refused rather than completed. A digest with no
+    /// rule ids and a set of rule ids with no digest are each a caller telling
+    /// engr something it cannot check, and filling in the other half would be
+    /// engr attesting on their behalf.
+    fn attestation(&self) -> Result<Option<backlog::Attestation>> {
+        match &self.review_digest {
+            None => {
+                ensure!(
+                    self.reviewed_rules.is_empty(),
+                    EXIT_USAGE,
+                    "--reviewed-rule says what a review covered, so it needs the --review digest that review was of"
+                );
+                Ok(None)
+            }
+            Some(digest) => {
+                ensure!(
+                    !self.reviewed_rules.is_empty(),
+                    EXIT_USAGE,
+                    "--review needs one --reviewed-rule for every Rule the review covered"
+                );
+                Ok(Some(backlog::Attestation {
+                    review_digest: digest.clone(),
+                    reviewed_rules: self.reviewed_rules.clone(),
+                }))
+            }
+        }
+    }
+
     /// Turn what the caller said into the predecessor this mutation binds.
     ///
     /// `binds` builds the precondition from current state; the caller's token is
@@ -294,9 +333,10 @@ impl ReviewArg {
             EXIT_USAGE,
             "a new backlog item takes an id engr allocates, so there is nothing to expect; drop --expect"
         );
-        Ok(backlog::Prepared::attempt(rules::Attempt::new(
-            self.attempt,
-        )?))
+        Ok(
+            backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?)
+                .reviewed(self.attestation()?),
+        )
     }
 
     fn prepared(
@@ -305,7 +345,8 @@ impl ReviewArg {
         item: &str,
         binds: impl FnOnce() -> Result<Vec<backlog::Precondition>>,
     ) -> Result<backlog::Prepared> {
-        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?);
+        let prepared = backlog::Prepared::attempt(rules::Attempt::new(self.attempt)?)
+            .reviewed(self.attestation()?);
         ensure!(
             self.expect.iter().all(|token| token.len() == 64
                 && token
@@ -636,6 +677,10 @@ struct Prepare {
     /// Destination state, valid for the destination type
     #[arg(long, value_enum, value_name = "STATE")]
     state: Option<StateArg>,
+    /// The object's title, for --new and --rename. The same field --text
+    /// carries there, under the name every other command uses for it
+    #[arg(long, conflicts_with_all = ["text", "text_file"])]
+    title: Option<String>,
     /// Wording, inline
     #[arg(long)]
     text: Option<String>,
@@ -692,8 +737,14 @@ struct Prepare {
     /// Rule id actually reviewed. Repeat for the complete surfaced set
     #[arg(long = "reviewed-rule", value_name = "RULE")]
     reviewed_rules: Vec<String>,
-    /// Which attempt of the continuous review sequence this is
-    #[arg(long = "review-attempt", default_value_t = 1, value_name = "N")]
+    /// Which attempt of the continuous review sequence this is. Also accepted
+    /// as `--attempt`, which is what every other governed domain calls it
+    #[arg(
+        long = "review-attempt",
+        alias = "attempt",
+        default_value_t = 1,
+        value_name = "N"
+    )]
     review_attempt: u32,
     /// Agent-attested outcome of reviewing the exact mutation
     #[arg(long = "review-result", value_enum, value_name = "RESULT")]
@@ -1538,6 +1589,34 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         }
         None
     } else if names_a_destination {
+        // A create is the one action here that does not name the state it
+        // produces, because it has none to name: a new object arrives untyped
+        // and open, and untyped is an answer rather than a gap.
+        //
+        // It got the sentence below anyway, and the sentence was false of it —
+        // which would be a wording complaint if it had not also been the whole
+        // of what a caller was told. Four cold agents in a row asked for a type
+        // here, were refused, dropped the flag, added the section, and reported
+        // the work finished with the object still untyped and open. None of
+        // them came back, and none of them had been told there was anything to
+        // come back to. Naming the act that does classify is the difference
+        // between a rule and a way forward.
+        //
+        // Deliberately not solved by nagging every create. `--classify` is a
+        // separate confirmed act on the other side of the Human gate, and a
+        // screen that pushed every new object toward being typed would be
+        // arguing with the model rather than explaining it. This fires only for
+        // a caller who asked for a type, which is a caller who wants one.
+        if chosen == Chosen::Create {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--new admits a title and nothing else, so a new object arrives untyped and \
+                 open — untyped is an answer here, not a gap. To give it a type, classify it \
+                 once it exists: `prepare --object <id> --classify --type <TYPE> --state \
+                 <STATE>`, which is a Human admission and needs its own confirmation"
+                    .to_owned(),
+            ));
+        }
         if !chosen.requires_attention() {
             return Err(Error::new(
                 EXIT_USAGE,
@@ -1594,6 +1673,28 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
                 .map_err(|error| engr::tool_error(path.display(), error))?,
         ),
         (None, None) => None,
+    };
+    // `--title` and `--text` are one field for the two actions that carry a
+    // title, and `--title` is what every other command in engr calls it —
+    // `backlog new`, `backlog rename`, `collection`. Accepting only `--text`
+    // here made the two halves of one tool disagree about the name of the same
+    // thing, and clap's guess for the unknown flag was `--state`, which sends a
+    // caller to change the object's lifecycle instead.
+    //
+    // Refused rather than accepted for the actions that admit Section wording:
+    // a title is a label, and letting `--title` stand in for wording would put
+    // a navigation aid where an assertion belongs.
+    let text = match &command.title {
+        None => text,
+        Some(title) => {
+            ensure!(
+                chosen.carries_title(),
+                EXIT_USAGE,
+                "{} admits section wording, not a title; use --text or --text-file",
+                chosen.label()
+            );
+            Some(title.clone())
+        }
     };
 
     if chosen.carries_title() && (command.based_on.is_some() || command.no_based_on) {
@@ -1747,7 +1848,48 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             EXIT_USAGE,
             "--oversize is a Human candidate exception; an Agent admission cannot claim it"
         );
-        let admitted = gate::admit_agent(root, payload, review)?;
+        // Governed and unreviewed is not a failure — it is the half of the work
+        // engr can do, and what the caller does next is read the Rules and look
+        // at this. So it goes to stdout, rendered the way `show` renders
+        // anything else, and the exit code still says nothing was written.
+        //
+        // The subject being *shown* is the point. Named alone, an agent
+        // delegating the review has to describe it to its reviewer out of the
+        // flags it typed, and a Section is more than its prose: one watched
+        // doing exactly that handed over the wording, was correctly told the
+        // two-word header its policy required was missing, and moved the header
+        // into the first line of the prose. The field stayed empty, the wording
+        // gained a paragraph the policy forbade, and the re-review — handed the
+        // same partial view — passed it.
+        let admitted = match gate::admit_agent(root, payload, review)? {
+            gate::AgentOutcome::Admitted(admitted) => *admitted,
+            gate::AgentOutcome::NeedsReview(needed) => {
+                if command.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "needs_review": {
+                                "digest": needed.digest,
+                                "rules": needed.rules,
+                                "projected": needed.projected,
+                            }
+                        }))
+                        .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+                    );
+                } else {
+                    print!("{}", view::render_projection(&needed.projected));
+                    println!(
+                        "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review what is above — all of it, not only the\n              wording — then repeat this command with\n\n                  --review {} --reviewed-rule <RULE> --review-result passed\n\n              Nothing has been written.",
+                        needed.rules.join(", "),
+                        needed.digest
+                    );
+                }
+                // stdout carries the subject for a reader; stderr keeps the
+                // one-line refusal a caller may already be parsing, and the
+                // exit code still says nothing was written.
+                return Err(needed.refusal());
+            }
+        };
         if command.json {
             println!(
                 "{}",
@@ -2741,6 +2883,13 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                 "\nnote       an existing object has this title: {}\n",
                 shorten(object, width)
             )),
+            // Named as a wrong turn rather than as advice, because that is what
+            // it is. Reaching here means the review passed, and a passing review
+            // leaves a person nothing to overrule — so the code below is about
+            // to be minted for somebody who has no decision to make.
+            gate::Note::ReviewedButQueuedForAHuman => out.push_str(
+                "\nnote       this review passed, so there is nothing here for a person to\n           overrule. If you are admitting your own work, `--agent` writes it\n           now and records agent admission; this path mints a code instead,\n           and that code is answered by a human or not at all.\n",
+            ),
         }
     }
     // What this screen may offer, decided by the Challenge's own state first and
@@ -2750,13 +2899,44 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // underneath it, so a dead Challenge said "type this exactly to confirm"
     // above "this candidate is dead", and an already-applied one said nothing
     // here can be confirmed above the instruction to retype the code.
+    // **Who the code is for is on the screen, because the screen is what an
+    // agent reads.** "Type this exactly to confirm" is an instruction, and the
+    // reader carrying it out is the agent — so engr was telling it to admit its
+    // own proposal as a human. A cold agent did exactly that, three times, in a
+    // workspace with no skill file to know better: the prohibition lived only in
+    // the guide, and a guide is not on the path of somebody who never read one.
+    //
+    // The phrase itself does not move. `CONFIRM <code>` is what a person types
+    // and what `confirm` accepts, and it is load-bearing; what changes is the
+    // sentence around it, which now says whose line it is and what taking it
+    // costs. Naming the consequence rather than only the rule is deliberate — an
+    // agent weighing whether to press on needs to know that this one is
+    // undetectable afterwards, not that it is disallowed.
+    //
+    // **And it offers a way to stop, which is the part a prohibition cannot
+    // supply.** Saying whose line the code is did not help on its own, and the
+    // reason is visible in what the caller was holding: told to finish the work
+    // with nobody available, an agent arriving here has exactly two endings —
+    // the task unfinished, or the code typed. Neither is the right one, so it
+    // takes the second. A pending code *is* the finished piece of work when
+    // there is no one to answer it, and until the screen said so, nothing on
+    // the agent's path did.
     let trailer = match gate::answerable(root, candidate) {
         Ok(gate::Answerable::Confirm) => format!(
-            "\nType this exactly to confirm:  CONFIRM {}\n",
+            "
+FOR A HUMAN   show them the change above and wait. They type this back:
+
+                  CONFIRM {}
+
+              With nobody to show it to, stop here and report the code. A
+              pending code is a finished handoff, not an unfinished task.
+              Typing it yourself records this as human-admitted, and no
+              later reader can tell that apart from a person having read it.
+",
             candidate.code()
         ),
         Ok(gate::Answerable::Cleanup) => format!(
-            "\nALREADY APPLIED  this admission is already in the record.\n                 Retype it to finish cleanup:  CONFIRM {}\n",
+            "\nALREADY APPLIED  this admission is already in the record.\n                 A human retypes it to finish cleanup:  CONFIRM {}\n",
             candidate.code()
         ),
         Ok(gate::Answerable::Dead { current_rev }) => format!(
@@ -4013,8 +4193,20 @@ fn render_migration(root: &Path, proposed: &engr::migration::Proposed) -> String
             proposed.discarded_candidates.join(", ")
         ));
     }
+    // The same sentence as the candidate screen, because it is the same act and
+    // the same reader. A migration rewrites the whole workspace, so this is the
+    // one code where an agent answering its own question costs the most.
     out.push_str(&format!(
-        "\nType this exactly to confirm:  CONFIRM {}\n",
+        "
+FOR A HUMAN   show them what is above and wait. They type this back:
+
+                  CONFIRM {}
+
+              With nobody to show it to, stop here and report the code. A
+              pending code is a finished handoff, not an unfinished task.
+              Typing it yourself records this as human-admitted, and no
+              later reader can tell that apart from a person having read it.
+",
         proposed.challenge
     ));
     out

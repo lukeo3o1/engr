@@ -132,7 +132,9 @@ fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
     );
     let expected = review.review_digest.clone();
 
-    let admitted = gate::admit_agent(temp.path(), payload, Some(review)).expect("agent admit");
+    let admitted = gate::admit_agent(temp.path(), payload, Some(review))
+        .and_then(gate::AgentOutcome::admitted)
+        .expect("agent admit");
 
     assert_eq!(admitted.object.sections[0].admitted.by, Admission::Agent);
     let admission = &admitted.event.metadata.admitted;
@@ -242,6 +244,80 @@ fn agent_cli_surfaces_the_review_then_admits_the_same_bound_mutation() {
     );
 }
 
+/// The one scalar an offered review prints, read back the way an agent reads it.
+fn offered_digest(refusal: &str) -> String {
+    refusal
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .unwrap_or_else(|| panic!("no review digest was offered: {refusal}"))
+        .to_owned()
+}
+
+/// The two-step Agent review terminates for a creation, which is the one
+/// operation whose subject does not exist yet.
+///
+/// Every other mutation can be repeated as the same mutation, because it names
+/// an Object that is already there. A creation cannot: engr mints a fresh
+/// UUIDv7 on each attempt and a caller may not choose one. While the review
+/// binding named that id, the first attempt offered a digest, the attempt that
+/// attested to it computed a different one, and the sequence had no exit — a
+/// workspace with any Object Rule could not create an Object at all, through
+/// either admission path.
+#[test]
+fn an_agent_creates_an_object_through_the_review_the_first_attempt_offered() {
+    let temp = tempfile::tempdir().expect("temp");
+    store::init(temp.path()).expect("init");
+    object_rule(temp.path());
+
+    let prepare = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_engr"))
+            .arg("--root")
+            .arg(temp.path())
+            .args([
+                "prepare",
+                "--new",
+                "--text",
+                "a governed creation",
+                "--agent",
+            ])
+            .args(extra)
+            .output()
+            .expect("prepare")
+    };
+
+    let first = prepare(&[]);
+    assert_eq!(first.status.code(), Some(engr::EXIT_USAGE));
+    let offered = offered_digest(&String::from_utf8_lossy(&first.stderr));
+
+    // The same command again offers the same review. That is the property the
+    // second step rests on, and the one a minted identity took away.
+    let again = prepare(&[]);
+    assert_eq!(
+        offered,
+        offered_digest(&String::from_utf8_lossy(&again.stderr)),
+        "a creation's review subject does not move between attempts"
+    );
+
+    let admitted = prepare(&[
+        "--review",
+        &offered,
+        "--reviewed-rule",
+        "object-policy",
+        "--review-result",
+        "passed",
+        "--json",
+    ]);
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    let output: serde_json::Value = serde_json::from_slice(&admitted.stdout).expect("json");
+    assert_eq!(output["event"]["type"], "object.created.v1");
+    assert_eq!(output["event"]["metadata"]["admitted"]["by"], "agent");
+    assert_eq!(output["object"]["title"], "a governed creation");
+}
+
 #[test]
 fn human_source_cannot_treat_agent_semantics_as_human_authority() {
     let temp = tempfile::tempdir().expect("temp");
@@ -257,7 +333,9 @@ fn human_source_cannot_treat_agent_semantics_as_human_authority() {
         proof::ReviewResult::Passed,
         None,
     );
-    gate::admit_agent(temp.path(), agent_payload, Some(review)).expect("agent section");
+    gate::admit_agent(temp.path(), agent_payload, Some(review))
+        .and_then(gate::AgentOutcome::admitted)
+        .expect("agent section");
 
     let reference = engr::dependency::SelectiveRef::stored(
         engr::proof::section_target(id, 1).expect("section target"),
@@ -544,7 +622,9 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
     admit_human(root, add(id, "wording admitted through the gate"));
 
     let repair = Payload::new(id, engr::model::Action::ObjectRepaired {});
-    let error = gate::admit_agent(root, repair.clone(), None).expect_err("no agent repair");
+    let error = gate::admit_agent(root, repair.clone(), None)
+        .and_then(gate::AgentOutcome::admitted)
+        .expect_err("no agent repair");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("human gate only"), "{error}");
 
