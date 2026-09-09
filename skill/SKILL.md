@@ -683,6 +683,27 @@ and engr will not guess a mapping:
 engr prepare --object <id> --classify --type decision --state accepted
 ```
 
+**A new object arrives untyped and open, and `--new` takes no type.** Recording
+one settled thing is therefore three acts, not one, and the third is easy to
+walk away from:
+
+```bash
+engr prepare --new --title "..."                              # 1. untyped, open
+engr prepare --object <id> --add --text-file draft.txt        # 2. the wording
+engr prepare --object <id> --classify --type decision --state accepted   # 3.
+```
+
+Only the third gives it a type, and it is Human-only — no `--agent` path exists
+for it, because what an object *is* is not an agent's to declare. So the
+sequence ends at a challenge code even when the first two steps were agent
+admissions. With nobody available to answer it, stop and report the code, and
+say the object is still untyped and open: that is the honest end of the work,
+and "recorded" without it overstates what is in the record.
+
+Untyped is a real answer, not an unfinished one — say `--untyped` when you mean
+it. What is not an answer is asking for a type, being refused at step 1, and
+never coming back.
+
 Use `--untyped` to say explicitly that an object has no type. There is no
 transition order to follow: any state valid for the destination type is
 reachable, and every hop is a separate confirmation.

@@ -1512,6 +1512,95 @@ fn a_passing_review_on_the_human_path_is_named_as_the_wrong_door() {
     );
 }
 
+/// Asking a create for a type is answered with the act that gives it one.
+///
+/// A create is the one action that does not name the state it produces, because
+/// it has none to name — a new object arrives untyped and open. It got the
+/// "already names the state it produces" refusal anyway, which was false of it
+/// and, more to the point, was the whole of what a caller was told.
+///
+/// Four cold agents in a row asked for a type here, were refused, dropped the
+/// flag, added their section and reported the work finished with the object
+/// still untyped and open. None came back, and none had been told there was
+/// anything to come back to.
+#[test]
+fn a_create_that_asks_for_a_type_is_told_where_types_come_from() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    for extra in [
+        vec!["--type", "decision", "--state", "accepted"],
+        vec!["--type", "decision"],
+        vec!["--state", "accepted"],
+        vec!["--untyped"],
+    ] {
+        let refused = run_engr(
+            root,
+            &[
+                &["prepare", "--new", "--title", "arrives untyped"],
+                extra.as_slice(),
+            ]
+            .concat(),
+        );
+        assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE));
+        let said = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(
+            said.contains("--classify"),
+            "the refusal names the act that classifies: {said}"
+        );
+        assert!(
+            said.contains("untyped is an answer here, not a gap"),
+            "and does not imply an untyped object is unfinished: {said}"
+        );
+        assert!(
+            !said.contains("already names the state it produces"),
+            "and does not repeat a sentence that is false of a create: {said}"
+        );
+    }
+
+    // The sentence it replaced is still right for the actions it was written
+    // for, and still theirs.
+    let created = prepare(root, &["prepare", "--new", "--title", "arrives untyped"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let closing = run_engr(
+        root,
+        &["prepare", "--object", &id, "--close", "--type", "decision"],
+    );
+    assert_eq!(closing.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        String::from_utf8_lossy(&closing.stderr).contains("already names the state it produces"),
+        "{}",
+        String::from_utf8_lossy(&closing.stderr)
+    );
+
+    // And the route the refusal names actually works.
+    let classified = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &classified);
+    let object = store::load_object(root, &id).expect("object");
+    assert_eq!(
+        object.object_type,
+        Some(engr::semantics::ObjectType::Decision)
+    );
+    assert_eq!(object.state, engr::semantics::State::Accepted);
+}
+
 #[test]
 fn prepare_calls_a_title_a_title() {
     let workspace = TempDir::new().expect("temp dir");

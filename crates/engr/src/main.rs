@@ -1589,6 +1589,34 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         }
         None
     } else if names_a_destination {
+        // A create is the one action here that does not name the state it
+        // produces, because it has none to name: a new object arrives untyped
+        // and open, and untyped is an answer rather than a gap.
+        //
+        // It got the sentence below anyway, and the sentence was false of it —
+        // which would be a wording complaint if it had not also been the whole
+        // of what a caller was told. Four cold agents in a row asked for a type
+        // here, were refused, dropped the flag, added the section, and reported
+        // the work finished with the object still untyped and open. None of
+        // them came back, and none of them had been told there was anything to
+        // come back to. Naming the act that does classify is the difference
+        // between a rule and a way forward.
+        //
+        // Deliberately not solved by nagging every create. `--classify` is a
+        // separate confirmed act on the other side of the Human gate, and a
+        // screen that pushed every new object toward being typed would be
+        // arguing with the model rather than explaining it. This fires only for
+        // a caller who asked for a type, which is a caller who wants one.
+        if chosen == Chosen::Create {
+            return Err(Error::new(
+                EXIT_USAGE,
+                "--new admits a title and nothing else, so a new object arrives untyped and \
+                 open — untyped is an answer here, not a gap. To give it a type, classify it \
+                 once it exists: `prepare --object <id> --classify --type <TYPE> --state \
+                 <STATE>`, which is a Human admission and needs its own confirmation"
+                    .to_owned(),
+            ));
+        }
         if !chosen.requires_attention() {
             return Err(Error::new(
                 EXIT_USAGE,
