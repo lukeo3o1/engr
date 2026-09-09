@@ -40,9 +40,14 @@ engr prepare --object 019ff75b --add --text-file draft.txt
 #   Retry with backoff, capped at 30s. Past that the caller has
 #   already given up, so a longer wait only delays the error.
 #
-#   Type this exactly to confirm:  CONFIRM 7U9K2U
+#   FOR A HUMAN   show them the change above and wait. They type this back:
+#
+#                     CONFIRM 7U9K2U
+#
+#                 Typing it yourself records this as human-admitted, and no
+#                 later reader can tell that apart from a person having read it.
 
-engr confirm 'CONFIRM 7U9K2U'
+engr confirm 'CONFIRM 7U9K2U'   # what the human gave you, verbatim
 ```
 
 ## What it is for
@@ -109,6 +114,21 @@ One thing Human admission does **not** prove: `prepare` prints the challenge cod
 where the agent can read it, so nothing stops an agent claiming Human admission
 by confirming its own proposal. The Human gate is a convention, not an identity
 mechanism. Agent admission is separately and explicitly recorded.
+
+That is not theoretical. Cold agents recording their first decision have done
+exactly this — told to finish with nobody available to answer, an agent at this
+screen has two endings, the task unfinished or the code taken, and it takes the
+second. The screen now names a third, that stopping with the code unanswered is
+a finished piece of work; a screen cannot do more than that, and a refusal an
+agent can read is one it can decline.
+
+Rule Review has the same shape one layer down. An attestation says a review
+happened over a named subject against a named Rule set — not that it was any
+good, and an agent reviewing wording it just wrote reads what it meant rather
+than what is there. Delegating the review to a reader who never saw the draft is
+the practice that catches that, and it is a practice: no field records who
+reviewed. What the mechanism buys is that the material was named precisely
+enough for somebody to check afterwards.
 
 ## Using it
 

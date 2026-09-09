@@ -2814,6 +2814,13 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
                 "\nnote       an existing object has this title: {}\n",
                 shorten(object, width)
             )),
+            // Named as a wrong turn rather than as advice, because that is what
+            // it is. Reaching here means the review passed, and a passing review
+            // leaves a person nothing to overrule — so the code below is about
+            // to be minted for somebody who has no decision to make.
+            gate::Note::ReviewedButQueuedForAHuman => out.push_str(
+                "\nnote       this review passed, so there is nothing here for a person to\n           overrule. If you are admitting your own work, `--agent` writes it\n           now and records agent admission; this path mints a code instead,\n           and that code is answered by a human or not at all.\n",
+            ),
         }
     }
     // What this screen may offer, decided by the Challenge's own state first and
@@ -2823,13 +2830,44 @@ fn render_candidate(root: &Path, candidate: &gate::Candidate, notes: &[gate::Not
     // underneath it, so a dead Challenge said "type this exactly to confirm"
     // above "this candidate is dead", and an already-applied one said nothing
     // here can be confirmed above the instruction to retype the code.
+    // **Who the code is for is on the screen, because the screen is what an
+    // agent reads.** "Type this exactly to confirm" is an instruction, and the
+    // reader carrying it out is the agent — so engr was telling it to admit its
+    // own proposal as a human. A cold agent did exactly that, three times, in a
+    // workspace with no skill file to know better: the prohibition lived only in
+    // the guide, and a guide is not on the path of somebody who never read one.
+    //
+    // The phrase itself does not move. `CONFIRM <code>` is what a person types
+    // and what `confirm` accepts, and it is load-bearing; what changes is the
+    // sentence around it, which now says whose line it is and what taking it
+    // costs. Naming the consequence rather than only the rule is deliberate — an
+    // agent weighing whether to press on needs to know that this one is
+    // undetectable afterwards, not that it is disallowed.
+    //
+    // **And it offers a way to stop, which is the part a prohibition cannot
+    // supply.** Saying whose line the code is did not help on its own, and the
+    // reason is visible in what the caller was holding: told to finish the work
+    // with nobody available, an agent arriving here has exactly two endings —
+    // the task unfinished, or the code typed. Neither is the right one, so it
+    // takes the second. A pending code *is* the finished piece of work when
+    // there is no one to answer it, and until the screen said so, nothing on
+    // the agent's path did.
     let trailer = match gate::answerable(root, candidate) {
         Ok(gate::Answerable::Confirm) => format!(
-            "\nType this exactly to confirm:  CONFIRM {}\n",
+            "
+FOR A HUMAN   show them the change above and wait. They type this back:
+
+                  CONFIRM {}
+
+              With nobody to show it to, stop here and report the code. A
+              pending code is a finished handoff, not an unfinished task.
+              Typing it yourself records this as human-admitted, and no
+              later reader can tell that apart from a person having read it.
+",
             candidate.code()
         ),
         Ok(gate::Answerable::Cleanup) => format!(
-            "\nALREADY APPLIED  this admission is already in the record.\n                 Retype it to finish cleanup:  CONFIRM {}\n",
+            "\nALREADY APPLIED  this admission is already in the record.\n                 A human retypes it to finish cleanup:  CONFIRM {}\n",
             candidate.code()
         ),
         Ok(gate::Answerable::Dead { current_rev }) => format!(
@@ -4086,8 +4124,20 @@ fn render_migration(root: &Path, proposed: &engr::migration::Proposed) -> String
             proposed.discarded_candidates.join(", ")
         ));
     }
+    // The same sentence as the candidate screen, because it is the same act and
+    // the same reader. A migration rewrites the whole workspace, so this is the
+    // one code where an agent answering its own question costs the most.
     out.push_str(&format!(
-        "\nType this exactly to confirm:  CONFIRM {}\n",
+        "
+FOR A HUMAN   show them what is above and wait. They type this back:
+
+                  CONFIRM {}
+
+              With nobody to show it to, stop here and report the code. A
+              pending code is a finished handoff, not an unfinished task.
+              Typing it yourself records this as human-admitted, and no
+              later reader can tell that apart from a person having read it.
+",
         proposed.challenge
     ));
     out

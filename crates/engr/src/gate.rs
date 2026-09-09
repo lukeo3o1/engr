@@ -946,7 +946,24 @@ pub fn is_live(root: &Path, candidate: &Candidate) -> bool {
 /// human is still holding the code.
 #[derive(Debug)]
 pub enum Note {
-    DuplicateTitle { object: String },
+    DuplicateTitle {
+        object: String,
+    },
+    /// A review that passed, on the path that mints a code for a person.
+    ///
+    /// The Human path takes a review for one reason: a failed or exhausted one
+    /// is something a person can overrule, and the Challenge has to carry what
+    /// they are being asked to overrule. A review that **passed** leaves
+    /// nothing to overrule, so a caller here has done the whole review and then
+    /// queued for a human anyway.
+    ///
+    /// Almost always that caller is an agent that never found the other door. A
+    /// person does not compute a ReviewDigest, and dogfooding watched two cold
+    /// agents do exactly this and then type the code back themselves — which
+    /// records `admitted.by = human` for something no person ever read. Saying
+    /// who the code is for did not help, because the caller had not found the
+    /// agent path to be sent back to. This names the path instead.
+    ReviewedButQueuedForAHuman,
 }
 
 #[derive(Debug)]
@@ -1109,6 +1126,14 @@ fn resolve_commit(root: &Path, field: &str, revision: &str) -> Result<String> {
 /// and a note absent from it is a note that missed its moment.
 pub fn notes_for(root: &Path, candidate: &Candidate) -> Vec<Note> {
     let mut notes = Vec::new();
+    if candidate
+        .subject
+        .review
+        .as_ref()
+        .is_some_and(|review| review.result == crate::proof::ReviewResult::Passed)
+    {
+        notes.push(Note::ReviewedButQueuedForAHuman);
+    }
     if let Some(title) = candidate.payload.action.title() {
         if let Some(object) = object_with_title(root, title, candidate.object()) {
             notes.push(Note::DuplicateTitle { object });

@@ -116,8 +116,31 @@ engr rules show <rule-id>
 ```
 
 Read every surfaced Rule and every file it rests on, then review the exact
-mutation. If it passes, repeat the unchanged command with the complete
-attestation:
+mutation.
+
+**Do not review your own wording yourself. Delegate it.** Hand a subagent the
+Rule text, every file the Rule rests on, and the exact wording this mutation
+admits — and nothing else. No draft history, no explanation of what you were
+going for, no opinion about whether it passes. Ask for one answer: does this
+wording meet every requirement, and if not, which one does it miss.
+
+You will pass your own work. Not dishonestly — you have just written the thing,
+so you read what you meant rather than what is there, and the requirements you
+miss are the mechanical ones you would catch in anybody else's text. Watched
+under a policy that fixed a six-word ceiling on a title, an agent wrote seven
+words and attested `passed`; under one that required a question, it wrote a
+statement and attested `passed`. Both had read the rule minutes earlier. A
+reader who never saw the draft catches both in a sentence.
+
+The subagent's answer is what you attest to. If it says no, fix the wording and
+count the next attempt honestly — a failed delegated review is a real attempt,
+not a rehearsal.
+
+This is a practice, not a mechanism: engr cannot tell who reviewed, and an
+attestation says a review happened rather than who ran it. It is worth doing
+because it is the only part of the review a second reader can actually improve.
+
+If it passes, repeat the unchanged command with the complete attestation:
 
 ```bash
 engr prepare --object <id> --add --text-file draft.txt --agent \
@@ -390,6 +413,13 @@ the digest travels between the two calls.
 
 Where no backlog Rule applies there is nothing to attest, and passing `--review`
 is refused rather than ignored.
+
+Delegating the review is worth it here too, and it is a judgement call rather
+than the rule it is for the record. Staging is meant to be cheap, and a
+subagent per parked thought is not cheap — but a point that will not pass its
+own policy is a point somebody has to come back and fix, so the saving is often
+borrowed rather than made. Delegate when the rule sets checkable requirements
+on the wording; review it yourself when it does not.
 
 Every one of these takes `--attempt <n>` when a project rule governs backlog
 (`--review-attempt` is accepted too, since that is what `prepare` calls it) —

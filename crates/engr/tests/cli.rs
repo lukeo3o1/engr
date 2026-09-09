@@ -239,7 +239,7 @@ fn repair_writes_back_a_projection_that_is_gone() {
             .find("Wording that exists nowhere else")
             .unwrap_or_else(|| panic!("{surface} must show what will be restored: {screen:?}"));
         let confirm = screen
-            .find("Type this exactly to confirm")
+            .find(OFFERS_A_CODE)
             .unwrap_or_else(|| panic!("{surface} must offer the code: {screen:?}"));
         assert!(
             wording < confirm,
@@ -247,11 +247,7 @@ fn repair_writes_back_a_projection_that_is_gone() {
         );
     };
     shows_the_wording(&screen, "the repair screen");
-    let code = screen
-        .split_whitespace()
-        .last()
-        .expect("the screen ends with the code")
-        .to_owned();
+    let code = offered_code(&screen);
 
     // The same code, rendered again hours later, through the same renderer.
     let again = run_engr(root, &["candidate", &code]);
@@ -307,6 +303,13 @@ fn repair_writes_back_a_projection_that_is_gone() {
     );
 }
 
+/// The marker that a screen is offering a live code for a human to answer.
+///
+/// One constant rather than ten copies of a sentence: the wording of that
+/// offer is exactly the thing this round changed, and a screen contract pinned
+/// by ten separate string literals is a contract nobody can restate.
+const OFFERS_A_CODE: &str = "FOR A HUMAN";
+
 /// The code a screen actually offers, taken from the line that offers it.
 ///
 /// The last word on the output is not always the code: preparing a candidate
@@ -314,8 +317,8 @@ fn repair_writes_back_a_projection_that_is_gone() {
 fn offered_code(screen: &str) -> String {
     screen
         .lines()
-        .find_map(|line| line.strip_prefix("Type this exactly to confirm:"))
-        .and_then(|offer| offer.split_whitespace().nth(1))
+        .find_map(|line| line.trim().strip_prefix("CONFIRM "))
+        .map(str::trim)
         .unwrap_or_else(|| panic!("the screen must offer a code: {screen:?}"))
         .to_owned()
 }
@@ -497,7 +500,7 @@ fn a_repair_code_is_dead_once_the_damage_is_gone() {
         "the screen must say the reason it was prepared for is gone: {rendered:?}"
     );
     assert!(
-        !rendered.contains("Type this exactly to confirm"),
+        !rendered.contains(OFFERS_A_CODE),
         "and must not offer a code it will refuse: {rendered:?}"
     );
     // Not "prepare it again": that is what a fresh `repair` refuses, for this
@@ -535,7 +538,7 @@ fn a_repair_code_is_dead_once_the_damage_is_gone() {
     save_raw(root, &resealed.object).expect("damage it again");
     let live = String::from_utf8_lossy(&run_engr(root, &["repair", &id]).stdout).to_string();
     assert!(
-        live.contains("Type this exactly to confirm"),
+        live.contains(OFFERS_A_CODE),
         "a damaged projection is still repairable: {live:?}"
     );
 }
@@ -825,7 +828,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         "{shown_text}"
     );
     assert!(
-        !shown_text.contains("Type this exactly to confirm"),
+        !shown_text.contains(OFFERS_A_CODE),
         "an applied admission is not offered again: {shown_text}"
     );
     let listed = run_engr(root, &["candidate"]);
@@ -874,10 +877,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     // The screen offers nothing to type. An older `expected_rev` cannot be
     // confirmed, so an instruction to confirm it is an instruction to answer a
     // question the gate has already refused.
-    assert!(
-        !stale_text.contains("Type this exactly to confirm"),
-        "{stale_text}"
-    );
+    assert!(!stale_text.contains(OFFERS_A_CODE), "{stale_text}");
     assert!(
         !stale_text.contains(&format!("CONFIRM {stale_code}")),
         "{stale_text}"
@@ -1347,6 +1347,171 @@ fn the_activated_generation_is_written_as_one_contract() {
 /// flag was `--state` — which does not name a title at all, it changes the
 /// object's lifecycle. Two commands disagreeing about the name of one thing,
 /// and the tip pointing at a different thing.
+/// The screen says whose line the code is, because the screen is what an agent
+/// reads.
+///
+/// `Type this exactly to confirm` was an instruction, and in an autonomous
+/// session the reader carrying it out is the agent — so engr was telling it to
+/// admit its own proposal as a human. A cold agent did exactly that, three
+/// times, in a workspace with no skill file: the prohibition lived only in the
+/// guide, and a guide is not on the path of somebody who never read one.
+///
+/// Three things are pinned, because the sentence has three jobs. It must name
+/// the reader it is addressed to, it must still carry the exact phrase
+/// `confirm` accepts, and it must say what taking the code costs — an agent
+/// deciding whether to press on needs to know this one is undetectable
+/// afterwards, not merely that it is disallowed.
+#[test]
+fn the_candidate_screen_says_the_code_is_not_the_agents_to_answer() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let screen = run_engr(root, &["prepare", "--new", "--title", "whose line is it"]);
+    let screen = String::from_utf8_lossy(&screen.stdout).to_string();
+
+    assert!(
+        screen.contains("FOR A HUMAN"),
+        "the offer names its reader: {screen}"
+    );
+    assert!(
+        screen.contains("Typing it yourself records this as human-admitted"),
+        "and says what taking it costs: {screen}"
+    );
+    assert!(
+        screen.contains("no\n              later reader can tell that apart"),
+        "and that the cost is undetectable afterwards: {screen}"
+    );
+
+    // The phrase itself does not move. It is what a person types and what
+    // `confirm` accepts, and changing it would be a change to the gate rather
+    // than to the sentence around it.
+    let code = offered_code(&screen);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    // Re-rendered hours later, the same sentence — that screen is where a
+    // human who came back late actually reads it.
+    let repeat = run_engr(root, &["prepare", "--new", "--title", "and again later"]);
+    let code = offered_code(&String::from_utf8_lossy(&repeat.stdout));
+    let again = run_engr(root, &["candidate", &code]);
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("FOR A HUMAN"),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+}
+
+/// A passing review on the Human path is a wrong turn, and the screen says so.
+///
+/// The Human path takes a review for one reason: a failed or exhausted one is
+/// something a person can overrule, and the Challenge must carry what they are
+/// being asked to overrule. A review that **passed** leaves nothing to
+/// overrule — so a caller here has done the whole review and then queued for a
+/// human anyway, and a person does not compute a ReviewDigest.
+///
+/// Dogfooding watched two cold agents do exactly this and then type the code
+/// back themselves. Saying whose line the code is did not stop it, because the
+/// caller had not found the agent path to be sent back to. This names the path.
+#[test]
+fn a_passing_review_on_the_human_path_is_named_as_the_wrong_door() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 2\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let offered = |args: &[&str]| {
+        let refused = run_engr(root, args);
+        String::from_utf8_lossy(&refused.stderr)
+            .split_whitespace()
+            .find(|word| word.starts_with("1:") && word.len() == 66)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no digest offered: {}",
+                    String::from_utf8_lossy(&refused.stderr)
+                )
+            })
+            .to_owned()
+    };
+
+    let base = ["prepare", "--new", "--title", "which door"];
+    let digest = offered(&base);
+    let passed = run_engr(
+        root,
+        &[
+            base.as_slice(),
+            &[
+                "--review",
+                &digest,
+                "--reviewed-rule",
+                "careful",
+                "--review-result",
+                "passed",
+            ],
+        ]
+        .concat(),
+    );
+    let screen = String::from_utf8_lossy(&passed.stdout).to_string();
+    assert!(
+        screen.contains("nothing here for a person to"),
+        "the screen names the wrong turn: {screen}"
+    );
+    assert!(
+        screen.contains("`--agent` writes it"),
+        "and names the path that was missed: {screen}"
+    );
+
+    // Recomputed, so the screen a human reaches hours later says the same —
+    // and so does the one an agent re-reads before deciding to press on.
+    let code = offered_code(&screen);
+    let again = run_engr(root, &["candidate", &code]);
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("nothing here for a person to"),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+
+    // And silent where the Human path is the right one. A failed review is
+    // exactly what a person is here to overrule, so saying "you took the wrong
+    // door" would be false — and a note that fires on a non-problem is how
+    // people learn to skip the notes.
+    let digest = offered(&["prepare", "--new", "--title", "a real override"]);
+    let failed = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--title",
+            "a real override",
+            "--review",
+            &digest,
+            "--reviewed-rule",
+            "careful",
+            "--review-result",
+            "failed",
+            "--review-explanation",
+            "the wording is a plan, not a record",
+        ],
+    );
+    let screen = String::from_utf8_lossy(&failed.stdout).to_string();
+    assert!(
+        failed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        !screen.contains("nothing here for a person to"),
+        "an override is what this path is for: {screen}"
+    );
+}
+
 #[test]
 fn prepare_calls_a_title_a_title() {
     let workspace = TempDir::new().expect("temp dir");
@@ -2972,15 +3137,6 @@ fn repository_with_source(root: &Path) {
 }
 
 /// The code a candidate screen ends with.
-fn code_from(screen: &str) -> String {
-    screen
-        .rsplit("CONFIRM ")
-        .next()
-        .expect("a candidate screen ends with its code")
-        .trim()
-        .to_owned()
-}
-
 /// A pending question knows which admission door the Section will use, but the
 /// admission instant does not exist until confirmation succeeds.
 ///
@@ -3018,7 +3174,7 @@ fn a_pending_section_does_not_claim_a_future_admission_instant() {
         String::from_utf8_lossy(&output.stderr)
     );
     let shown = String::from_utf8_lossy(&output.stdout);
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     let pending: Value = serde_json::from_str(
         &std::fs::read_to_string(store::challenge_path(root, &code).expect("challenge path"))
             .expect("challenge bytes"),
@@ -3106,7 +3262,7 @@ fn classifying_shows_the_whole_destination_and_what_it_does_to_the_listing() {
     for line in ["Type       design", "State      draft", "Attention  yes"] {
         assert!(shown.contains(line), "{line:?} missing from {shown}");
     }
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3198,7 +3354,7 @@ fn a_section_carries_role_supplementary_content_and_implementation_provenance() 
             "{fragment:?} missing from {shown}"
         );
     }
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3302,7 +3458,7 @@ fn an_oversize_section_is_refused_once_and_the_retry_says_so_on_the_screen() {
         shown.contains("OVERSIZE   admitted by exception"),
         "the exception is on the screen, above the wording: {shown}"
     );
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3371,7 +3527,7 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
     assert!(shown.contains("Role       supersession"), "{shown}");
     assert!(shown.contains("superseded_by -> engr:obj:"), "{shown}");
     assert!(shown.contains("State      superseded"), "{shown}");
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3738,7 +3894,7 @@ fn a_removed_supplementary_body_is_shown_and_a_changed_one_is_shown_as_a_diff() 
         "an unchanged tail forty lines away is not context: {shown}"
     );
 
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -4054,7 +4210,7 @@ fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
         "the candidate screen shows the caller's order: {shown}"
     );
 
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -6689,7 +6845,7 @@ fn an_override_screen_shows_the_review_it_is_overruling_and_keeps_showing_it() {
         "and the screen says the code is no longer good: {after}"
     );
     assert!(
-        !after.contains("Type this exactly to confirm"),
+        !after.contains(OFFERS_A_CODE),
         "and does not tell a person to answer it anyway: {after}"
     );
 
@@ -6739,7 +6895,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
     let screen =
         String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
     assert!(
-        screen.contains("Type this exactly to confirm"),
+        screen.contains(OFFERS_A_CODE),
         "it is answerable while nothing governs it: {screen}"
     );
 
@@ -6756,7 +6912,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
         "a Rule appearing makes the question unanswerable, and the screen says which: {after}"
     );
     assert!(
-        !after.contains("Type this exactly to confirm"),
+        !after.contains(OFFERS_A_CODE),
         "and it does not tell a person to answer it: {after}"
     );
     assert!(
@@ -6780,7 +6936,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
         "Rule material that cannot be read cannot say a question is still good: {broken}"
     );
     assert!(
-        !broken.contains("Type this exactly to confirm"),
+        !broken.contains(OFFERS_A_CODE),
         "and the instruction is withheld: {broken}"
     );
 }
@@ -7292,11 +7448,7 @@ fn a_resealed_projection_is_repaired_back_to_what_history_proves() {
     assert!(text.contains("wording nobody was ever shown"), "{text}");
     assert!(text.contains("the wording that was admitted"), "{text}");
 
-    let code = text
-        .split_whitespace()
-        .last()
-        .expect("the confirmation code")
-        .to_owned();
+    let code = offered_code(&text);
     let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
     assert!(
         confirmed.status.success(),

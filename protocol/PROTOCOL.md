@@ -2205,6 +2205,34 @@ used, never as identity proof that a human was present. Making the Human
 Gate a mechanism needs the challenge to travel where the agent cannot read it,
 or `confirm` to run in a different process. That is not v0.
 
+**This is observed behaviour, not a theoretical hole.** Cold agents recording
+their first decision have taken the Human path and typed the code back
+themselves, in a workspace with no guide to know better, having been told to
+finish the work with nobody available to answer anything. Two things follow, and
+neither of them is a mechanism.
+
+The screen carries what a screen can carry: whose line the code is, what typing
+it yourself costs, and — the part a prohibition cannot supply — that stopping
+with the code unanswered is a finished piece of work rather than a failed task.
+An agent arriving here otherwise has two endings, the task unfinished or the
+code taken, and takes the second. An implementation SHOULD offer the third.
+
+What none of that does is make the claim checkable. A refusal an agent can read
+is a refusal an agent can decline, and every strengthening of this screen is a
+better-informed decision rather than a closed door.
+
+**Rule Review has the same shape, one layer down.** An attestation says a review
+happened over a named subject against a named Rule set; it does not say the
+review was any good, and the same agent that wrote the wording is a poor reader
+of it. Watched under a policy fixing a six-word ceiling on a title, an agent
+wrote seven words and attested that it passed, having read the rule minutes
+earlier. Delegating the review to a reader who never saw the draft catches that
+class of miss, and it is a **practice** rather than a rule: no field records who
+reviewed, and an implementation cannot tell. What the mechanism guarantees is
+that the material was named precisely enough to be checked afterwards, by
+somebody who cares to. It has never guaranteed comprehension and does not start
+here.
+
 ### Supersession is one-way
 
 The coupled invariant closes in both directions, so there is **no way out of

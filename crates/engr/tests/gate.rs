@@ -1221,7 +1221,12 @@ fn a_duplicate_title_is_flagged_but_not_blocked() {
     )
     .expect("a duplicate title is admitted");
     assert_eq!(prepared.notes.len(), 1, "trimmed and case-folded match");
-    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0] else {
+        panic!(
+            "the duplicate-title note is the one this prepares: {:?}",
+            prepared.notes
+        )
+    };
     assert_eq!(object, &first);
 
     let prepared = gate::prepare(
@@ -1307,7 +1312,12 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
     )
     .expect("a duplicate title is admitted, not refused");
     assert_eq!(prepared.notes.len(), 1);
-    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0] else {
+        panic!(
+            "the duplicate-title note is the one this prepares: {:?}",
+            prepared.notes
+        )
+    };
     assert_eq!(object, &first);
     // Stored as it will be listed. The duplicate check above already ignores the
     // padding, and a listing that prints what that check ignores puts one row

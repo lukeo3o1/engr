@@ -42,12 +42,19 @@ crates/engr/tests/cli.rs        what the command line promises the outside world
 ## If you are the agent using engr, not editing it
 
 Use plain `prepare` only when asking a human to admit the rendered candidate;
-never confirm a code the human did not return. For autonomous semantic work,
-use `prepare --agent`, read every surfaced Rule and its bases, then repeat the
-exact mutation with its ReviewDigest, complete Rule ids and a passing result.
-That path writes immediately and records Agent admission. It refuses semantic
-work with no applicable usable Object Rule; title create/rename is the sole
-non-authoritative exception.
+never confirm a code the human did not return. With nobody available to answer
+one, stop and report the code — a pending code is a finished handoff, not an
+unfinished task. For autonomous semantic work, use `prepare --agent`, read every
+surfaced Rule and its bases, then repeat the exact mutation with its
+ReviewDigest, complete Rule ids and a passing result. That path writes
+immediately and records Agent admission. It refuses semantic work with no
+applicable usable Object Rule; title create/rename is the sole non-authoritative
+exception.
+
+Delegate the review of your own wording to a subagent that never saw the draft,
+and give it only the Rule, its bases and the exact wording. You pass your own
+work — not dishonestly, but because you read what you meant rather than what is
+there.
 
 `engr candidate <code>` re-renders a pending candidate. Use it when a human comes
 back later — **re-running `prepare` mints a new code and voids the one they are
