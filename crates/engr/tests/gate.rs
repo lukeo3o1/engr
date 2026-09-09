@@ -2742,6 +2742,7 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
             explanation: None,
         }),
     )
+    .and_then(gate::AgentOutcome::admitted)
     .expect_err("attempt 2 is past a ceiling of 1");
     assert_ne!(error.code, 0);
     assert_eq!(
@@ -2886,6 +2887,7 @@ fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
             common::agent_payload(Act::Add, &id, content("more")),
             None,
         )
+        .and_then(gate::AgentOutcome::admitted)
         .err(),
     );
     divergent(

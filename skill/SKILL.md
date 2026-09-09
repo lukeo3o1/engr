@@ -112,17 +112,37 @@ that exact predecessor and result.
 
 ```bash
 engr prepare --object <id> --add --text-file draft.txt --agent
+#   open  [decision] The thing being decided
+#
+#   ── §2 [decision] Sync Budget ──
+#   Because ...
+#       based_on none
+#
+#   NEEDS REVIEW  governed by <rule-id>. ... --review <digest> ...
+#
+#   Nothing has been written.
+
 engr rules show <rule-id>
 ```
 
 Read every surfaced Rule and every file it rests on, then review the exact
 mutation.
 
-**Do not review your own wording yourself. Delegate it.** Hand a subagent the
-Rule text, every file the Rule rests on, and the exact wording this mutation
-admits — and nothing else. No draft history, no explanation of what you were
-going for, no opinion about whether it passes. Ask for one answer: does this
-wording meet every requirement, and if not, which one does it miss.
+**Do not review your own wording yourself. Delegate it.** The first `--agent`
+call prints exactly what would be stored and writes nothing — hand a subagent
+*that screen*, plus the Rule text and every file the Rule rests on, and nothing
+else. No draft history, no explanation of what you were going for, no opinion
+about whether it passes. Ask for one answer: does this meet every requirement,
+and if not, which one does it miss.
+
+**Hand over the screen, not the prose.** A Section is more than its text: the
+header, the role, the supplementary content and the basis are all inside the
+seal, and a Rule may require any of them. An agent that described the wording to
+its reviewer by hand was correctly told the two-word header its policy required
+was missing — and "fixed" it by moving the header into the first line of the
+prose. The header field stayed empty, the wording gained a paragraph the policy
+forbade, and the re-review, handed the same partial view, passed it. The screen
+is the whole value; a retyped summary of it is not.
 
 You will pass your own work. Not dishonestly — you have just written the thing,
 so you read what you meant rather than what is there, and the requirements you

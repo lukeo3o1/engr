@@ -559,6 +559,60 @@ fn render_relations(out: &mut String, relations: &[Relation]) {
     }
 }
 
+/// A projection nothing has written yet, shown as what it would store.
+///
+/// Deliberately **not** [`render_show`]. That screen answers "how far can this
+/// be trusted", and every part of that answer is about a *stored* object: it
+/// compares the value against admitted history, against git, against the seals
+/// on disk. Run over a projection nothing has written, it reports the object as
+/// rewritten and resealed and sends the reader to `engr repair` — a false alarm
+/// about a file that does not exist — and prints the admission instant off the
+/// placeholder the preflight used.
+///
+/// A reviewer is asking the other question. Not how much to trust this, but
+/// what it says: every field a Rule may require, including the ones that are
+/// not prose, and nothing that is only true once it is on disk.
+pub fn render_projection(object: &Object) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  {}{}\n",
+        object.state.as_str(),
+        match object.object_type {
+            Some(object_type) => format!("[{}] ", object_type.as_str()),
+            None => String::new(),
+        },
+        object.title
+    ));
+    for section in &object.sections {
+        out.push_str(&format!(
+            "\n── §{}{}{} ──\n",
+            section.id,
+            match section.role {
+                Some(role) => format!(" [{}]", role.as_str()),
+                None => String::new(),
+            },
+            match &section.header {
+                Some(header) => format!(" {header}"),
+                None => String::new(),
+            }
+        ));
+        out.push_str(section.text.trim_end());
+        out.push('\n');
+        render_content(&mut out, &section.content);
+        render_relations(&mut out, &section.relations);
+        match &section.based_on {
+            Some(basis) => out.push_str(&format!("    based_on {}\n", short(&basis.commit))),
+            None => out.push_str("    based_on none\n"),
+        }
+        for reference in &section.refs {
+            let (target, target_section) = crate::dependency::parse_target(reference.target())
+                .unwrap_or_else(|_| ("invalid".to_owned(), 0));
+            out.push_str(&format!("    refs     {target} §{target_section}\n"));
+        }
+    }
+    out
+}
+
 pub fn render_show(root: &Path, object: &Object) -> String {
     let assessment = assess(root, object);
     let tally = counts(&assessment);

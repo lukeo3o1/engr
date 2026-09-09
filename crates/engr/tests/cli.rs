@@ -1601,6 +1601,122 @@ fn a_create_that_asks_for_a_type_is_told_where_types_come_from() {
     assert_eq!(object.state, engr::semantics::State::Accepted);
 }
 
+/// A governed Agent mutation shows what it would write, not just its name.
+///
+/// Naming the subject and never showing it left an agent delegating the review
+/// to describe it out of the flags it had typed — and a Section is more than
+/// its prose. One watched doing that handed over the wording, was correctly
+/// told the two-word header its policy required was missing, and moved the
+/// header into the first line of the prose: the field stayed empty, the wording
+/// gained a paragraph the policy forbade, and the re-review passed it.
+#[test]
+fn a_governed_agent_mutation_shows_the_subject_it_needs_reviewed() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let digest = |args: &[&str]| {
+        String::from_utf8_lossy(&run_engr(root, args).stderr)
+            .split_whitespace()
+            .find(|word| word.starts_with("1:") && word.len() == 66)
+            .expect("a digest is offered")
+            .to_owned()
+    };
+    let create = ["prepare", "--new", "--title", "Retry Budget", "--agent"];
+    let made = run_engr(
+        root,
+        &[
+            create.as_slice(),
+            &[
+                "--review",
+                &digest(&create),
+                "--reviewed-rule",
+                "careful",
+                "--review-result",
+                "passed",
+            ],
+        ]
+        .concat(),
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let id = store::object_ids(root).expect("ids")[0].clone();
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--header",
+            "Sync Budget",
+            "--role",
+            "decision",
+            "--text",
+            "Because the downstream rate-limits.",
+            "--no-based-on",
+            "--agent",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE));
+    let shown = String::from_utf8_lossy(&refused.stdout).to_string();
+
+    // Every field a Rule may require, not only the one a caller would think to
+    // retype. The header is the field that went missing when this was a name.
+    assert!(
+        shown.contains("── §1 [decision] Sync Budget ──"),
+        "the header and role are on the screen: {shown}"
+    );
+    assert!(
+        shown.contains("Because the downstream rate-limits."),
+        "and the wording: {shown}"
+    );
+    assert!(
+        shown.contains("based_on none"),
+        "and the basis, which a Rule may also require: {shown}"
+    );
+    assert!(
+        shown.contains("Nothing has been written."),
+        "and it says so: {shown}"
+    );
+
+    // Not `show`. That screen answers how far a *stored* object can be trusted,
+    // and over a projection nothing has written it reports the object as
+    // rewritten and resealed and sends the reader to `engr repair`.
+    assert!(
+        !shown.contains("engr repair"),
+        "no false alarm about a file that does not exist: {shown}"
+    );
+    assert!(
+        !shown.contains("0001-01-01"),
+        "and no placeholder instant off the preflight: {shown}"
+    );
+
+    // The one-line refusal a caller may be parsing is still on stderr, and
+    // still carries the digest.
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(said.contains("governed by careful"), "{said}");
+    assert!(
+        said.split_whitespace()
+            .any(|word| word.starts_with("1:") && word.len() == 66),
+        "{said}"
+    );
+
+    // And nothing was written.
+    assert_eq!(store::load_object(root, &id).expect("object").rev, 1);
+}
+
 #[test]
 fn prepare_calls_a_title_a_title() {
     let workspace = TempDir::new().expect("temp dir");

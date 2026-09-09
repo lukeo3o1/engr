@@ -132,7 +132,9 @@ fn agent_review_is_rechecked_and_persisted_by_the_direct_admission_path() {
     );
     let expected = review.review_digest.clone();
 
-    let admitted = gate::admit_agent(temp.path(), payload, Some(review)).expect("agent admit");
+    let admitted = gate::admit_agent(temp.path(), payload, Some(review))
+        .and_then(gate::AgentOutcome::admitted)
+        .expect("agent admit");
 
     assert_eq!(admitted.object.sections[0].admitted.by, Admission::Agent);
     let admission = &admitted.event.metadata.admitted;
@@ -331,7 +333,9 @@ fn human_source_cannot_treat_agent_semantics_as_human_authority() {
         proof::ReviewResult::Passed,
         None,
     );
-    gate::admit_agent(temp.path(), agent_payload, Some(review)).expect("agent section");
+    gate::admit_agent(temp.path(), agent_payload, Some(review))
+        .and_then(gate::AgentOutcome::admitted)
+        .expect("agent section");
 
     let reference = engr::dependency::SelectiveRef::stored(
         engr::proof::section_target(id, 1).expect("section target"),
@@ -618,7 +622,9 @@ fn an_agent_cannot_repair_through_the_api_or_through_a_stored_event() {
     admit_human(root, add(id, "wording admitted through the gate"));
 
     let repair = Payload::new(id, engr::model::Action::ObjectRepaired {});
-    let error = gate::admit_agent(root, repair.clone(), None).expect_err("no agent repair");
+    let error = gate::admit_agent(root, repair.clone(), None)
+        .and_then(gate::AgentOutcome::admitted)
+        .expect_err("no agent repair");
     assert_eq!(error.code, engr::EXIT_INVARIANT);
     assert!(error.message.contains("human gate only"), "{error}");
 

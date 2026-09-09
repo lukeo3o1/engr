@@ -1492,7 +1492,7 @@ fn checked_review(
     payload: &Payload,
     expected_rev: u64,
     attestation: Option<ReviewAttestation>,
-) -> Result<Option<crate::proof::CandidateReview>> {
+) -> Result<ReviewCheck> {
     let mutation = crate::proof::object_review_mutation(before, after, payload)?;
     let binding = crate::rules::bind_object(root, &mutation, expected_rev)?;
     let expected_digest = binding.digest()?.to_string();
@@ -1504,19 +1504,22 @@ fn checked_review(
             EXIT_USAGE,
             "no Object Rule applies to this mutation, so there is no Rule Review to attest"
         );
-        return Ok(None);
+        return Ok(ReviewCheck::Ungoverned);
     }
 
-    let attestation = attestation.ok_or_else(|| {
-        Error::new(
-            EXIT_USAGE,
-            format!(
-                "this mutation is governed by {}; review the surfaced Rules, then repeat it with review digest {} and the review outcome",
-                expected_rules.join(", "),
-                expected_digest
-            ),
-        )
-    })?;
+    // Two answers rather than one error, for the reason `Repairable` has two: a
+    // governed mutation nobody has reviewed yet has not failed, and the caller's
+    // next move is to look at the thing it must review. An error naming the
+    // digest says *which* subject without ever showing it — and the reviewer a
+    // caller delegates to then has to be told the subject by hand, field by
+    // field, which is how a header that was set arrives at a reviewer as a
+    // header that is missing.
+    let Some(attestation) = attestation else {
+        return Ok(ReviewCheck::Needed {
+            digest: expected_digest,
+            rules: expected_rules,
+        });
+    };
     let mut reviewed = attestation.reviewed_rules;
     reviewed.sort();
     reviewed.dedup();
@@ -1545,7 +1548,7 @@ fn checked_review(
     };
     crate::proof::check_review_report(&review)?;
     crate::proof::check_object_review_identity(&review, &mutation, expected_rev)?;
-    Ok(Some(review))
+    Ok(ReviewCheck::Attested(review))
 }
 
 /// What a review outcome means for the Event a confirmation will record.
@@ -1676,7 +1679,24 @@ fn prepare_locked(
     validate_relations(root, &payload, &projected)?;
 
     let expected_rev = object.as_ref().map(|object| object.rev).unwrap_or(0);
-    let report = checked_review(root, &before, &projected, &payload, expected_rev, review)?;
+    // The Human path keeps its refusal. Its second call renders the candidate
+    // in full, so the subject a reviewer needs is one command away here in a way
+    // it was not on the Agent path, which writes on the second call rather than
+    // showing anything.
+    let report = match checked_review(root, &before, &projected, &payload, expected_rev, review)? {
+        ReviewCheck::Ungoverned => None,
+        ReviewCheck::Attested(review) => Some(review),
+        ReviewCheck::Needed { digest, rules } => {
+            return Err(Error::new(
+                EXIT_USAGE,
+                format!(
+                    "this mutation is governed by {}; review the surfaced Rules, then repeat it with review digest {} and the review outcome",
+                    rules.join(", "),
+                    digest
+                ),
+            ))
+        }
+    };
     let prepared = mint(
         root,
         &payload,
@@ -1780,11 +1800,95 @@ fn check_is_a_change(payload: &Payload, object: Option<&Object>) -> Result<()> {
 /// projection, and live Rule material while the writer lock is held. A missing
 /// Rule is permitted only for title create/rename, which is non-authoritative
 /// navigation metadata.
+/// What checking a mutation against project policy answers.
+///
+/// Three answers, because the two failures a boolean would collapse are not the
+/// same thing to a caller: a mutation nobody has reviewed yet is waiting on
+/// work, and a mutation no Rule governs is finished with policy entirely.
+enum ReviewCheck {
+    /// No Rule governs this mutation, so there is no review to attest.
+    Ungoverned,
+    /// Governed, attested, and the attestation holds.
+    Attested(crate::proof::CandidateReview),
+    /// Governed and not yet reviewed: the subject's name, and what governs it.
+    Needed { digest: String, rules: Vec<String> },
+}
+
+/// What `admit_agent` answers with.
+///
+/// An Agent admission that has not been reviewed has not failed — it has not
+/// happened yet, and what the caller does next is read the Rules and look at
+/// what it is about to write. So the unreviewed case carries that: the exact
+/// projection this mutation would store, rendered by the caller the same way
+/// `show` renders anything else.
+///
+/// It used to be an error carrying the digest and the Rule ids, which named the
+/// subject without showing it. An agent delegating the review then had to
+/// describe the subject to its reviewer by hand, out of the flags it had
+/// typed — and a Section is more than its prose. Watched doing exactly that, a
+/// reviewer was handed the wording alone, correctly reported that the
+/// two-word header its policy required was missing, and the agent "fixed" it by
+/// moving the header into the first line of the prose. The header field stayed
+/// empty, the wording gained a fourth paragraph the policy forbade, and the
+/// re-review — handed the same partial view — passed it.
+#[derive(Debug)]
+pub enum AgentOutcome {
+    /// Written, with its Event and the projection it produced.
+    Admitted(Box<Admitted>),
+    /// Governed, and waiting on the review it has not had.
+    NeedsReview(Box<NeedsReview>),
+}
+
+/// A governed Agent mutation, and the subject it must be reviewed as.
+#[derive(Debug)]
+pub struct NeedsReview {
+    /// Exactly what would be stored, had this been reviewed. Not a summary and
+    /// not a rebuild: the projection the admission itself would have written.
+    pub projected: Object,
+    /// The name of that subject under `ReviewDigestContract`.
+    pub digest: String,
+    /// Every Rule id the review must cover.
+    pub rules: Vec<String>,
+}
+
+impl NeedsReview {
+    /// The refusal this is, in one sentence.
+    ///
+    /// One place, because it is said on two paths and by a caller that has
+    /// already rendered the subject: a screen and an error line are for
+    /// different readers, and two spellings of one refusal is one of them
+    /// drifting.
+    pub fn refusal(&self) -> Error {
+        Error::new(
+            EXIT_USAGE,
+            format!(
+                "this mutation is governed by {}; review the surfaced Rules, then repeat it with review digest {} and the review outcome",
+                self.rules.join(", "),
+                self.digest
+            ),
+        )
+    }
+}
+
+impl AgentOutcome {
+    /// The admission, for a caller with nothing to do about a review.
+    ///
+    /// The refusal it produces is the one this path gave before it could show
+    /// the subject, so a caller that cannot act on `NeedsReview` is no worse off
+    /// than it was.
+    pub fn admitted(self) -> Result<Admitted> {
+        match self {
+            Self::Admitted(admitted) => Ok(*admitted),
+            Self::NeedsReview(needed) => Err(needed.refusal()),
+        }
+    }
+}
+
 pub fn admit_agent(
     root: &Path,
     payload: Payload,
     review: Option<ReviewAttestation>,
-) -> Result<Admitted> {
+) -> Result<AgentOutcome> {
     store::require_current(root)?;
     store::with_lock(root, move || admit_agent_locked(root, payload, review))
 }
@@ -1793,7 +1897,7 @@ fn admit_agent_locked(
     root: &Path,
     mut payload: Payload,
     review: Option<ReviewAttestation>,
-) -> Result<Admitted> {
+) -> Result<AgentOutcome> {
     store::require_current(root)?;
     // Before anything else, and unconditionally. The reducer refuses an
     // Agent-admitted repair too, but a door that is only closed further in is
@@ -1832,20 +1936,33 @@ fn admit_agent_locked(
     validate_refs(root, &payload, Admission::Agent)?;
     validate_relations(root, &payload, &projected)?;
 
-    let checked = checked_review(root, &before, &projected, &payload, before.rev, review)?;
-    if let Some(review) = &checked {
-        ensure!(
-            review.result == crate::proof::ReviewResult::Passed,
-            EXIT_INVARIANT,
-            "an Agent mutation is admitted only by a passing Rule Review"
-        );
-    } else {
-        ensure!(
-            payload.action.carries_title(),
-            EXIT_INVARIANT,
-            "Agent semantic Object admission needs at least one applicable usable Object Rule"
-        );
-    }
+    let checked = match checked_review(root, &before, &projected, &payload, before.rev, review)? {
+        // Nothing is written, and the projection goes back to the caller rather
+        // than out of scope with the stack frame. It is what the review is of.
+        ReviewCheck::Needed { digest, rules } => {
+            return Ok(AgentOutcome::NeedsReview(Box::new(NeedsReview {
+                projected,
+                digest,
+                rules,
+            })))
+        }
+        ReviewCheck::Ungoverned => {
+            ensure!(
+                payload.action.carries_title(),
+                EXIT_INVARIANT,
+                "Agent semantic Object admission needs at least one applicable usable Object Rule"
+            );
+            None
+        }
+        ReviewCheck::Attested(review) => {
+            ensure!(
+                review.result == crate::proof::ReviewResult::Passed,
+                EXIT_INVARIANT,
+                "an Agent mutation is admitted only by a passing Rule Review"
+            );
+            Some(review)
+        }
+    };
 
     // An Agent cannot overrule a review, so anything that reached here passed
     // one; the attempt it passed on is the fact worth keeping.
@@ -1870,7 +1987,7 @@ fn admit_agent_locked(
     validate_relations(root, &payload, &object)?;
     store::append_event_locked(root, &payload.object, &event)?;
     store::save_object(root, &object)?;
-    Ok(Admitted { event, object })
+    Ok(AgentOutcome::Admitted(Box::new(Admitted { event, object })))
 }
 /// Everything a relation claims about the world outside this payload.
 ///

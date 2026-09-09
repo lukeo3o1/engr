@@ -1848,7 +1848,48 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
             EXIT_USAGE,
             "--oversize is a Human candidate exception; an Agent admission cannot claim it"
         );
-        let admitted = gate::admit_agent(root, payload, review)?;
+        // Governed and unreviewed is not a failure — it is the half of the work
+        // engr can do, and what the caller does next is read the Rules and look
+        // at this. So it goes to stdout, rendered the way `show` renders
+        // anything else, and the exit code still says nothing was written.
+        //
+        // The subject being *shown* is the point. Named alone, an agent
+        // delegating the review has to describe it to its reviewer out of the
+        // flags it typed, and a Section is more than its prose: one watched
+        // doing exactly that handed over the wording, was correctly told the
+        // two-word header its policy required was missing, and moved the header
+        // into the first line of the prose. The field stayed empty, the wording
+        // gained a paragraph the policy forbade, and the re-review — handed the
+        // same partial view — passed it.
+        let admitted = match gate::admit_agent(root, payload, review)? {
+            gate::AgentOutcome::Admitted(admitted) => *admitted,
+            gate::AgentOutcome::NeedsReview(needed) => {
+                if command.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "needs_review": {
+                                "digest": needed.digest,
+                                "rules": needed.rules,
+                                "projected": needed.projected,
+                            }
+                        }))
+                        .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))?
+                    );
+                } else {
+                    print!("{}", view::render_projection(&needed.projected));
+                    println!(
+                        "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review what is above — all of it, not only the\n              wording — then repeat this command with\n\n                  --review {} --reviewed-rule <RULE> --review-result passed\n\n              Nothing has been written.",
+                        needed.rules.join(", "),
+                        needed.digest
+                    );
+                }
+                // stdout carries the subject for a reader; stderr keeps the
+                // one-line refusal a caller may already be parsing, and the
+                // exit code still says nothing was written.
+                return Err(needed.refusal());
+            }
+        };
         if command.json {
             println!(
                 "{}",
