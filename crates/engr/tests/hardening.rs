@@ -325,6 +325,7 @@ fn the_candidate_states_are_reachable_and_each_one_behaves() {
     // the candidate is left describing a state that no longer exists.
     let stale = gate::prepare(&root, add(&id, wording("stale"))).expect("prepare");
     gate::admit_agent(&root, common::rename(&id, "an agent got there first"), None)
+        .and_then(gate::AgentOutcome::admitted)
         .expect("agent rename");
     match gate::candidate_state(&root, &stale.candidate).expect("classify") {
         gate::CandidateState::Stale { current_rev } => assert!(

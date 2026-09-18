@@ -1221,7 +1221,12 @@ fn a_duplicate_title_is_flagged_but_not_blocked() {
     )
     .expect("a duplicate title is admitted");
     assert_eq!(prepared.notes.len(), 1, "trimmed and case-folded match");
-    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0] else {
+        panic!(
+            "the duplicate-title note is the one this prepares: {:?}",
+            prepared.notes
+        )
+    };
     assert_eq!(object, &first);
 
     let prepared = gate::prepare(
@@ -1307,7 +1312,12 @@ fn a_rename_reports_a_clash_with_another_object_but_not_with_itself() {
     )
     .expect("a duplicate title is admitted, not refused");
     assert_eq!(prepared.notes.len(), 1);
-    let gate::Note::DuplicateTitle { object } = &prepared.notes[0];
+    let gate::Note::DuplicateTitle { object } = &prepared.notes[0] else {
+        panic!(
+            "the duplicate-title note is the one this prepares: {:?}",
+            prepared.notes
+        )
+    };
     assert_eq!(object, &first);
     // Stored as it will be listed. The duplicate check above already ignores the
     // padding, and a listing that prints what that check ignores puts one row
@@ -2732,6 +2742,7 @@ fn an_exhausted_attempt_is_refused_and_there_is_no_second_door() {
             explanation: None,
         }),
     )
+    .and_then(gate::AgentOutcome::admitted)
     .expect_err("attempt 2 is past a ceiling of 1");
     assert_ne!(error.code, 0);
     assert_eq!(
@@ -2876,6 +2887,7 @@ fn a_resealed_out_of_band_edit_cannot_become_an_admission_predecessor() {
             common::agent_payload(Act::Add, &id, content("more")),
             None,
         )
+        .and_then(gate::AgentOutcome::admitted)
         .err(),
     );
     divergent(

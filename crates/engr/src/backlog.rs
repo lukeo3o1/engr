@@ -1132,6 +1132,12 @@ fn take_id(item: &mut Item) -> Result<u64> {
 /// them invites a caller to pass one and forget the other.
 #[derive(Clone, Debug)]
 pub struct Prepared {
+    /// What the agent says it reviewed, where a Rule governs this mutation.
+    ///
+    /// Absent on the first governed attempt, which is what earns the refusal
+    /// that surfaces the digest. Absent forever in a workspace with no
+    /// applicable backlog Rule, where offering one would attest to nothing.
+    pub review: Option<Attestation>,
     /// Which attempt of this review sequence the agent is on.
     ///
     /// Agent-attested process metadata: engr keeps no counter, and a sequence
@@ -1151,6 +1157,7 @@ impl Prepared {
         Self {
             attempt: Attempt::FIRST,
             precondition: None,
+            review: None,
         }
     }
 
@@ -1159,7 +1166,14 @@ impl Prepared {
         Self {
             attempt,
             precondition: None,
+            review: None,
         }
+    }
+
+    /// Carry the attestation this mutation was reviewed under.
+    pub fn reviewed(mut self, review: Option<Attestation>) -> Self {
+        self.review = review;
+        self
     }
 
     /// Bind the predecessor this mutation was written against.
@@ -1179,11 +1193,17 @@ struct Reviewed {
 }
 
 impl Reviewed {
-    fn compose(root: &Path, attempt: Attempt) -> Result<Self> {
-        // One read of policy for both answers. Asking twice lets a rule appear
-        // between them and leaves this mutation acting on two pictures at once.
-        let (_, verdict) = crate::rules::assess(root, crate::rules::Domain::Backlog, attempt)?;
-        match verdict {
+    /// What an attempt means under a Rule set the caller has already resolved.
+    ///
+    /// The snapshot is passed in rather than read here, and that is the whole
+    /// point: this mutation asks policy two questions — what does this attempt
+    /// mean, and what is the review subject — and the second cannot be asked
+    /// until the mutation has been projected. Two reads put a whole mutation
+    /// between them, and `.engr/rules/` is edited by people and by
+    /// `git checkout` rather than through engr. One snapshot cannot disagree
+    /// with itself.
+    fn of(rules: &[crate::rules::BoundRule], attempt: Attempt) -> Result<Self> {
+        match crate::rules::verdict(crate::rules::Domain::Backlog, rules, attempt)? {
             // No applicable rule, or none of them out of attempts. Either way
             // there is no diagnostic to carry.
             crate::rules::Exhaustion::NotReached => Ok(Self { marker: None }),
@@ -1334,6 +1354,434 @@ impl Precondition {
     }
 }
 
+/// One Backlog Section as a review binds it.
+///
+/// Two persisted members are deliberately absent, and both for one reason: they
+/// are stamped by the mutation out of **process metadata** rather than out of
+/// what is being reviewed. `updated_at` comes from the clock, and
+/// `review_exhaustion` is composed from the attested attempt — which #66 §10
+/// keeps out of the review digest by name. Either one inside the subject would
+/// move the digest between the attempt that is offered it and the attempt that
+/// attests to it, and the two-step review would never terminate. That is not a
+/// hypothetical: it is exactly what a minted identity did to a governed Object
+/// creation, and it is the same failure wearing different clothes.
+///
+/// Every member is spelled out, including the ones storage omits when they
+/// carry nothing. Omission is a storage economy and #66 §3 is right to ask for
+/// it there; a hash contract cannot afford one, because the omitting and the
+/// spelling-out implementations would disagree about the bytes.
+#[derive(Serialize, Debug)]
+struct SectionSemantic {
+    id: u64,
+    header: Option<String>,
+    text: String,
+    content: Vec<crate::semantics::Supplement>,
+    subjects: Vec<Subject>,
+    produced: Vec<Produced>,
+}
+
+impl SectionSemantic {
+    fn of(section: &Section) -> Self {
+        Self {
+            id: section.id,
+            header: section.header.clone(),
+            text: section.text.clone(),
+            content: section.content.clone(),
+            subjects: section.subjects.clone(),
+            produced: section.produced.clone(),
+        }
+    }
+}
+
+/// The whole resulting topic, for an operation whose scope is the topic.
+///
+/// `next_section_id` is not here. It is allocation state rather than semantics,
+/// and the id an add actually receives is named in the operation's parameters —
+/// the way the Object table names it — so putting the counter in as well would
+/// bind the same fact twice and let the two spellings disagree.
+#[derive(Serialize, Debug)]
+struct ItemSemantic {
+    title: String,
+    sections: Vec<SectionSemantic>,
+}
+
+impl ItemSemantic {
+    fn of(item: &Item) -> Self {
+        let mut sections: Vec<&Section> = item.sections.iter().collect();
+        sections.sort_by_key(|section| section.id);
+        Self {
+            title: item.title.clone(),
+            sections: sections.into_iter().map(SectionSemantic::of).collect(),
+        }
+    }
+}
+
+/// One point, under the topic it is read in.
+///
+/// Paired for the reason the Object domain pairs a Section with its lifecycle:
+/// the topic is the context a point means something in, so a review of the
+/// point is a review of it *under that title*. `section` is `null` where the
+/// operation removed it.
+#[derive(Serialize, Debug)]
+struct SectionOperation {
+    title: String,
+    section: Option<SectionSemantic>,
+}
+
+/// Which mutation this is, named once per call site.
+///
+/// This also decides which predecessor the mutation is entitled to have been
+/// prepared against: [`Self::binds`] derives the [`Binds`] answer rather than
+/// taking a second argument for it. Two enums per call site is two things to
+/// keep aligned, and the alignment is not checkable — a caller that named a
+/// consume and bound an add would pass every check there is.
+#[derive(Clone, Debug)]
+pub(crate) enum Mutation {
+    Rename,
+    SectionCreate,
+    SectionUpdate(u64),
+    SectionSubjects(u64),
+    SectionProduced {
+        section: u64,
+        outcome: Produced,
+        forget: bool,
+    },
+    SectionMerge {
+        destination: u64,
+        source: u64,
+    },
+    SectionConsume(u64),
+}
+
+impl Mutation {
+    /// What this mutation is entitled to have been prepared against.
+    fn binds(&self) -> Binds {
+        match self {
+            Self::Rename => Binds::Title,
+            Self::SectionCreate => Binds::NewSection,
+            Self::SectionUpdate(section)
+            | Self::SectionSubjects(section)
+            | Self::SectionProduced { section, .. }
+            | Self::SectionConsume(section) => Binds::Section(*section),
+            Self::SectionMerge {
+                destination,
+                source,
+            } => Binds::Merge {
+                destination: *destination,
+                source: *source,
+            },
+        }
+    }
+
+    /// The protocol's operation name, never the CLI spelling — a command line
+    /// is presentation and may change without the semantics changing at all.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::SectionCreate => "section.create",
+            Self::SectionUpdate(_) => "section.update",
+            Self::SectionSubjects(_) => "section.subjects",
+            Self::SectionProduced { .. } => "section.produced",
+            Self::SectionMerge { .. } => "section.merge",
+            Self::SectionConsume(_) => "section.consume",
+        }
+    }
+
+    /// The canonical target, in the embedded reference spelling #66 §4 fixes.
+    fn target(&self, item: &str) -> Result<String> {
+        let owner = item_target(item)?;
+        Ok(match self {
+            // The topic itself. An add names the topic too: the point it
+            // creates has no identity until the mutation runs, and the id it
+            // receives is the protocol's answer, carried in the parameters.
+            Self::Rename | Self::SectionCreate => owner,
+            Self::SectionUpdate(section)
+            | Self::SectionSubjects(section)
+            | Self::SectionProduced { section, .. }
+            | Self::SectionConsume(section) => section_target(&owner, *section)?,
+            Self::SectionMerge { destination, .. } => section_target(&owner, *destination)?,
+        })
+    }
+
+    /// What the operation does that its `after` projection cannot show.
+    ///
+    /// `allocated` is the id an add received, read off the counter the item
+    /// carried before the mutation ran rather than predicted — the protocol's
+    /// answer, like the Object table's.
+    fn parameters(&self, allocated: u64) -> Result<serde_json::Value> {
+        Ok(match self {
+            Self::Rename
+            | Self::SectionUpdate(_)
+            | Self::SectionSubjects(_)
+            | Self::SectionConsume(_) => serde_json::json!({}),
+            Self::SectionCreate => serde_json::json!({ "section": allocated }),
+            // Which entry, and which direction. The resulting `produced[]` does
+            // show the difference, and naming it anyway is what keeps a forget
+            // of an entry that was never there from being the same subject as
+            // an idempotent re-record of one that was.
+            Self::SectionProduced {
+                outcome, forget, ..
+            } => serde_json::json!({
+                "outcome": outcome.target.reference,
+                "forget": forget,
+            }),
+            // The source is named because `after` cannot say it: a point that
+            // was consumed and a point that never existed look identical in a
+            // list that no longer holds either.
+            Self::SectionMerge { source, .. } => serde_json::json!({ "source": source }),
+        })
+    }
+
+    /// Whether this operation's scope is the whole topic.
+    ///
+    /// **The projection's scope is the precondition's scope.** One sentence
+    /// generates the whole table, and it is the sentence that keeps the two
+    /// halves of a review honest: a subject wider than what the mutation was
+    /// prepared against would move when an unrelated sibling moved, and an
+    /// agent would be sent back to review work it never touched.
+    fn whole_topic(&self) -> bool {
+        matches!(self, Self::Rename | Self::SectionMerge { .. })
+    }
+
+    /// The `after` projection this operation is defined to carry.
+    ///
+    /// Read off what the mutation produced rather than re-derived, so the
+    /// descriptor describes the change that actually happened. `after` is
+    /// entirely absent — `null` — where the topic itself went with the point,
+    /// because "this point is gone" and "this point and the topic holding it
+    /// are gone" are two different judgements and a review must not conflate
+    /// them.
+    fn after(&self, after: Option<&Item>) -> Result<serde_json::Value> {
+        let Some(after) = after else {
+            return Ok(serde_json::Value::Null);
+        };
+        let json = |value: &dyn erased::Erased| value.to_json();
+        if self.whole_topic() {
+            return json(&ItemSemantic::of(after));
+        }
+        let section = match self {
+            Self::SectionCreate => Some(
+                after
+                    .sections
+                    .iter()
+                    .max_by_key(|section| section.id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            EXIT_INVARIANT,
+                            "an add leaves at least one point".to_owned(),
+                        )
+                    })?,
+            ),
+            Self::SectionUpdate(section)
+            | Self::SectionSubjects(section)
+            | Self::SectionProduced { section, .. }
+            | Self::SectionConsume(section) => after.section(*section).ok(),
+            // Handled above; kept exhaustive so a new operation cannot silently
+            // fall into the section-scoped branch.
+            Self::Rename | Self::SectionMerge { .. } => unreachable!("whole_topic covers these"),
+        };
+        json(&SectionOperation {
+            title: after.title.clone(),
+            section: section.map(SectionSemantic::of),
+        })
+    }
+}
+
+/// Serializing a projection without naming its type twice.
+mod erased {
+    use super::{Error, Result, EXIT_SCHEMA};
+    use serde::Serialize;
+
+    pub trait Erased {
+        fn to_json(&self) -> Result<serde_json::Value>;
+    }
+
+    impl<T: Serialize> Erased for T {
+        fn to_json(&self) -> Result<serde_json::Value> {
+            serde_json::to_value(self)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("projection: {error}")))
+        }
+    }
+}
+
+/// The canonical target of an operation that names a whole topic.
+fn item_target(id: &str) -> Result<String> {
+    Ok(format!(
+        "{}:{}",
+        ResourceKind::Backlog.token(),
+        crate::reference::encode_uuid_str(id)?
+    ))
+}
+
+/// The canonical target of an operation that names one point.
+fn section_target(owner: &str, section: u64) -> Result<String> {
+    ensure!(section > 0, EXIT_SCHEMA, "section ids start at 1");
+    ensure!(
+        section <= crate::proof::MAX_SAFE_INTEGER,
+        EXIT_SCHEMA,
+        "section id {section} is outside the shared safe-integer domain"
+    );
+    Ok(format!("{owner}:{section}"))
+}
+
+/// The Backlog-domain ReviewDigest `mutation`.
+///
+/// Three members, and the same three the Object domain uses. One descriptor
+/// shape across domains is one thing a second implementation has to learn, and
+/// each member means here exactly what it means there.
+///
+/// Private members and no public constructor, so a binding can only be built
+/// from a real projection. The untyped route through `rules::bind` still exists
+/// for the domains that have no frozen descriptor; what it can no longer be is
+/// how a *Backlog* subject gets made inside engr.
+#[derive(Serialize, Debug)]
+pub(crate) struct ReviewMutation {
+    operation: crate::proof::Operation,
+    /// The existing resource the operation acts on, and `null` for a creation —
+    /// engr mints the UUIDv7 while performing the create and a caller may not
+    /// choose one, so there is no identity in existence for a review to name.
+    target: Option<String>,
+    after: serde_json::Value,
+}
+
+/// The frozen descriptor for one Backlog mutation.
+///
+/// | operation        | target                 | parameters                         | after            |
+/// | ---              | ---                    | ---                                | ---              |
+/// | `create`         | `null`                 | `{}`                               | topic            |
+/// | `rename`         | `backlog:<c>`          | `{}`                               | topic            |
+/// | `section.create` | `backlog:<c>`          | `{"section": <allocated>}`         | point            |
+/// | `section.update` | `backlog:<c>:<n>`      | `{}`                               | point            |
+/// | `section.subjects` | `backlog:<c>:<n>`    | `{}`                               | point            |
+/// | `section.produced` | `backlog:<c>:<n>`    | `{"outcome": <ref>, "forget": <bool>}` | point        |
+/// | `section.merge`  | `backlog:<c>:<dest>`   | `{"source": <n>}`                  | topic            |
+/// | `section.consume` | `backlog:<c>:<n>`     | `{}`                               | point, or `null` |
+///
+/// "topic" is the complete resulting item; "point" is the one Section under its
+/// title. Which of the two an operation uses is not a taste: it is the scope
+/// that operation's precondition binds.
+fn review_mutation(
+    mutation: &Mutation,
+    item: &str,
+    allocated: u64,
+    after: Option<&Item>,
+) -> Result<ReviewMutation> {
+    Ok(ReviewMutation {
+        operation: crate::proof::Operation {
+            name: mutation.name().to_owned(),
+            parameters: mutation.parameters(allocated)?,
+        },
+        target: Some(mutation.target(item)?),
+        after: mutation.after(after)?,
+    })
+}
+
+/// The descriptor for a creation, which names no target at all.
+fn creation_mutation(after: &Item) -> Result<ReviewMutation> {
+    Ok(ReviewMutation {
+        operation: crate::proof::Operation {
+            name: "create".to_owned(),
+            parameters: serde_json::json!({}),
+        },
+        target: None,
+        after: serde_json::to_value(ItemSemantic::of(after))
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("projection: {error}")))?,
+    })
+}
+
+/// What an agent says it reviewed.
+///
+/// The attempt is not in here. It is agent-attested process metadata that #66
+/// §10 keeps out of the digest, so it travels on [`Prepared`] where it cannot
+/// reach the hash — the shape makes that structural rather than remembered.
+#[derive(Clone, Debug)]
+pub struct Attestation {
+    /// The ReviewDigest the first governed attempt surfaced.
+    pub review_digest: String,
+    /// Every rule id the review covered. The complete applicable set, or this
+    /// is a review of something else.
+    pub reviewed_rules: Vec<String>,
+}
+
+/// The predecessor a Backlog mutation was reviewed against.
+///
+/// A creation binds nothing and says so **by name** rather than by an empty
+/// object: `{}` is what a predecessor whose members all happened to be omitted
+/// would also look like, and "there was nothing to bind" is a different claim
+/// from "everything I bound was empty".
+fn review_precondition(precondition: Option<&Precondition>) -> Result<serde_json::Value> {
+    match precondition {
+        Some(precondition) => serde_json::to_value(precondition)
+            .map_err(|error| Error::new(EXIT_SCHEMA, format!("precondition: {error}"))),
+        None => Ok(serde_json::json!({ "precondition": "none" })),
+    }
+}
+
+/// Hold this mutation to the review it claims, against the subject as it stands
+/// right now.
+///
+/// Recomputed, never looked up, and inside the writer lock: the digest an agent
+/// submits means something only if the thing it names is rebuilt from current
+/// state at the moment of admission, or the interval between reviewing and
+/// applying is exactly where the subject can change.
+///
+/// The rule ids are checked as well as the hash. Redundant against a correct
+/// implementation, and not redundant against a confused one: an agent that
+/// names the wrong set has said its review covered something else, and that is
+/// better said than accepted.
+fn check_review(
+    rules: Vec<crate::rules::BoundRule>,
+    mutation: &ReviewMutation,
+    precondition: serde_json::Value,
+    attestation: Option<&Attestation>,
+) -> Result<()> {
+    if rules.is_empty() {
+        ensure!(
+            attestation.is_none(),
+            EXIT_USAGE,
+            "no backlog Rule applies to this mutation, so there is no Rule Review to attest"
+        );
+        return Ok(());
+    }
+    let mutation = serde_json::to_value(mutation)
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?;
+    let binding =
+        crate::rules::rebind(crate::rules::Domain::Backlog, mutation, precondition, rules)?;
+    let expected_digest = binding.digest()?.to_string();
+    let expected_rules = binding.rule_ids();
+
+    let attestation = attestation.ok_or_else(|| {
+        Error::new(
+            EXIT_USAGE,
+            format!(
+                "this mutation is governed by {}; read the surfaced Rules and what they rest on, review this exact change, then repeat it with review digest {} and the complete rule set",
+                expected_rules.join(", "),
+                expected_digest
+            ),
+        )
+    })?;
+    let mut reviewed = attestation.reviewed_rules.clone();
+    reviewed.sort();
+    reviewed.dedup();
+    ensure!(
+        reviewed == expected_rules,
+        EXIT_INVARIANT,
+        "the review names {}, and this mutation is governed by {}",
+        if reviewed.is_empty() {
+            "no Rules".to_owned()
+        } else {
+            reviewed.join(", ")
+        },
+        expected_rules.join(", ")
+    );
+    ensure!(
+        attestation.review_digest == expected_digest,
+        EXIT_INVARIANT,
+        "this review was of something else; review the current subject and attest to {expected_digest}"
+    );
+    Ok(())
+}
+
 fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
     store::require_current(root)?;
     store::with_lock(root, || {
@@ -1344,26 +1792,53 @@ fn locked<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
 
 /// Apply one mutation to one item, under the lock, having earned the right to.
 ///
-/// The order is the contract. The precondition is checked first, because a
-/// mutation prepared against something else is not a mutation anyone reviewed;
-/// then the verdict is composed against the rules as they stand right now.
+/// The order is the contract, and it now has four steps rather than three:
+///
+/// 1. the predecessor, because a mutation prepared against something else is
+///    not a mutation anyone reviewed;
+/// 2. the verdict, against the rules as they stand right now;
+/// 3. the mutation itself, projected but **not written**;
+/// 4. the review, against that projection — because what an agent has to have
+///    reviewed is the change it is making, and until step 3 has run there is
+///    nothing for the digest to be over.
+///
+/// Steps 2 and 4 read policy once between them. They used to be one step and
+/// one read because only the verdict needed it; splitting them without sharing
+/// the snapshot would put a whole mutation between two reads of a directory
+/// people edit by hand.
+///
+/// Nothing is written until every step has passed, so a refusal at step 4
+/// leaves the item exactly as it was — the projected result is discarded with
+/// the stack frame.
 fn edit<T>(
     root: &Path,
     id: &str,
     prepared: &Prepared,
-    binds: Binds,
+    mutation: Mutation,
     body: impl FnOnce(&mut Item, &Reviewed) -> Result<T>,
 ) -> Result<T> {
     locked(root, || {
         Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
-            precondition.authorizes(id, &binds)?;
+            precondition.authorizes(id, &mutation.binds())?;
             precondition.still_holds(root)?;
         }
-        let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        let rules = crate::rules::resolved(root, crate::rules::Domain::Backlog)?;
+        let reviewed = Reviewed::of(&rules, prepared.attempt)?;
         let mut item = load(root, id)?;
+        // The id an add is about to receive, read off the counter before the
+        // mutation runs. Predicting it afterwards would mean reading it back
+        // out of the result, which is the same number by a longer route only
+        // for as long as nothing else allocates.
+        let allocated = item.next_section_id;
         let outcome = body(&mut item, &reviewed)?;
         item.sections.sort_by_key(|section| section.id);
+        check_review(
+            rules,
+            &review_mutation(&mutation, id, allocated, Some(&item))?,
+            review_precondition(prepared.precondition.as_ref())?,
+            prepared.review.as_ref(),
+        )?;
         save(root, &item)?;
         Ok(outcome)
     })
@@ -1429,7 +1904,8 @@ pub fn create(
             EXIT_INVARIANT,
             "a new backlog item takes an id engr allocates, so there is nothing for a precondition to bind"
         );
-        let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        let rules = crate::rules::resolved(root, crate::rules::Domain::Backlog)?;
+        let reviewed = Reviewed::of(&rules, prepared.attempt)?;
         let mut section = Section {
             id: 1,
             text: text.to_owned(),
@@ -1447,6 +1923,16 @@ pub fn create(
             next_section_id: 2,
             sections: vec![section],
         };
+        // The identity is minted above and is deliberately not in the review
+        // subject — see `creation_mutation`. A creation is reviewed for its
+        // intent, and the id engr issues for it is a different id on the next
+        // attempt, so binding it would make the two-step review unable to end.
+        check_review(
+            rules,
+            &creation_mutation(&item)?,
+            review_precondition(None)?,
+            prepared.review.as_ref(),
+        )?;
         save(root, &item)?;
         Ok(item)
     })
@@ -1464,7 +1950,7 @@ pub fn create(
 /// representation nobody has settled, so this refuses rather than inventing one.
 pub fn rename(root: &Path, id: &str, title: &str, prepared: &Prepared) -> Result<Item> {
     check_title(title)?;
-    edit(root, id, prepared, Binds::Title, |item, reviewed| {
+    edit(root, id, prepared, Mutation::Rename, |item, reviewed| {
         reviewed.must_have_passed(
             "a title is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
         )?;
@@ -1481,22 +1967,28 @@ pub fn add_section(
     prepared: &Prepared,
 ) -> Result<u64> {
     check_text(text)?;
-    edit(root, id, prepared, Binds::NewSection, |item, reviewed| {
-        let section = take_id(item)?;
-        let mut added = Section {
-            id: section,
-            text: text.to_owned(),
-            updated_at: now(),
-            subjects,
-            produced: Vec::new(),
-            header: None,
-            content: Vec::new(),
-            review_exhaustion: None,
-        };
-        reviewed.mark(&mut added);
-        item.sections.push(added);
-        Ok(section)
-    })
+    edit(
+        root,
+        id,
+        prepared,
+        Mutation::SectionCreate,
+        |item, reviewed| {
+            let section = take_id(item)?;
+            let mut added = Section {
+                id: section,
+                text: text.to_owned(),
+                updated_at: now(),
+                subjects,
+                produced: Vec::new(),
+                header: None,
+                content: Vec::new(),
+                review_exhaustion: None,
+            };
+            reviewed.mark(&mut added);
+            item.sections.push(added);
+            Ok(section)
+        },
+    )
 }
 
 pub fn revise_section(
@@ -1511,7 +2003,7 @@ pub fn revise_section(
         root,
         id,
         prepared,
-        Binds::Section(section),
+        Mutation::SectionUpdate(section),
         |item, reviewed| {
             item.section(section)?;
             let slot = item
@@ -1547,7 +2039,7 @@ pub fn set_subjects(
         root,
         id,
         prepared,
-        Binds::Section(section),
+        Mutation::SectionSubjects(section),
         |item, reviewed| {
             item.section(section)?;
             let slot = item
@@ -1596,7 +2088,11 @@ pub fn record_produced(
         root,
         id,
         prepared,
-        Binds::Section(section),
+        Mutation::SectionProduced {
+            section,
+            outcome: outcome.clone(),
+            forget: false,
+        },
         |item, reviewed| {
             // Inside the lock, not before it. Existence is checked exactly once, at
             // the moment the claim is made — so it has to be checked at the moment
@@ -1690,7 +2186,11 @@ pub fn forget_produced(
         root,
         id,
         prepared,
-        Binds::Section(section),
+        Mutation::SectionProduced {
+            section,
+            outcome: outcome.clone(),
+            forget: true,
+        },
         |item, reviewed| {
             item.section(section)?;
             let slot = item
@@ -1752,7 +2252,7 @@ pub fn merge_into(
         root,
         id,
         prepared,
-        Binds::Merge {
+        Mutation::SectionMerge {
             destination,
             source,
         },
@@ -1810,13 +2310,19 @@ pub fn merge_into(
 /// there would be nothing left to mark. The point stays exactly as it was, and
 /// no marker is written, because nothing was admitted for one to describe.
 pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared) -> Result<bool> {
+    let mutation = Mutation::SectionConsume(section);
     locked(root, || {
         Reviewed::needs_predecessor(prepared.precondition.as_ref())?;
         if let Some(precondition) = &prepared.precondition {
-            precondition.authorizes(id, &Binds::Section(section))?;
+            precondition.authorizes(id, &mutation.binds())?;
             precondition.still_holds(root)?;
         }
-        let reviewed = Reviewed::compose(root, prepared.attempt)?;
+        let rules = crate::rules::resolved(root, crate::rules::Domain::Backlog)?;
+        let reviewed = Reviewed::of(&rules, prepared.attempt)?;
+        // Before the review, and deliberately. An exhausted removal cannot be
+        // admitted by any attestation, so surfacing a digest for it would offer
+        // a path that does not exist — and the answer a caller needs is that the
+        // point is still here, not a hash of a change they cannot make.
         reviewed.must_have_passed(
             "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
         )?;
@@ -1830,7 +2336,19 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
             require_no_work(root, id)?;
         }
         item.sections.retain(|candidate| candidate.id != section);
-        if item.sections.is_empty() {
+        let emptied = item.sections.is_empty();
+        // `after` is the whole absence when the topic goes with the point.
+        // Consuming the last point is a different judgement from consuming one
+        // of several, and a review must be able to tell them apart: one ends an
+        // unresolved topic, the other narrows it.
+        let after = if emptied { None } else { Some(&item) };
+        check_review(
+            rules,
+            &review_mutation(&mutation, id, item.next_section_id, after)?,
+            review_precondition(prepared.precondition.as_ref())?,
+            prepared.review.as_ref(),
+        )?;
+        if emptied {
             remove(root, id)?;
             return Ok(true);
         }
@@ -1870,4 +2388,81 @@ fn require_no_work(root: &Path, id: &str) -> Result<()> {
          `engr work rm {subject}` and consume again, or record what it was for first"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod frozen_table_tests {
+    use super::*;
+
+    const AT: &str = "2026-09-08T00:00:00Z";
+    const ID: &str = "0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f";
+
+    fn section(id: u64, text: &str) -> Section {
+        Section {
+            id,
+            header: None,
+            text: text.to_owned(),
+            content: Vec::new(),
+            updated_at: AT.to_owned(),
+            subjects: Vec::new(),
+            produced: Vec::new(),
+            review_exhaustion: None,
+        }
+    }
+
+    fn topic() -> Item {
+        Item {
+            id: ID.to_owned(),
+            title: "the topic".to_owned(),
+            next_section_id: 2,
+            sections: vec![section(1, "as revised")],
+        }
+    }
+
+    fn bytes(mutation: &ReviewMutation, precondition: serde_json::Value) -> String {
+        let binding = crate::rules::rebind(
+            crate::rules::Domain::Backlog,
+            serde_json::to_value(mutation).expect("mutation value"),
+            precondition,
+            Vec::new(),
+        )
+        .expect("rebind");
+        crate::proof::canonical_bytes(&binding, "review binding").expect("canonical")
+    }
+
+    /// The exact bytes of a point-scoped mutation, pinned.
+    ///
+    /// Two implementations that agree on the operation, the target, the after
+    /// projection, the predecessor and the Rule set must reach these bytes;
+    /// anything else is a private agreement between one build and its own
+    /// tests. `updated_at` appears in the **precondition**, which is a
+    /// predecessor that already stands still, and nowhere in `after`, which is
+    /// what the mutation is about to produce.
+    #[test]
+    fn a_point_scoped_mutation_hashes_to_its_pinned_contract_bytes() {
+        let after = topic();
+        let mutation =
+            review_mutation(&Mutation::SectionUpdate(1), ID, 2, Some(&after)).expect("mutation");
+        let precondition = review_precondition(Some(
+            &Precondition::of_section(&after, 1).expect("predecessor"),
+        ))
+        .expect("precondition");
+        assert_eq!(
+            bytes(&mutation, precondition),
+            r#"{"domain":"backlog","mutation":{"after":{"section":{"content":[],"header":null,"id":1,"produced":[],"subjects":[],"text":"as revised"},"title":"the topic"},"operation":{"name":"section.update","parameters":{}},"target":"backlog:01jbrcg6hbfgyrwkttddy8v7gf:1"},"precondition":{"item":"0192f0c8-1a2b-7c3d-8e4f-5a6b7c8d9e0f","precondition":"section","section":{"id":1,"text":"as revised","updated_at":"2026-09-08T00:00:00Z"},"title":"the topic"},"rules":[]}"#,
+            "the frozen JCS bytes of a point-scoped backlog review binding"
+        );
+    }
+
+    /// A creation names no target and binds no predecessor, and says the second
+    /// one by name rather than with an empty object.
+    #[test]
+    fn a_creation_hashes_to_its_pinned_contract_bytes() {
+        let mutation = creation_mutation(&topic()).expect("mutation");
+        assert_eq!(
+            bytes(&mutation, review_precondition(None).expect("precondition")),
+            r#"{"domain":"backlog","mutation":{"after":{"sections":[{"content":[],"header":null,"id":1,"produced":[],"subjects":[],"text":"as revised"}],"title":"the topic"},"operation":{"name":"create","parameters":{}},"target":null},"precondition":{"precondition":"none"},"rules":[]}"#,
+            "the frozen JCS bytes of a backlog creation review binding"
+        );
+    }
 }

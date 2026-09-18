@@ -1952,6 +1952,30 @@ fn bound_rules(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
 /// What the applicable rules say about one attempt, without a mutation to
 /// describe.
 ///
+/// The applicable Rule set for a domain, resolved once, for a caller that needs
+/// it twice.
+///
+/// A Backlog mutation asks policy two questions — what does this attempt mean
+/// under the ceilings, and what is the review subject — and the second cannot be
+/// asked until the mutation has been projected. Asking each from its own read
+/// puts a whole mutation between them, and `.engr/rules/` is edited by people
+/// and by `git checkout` rather than through engr, so the two answers can come
+/// from two different policies. One snapshot, handed to [`verdict`] and to
+/// [`rebind`], cannot disagree with itself.
+pub fn resolved(root: &Path, domain: Domain) -> Result<Vec<BoundRule>> {
+    bound_rules(root, domain)
+}
+
+/// What an attempt means under an already-resolved Rule set.
+///
+/// The composition [`exhaustion`] performs, over rules a caller is holding
+/// rather than over a fresh read. Same function underneath, so a caller that
+/// splits the read from the verdict cannot get a different answer from one that
+/// does not.
+pub fn verdict(domain: Domain, rules: &[BoundRule], attempt: Attempt) -> Result<Exhaustion> {
+    compose(domain, rules, attempt)
+}
+
 /// A domain whose mutations are applied directly — Backlog — still has to ask
 /// the exhaustion question, and it has no prepared candidate to hang a binding
 /// on. The verdict is composed from the same resolved rules either way, so this

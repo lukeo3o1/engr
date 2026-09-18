@@ -239,7 +239,7 @@ fn repair_writes_back_a_projection_that_is_gone() {
             .find("Wording that exists nowhere else")
             .unwrap_or_else(|| panic!("{surface} must show what will be restored: {screen:?}"));
         let confirm = screen
-            .find("Type this exactly to confirm")
+            .find(OFFERS_A_CODE)
             .unwrap_or_else(|| panic!("{surface} must offer the code: {screen:?}"));
         assert!(
             wording < confirm,
@@ -247,11 +247,7 @@ fn repair_writes_back_a_projection_that_is_gone() {
         );
     };
     shows_the_wording(&screen, "the repair screen");
-    let code = screen
-        .split_whitespace()
-        .last()
-        .expect("the screen ends with the code")
-        .to_owned();
+    let code = offered_code(&screen);
 
     // The same code, rendered again hours later, through the same renderer.
     let again = run_engr(root, &["candidate", &code]);
@@ -307,6 +303,13 @@ fn repair_writes_back_a_projection_that_is_gone() {
     );
 }
 
+/// The marker that a screen is offering a live code for a human to answer.
+///
+/// One constant rather than ten copies of a sentence: the wording of that
+/// offer is exactly the thing this round changed, and a screen contract pinned
+/// by ten separate string literals is a contract nobody can restate.
+const OFFERS_A_CODE: &str = "FOR A HUMAN";
+
 /// The code a screen actually offers, taken from the line that offers it.
 ///
 /// The last word on the output is not always the code: preparing a candidate
@@ -314,8 +317,8 @@ fn repair_writes_back_a_projection_that_is_gone() {
 fn offered_code(screen: &str) -> String {
     screen
         .lines()
-        .find_map(|line| line.strip_prefix("Type this exactly to confirm:"))
-        .and_then(|offer| offer.split_whitespace().nth(1))
+        .find_map(|line| line.trim().strip_prefix("CONFIRM "))
+        .map(str::trim)
         .unwrap_or_else(|| panic!("the screen must offer a code: {screen:?}"))
         .to_owned()
 }
@@ -497,7 +500,7 @@ fn a_repair_code_is_dead_once_the_damage_is_gone() {
         "the screen must say the reason it was prepared for is gone: {rendered:?}"
     );
     assert!(
-        !rendered.contains("Type this exactly to confirm"),
+        !rendered.contains(OFFERS_A_CODE),
         "and must not offer a code it will refuse: {rendered:?}"
     );
     // Not "prepare it again": that is what a fresh `repair` refuses, for this
@@ -535,7 +538,7 @@ fn a_repair_code_is_dead_once_the_damage_is_gone() {
     save_raw(root, &resealed.object).expect("damage it again");
     let live = String::from_utf8_lossy(&run_engr(root, &["repair", &id]).stdout).to_string();
     assert!(
-        live.contains("Type this exactly to confirm"),
+        live.contains(OFFERS_A_CODE),
         "a damaged projection is still repairable: {live:?}"
     );
 }
@@ -825,7 +828,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
         "{shown_text}"
     );
     assert!(
-        !shown_text.contains("Type this exactly to confirm"),
+        !shown_text.contains(OFFERS_A_CODE),
         "an applied admission is not offered again: {shown_text}"
     );
     let listed = run_engr(root, &["candidate"]);
@@ -874,10 +877,7 @@ fn candidate_display_distinguishes_retryable_from_stale() {
     // The screen offers nothing to type. An older `expected_rev` cannot be
     // confirmed, so an instruction to confirm it is an instruction to answer a
     // question the gate has already refused.
-    assert!(
-        !stale_text.contains("Type this exactly to confirm"),
-        "{stale_text}"
-    );
+    assert!(!stale_text.contains(OFFERS_A_CODE), "{stale_text}");
     assert!(
         !stale_text.contains(&format!("CONFIRM {stale_code}")),
         "{stale_text}"
@@ -1337,6 +1337,632 @@ fn the_activated_generation_is_written_as_one_contract() {
         "the human gate is the door this came through, and the record says which"
     );
     assert!(!loaded.sections[0].admitted.at.is_empty());
+}
+
+/// One field, one name, across the whole tool.
+///
+/// A cold agent recording its first decision reached for `--title`, because
+/// that is what `backlog new`, `backlog rename` and `collection` call the same
+/// field. `prepare` took it only as `--text`, and clap's guess for the unknown
+/// flag was `--state` — which does not name a title at all, it changes the
+/// object's lifecycle. Two commands disagreeing about the name of one thing,
+/// and the tip pointing at a different thing.
+/// The screen says whose line the code is, because the screen is what an agent
+/// reads.
+///
+/// `Type this exactly to confirm` was an instruction, and in an autonomous
+/// session the reader carrying it out is the agent — so engr was telling it to
+/// admit its own proposal as a human. A cold agent did exactly that, three
+/// times, in a workspace with no skill file: the prohibition lived only in the
+/// guide, and a guide is not on the path of somebody who never read one.
+///
+/// Three things are pinned, because the sentence has three jobs. It must name
+/// the reader it is addressed to, it must still carry the exact phrase
+/// `confirm` accepts, and it must say what taking the code costs — an agent
+/// deciding whether to press on needs to know this one is undetectable
+/// afterwards, not merely that it is disallowed.
+#[test]
+fn the_candidate_screen_says_the_code_is_not_the_agents_to_answer() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let screen = run_engr(root, &["prepare", "--new", "--title", "whose line is it"]);
+    let screen = String::from_utf8_lossy(&screen.stdout).to_string();
+
+    assert!(
+        screen.contains("FOR A HUMAN"),
+        "the offer names its reader: {screen}"
+    );
+    assert!(
+        screen.contains("Typing it yourself records this as human-admitted"),
+        "and says what taking it costs: {screen}"
+    );
+    assert!(
+        screen.contains("no\n              later reader can tell that apart"),
+        "and that the cost is undetectable afterwards: {screen}"
+    );
+
+    // The phrase itself does not move. It is what a person types and what
+    // `confirm` accepts, and changing it would be a change to the gate rather
+    // than to the sentence around it.
+    let code = offered_code(&screen);
+    assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
+        .status
+        .success());
+
+    // Re-rendered hours later, the same sentence — that screen is where a
+    // human who came back late actually reads it.
+    let repeat = run_engr(root, &["prepare", "--new", "--title", "and again later"]);
+    let code = offered_code(&String::from_utf8_lossy(&repeat.stdout));
+    let again = run_engr(root, &["candidate", &code]);
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("FOR A HUMAN"),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+}
+
+/// A passing review on the Human path is a wrong turn, and the screen says so.
+///
+/// The Human path takes a review for one reason: a failed or exhausted one is
+/// something a person can overrule, and the Challenge must carry what they are
+/// being asked to overrule. A review that **passed** leaves nothing to
+/// overrule — so a caller here has done the whole review and then queued for a
+/// human anyway, and a person does not compute a ReviewDigest.
+///
+/// Dogfooding watched two cold agents do exactly this and then type the code
+/// back themselves. Saying whose line the code is did not stop it, because the
+/// caller had not found the agent path to be sent back to. This names the path.
+#[test]
+fn a_passing_review_on_the_human_path_is_named_as_the_wrong_door() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\nreview:\n  max_attempts: 2\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let offered = |args: &[&str]| {
+        let refused = run_engr(root, args);
+        String::from_utf8_lossy(&refused.stderr)
+            .split_whitespace()
+            .find(|word| word.starts_with("1:") && word.len() == 66)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no digest offered: {}",
+                    String::from_utf8_lossy(&refused.stderr)
+                )
+            })
+            .to_owned()
+    };
+
+    let base = ["prepare", "--new", "--title", "which door"];
+    let digest = offered(&base);
+    let passed = run_engr(
+        root,
+        &[
+            base.as_slice(),
+            &[
+                "--review",
+                &digest,
+                "--reviewed-rule",
+                "careful",
+                "--review-result",
+                "passed",
+            ],
+        ]
+        .concat(),
+    );
+    let screen = String::from_utf8_lossy(&passed.stdout).to_string();
+    assert!(
+        screen.contains("nothing here for a person to"),
+        "the screen names the wrong turn: {screen}"
+    );
+    assert!(
+        screen.contains("`--agent` writes it"),
+        "and names the path that was missed: {screen}"
+    );
+
+    // Recomputed, so the screen a human reaches hours later says the same —
+    // and so does the one an agent re-reads before deciding to press on.
+    let code = offered_code(&screen);
+    let again = run_engr(root, &["candidate", &code]);
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("nothing here for a person to"),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+
+    // And silent where the Human path is the right one. A failed review is
+    // exactly what a person is here to overrule, so saying "you took the wrong
+    // door" would be false — and a note that fires on a non-problem is how
+    // people learn to skip the notes.
+    let digest = offered(&["prepare", "--new", "--title", "a real override"]);
+    let failed = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--title",
+            "a real override",
+            "--review",
+            &digest,
+            "--reviewed-rule",
+            "careful",
+            "--review-result",
+            "failed",
+            "--review-explanation",
+            "the wording is a plan, not a record",
+        ],
+    );
+    let screen = String::from_utf8_lossy(&failed.stdout).to_string();
+    assert!(
+        failed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        !screen.contains("nothing here for a person to"),
+        "an override is what this path is for: {screen}"
+    );
+}
+
+/// Asking a create for a type is answered with the act that gives it one.
+///
+/// A create is the one action that does not name the state it produces, because
+/// it has none to name — a new object arrives untyped and open. It got the
+/// "already names the state it produces" refusal anyway, which was false of it
+/// and, more to the point, was the whole of what a caller was told.
+///
+/// Four cold agents in a row asked for a type here, were refused, dropped the
+/// flag, added their section and reported the work finished with the object
+/// still untyped and open. None came back, and none had been told there was
+/// anything to come back to.
+#[test]
+fn a_create_that_asks_for_a_type_is_told_where_types_come_from() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    for extra in [
+        vec!["--type", "decision", "--state", "accepted"],
+        vec!["--type", "decision"],
+        vec!["--state", "accepted"],
+        vec!["--untyped"],
+    ] {
+        let refused = run_engr(
+            root,
+            &[
+                &["prepare", "--new", "--title", "arrives untyped"],
+                extra.as_slice(),
+            ]
+            .concat(),
+        );
+        assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE));
+        let said = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(
+            said.contains("--classify"),
+            "the refusal names the act that classifies: {said}"
+        );
+        assert!(
+            said.contains("untyped is an answer here, not a gap"),
+            "and does not imply an untyped object is unfinished: {said}"
+        );
+        assert!(
+            !said.contains("already names the state it produces"),
+            "and does not repeat a sentence that is false of a create: {said}"
+        );
+    }
+
+    // The sentence it replaced is still right for the actions it was written
+    // for, and still theirs.
+    let created = prepare(root, &["prepare", "--new", "--title", "arrives untyped"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+    let closing = run_engr(
+        root,
+        &["prepare", "--object", &id, "--close", "--type", "decision"],
+    );
+    assert_eq!(closing.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        String::from_utf8_lossy(&closing.stderr).contains("already names the state it produces"),
+        "{}",
+        String::from_utf8_lossy(&closing.stderr)
+    );
+
+    // And the route the refusal names actually works.
+    let classified = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--classify",
+            "--type",
+            "decision",
+            "--state",
+            "accepted",
+        ],
+    );
+    confirm(root, &classified);
+    let object = store::load_object(root, &id).expect("object");
+    assert_eq!(
+        object.object_type,
+        Some(engr::semantics::ObjectType::Decision)
+    );
+    assert_eq!(object.state, engr::semantics::State::Accepted);
+}
+
+/// A governed Agent mutation shows what it would write, not just its name.
+///
+/// Naming the subject and never showing it left an agent delegating the review
+/// to describe it out of the flags it had typed — and a Section is more than
+/// its prose. One watched doing that handed over the wording, was correctly
+/// told the two-word header its policy required was missing, and moved the
+/// header into the first line of the prose: the field stayed empty, the wording
+/// gained a paragraph the policy forbade, and the re-review passed it.
+#[test]
+fn a_governed_agent_mutation_shows_the_subject_it_needs_reviewed() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let digest = |args: &[&str]| {
+        String::from_utf8_lossy(&run_engr(root, args).stderr)
+            .split_whitespace()
+            .find(|word| word.starts_with("1:") && word.len() == 66)
+            .expect("a digest is offered")
+            .to_owned()
+    };
+    let create = ["prepare", "--new", "--title", "Retry Budget", "--agent"];
+    let made = run_engr(
+        root,
+        &[
+            create.as_slice(),
+            &[
+                "--review",
+                &digest(&create),
+                "--reviewed-rule",
+                "careful",
+                "--review-result",
+                "passed",
+            ],
+        ]
+        .concat(),
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let id = store::object_ids(root).expect("ids")[0].clone();
+
+    let refused = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--header",
+            "Sync Budget",
+            "--role",
+            "decision",
+            "--text",
+            "Because the downstream rate-limits.",
+            "--no-based-on",
+            "--agent",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE));
+    let shown = String::from_utf8_lossy(&refused.stdout).to_string();
+
+    // Every field a Rule may require, not only the one a caller would think to
+    // retype. The header is the field that went missing when this was a name.
+    assert!(
+        shown.contains("── §1 [decision] Sync Budget ──"),
+        "the header and role are on the screen: {shown}"
+    );
+    assert!(
+        shown.contains("Because the downstream rate-limits."),
+        "and the wording: {shown}"
+    );
+    assert!(
+        shown.contains("based_on none"),
+        "and the basis, which a Rule may also require: {shown}"
+    );
+    assert!(
+        shown.contains("Nothing has been written."),
+        "and it says so: {shown}"
+    );
+
+    // Not `show`. That screen answers how far a *stored* object can be trusted,
+    // and over a projection nothing has written it reports the object as
+    // rewritten and resealed and sends the reader to `engr repair`.
+    assert!(
+        !shown.contains("engr repair"),
+        "no false alarm about a file that does not exist: {shown}"
+    );
+    assert!(
+        !shown.contains("0001-01-01"),
+        "and no placeholder instant off the preflight: {shown}"
+    );
+
+    // The one-line refusal a caller may be parsing is still on stderr, and
+    // still carries the digest.
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(said.contains("governed by careful"), "{said}");
+    assert!(
+        said.split_whitespace()
+            .any(|word| word.starts_with("1:") && word.len() == 66),
+        "{said}"
+    );
+
+    // And nothing was written.
+    assert_eq!(store::load_object(root, &id).expect("object").rev, 1);
+}
+
+#[test]
+fn prepare_calls_a_title_a_title() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+
+    let created = prepare(root, &["prepare", "--new", "--title", "named by --title"]);
+    confirm(root, &created);
+    let listed = run_engr(root, &["ls"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("named by --title"),
+        "{}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    // Still the other spelling, because nothing about `--text` stopped being
+    // true — a rename takes either.
+    let renamed = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--rename",
+            "--text",
+            "or --text",
+        ],
+    );
+    confirm(root, &renamed);
+
+    // And they are one field, so offering both is refused rather than one of
+    // them quietly winning.
+    let both = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--rename",
+            "--title",
+            "one",
+            "--text",
+            "the other",
+        ],
+    );
+    assert_eq!(both.status.code(), Some(engr::EXIT_USAGE));
+
+    // A title is a label. An action that admits Section wording does not take
+    // one, or a navigation aid would land where an assertion belongs.
+    let wording = run_engr(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--title",
+            "not wording",
+            "--no-based-on",
+        ],
+    );
+    assert_eq!(wording.status.code(), Some(engr::EXIT_USAGE));
+    assert!(
+        String::from_utf8_lossy(&wording.stderr).contains("--text"),
+        "the refusal names the flag that does carry wording: {}",
+        String::from_utf8_lossy(&wording.stderr)
+    );
+}
+
+/// A Section's header is on the screen that says how far it can be trusted.
+///
+/// It is inside the Section seal and it is one of the fields a Ref may pin, so
+/// leaving it off `show` meant a reader deciding whether to rely on a Section
+/// could not see part of what something else may already be depending on.
+/// Everything else the seal covers was already there.
+#[test]
+fn show_renders_the_header_a_reference_can_depend_on() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let created = prepare(root, &["prepare", "--new", "--title", "headers"]);
+    confirm(root, &created);
+    let id = created["subject"]["data"]["object"]
+        .as_str()
+        .expect("object id")
+        .to_owned();
+
+    let added = prepare(
+        root,
+        &[
+            "prepare",
+            "--object",
+            &id,
+            "--add",
+            "--header",
+            "Retry budget",
+            "--role",
+            "decision",
+            "--text",
+            "five attempts, exponential backoff",
+            "--no-based-on",
+        ],
+    );
+    confirm(root, &added);
+
+    let shown = run_engr(root, &["show", &id]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("── §1 [decision] Retry budget ──"),
+        "the header sits on the section's own line: {shown}"
+    );
+
+    // Staging carries one too, and a surface that stores a field and never
+    // shows it is a surface a reader cannot check what they were handed
+    // against.
+    let item = engr::backlog::create(
+        root,
+        "staging headers",
+        "an unresolved point",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("backlog");
+    let path = engr::backlog::item_path(root, &item.id);
+    let mut stored: Value = store::read_json(&path).expect("item");
+    stored["sections"][0]["header"] = Value::String("Cache invalidation".to_owned());
+    std::fs::write(&path, serde_json::to_string(&stored).expect("json")).expect("write");
+
+    let shown = run_engr(root, &["backlog", "show", &item.id]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("── §1 Cache invalidation ──"),
+        "and on the staging screen too: {shown}"
+    );
+}
+
+/// One idea, and every spelling of it works in every governed domain.
+///
+/// The attempt is the same thing on both sides — which try of one continuous
+/// self-review this is — and it was `--review-attempt` on `prepare` and
+/// `--attempt` on backlog, work and collection. A cold agent found the
+/// difference by diffing two `--help` outputs, which is not a discovery
+/// surface. Renaming either one would have been worse than the split it fixed:
+/// three domains already agree with each other, and `prepare`'s spelling is the
+/// one that reads correctly beside its other `--review*` flags. So each accepts
+/// the other's name.
+#[test]
+fn the_review_attempt_answers_to_both_its_names() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let id = governed_backlog(root, 2);
+
+    let revise = |flag: &str, value: &str, text: &str| {
+        let token = expect_token(root, &id, Some(1));
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "revise",
+                &id,
+                "--section",
+                "1",
+                "--text",
+                text,
+                "--expect",
+                &token,
+                flag,
+                value,
+            ],
+        )
+    };
+
+    assert!(revise("--attempt", "1", "backlog's own spelling")
+        .status
+        .success());
+    assert!(revise("--review-attempt", "1", "and prepare's, here too")
+        .status
+        .success());
+
+    // The same number means the same thing under either spelling: past the
+    // ceiling, both soft-admit and both mark.
+    assert!(revise("--review-attempt", "9", "past the ceiling")
+        .status
+        .success());
+    assert_eq!(
+        engr::backlog::load(root, &id)
+            .expect("load")
+            .section(1)
+            .expect("§1")
+            .review_exhaustion,
+        Some(engr::rules::RuleReview {
+            attempts: 9,
+            limit: 2
+        })
+    );
+
+    // And `prepare` answers to backlog's spelling, which is the direction a
+    // caller who learned engr through staging arrives from.
+    let object = TempDir::new().expect("temp dir");
+    let root = object.path();
+    store::init(root).expect("init");
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        "---\nid: careful\napplies:\n  domains:\n    - object\n---\n\n# Careful\n\nRead it first.\n",
+    )
+    .expect("rule");
+
+    let refused = run_engr(
+        root,
+        &["prepare", "--new", "--title", "either name", "--agent"],
+    );
+    let refusal = String::from_utf8_lossy(&refused.stderr).to_string();
+    let digest = refusal
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .unwrap_or_else(|| panic!("no digest offered: {refusal}"));
+    let admitted = run_engr(
+        root,
+        &[
+            "prepare",
+            "--new",
+            "--title",
+            "either name",
+            "--agent",
+            "--review",
+            digest,
+            "--reviewed-rule",
+            "careful",
+            "--attempt",
+            "1",
+            "--review-result",
+            "passed",
+        ],
+    );
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
 }
 
 #[test]
@@ -2273,7 +2899,7 @@ fn record_surfaces_never_mix_in_unconfirmed_staging() {
     );
     confirm(root, &section);
 
-    let staged = run_engr(
+    let staged = run_backlog(
         root,
         &[
             "backlog",
@@ -2455,7 +3081,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "source"]);
 
-    let created = run_engr(
+    let created = run_backlog(
         root,
         &[
             "backlog",
@@ -2478,7 +3104,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     );
     let id = engr::backlog::ids(root).expect("ids").remove(0);
 
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2492,7 +3118,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2508,7 +3134,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2528,7 +3154,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     )
     .status
     .success());
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2558,7 +3184,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
     // A dirty path is pinned and marked rather than refused: losing the context
     // is worse than recording that the baseline is inexact.
     std::fs::write(root.join("session.rs"), "fn refresh() { todo!() }\n").expect("edit");
-    let staged = run_engr(
+    let staged = run_backlog(
         root,
         &[
             "backlog",
@@ -2597,7 +3223,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         remaining, 2,
         "the dirty subject was staged as its own point"
     );
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2617,7 +3243,7 @@ fn the_backlog_namespace_edits_staging_without_a_challenge_code() {
         "one point consumed, the topic still has unresolved work"
     );
     let last = engr::backlog::load(root, &id).expect("item").sections[0].id;
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -2716,15 +3342,6 @@ fn repository_with_source(root: &Path) {
 }
 
 /// The code a candidate screen ends with.
-fn code_from(screen: &str) -> String {
-    screen
-        .rsplit("CONFIRM ")
-        .next()
-        .expect("a candidate screen ends with its code")
-        .trim()
-        .to_owned()
-}
-
 /// A pending question knows which admission door the Section will use, but the
 /// admission instant does not exist until confirmation succeeds.
 ///
@@ -2762,7 +3379,7 @@ fn a_pending_section_does_not_claim_a_future_admission_instant() {
         String::from_utf8_lossy(&output.stderr)
     );
     let shown = String::from_utf8_lossy(&output.stdout);
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     let pending: Value = serde_json::from_str(
         &std::fs::read_to_string(store::challenge_path(root, &code).expect("challenge path"))
             .expect("challenge bytes"),
@@ -2850,7 +3467,7 @@ fn classifying_shows_the_whole_destination_and_what_it_does_to_the_listing() {
     for line in ["Type       design", "State      draft", "Attention  yes"] {
         assert!(shown.contains(line), "{line:?} missing from {shown}");
     }
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -2942,7 +3559,7 @@ fn a_section_carries_role_supplementary_content_and_implementation_provenance() 
             "{fragment:?} missing from {shown}"
         );
     }
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3046,7 +3663,7 @@ fn an_oversize_section_is_refused_once_and_the_retry_says_so_on_the_screen() {
         shown.contains("OVERSIZE   admitted by exception"),
         "the exception is on the screen, above the wording: {shown}"
     );
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3115,7 +3732,7 @@ fn superseding_names_the_replacement_and_moves_the_state_in_one_confirmation() {
     assert!(shown.contains("Role       supersession"), "{shown}");
     assert!(shown.contains("superseded_by -> engr:obj:"), "{shown}");
     assert!(shown.contains("State      superseded"), "{shown}");
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3482,7 +4099,7 @@ fn a_removed_supplementary_body_is_shown_and_a_changed_one_is_shown_as_a_diff() 
         "an unchanged tail forty lines away is not context: {shown}"
     );
 
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -3798,7 +4415,7 @@ fn mixed_inline_and_file_backed_content_keeps_the_order_it_was_written_in() {
         "the candidate screen shows the caller's order: {shown}"
     );
 
-    let code = code_from(&shown);
+    let code = offered_code(&shown);
     assert!(run_engr(root, &["confirm", &format!("CONFIRM {code}")])
         .status
         .success());
@@ -4355,7 +4972,7 @@ fn a_read_surface_prints_the_reference_every_flag_asks_for() {
         ],
     );
     confirm(root, &added);
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &["backlog", "new", "--title", "refresh", "--text", "a point"]
     )
@@ -4526,7 +5143,7 @@ fn every_addressable_entity_exposes_its_canonical_reference() {
         ],
     );
     confirm(root, &added);
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &["backlog", "new", "--title", "t", "--text", "a point"]
     )
@@ -4583,7 +5200,7 @@ fn every_addressable_entity_exposes_its_canonical_reference() {
     assert_eq!(planned["id"], plan);
 
     // Each one is accepted where it is meant to be used.
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -4635,7 +5252,7 @@ fn a_zero_section_selector_is_refused_everywhere() {
     assert!(engr::reference::EngrRef::parse_embedded(&format!("obj:{compact}:1")).is_ok());
 
     // And it is refused at the command line, through the same parser.
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5326,14 +5943,11 @@ fn rule_surfaces_state_the_policy_rather_than_promising_an_outcome() {
 
 /// Set up a workspace whose backlog is governed by one rule, with one item.
 fn governed_backlog(root: &Path, max_attempts: u32) -> String {
-    let rules = engr::rules::dir(root);
-    std::fs::create_dir_all(&rules).expect("rules dir");
-    std::fs::write(
-        rules.join("careful.md"),
-        format!("---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: {max_attempts}\n---\n\n# Careful\n\nRead it first.\n"),
-    )
-    .expect("rule");
-    engr::backlog::create(
+    // The topic first, and the Rule after it. The Rule is here to govern the
+    // mutations under test; making the arrangement itself carry an attestation
+    // would put the two-step review inside every fixture and leave each test
+    // asserting about its own setup.
+    let id = engr::backlog::create(
         root,
         "staging",
         "an unresolved point",
@@ -5341,7 +5955,50 @@ fn governed_backlog(root: &Path, max_attempts: u32) -> String {
         &engr::backlog::Prepared::first(),
     )
     .expect("backlog")
-    .id
+    .id;
+    let rules = engr::rules::dir(root);
+    std::fs::create_dir_all(&rules).expect("rules dir");
+    std::fs::write(
+        rules.join("careful.md"),
+        format!("---\nid: careful\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: {max_attempts}\n---\n\n# Careful\n\nRead it first.\n"),
+    )
+    .expect("rule");
+    id
+}
+
+/// Run a backlog mutation the way a governed agent runs one.
+///
+/// Once, to be refused and told what to review and what its digest is, and then
+/// again carrying the attestation. A workspace with no applicable backlog Rule
+/// succeeds on the first call and never reaches the second — and so does a
+/// refusal that is about anything else, which passes straight back to the
+/// caller.
+fn run_backlog(root: &Path, args: &[&str]) -> std::process::Output {
+    let first = run_engr(root, args);
+    if first.status.success() {
+        return first;
+    }
+    let refusal = String::from_utf8_lossy(&first.stderr).to_string();
+    let Some(digest) = refusal
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+    else {
+        return first;
+    };
+    let mut repeated: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    repeated.push("--review".to_owned());
+    repeated.push(digest.to_owned());
+    for rule in refusal
+        .split_once("governed by ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(names, _)| names.split(", ").collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        repeated.push("--reviewed-rule".to_owned());
+        repeated.push(rule.to_owned());
+    }
+    let repeated: Vec<&str> = repeated.iter().map(String::as_str).collect();
+    run_engr(root, &repeated)
 }
 
 /// What `backlog show --json` says to hand back for a given point.
@@ -5391,7 +6048,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
     let expect = expect_token(root, &id, Some(1));
 
     // Counted from 1, so there is no attempt 0 to smuggle past the ceiling.
-    let zero = run_engr(
+    let zero = run_backlog(
         root,
         &[
             "backlog",
@@ -5411,7 +6068,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
     let add = run_engr(root, &["backlog", "show", &id, "--format", "json"]);
     let add: Value = serde_json::from_slice(&add.stdout).expect("json");
     let add = add["expect"]["add"].as_str().expect("add").to_owned();
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5432,7 +6089,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
 
     // Past it: still admitted, and marked with what it went in on.
     let second = expect_token(root, &id, Some(2));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5461,7 +6118,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
 
     // Except where the mutation would remove the point.
     let second = expect_token(root, &id, Some(2));
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5476,7 +6133,7 @@ fn the_backlog_attempt_flag_is_the_one_the_review_is_composed_against() {
         ],
     );
     assert_eq!(refused.status.code(), Some(engr::EXIT_INVARIANT));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5511,7 +6168,7 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
 
     // A rule governs backlog, so a mutation with nothing to anchor it is usage,
     // not silently accepted.
-    let bare = run_engr(
+    let bare = run_backlog(
         root,
         &[
             "backlog",
@@ -5531,18 +6188,31 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
     );
 
     // Read it, then somebody else sharpens it before the reviewed change runs.
+    // Through the same governed path, because a concurrent writer is not a
+    // caller with special powers — it is another agent doing what this one is
+    // about to try, only sooner.
     let stale = expect_token(root, &id, Some(1));
-    engr::backlog::revise_section(
-        root,
-        &id,
-        1,
-        "sharpened by someone else",
-        &engr::backlog::Prepared::first()
-            .against(engr::backlog::Precondition::section(root, &id, 1).expect("observe")),
-    )
-    .expect("concurrent");
+    assert!(
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "revise",
+                &id,
+                "--section",
+                "1",
+                "--text",
+                "sharpened by someone else",
+                "--expect",
+                &stale,
+            ],
+        )
+        .status
+        .success(),
+        "concurrent"
+    );
 
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5569,7 +6239,7 @@ fn a_reviewed_backlog_mutation_carries_the_predecessor_it_was_reviewed_against()
 
     // Read it again, and it goes through.
     let current = expect_token(root, &id, Some(1));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5594,21 +6264,30 @@ fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     let root = workspace.path();
     store::init(root).expect("init");
     let id = governed_backlog(root, 5);
-    engr::backlog::add_section(
-        root,
-        &id,
-        "a second point",
-        Vec::new(),
-        &engr::backlog::Prepared::first()
-            .against(engr::backlog::Precondition::section_absent(root, &id).expect("observe")),
-    )
-    .expect("add");
+    let adding = add_token(root, &id);
+    assert!(
+        run_backlog(
+            root,
+            &[
+                "backlog",
+                "add",
+                &id,
+                "--text",
+                "a second point",
+                "--expect",
+                &adding,
+            ],
+        )
+        .status
+        .success(),
+        "a second point to merge"
+    );
 
     let first = expect_token(root, &id, Some(1));
     let second = expect_token(root, &id, Some(2));
 
     // Only one of the two: the judgement was about both.
-    let partial = run_engr(
+    let partial = run_backlog(
         root,
         &[
             "backlog",
@@ -5626,7 +6305,7 @@ fn a_merge_carries_a_predecessor_for_both_points_it_touches() {
     );
     assert!(!partial.status.success());
 
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5677,7 +6356,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
         "nothing governs backlog here"
     );
 
-    let bare = run_engr(
+    let bare = run_backlog(
         root,
         &[
             "backlog",
@@ -5698,7 +6377,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     );
 
     let current = expect_token(root, &item.id, Some(1));
-    assert!(run_engr(
+    assert!(run_backlog(
         root,
         &[
             "backlog",
@@ -5726,7 +6405,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
             .against(engr::backlog::Precondition::section(root, &item.id, 1).expect("observe")),
     )
     .expect("concurrent");
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -5748,7 +6427,7 @@ fn an_ungoverned_backlog_mutation_still_carries_its_predecessor() {
     );
 
     // Destructive consumption is held to the same rule.
-    let bare = run_engr(root, &["backlog", "consume", &item.id, "--section", "1"]);
+    let bare = run_backlog(root, &["backlog", "consume", &item.id, "--section", "1"]);
     assert_eq!(bare.status.code(), Some(engr::EXIT_USAGE));
     assert!(
         !engr::backlog::ids(root).expect("ids").is_empty(),
@@ -5776,7 +6455,7 @@ fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
     )
     .expect("rule");
 
-    let created = run_engr(
+    let created = run_backlog(
         root,
         &[
             "backlog",
@@ -5796,7 +6475,7 @@ fn creating_a_point_from_the_cli_survives_a_rule_that_governs_backlog() {
 
     // Offering a predecessor is usage, and answered rather than ignored — and
     // above all not a panic.
-    let offered = run_engr(
+    let offered = run_backlog(
         root,
         &[
             "backlog",
@@ -6198,7 +6877,7 @@ fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
         .status
         .success());
 
-    let refused = run_engr(
+    let refused = run_backlog(
         root,
         &[
             "backlog",
@@ -6218,7 +6897,7 @@ fn resolving_the_last_point_says_what_to_do_about_the_execution_memory() {
     );
 
     assert!(run_engr(root, &["work", "rm", &item_ref]).status.success());
-    let consumed = run_engr(
+    let consumed = run_backlog(
         root,
         &[
             "backlog",
@@ -6371,7 +7050,7 @@ fn an_override_screen_shows_the_review_it_is_overruling_and_keeps_showing_it() {
         "and the screen says the code is no longer good: {after}"
     );
     assert!(
-        !after.contains("Type this exactly to confirm"),
+        !after.contains(OFFERS_A_CODE),
         "and does not tell a person to answer it anyway: {after}"
     );
 
@@ -6421,7 +7100,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
     let screen =
         String::from_utf8_lossy(&run_engr(root, &["candidate", &code]).stdout).into_owned();
     assert!(
-        screen.contains("Type this exactly to confirm"),
+        screen.contains(OFFERS_A_CODE),
         "it is answerable while nothing governs it: {screen}"
     );
 
@@ -6438,7 +7117,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
         "a Rule appearing makes the question unanswerable, and the screen says which: {after}"
     );
     assert!(
-        !after.contains("Type this exactly to confirm"),
+        !after.contains(OFFERS_A_CODE),
         "and it does not tell a person to answer it: {after}"
     );
     assert!(
@@ -6462,7 +7141,7 @@ fn a_pending_screen_refuses_to_offer_an_unanswerable_question() {
         "Rule material that cannot be read cannot say a question is still good: {broken}"
     );
     assert!(
-        !broken.contains("Type this exactly to confirm"),
+        !broken.contains(OFFERS_A_CODE),
         "and the instruction is withheld: {broken}"
     );
 }
@@ -6974,11 +7653,7 @@ fn a_resealed_projection_is_repaired_back_to_what_history_proves() {
     assert!(text.contains("wording nobody was ever shown"), "{text}");
     assert!(text.contains("the wording that was admitted"), "{text}");
 
-    let code = text
-        .split_whitespace()
-        .last()
-        .expect("the confirmation code")
-        .to_owned();
+    let code = offered_code(&text);
     let confirmed = run_engr(root, &["confirm", &format!("CONFIRM {code}")]);
     assert!(
         confirmed.status.success(),
@@ -7095,7 +7770,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
     )
     .expect("write the rule");
 
-    let made = run_engr(
+    let made = run_backlog(
         root,
         &["backlog", "new", "--title", "a topic", "--text", "a point"],
     );
@@ -7115,7 +7790,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
         .to_owned();
 
     // Past the ceiling the rule set, which is what makes this exhausted.
-    let revised = run_engr(
+    let revised = run_backlog(
         root,
         &[
             "backlog",
@@ -7158,7 +7833,7 @@ fn an_exhausted_backlog_review_is_announced_where_a_person_will_see_it() {
         .as_str()
         .expect("token")
         .to_owned();
-    let again = run_engr(
+    let again = run_backlog(
         root,
         &[
             "backlog",
@@ -7560,7 +8235,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
     let workspace = TempDir::new().expect("temp dir");
     let root = workspace.path();
     store::init(root).expect("init");
-    let started = run_engr(
+    let started = run_backlog(
         root,
         &[
             "backlog",
@@ -7601,7 +8276,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
 
     // The wrong level is a usage problem, not staleness, and saying which token
     // was passed is the only thing that gets the caller anywhere.
-    let wrong = run_engr(
+    let wrong = run_backlog(
         root,
         &[
             "backlog",
@@ -7621,7 +8296,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
 
     // The token it names works, and a token that really is stale still reports
     // staleness — the distinction is the point, so both halves are pinned.
-    let added = run_engr(
+    let added = run_backlog(
         root,
         &[
             "backlog",
@@ -7638,7 +8313,7 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
-    let stale = run_engr(
+    let stale = run_backlog(
         root,
         &[
             "backlog",

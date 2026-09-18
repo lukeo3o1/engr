@@ -343,7 +343,19 @@ pub struct Operation {
 #[derive(Debug)]
 pub struct ObjectProjection {
     pub operation: Operation,
-    pub target: String,
+    /// The existing resource the operation acts on, and `None` for a creation.
+    ///
+    /// Every other operation acts on an Object that is already there, so its
+    /// identity is part of what a review is of. A creation has no identity to
+    /// name: engr mints the UUIDv7 while performing the create and a caller may
+    /// not choose one, so the id one attempt would name is a different id on
+    /// the next attempt. Binding it made a governed creation impossible rather
+    /// than merely awkward — the digest an agent was told to attest to was
+    /// never the digest the next attempt computed, so the two-step review could
+    /// not terminate and no Object could be created at all in a workspace with
+    /// an Object Rule. What a review of a creation is of is the intent, which
+    /// is what `after` carries; the identity is engr's to issue.
+    pub target: Option<String>,
     pub after: serde_json::Value,
 }
 
@@ -387,10 +399,13 @@ pub fn object_projection(
     };
     let json = |value: &dyn erased_json::Erased| value.to_json();
 
-    let (target, parameters, after_state) =
+    let (target, parameters, after_state): (Option<String>, serde_json::Value, serde_json::Value) =
         match &payload.action {
+            // No target. The Object this creates does not exist yet, and the id
+            // engr will mint for it is not the id it minted last time — see
+            // [`ObjectProjection::target`].
             Action::ObjectCreated { .. } => (
-                object_target(id)?,
+                None,
                 serde_json::json!({}),
                 json(&ObjectCreation {
                     title: after.title.clone(),
@@ -400,17 +415,17 @@ pub fn object_projection(
                 })?,
             ),
             Action::ObjectRenamed { .. } => (
-                object_target(id)?,
+                Some(object_target(id)?),
                 serde_json::json!({ "becomes": becomes }),
                 json(&TitleLifecycle::of(after))?,
             ),
             Action::ObjectStateChanged { state } => (
-                object_target(id)?,
+                Some(object_target(id)?),
                 serde_json::json!({ "state": state }),
                 json(&Lifecycle::of(after))?,
             ),
             Action::ObjectClassified { object_type, state } => (
-                object_target(id)?,
+                Some(object_target(id)?),
                 serde_json::json!({ "type": object_type, "state": state }),
                 json(&Lifecycle::of(after))?,
             ),
@@ -419,18 +434,18 @@ pub fn object_projection(
                 // it is read off what the reducer produced rather than predicted.
                 let added = added_section(before, after)?;
                 (
-                    object_target(id)?,
+                    Some(object_target(id)?),
                     serde_json::json!({ "section": added, "becomes": becomes }),
                     json(&section_state(after, added)?)?,
                 )
             }
             Action::SectionUpdated { section, .. } => (
-                section_target(id, *section)?,
+                Some(section_target(id, *section)?),
                 serde_json::json!({ "becomes": becomes }),
                 json(&section_state(after, *section)?)?,
             ),
             Action::SectionDeleted { section, .. } => (
-                section_target(id, *section)?,
+                Some(section_target(id, *section)?),
                 serde_json::json!({ "becomes": becomes }),
                 json(&SectionOperation {
                     lifecycle: Lifecycle::of(after),
@@ -438,14 +453,14 @@ pub fn object_projection(
                 })?,
             ),
             Action::SectionMerged { merge, .. } => (
-                section_target(id, merge.destination)?,
+                Some(section_target(id, merge.destination)?),
                 serde_json::json!({ "sources": merge.sources, "becomes": becomes }),
                 json(&ObjectInvariant::of(after)?)?,
             ),
             Action::ObjectSuperseded { .. } => {
                 let added = added_section(before, after)?;
                 (
-                    object_target(id)?,
+                    Some(object_target(id)?),
                     serde_json::json!({ "rationale_section": added }),
                     json(&ObjectInvariant::of(after)?)?,
                 )
@@ -457,7 +472,7 @@ pub fn object_projection(
             // diagnostic material shown beside the proposal, and a digest that bound
             // them could not be recomputed from history later.
             Action::ObjectRepaired {} => (
-                object_target(id)?,
+                Some(object_target(id)?),
                 serde_json::json!({}),
                 json(&ObjectInvariant::of(after)?)?,
             ),
@@ -471,10 +486,16 @@ pub fn object_projection(
             )),
         };
 
-    // And the formatted target parses back as the identity it claims to be.
+    // And a formatted target parses back as the identity it claims to be.
     // A Section id of 0, or one past the shared safe-integer ceiling, formats
     // into a string like any other and denotes no Section at all.
-    check_canonical_target(&target)?;
+    //
+    // A creation has nothing to check here, which is not the same as skipping a
+    // check: it names no target at all, and the shape rule below is what holds
+    // it to naming none.
+    if let Some(target) = &target {
+        check_canonical_target(target)?;
+    }
     Ok(ObjectProjection {
         operation: Operation {
             name: payload.action.command().to_owned(),
@@ -648,26 +669,35 @@ mod table_tests {
         after.title = "after".to_owned();
         after.reseal().expect("seal");
 
-        let cases: Vec<(Action, String)> = vec![
+        let cases: Vec<(Action, Option<String>)> = vec![
+            // A creation names none, because engr issues the identity while
+            // performing the create and a review has to be able to name the
+            // same subject on the attempt that attests to it.
+            (
+                Action::ObjectCreated {
+                    title: "after".to_owned(),
+                },
+                None,
+            ),
             (
                 Action::ObjectRenamed {
                     title: "after".to_owned(),
                     becomes: None,
                 },
-                object_target(&id).expect("object target"),
+                Some(object_target(&id).expect("object target")),
             ),
             (
                 Action::ObjectStateChanged {
                     state: State::Closed,
                 },
-                object_target(&id).expect("object target"),
+                Some(object_target(&id).expect("object target")),
             ),
             (
                 Action::ObjectClassified {
                     object_type: Some(ObjectType::Design),
                     state: State::Draft,
                 },
-                object_target(&id).expect("object target"),
+                Some(object_target(&id).expect("object target")),
             ),
             (
                 Action::SectionUpdated {
@@ -675,14 +705,14 @@ mod table_tests {
                     value: value("one, revised"),
                     becomes: None,
                 },
-                section_target(&id, 1).expect("section target"),
+                Some(section_target(&id, 1).expect("section target")),
             ),
             (
                 Action::SectionDeleted {
                     section: 2,
                     becomes: None,
                 },
-                section_target(&id, 2).expect("section target"),
+                Some(section_target(&id, 2).expect("section target")),
             ),
             (
                 Action::SectionMerged {
@@ -693,11 +723,11 @@ mod table_tests {
                     value: value("merged"),
                     becomes: None,
                 },
-                section_target(&id, 1).expect("section target"),
+                Some(section_target(&id, 1).expect("section target")),
             ),
             (
                 Action::ObjectRepaired {},
-                object_target(&id).expect("object target"),
+                Some(object_target(&id).expect("object target")),
             ),
         ];
         for (action, target) in cases {
@@ -735,7 +765,10 @@ mod table_tests {
             ),
         )
         .expect("projection");
-        assert_eq!(projected.target, object_target(&id).expect("object target"));
+        assert_eq!(
+            projected.target,
+            Some(object_target(&id).expect("object target"))
+        );
         assert_eq!(projected.operation.parameters["section"], 1);
     }
 
@@ -818,7 +851,13 @@ mod table_tests {
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct ReviewMutation {
     operation: Operation,
-    target: String,
+    /// The existing resource the operation acts on, and `null` for a creation.
+    ///
+    /// Serialized either way rather than omitted when absent: a hash contract
+    /// cannot afford a storage economy, or the omitting and the spelling-out
+    /// implementations disagree about the bytes. See
+    /// [`ObjectProjection::target`] for why a creation has none.
+    target: Option<String>,
     /// The after projection **under the admission path that actually ran**.
     ///
     /// Not normalized to Human semantics: an Agent-reviewed Section projects
@@ -834,8 +873,8 @@ impl ReviewMutation {
         &self.operation
     }
 
-    pub fn target(&self) -> &str {
-        &self.target
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 
     pub fn after(&self) -> &serde_json::Value {
@@ -877,6 +916,13 @@ pub fn object_review_mutation(
 const OBJECT_MUTATION_MEMBERS: &[&str] = &["after", "operation", "target"];
 const OBJECT_PRECONDITION_MEMBERS: &[&str] = &["expected_rev"];
 
+/// The one operation whose descriptor names no target.
+///
+/// Spelled here as well as in the action table because this check reads JSON
+/// rather than an `Action`, and the two must not be able to drift — a test
+/// pins them equal.
+const CREATION_OPERATION: &str = "create";
+
 /// Refuse an Object-domain binding whose descriptor is not the frozen shape.
 ///
 /// `bind` and `rebind` take caller JSON because the Backlog domain describes its
@@ -900,11 +946,23 @@ pub fn check_object_review_shape(
         EXIT_SCHEMA,
         "an object review mutation names the operation it reviewed"
     );
-    ensure!(
-        mutation["target"].is_string(),
-        EXIT_SCHEMA,
-        "an object review mutation names the target it reviewed"
-    );
+    // Both directions, because each failure is its own. A creation carrying a
+    // target would put an identity engr has not issued yet into a proof that
+    // has to be reproducible on the next attempt, and anything else carrying
+    // none would bind a review to a mutation nobody can locate.
+    if mutation["operation"]["name"] == CREATION_OPERATION {
+        ensure!(
+            mutation["target"].is_null(),
+            EXIT_SCHEMA,
+            "a creation names no target: engr issues the identity while performing it"
+        );
+    } else {
+        ensure!(
+            mutation["target"].is_string(),
+            EXIT_SCHEMA,
+            "an object review mutation names the target it reviewed"
+        );
+    }
     ensure!(
         precondition["expected_rev"].as_u64().is_some(),
         EXIT_SCHEMA,
@@ -1161,7 +1219,7 @@ mod review_context_tests {
                 name: "section_revised".to_owned(),
                 parameters: serde_json::json!({"section": 1}),
             },
-            target: "obj:01jbrcg6hbfgyrwkttddy8v7gf:1".to_owned(),
+            target: Some("obj:01jbrcg6hbfgyrwkttddy8v7gf:1".to_owned()),
             after: serde_json::json!({"admission": "human", "text": "revised"}),
         };
         (mutation, 7)
@@ -1406,6 +1464,141 @@ mod object_binding_tests {
         assert_eq!(
             binding.digest().expect("digest").to_string(),
             "1:339dff0725eda8ac29ff2893fa3fb2f15a7a1dc57e6c40c2cb17fc85bb9d82ba"
+        );
+    }
+
+    /// A creation is one review subject whatever identity engr mints for it.
+    ///
+    /// This is the property the two-step review rests on, and it is the whole
+    /// reason a creation names no target. engr issues the UUIDv7 while
+    /// performing the create and a caller may not choose one, so the id one
+    /// attempt would name is never the id the next attempt names. While the
+    /// binding carried it, the digest a caller was told to attest to was never
+    /// the digest their next attempt computed: the surfaced value moved on
+    /// every run, and a workspace with any Object Rule could not create an
+    /// Object at all, through either admission path.
+    #[test]
+    fn a_creation_is_one_review_subject_whatever_id_engr_mints() {
+        let created = |id: String| {
+            let before = Object::new(id.clone(), String::new()).expect("object");
+            let mut after = Object::new(id.clone(), "a new object".to_owned()).expect("object");
+            after.rev = 1;
+            after.reseal().expect("seal");
+            let payload = Payload::new(
+                id,
+                Action::ObjectCreated {
+                    title: "a new object".to_owned(),
+                },
+            );
+            object_review_mutation(&before, &after, &payload).expect("mutation")
+        };
+        let one = created(crate::model::new_id());
+        let other = created(crate::model::new_id());
+        assert_eq!(one.target, None, "a creation names no target");
+        assert_ne!(
+            crate::model::new_id(),
+            crate::model::new_id(),
+            "the ids genuinely differ, or this proves nothing"
+        );
+
+        let digest = |mutation| {
+            crate::rules::rebind_object(&mutation, 0, Vec::new())
+                .expect("rebind")
+                .digest_under(1)
+                .expect("digest")
+        };
+        assert_eq!(
+            digest(one),
+            digest(other),
+            "two creations of the same intent are one review subject"
+        );
+    }
+
+    /// The creation bytes, pinned like the rest of the contract. `target` is
+    /// spelled `null` rather than omitted: a hash contract cannot afford a
+    /// storage economy, or an omitting implementation and a spelling-out one
+    /// disagree about the bytes.
+    #[test]
+    fn a_creation_binding_hashes_to_its_pinned_contract_bytes() {
+        let id = crate::model::new_id();
+        let before = Object::new(id.clone(), String::new()).expect("object");
+        let mut after = Object::new(id.clone(), "a new object".to_owned()).expect("object");
+        after.rev = 1;
+        after.reseal().expect("seal");
+        let payload = Payload::new(
+            id,
+            Action::ObjectCreated {
+                title: "a new object".to_owned(),
+            },
+        );
+        let mutation = object_review_mutation(&before, &after, &payload).expect("mutation");
+        let binding = crate::rules::rebind_object(&mutation, 0, Vec::new()).expect("rebind");
+
+        assert_eq!(
+            canonical_bytes(&binding, "review binding").expect("canonical"),
+            r#"{"domain":"object","mutation":{"after":{"sections":[],"state":"open","title":"a new object","type":null},"operation":{"name":"create","parameters":{}},"target":null},"precondition":{"expected_rev":0},"rules":[]}"#,
+            "the frozen JCS bytes of a creation review binding"
+        );
+    }
+
+    /// Both halves of the target rule, because each failure is its own: a
+    /// creation carrying a target puts an identity engr has not issued into a
+    /// proof that must survive to the next attempt, and anything else carrying
+    /// none binds a review to a mutation nobody can locate.
+    #[test]
+    fn only_a_creation_may_name_no_target() {
+        let precondition = serde_json::json!({ "expected_rev": 0 });
+        let mutation = |name: &str, target: serde_json::Value| {
+            serde_json::json!({
+                "operation": { "name": name, "parameters": {} },
+                "target": target,
+                "after": serde_json::Value::Null,
+            })
+        };
+        check_object_review_shape(
+            &mutation(CREATION_OPERATION, serde_json::Value::Null),
+            &precondition,
+        )
+        .expect("a creation names none");
+        check_object_review_shape(
+            &mutation(
+                "rename",
+                serde_json::json!("obj:01jbrcg6hbfgyrwkttddy8v7gf"),
+            ),
+            &precondition,
+        )
+        .expect("everything else names one");
+
+        let named = check_object_review_shape(
+            &mutation(
+                CREATION_OPERATION,
+                serde_json::json!("obj:01jbrcg6hbfgyrwkttddy8v7gf"),
+            ),
+            &precondition,
+        )
+        .expect_err("a creation has no identity to name yet");
+        assert!(named.to_string().contains("names no target"), "{named}");
+
+        let missing =
+            check_object_review_shape(&mutation("rename", serde_json::Value::Null), &precondition)
+                .expect_err("a rename acts on something that exists");
+        assert!(
+            missing.to_string().contains("names the target it reviewed"),
+            "{missing}"
+        );
+    }
+
+    /// The JSON spelling this file checks and the action table's own name are
+    /// two places saying one thing, so they are pinned equal here rather than
+    /// left to drift.
+    #[test]
+    fn the_creation_operation_name_is_the_action_tables_own() {
+        assert_eq!(
+            Action::ObjectCreated {
+                title: "a new object".to_owned()
+            }
+            .command(),
+            CREATION_OPERATION
         );
     }
 
