@@ -1302,12 +1302,17 @@ fn a_rewritten_staged_destination_is_refused_rather_than_published() {
 /// Publication writes the staged bytes verbatim, so the resume path holds them
 /// to exactly the contract the ordinary read path holds them to.
 ///
-/// A rewrite that keeps the value and changes the bytes — member order,
-/// whitespace, an explicit null where the writer omits the member — satisfies
-/// every digest, because a digest is taken over the value. It does not satisfy
-/// the current generation's canonical JCS representation. Publishing it would
-/// write `VERSION` over a workspace unable to read its own migrated resources,
-/// and `VERSION` is the last thing written, so nothing after it would notice.
+/// A rewrite that keeps the value and changes the bytes — member order, an
+/// explicit null where the writer omits the member — satisfies every digest,
+/// because a digest is taken over the value. It does not satisfy the current
+/// generation's canonical JCS representation. Publishing it would write
+/// `VERSION` over a workspace unable to read its own migrated resources, and
+/// `VERSION` is the last thing written, so nothing after it would notice.
+///
+/// Layout is the one rewrite that is *not* a second representation, and only
+/// for a JSON resource: an Object may be laid out over lines and is the same
+/// Object, while an Event stream is framed one record per line, so the same
+/// whitespace there is framing damage. Both halves are pinned below.
 #[test]
 fn a_rewritten_staged_byte_is_refused_even_when_the_value_survives() {
     let object_path = |root: &Path| {
@@ -1342,16 +1347,6 @@ fn a_rewritten_staged_byte_is_refused_even_when_the_value_survives() {
                     .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
                     .collect();
                 write(&object_path(root), &format!("{{{}}}", reordered.join(",")));
-            }),
-        ),
-        (
-            "an Object with insignificant whitespace",
-            Box::new(move |root: &Path| {
-                let value: Value = serde_json::from_str(&read(&object_path(root))).expect("staged");
-                write(
-                    &object_path(root),
-                    &serde_json::to_string_pretty(&value).expect("pretty"),
-                );
             }),
         ),
         (
@@ -1407,6 +1402,23 @@ fn a_rewritten_staged_byte_is_refused_even_when_the_value_survives() {
             "{what}: {refused}"
         );
     }
+
+    // And the other half: a staged Object whose layout differs is the same
+    // Object, so the transaction finishes rather than stranding a workspace on
+    // a difference no reader is entitled to see.
+    let (_temp, root) = released();
+    let proposed = engr::migration::prepare(&root).expect("prepare");
+    interrupt_after_confirmed_destination(&root, &proposed.challenge);
+    let staged = object_path(&root);
+    write(&staged, &engr::proof::compacted(&read(&staged)));
+
+    engr::confirm(&root, &format!("CONFIRM {}", proposed.challenge))
+        .expect("layout is not a second representation");
+    assert!(
+        store::version_path(&root).exists(),
+        "the workspace is current"
+    );
+    store::load_object(&root, AUTHORITY).expect("and it reads its own migrated Object");
 }
 
 /// The staged set is the confirmed set, exactly.

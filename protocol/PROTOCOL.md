@@ -69,6 +69,32 @@ that accepts many is not one representation. The same comparison settles
 duplicate member names without a second rule — a repeated key collapses during
 parsing, so the value no longer re-serializes to the bytes that had two.
 
+**Those bytes are laid out over lines, and the layout is not part of the
+value.** A record is read by people as often as by programs — in a review, in a
+`git diff`, in a merge conflict — and one long line defeats all three: a changed
+word shows up as the whole file, and a conflict covers every member rather than
+the one that moved. So a writer MUST lay a JSON resource out, one member or
+element to a line, and a reader MUST compare the stored text **with the
+whitespace between its tokens removed** against the canonical bytes. JSON's
+insignificant whitespace is exactly space, tab, carriage return and line feed
+between tokens; removing it from a document that parsed leaves the same tokens
+in the same order, so member order, number spelling, string escaping and a
+duplicate member name are all still refused exactly as before.
+
+The layout's own details — how wide an indent is, whether an empty object sits
+on its line — belong to the implementation that wrote the file, and a reader
+MUST NOT refuse a resource for them. This is the one thing about a resource's
+bytes that two conforming implementations may disagree on, and it is deliberate:
+putting the rule on the reader is what keeps a **workspace written before the
+layout existed** readable, keeps an **Object snapshot inside a commit** — which
+a Ref resolves through, and which nobody can rewrite — the Object it was, and
+keeps a checkout that rewrote line endings a workspace rather than a pile of
+damaged resources.
+
+An Event record is the exception: its stream is framed one record per line, so a
+record laid out over lines would not be a record. See
+[Confirming](#confirming).
+
 Predecessor generations are read under their own contract, which did not require
 this. Bringing them forward is what migration is for.
 
@@ -1021,6 +1047,14 @@ already erased member order, insignificant whitespace, and any duplicate member
 name it collapsed — and a duplicate is exactly where two conforming JSON stacks
 are permitted to disagree about what a file says. An EventStore arrives through
 a git merge, a hand edit or a copy as readily as through a supported append.
+
+**A record is therefore not laid out over lines**, and this is the one place
+where the layout every other JSON resource carries is unavailable rather than
+merely unhelpful: the framing *is* the line, so a record broken across several
+would not be a record, and whitespace where a record belongs is the first sign
+of the framing damage the next paragraph refuses. An Event stream stays diffable
+for the reason a log does — a new record is a new line, and no existing line
+moves.
 
 The framing is exact in both directions. **Every line is a record and every
 record is terminated**: a blank or whitespace-only line is refused rather than

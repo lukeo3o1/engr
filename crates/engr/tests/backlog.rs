@@ -149,12 +149,8 @@ fn a_declared_current_workspace_is_not_downgraded_by_a_malformed_object() {
     write_raw(&object_path, &malformed).expect("legacy spelling in declared v3");
 
     let path = backlog::item_path(&root, &id);
-    let value: serde_json::Value = store::read_json(&path).expect("item");
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&value).expect("non-JCS item"),
-    )
-    .expect("write non-JCS item");
+    let stored = std::fs::read_to_string(&path).expect("item");
+    std::fs::write(&path, common::reordered(&stored)).expect("write non-JCS item");
 
     let error = backlog::load(&root, &id).expect_err("the unrelated resource stays v3");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
