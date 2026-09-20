@@ -67,7 +67,9 @@ a git merge, a hand edit, a copy or another implementation as readily as through
 a supported write, and a writer that emits one representation beside a reader
 that accepts many is not one representation. The same comparison settles
 duplicate member names without a second rule — a repeated key collapses during
-parsing, so the value no longer re-serializes to the bytes that had two.
+parsing, so the value no longer re-serializes to the bytes that had two. The
+paragraph below qualifies that in exactly one way, and only for the whitespace
+between tokens.
 
 **Those bytes are laid out over lines, and the layout is not part of the
 value.** A record is read by people as often as by programs — in a review, in a
@@ -86,10 +88,14 @@ on its line — belong to the implementation that wrote the file, and a reader
 MUST NOT refuse a resource for them. This is the one thing about a resource's
 bytes that two conforming implementations may disagree on, and it is deliberate:
 putting the rule on the reader is what keeps a **workspace written before the
-layout existed** readable, keeps an **Object snapshot inside a commit** — which
-a Ref resolves through, and which nobody can rewrite — the Object it was, and
-keeps a checkout that rewrote line endings a workspace rather than a pile of
-damaged resources.
+layout existed** readable, and keeps an **Object snapshot inside a commit** —
+which a Ref resolves through, and which nobody can rewrite — the Object it was.
+
+The writer's half is therefore the one requirement in this document that no
+conforming reader may enforce, and that is not an oversight: a reader that
+refused a compact resource would refuse exactly the material the paragraph above
+obliges it to accept. A resource laid out by nobody is still a resource; the
+`MUST` says what an implementation owes the people who read its output.
 
 An Event record is the exception: its stream is framed one record per line, so a
 record laid out over lines would not be a record. See
@@ -723,11 +729,13 @@ as numeric-ascending; that wording is superseded, and the shared algorithm
 applies to it like every other set.
 
 **Current-generation resources are persisted in that order.** A generation-1
-resource has one persisted representation, so a stored set written another way
-round is not valid current data however sound its seals are, and MUST be refused
-on the read path rather than normalized. This is the same rule that makes the
-bytes themselves JCS: two encodings of one value are two things a reader can
-disagree about.
+resource has one persisted representation, up to the layout that [the persisted
+form](#model) exempts, so a stored set written another way round is not valid
+current data however sound its seals are, and MUST be refused on the read path
+rather than normalized. This is the same rule that makes the bytes themselves
+JCS: two encodings of one value are two things a reader can disagree about.
+Whitespace between tokens is not one of those encodings, and member or element
+order is.
 
 Historical and predecessor-generation material is read under its own contract.
 Before this rule, no canonical persisted order was required and none was
@@ -1857,9 +1865,11 @@ this generation: an absent optional, an empty array and an empty object are all
 written the same way, which is not at all. So an omitted list and an explicit
 empty one are not two spellings of the same sidecar — the second is not a
 spelling this generation has, and a reader refuses it. More generally, a stored
-sidecar MUST be held to exactly what the write path can produce — a reader that
-accepts shapes the API refuses is a second, larger schema that only ever gets
-discovered by something that came to depend on it. A fault in a stored file is a
+sidecar MUST be held to exactly what the write path can produce, up to the
+layout [the persisted form](#model) exempts — a reader that accepts *shapes* the
+API refuses is a second, larger schema that only ever gets discovered by
+something that came to depend on it, while whitespace between tokens is not a
+shape. A fault in a stored file is a
 **schema** fault, not a usage error: nobody currently running a command wrote it.
 
 `dependencies[]` and each `items[].commits[]` are sets, in the shared JCS-element

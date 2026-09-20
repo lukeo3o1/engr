@@ -14,9 +14,11 @@ use std::path::Path;
 
 /// Put an Object on disk without going through any write path.
 ///
-/// Written as this generation's canonical bytes on purpose: a hand edit that
-/// also changes the *spelling* is refused as schema before anything looks at a
-/// seal, and every caller here is asking about the seal.
+/// Written as canonical bytes on purpose: a hand edit that also changes the
+/// *spelling* is refused as schema before anything looks at a seal, and every
+/// caller here is asking about the seal. The compact spelling is one the read
+/// path accepts — layout is not what that check is about — so these bytes get
+/// past it and the seal is what the test then fails on.
 fn overwrite_object(root: &Path, object: &engr::model::Object) {
     std::fs::write(
         store::object_path(root, &object.id),

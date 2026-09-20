@@ -794,7 +794,7 @@ pub(crate) fn check_canonical_bytes(
         crate::proof::compacted(text)
             == crate::proof::canonical_bytes(value, &path.display().to_string())?,
         EXIT_SCHEMA,
-        "{}: a current resource is persisted as its canonical JCS bytes, laid out over lines, and these are not them",
+        "{}: a current resource is persisted as its canonical JCS bytes, and these are not them",
         path.display()
     );
     Ok(())

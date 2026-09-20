@@ -1302,10 +1302,10 @@ fn a_rewritten_staged_destination_is_refused_rather_than_published() {
 /// Publication writes the staged bytes verbatim, so the resume path holds them
 /// to exactly the contract the ordinary read path holds them to.
 ///
-/// A rewrite that keeps the value and changes the bytes — member order, an
-/// explicit null where the writer omits the member — satisfies every digest,
-/// because a digest is taken over the value. It does not satisfy the current
-/// generation's canonical JCS representation. Publishing it would write
+/// A rewrite that keeps the value and changes the bytes — member order is the
+/// one exercised here — satisfies every digest, because a digest is taken over
+/// the value. It does not satisfy the current generation's canonical JCS
+/// representation. Publishing it would write
 /// `VERSION` over a workspace unable to read its own migrated resources, and
 /// `VERSION` is the last thing written, so nothing after it would notice.
 ///
