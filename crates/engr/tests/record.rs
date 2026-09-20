@@ -887,20 +887,24 @@ fn a_current_resource_with_a_duplicate_member_is_not_this_generations_bytes() {
 
     let path = store::object_path(&root, &id);
     let original = std::fs::read_to_string(&path).expect("object bytes");
-    store::load_object(&root, &id).expect("the canonical bytes load");
+    store::load_object(&root, &id).expect("the stored bytes load");
 
+    // The surgery is on the compact spelling, which the read path accepts as
+    // readily as the laid-out one — so what these fixtures change is the
+    // duplicate and nothing else.
+    let compact = engr::proof::compacted(&original);
     for (what, rewritten) in [
         (
             "a duplicated top-level member",
-            original.replacen('{', r#"{"state":"open","#, 1),
+            compact.replacen('{', r#"{"state":"open","#, 1),
         ),
         (
             "a duplicated Section member",
-            original.replacen(r#""sections":[{"#, r#""sections":[{"id":1,"#, 1),
+            compact.replacen(r#""sections":[{"#, r#""sections":[{"id":1,"#, 1),
         ),
     ] {
         assert_ne!(
-            rewritten, original,
+            rewritten, compact,
             "{what}: the fixture must change something"
         );
         std::fs::write(&path, &rewritten).expect("write");
@@ -2047,4 +2051,141 @@ fn a_dependency_from_an_unprojected_event_is_verified_and_one_it_dropped_is_not(
         report.standing_on_unreadable
     );
     assert_eq!(report.unprojected, 1);
+}
+
+/// Every persisted JSON resource is laid out over lines, and an Event stream is
+/// not.
+///
+/// The record is read by people — in a review, in a `git diff`, in a merge
+/// conflict — and one long line defeats all three: a changed word shows up as
+/// the whole file, and a conflict covers every member rather than the one that
+/// moved. The layout is derived from the canonical bytes, so this also pins the
+/// half that makes it safe: taking it back out returns exactly the bytes every
+/// digest was computed over.
+///
+/// The EventStore is the deliberate exception. Its framing *is* one record per
+/// line, so a record laid out over lines would not be a record.
+#[test]
+fn every_persisted_json_resource_is_laid_out_over_lines() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "one member to a line");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+    engr::backlog::create(
+        &root,
+        "unresolved",
+        "a point nobody settled",
+        Vec::new(),
+        &engr::backlog::Prepared::first(),
+    )
+    .expect("a backlog item");
+    engr::work::start(
+        &root,
+        &engr::work::Subject::Object(id.clone()),
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("a work sidecar");
+    engr::collection::create(
+        &root,
+        "plan",
+        "a plan",
+        None,
+        None,
+        engr::rules::Attempt::FIRST,
+    )
+    .expect("a collection");
+    // Left pending on purpose: a live Challenge is a persisted resource too.
+    gate::prepare(&root, payload(Act::Add, &id, "awaiting a human")).expect("prepare");
+
+    let mut resources = 0;
+    for path in persisted(&store::engr_dir(&root)) {
+        let text = std::fs::read_to_string(&path).expect("read");
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => {
+                resources += 1;
+                let value: Value = serde_json::from_str(&text)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert!(
+                    text.contains('\n') && text.ends_with('\n'),
+                    "{}: a JSON resource is laid out over lines",
+                    path.display()
+                );
+                assert_eq!(
+                    engr::proof::compacted(&text),
+                    engr::proof::canonical_bytes(&value, "resource").expect("canonical"),
+                    "{}: the layout is the only difference",
+                    path.display()
+                );
+            }
+            Some("jsonl") => {
+                for line in text.lines() {
+                    assert!(
+                        !line.trim().is_empty(),
+                        "{}: every line is a whole record",
+                        path.display()
+                    );
+                    serde_json::from_str::<Value>(line)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                }
+            }
+            _ => {}
+        }
+    }
+    // The Object, its backlog item, the sidecar, the plan and the pending
+    // Challenge. A count, so a domain that stops writing through the publisher
+    // is noticed here rather than in whatever reads it next.
+    assert_eq!(resources, 5, "every domain writes a JSON resource");
+}
+
+/// A resource an earlier build wrote as one line is the same resource, and the
+/// next write lays it out.
+///
+/// Layout is whitespace between tokens, so reading it as a second encoding
+/// would refuse every workspace written before this change — and every Object
+/// snapshot in a commit that was already made, which nobody can rewrite. So the
+/// read path compares the canonical bytes underneath, and the writer is what
+/// moves a file forward.
+#[test]
+fn a_resource_written_as_one_line_still_reads() {
+    let (_dir, root) = workspace();
+    let id = new_object(&root, "an earlier build's bytes");
+    admit(&root, payload(Act::Add, &id, "admitted wording"));
+
+    let path = store::object_path(&root, &id);
+    let laid_out = std::fs::read_to_string(&path).expect("object");
+    let compact = engr::proof::compacted(&laid_out);
+    assert!(!compact.contains('\n'), "the fixture is the one-line form");
+    std::fs::write(&path, &compact).expect("write the compact spelling");
+
+    let object = store::load_object(&root, &id).expect("the same Object");
+    assert!(
+        ops::verify(&root, &id).expect("verify").passed(),
+        "and the same seals"
+    );
+
+    admit(&root, payload(Act::Add, &id, "a second wording"));
+    let after = std::fs::read_to_string(&path).expect("object");
+    assert!(after.contains('\n'), "the next write lays it out");
+    assert_eq!(
+        store::load_object(&root, &id).expect("read back").rev,
+        object.rev + 1
+    );
+}
+
+/// Every file under a directory, in a stable order.
+fn persisted(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            found.extend(persisted(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
 }

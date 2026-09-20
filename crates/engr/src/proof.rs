@@ -119,6 +119,147 @@ pub fn canonical_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
         .map_err(|error| Error::new(EXIT_SCHEMA, format!("canonical {what}: {error}")))
 }
 
+/// The persisted spelling of a JSON resource: its canonical bytes, laid out
+/// over lines.
+///
+/// A record is read by people as often as by programs — in a review, in a `git
+/// diff`, in a merge conflict — and one long line is where all three of those
+/// stop working. A single changed word shows up as the whole file, and the
+/// conflict a merge raises covers every member rather than the one that moved.
+///
+/// The layout is derived from the canonical bytes rather than produced beside
+/// them, and that is the whole of why this is safe: [`indented`] inserts space
+/// *between* tokens and changes no token, so member order, number spelling and
+/// string escaping are still exactly what RFC 8785 said. [`compacted`] takes
+/// the layout back out, which is what the read path compares — so the file a
+/// person reads and the bytes the contract is written against are the same
+/// value, and neither this function nor a text editor's reformat can make them
+/// disagree.
+///
+/// Events are the one resource that keeps the compact form: an EventStore's
+/// framing *is* one record per line, so a record laid out over lines would not
+/// be a record.
+pub fn stored_bytes<T: Serialize>(value: &T, what: &str) -> Result<String> {
+    Ok(indented(&canonical_bytes(value, what)?))
+}
+
+/// Lay canonical bytes out over lines, touching nothing but the gaps.
+///
+/// Two spaces per level, one member or element per line, an empty object or
+/// array kept on its line as `{}` or `[]`, and a final newline so the file is
+/// an ordinary line-terminated text file. Everything inside a string literal is
+/// copied through untouched — a `{` or a `,` in a body is text, not structure.
+pub fn indented(canonical: &str) -> String {
+    let mut out = String::with_capacity(canonical.len() * 2);
+    let mut depth = 0usize;
+    let mut literal = Literal::default();
+    let mut chars = canonical.chars().peekable();
+    while let Some(character) = chars.next() {
+        if literal.carries(character) {
+            out.push(character);
+            continue;
+        }
+        match character {
+            '{' | '[' => {
+                out.push(character);
+                let closing = if character == '{' { '}' } else { ']' };
+                // An empty container is one token to a reader, and a line break
+                // inside it would be layout describing nothing.
+                if chars.peek() == Some(&closing) {
+                    chars.next();
+                    out.push(closing);
+                } else {
+                    depth += 1;
+                    break_line(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                break_line(&mut out, depth);
+                out.push(character);
+            }
+            ',' => {
+                out.push(character);
+                break_line(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            _ => out.push(character),
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// The canonical bytes of persisted text, recovered by removing the layout.
+///
+/// JSON's insignificant whitespace is exactly space, tab, carriage return and
+/// line feed between tokens, so removing it from a document that parsed leaves
+/// the one compact spelling of the same tokens in the same order. What it does
+/// **not** do is normalize anything the contract cares about: a reordered
+/// member, a number written another way, a differently escaped string and a
+/// duplicate member name all survive this and are refused by the comparison it
+/// feeds.
+///
+/// Only for text that has already parsed as JSON. Fed something else, it
+/// removes whatever looks like whitespace to it and says nothing about the
+/// result.
+pub fn compacted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut literal = Literal::default();
+    for character in text.chars() {
+        if literal.carries(character) {
+            out.push(character);
+            continue;
+        }
+        match character {
+            ' ' | '\t' | '\n' | '\r' => {}
+            _ => out.push(character),
+        }
+    }
+    out
+}
+
+fn break_line(out: &mut String, depth: usize) {
+    out.push('\n');
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+}
+
+/// Where a scan is: inside a string literal, or between tokens.
+///
+/// One state machine for both directions, because the two would otherwise be
+/// two places to get `"\\"` wrong — a body ending in a backslash, where the
+/// quote that follows really does close the string.
+#[derive(Default)]
+struct Literal {
+    inside: bool,
+    escaped: bool,
+}
+
+impl Literal {
+    /// Advance over `character` and say whether the literal carries it, meaning
+    /// the caller must copy it through untouched rather than read it as
+    /// structure.
+    fn carries(&mut self, character: char) -> bool {
+        if !self.inside {
+            self.inside = character == '"';
+            // The opening quote is a token, and it belongs to the literal from
+            // here; a caller that read it as structure would have to know that
+            // too.
+            return self.inside;
+        }
+        if self.escaped {
+            self.escaped = false;
+        } else if character == '\\' {
+            self.escaped = true;
+        } else if character == '"' {
+            self.inside = false;
+        }
+        true
+    }
+}
+
 /// Put a persisted set in its protocol order, refusing canonical duplicates.
 ///
 /// The protocol classifies every persisted array as `ordered` or `set`. A set
@@ -580,6 +721,75 @@ mod tests {
 
     fn object() -> Object {
         Object::new(crate::model::new_id(), "a title".to_owned()).expect("object")
+    }
+
+    /// The layout is whitespace and nothing else, so taking it out returns the
+    /// exact bytes it was put into.
+    ///
+    /// The round trip is the whole safety argument for persisting a laid-out
+    /// resource: if a single token could move, the file a person reads and the
+    /// bytes every digest is taken over would be two different values.
+    #[test]
+    fn layout_is_whitespace_and_comes_back_out() {
+        for canonical in [
+            r#"{}"#,
+            r#"[]"#,
+            r#"{"a":1,"b":[1,2],"c":{"d":{}},"e":[]}"#,
+            r#"{"nested":[{"deep":[[1],[2,3]]}]}"#,
+            // Structure inside a string is text: a body may hold every
+            // character the layout reads as a delimiter.
+            r#"{"text":"{\"a\": 1,\n  [x]: y\"}","done":true}"#,
+            // A body ending in a backslash, where the next quote really does
+            // close the literal.
+            r#"{"text":"a trailing slash \\","after":null}"#,
+        ] {
+            let laid_out = indented(canonical);
+            assert_eq!(compacted(&laid_out), canonical, "{canonical}");
+            assert!(laid_out.ends_with('\n'), "{canonical}: line-terminated");
+        }
+    }
+
+    /// One member or element to a line, which is what makes a diff show the
+    /// member that changed rather than the file.
+    #[test]
+    fn layout_puts_one_member_on_each_line() {
+        assert_eq!(
+            indented(r#"{"a":1,"b":{"c":[1,2]},"d":{},"e":[]}"#),
+            "{\n  \"a\": 1,\n  \"b\": {\n    \"c\": [\n      1,\n      2\n    ]\n  },\n  \"d\": {},\n  \"e\": []\n}\n"
+        );
+    }
+
+    /// Removing the layout is not a normalizer. Everything the canonical form
+    /// fixes — member order, number spelling, string escaping, a duplicate
+    /// member name — survives it, which is what lets the read path compare the
+    /// result against the canonical bytes and still refuse a second encoding.
+    #[test]
+    fn taking_the_layout_out_normalizes_nothing_else() {
+        let value = serde_json::json!({"a": 1, "b": 2});
+        let canonical = canonical_bytes(&value, "fixture").expect("canonical");
+        for second in [
+            r#"{ "b": 2, "a": 1 }"#,
+            "{\n  \"a\": 1.0,\n  \"b\": 2\n}\n",
+            r#"{"a":1,"a":1,"b":2}"#,
+            r#"{"\u0061":1,"b":2}"#,
+        ] {
+            assert_ne!(compacted(second), canonical, "{second}");
+        }
+        assert_eq!(
+            compacted("  {\n\t\"a\": 1,\r\n  \"b\": 2\n}\n"),
+            canonical,
+            "only the whitespace between tokens goes"
+        );
+    }
+
+    /// What a writer emits for a JSON resource: the canonical bytes, laid out.
+    #[test]
+    fn stored_bytes_are_the_canonical_bytes_laid_out() {
+        let object = object();
+        let canonical = canonical_bytes(&object, "object").expect("canonical");
+        let stored = stored_bytes(&object, "object").expect("stored");
+        assert!(stored.contains('\n'), "a stored resource breaks lines");
+        assert_eq!(compacted(&stored), canonical);
     }
 
     /// Every member is present, including the ones the persisted resource omits

@@ -14,9 +14,11 @@ use std::path::Path;
 
 /// Put an Object on disk without going through any write path.
 ///
-/// Written as this generation's canonical bytes on purpose: a hand edit that
-/// also changes the *spelling* is refused as schema before anything looks at a
-/// seal, and every caller here is asking about the seal.
+/// Written as canonical bytes on purpose: a hand edit that also changes the
+/// *spelling* is refused as schema before anything looks at a seal, and every
+/// caller here is asking about the seal. The compact spelling is one the read
+/// path accepts — layout is not what that check is about — so these bytes get
+/// past it and the seal is what the test then fails on.
 fn overwrite_object(root: &Path, object: &engr::model::Object) {
     std::fs::write(
         store::object_path(root, &object.id),
@@ -149,12 +151,8 @@ fn a_declared_current_workspace_is_not_downgraded_by_a_malformed_object() {
     write_raw(&object_path, &malformed).expect("legacy spelling in declared v3");
 
     let path = backlog::item_path(&root, &id);
-    let value: serde_json::Value = store::read_json(&path).expect("item");
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&value).expect("non-JCS item"),
-    )
-    .expect("write non-JCS item");
+    let stored = std::fs::read_to_string(&path).expect("item");
+    std::fs::write(&path, common::reordered(&stored)).expect("write non-JCS item");
 
     let error = backlog::load(&root, &id).expect_err("the unrelated resource stays v3");
     assert_eq!(error.code, engr::EXIT_SCHEMA);

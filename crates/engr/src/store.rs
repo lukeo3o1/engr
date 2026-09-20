@@ -1,5 +1,10 @@
 //! Filesystem layout, locking, and atomic writes.
 //!
+//! Every JSON resource here is persisted as its canonical JCS bytes laid out
+//! over lines, and read back with the layout removed; the EventStore is the
+//! exception, because its framing is one record per line. See
+//! [`crate::proof::stored_bytes`].
+//!
 //! ```text
 //! .engr/
 //!   VERSION                          the workspace generation, "1"
@@ -748,13 +753,18 @@ fn read_text(path: &Path) -> Result<String> {
 /// Current resources have the one spelling their writer emits. JCS alone fixes
 /// JSON member order and number text, but it cannot distinguish an omitted
 /// optional field from an explicit `null`, or an omitted false from `false`.
+///
+/// Compared with the layout taken back out, like every other read of a
+/// persisted resource: how the file is broken across lines is not part of what
+/// it says.
 pub(crate) fn check_current_resource_shape<T: Serialize>(
     path: &Path,
     text: &str,
     resource: &T,
 ) -> Result<()> {
     ensure!(
-        text == crate::proof::canonical_bytes(resource, &path.display().to_string())?,
+        crate::proof::compacted(text)
+            == crate::proof::canonical_bytes(resource, &path.display().to_string())?,
         EXIT_SCHEMA,
         "{}: a current resource is not in the exact shape its writer emits",
         path.display()
@@ -764,6 +774,13 @@ pub(crate) fn check_current_resource_shape<T: Serialize>(
 
 /// The bytes of a current-generation resource against the one serialization it
 /// is allowed to have. Split out so a caller that already holds both can ask.
+///
+/// The layout comes out first. How a file is broken across lines is not part of
+/// the value — see [`crate::proof::stored_bytes`] — and holding a resource to
+/// one spelling of its whitespace would refuse every workspace written before
+/// there was a layout, and every Object snapshot already inside a commit, which
+/// nobody can rewrite. Everything the canonical form actually fixes survives the
+/// removal and is still refused here.
 pub(crate) fn check_canonical_bytes(
     path: &Path,
     text: &str,
@@ -774,7 +791,8 @@ pub(crate) fn check_canonical_bytes(
     // file is a fault in the file.
     crate::proof::stored_within_safe_integers(value, &path.display().to_string())?;
     ensure!(
-        text == crate::proof::canonical_bytes(value, &path.display().to_string())?,
+        crate::proof::compacted(text)
+            == crate::proof::canonical_bytes(value, &path.display().to_string())?,
         EXIT_SCHEMA,
         "{}: a current resource is persisted as its canonical JCS bytes, and these are not them",
         path.display()
@@ -979,8 +997,13 @@ pub(crate) fn create_dir_durably(path: &Path) -> Result<()> {
 }
 
 /// Write via a temporary file and rename, so a reader never sees half a file.
+///
+/// Laid out over lines, which is the spelling a JSON resource is persisted in.
+/// An Event record is not written through here: its stream is framed one record
+/// per line, so it keeps the compact bytes [`crate::proof::stored_bytes`] is
+/// derived from.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let text = crate::proof::canonical_bytes(value, &path.display().to_string())?;
+    let text = crate::proof::stored_bytes(value, &path.display().to_string())?;
     publish(path, &text)
 }
 
