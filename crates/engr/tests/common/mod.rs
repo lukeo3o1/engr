@@ -414,3 +414,29 @@ pub fn released() -> (TempDir, PathBuf) {
     );
     (temp, root)
 }
+
+/// A second spelling of a persisted value: the same members, in an order JCS
+/// does not put them in.
+///
+/// Layout is no longer a second spelling — a resource is compared with its line
+/// breaks taken back out, so a file somebody reformatted is the same file. A
+/// fixture that needs bytes the read path refuses therefore has to move
+/// something the canonical form actually fixes, and member order is the
+/// cheapest of those.
+pub fn reordered(text: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(text).expect("json");
+    let members = value.as_object().expect("a JSON object");
+    assert!(members.len() > 1, "one member has only one order");
+    let mut written: Vec<String> = members
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}:{}",
+                serde_json::to_string(name).expect("member name"),
+                engr::proof::canonical_bytes(value, "member").expect("canonical member")
+            )
+        })
+        .collect();
+    written.reverse();
+    format!("{{{}}}", written.join(","))
+}

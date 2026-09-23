@@ -67,7 +67,39 @@ a git merge, a hand edit, a copy or another implementation as readily as through
 a supported write, and a writer that emits one representation beside a reader
 that accepts many is not one representation. The same comparison settles
 duplicate member names without a second rule — a repeated key collapses during
-parsing, so the value no longer re-serializes to the bytes that had two.
+parsing, so the value no longer re-serializes to the bytes that had two. The
+paragraph below qualifies that in exactly one way, and only for the whitespace
+between tokens.
+
+**Those bytes are laid out over lines, and the layout is not part of the
+value.** A record is read by people as often as by programs — in a review, in a
+`git diff`, in a merge conflict — and one long line defeats all three: a changed
+word shows up as the whole file, and a conflict covers every member rather than
+the one that moved. So a writer MUST lay a JSON resource out, one member or
+element to a line, and a reader MUST compare the stored text **with the
+whitespace between its tokens removed** against the canonical bytes. JSON's
+insignificant whitespace is exactly space, tab, carriage return and line feed
+between tokens; removing it from a document that parsed leaves the same tokens
+in the same order, so member order, number spelling, string escaping and a
+duplicate member name are all still refused exactly as before.
+
+The layout's own details — how wide an indent is, whether an empty object sits
+on its line — belong to the implementation that wrote the file, and a reader
+MUST NOT refuse a resource for them. This is the one thing about a resource's
+bytes that two conforming implementations may disagree on, and it is deliberate:
+putting the rule on the reader is what keeps a **workspace written before the
+layout existed** readable, and keeps an **Object snapshot inside a commit** —
+which a Ref resolves through, and which nobody can rewrite — the Object it was.
+
+The writer's half is therefore the one requirement in this document that no
+conforming reader may enforce, and that is not an oversight: a reader that
+refused a compact resource would refuse exactly the material the paragraph above
+obliges it to accept. A resource laid out by nobody is still a resource; the
+`MUST` says what an implementation owes the people who read its output.
+
+An Event record is the exception: its stream is framed one record per line, so a
+record laid out over lines would not be a record. See
+[Confirming](#confirming).
 
 Predecessor generations are read under their own contract, which did not require
 this. Bringing them forward is what migration is for.
@@ -697,11 +729,13 @@ as numeric-ascending; that wording is superseded, and the shared algorithm
 applies to it like every other set.
 
 **Current-generation resources are persisted in that order.** A generation-1
-resource has one persisted representation, so a stored set written another way
-round is not valid current data however sound its seals are, and MUST be refused
-on the read path rather than normalized. This is the same rule that makes the
-bytes themselves JCS: two encodings of one value are two things a reader can
-disagree about.
+resource has one persisted representation, up to the layout that [the persisted
+form](#model) exempts, so a stored set written another way round is not valid
+current data however sound its seals are, and MUST be refused on the read path
+rather than normalized. This is the same rule that makes the bytes themselves
+JCS: two encodings of one value are two things a reader can disagree about.
+Whitespace between tokens is not one of those encodings, and member or element
+order is.
 
 Historical and predecessor-generation material is read under its own contract.
 Before this rule, no canonical persisted order was required and none was
@@ -1021,6 +1055,14 @@ already erased member order, insignificant whitespace, and any duplicate member
 name it collapsed — and a duplicate is exactly where two conforming JSON stacks
 are permitted to disagree about what a file says. An EventStore arrives through
 a git merge, a hand edit or a copy as readily as through a supported append.
+
+**A record is therefore not laid out over lines**, and this is the one place
+where the layout every other JSON resource carries is unavailable rather than
+merely unhelpful: the framing *is* the line, so a record broken across several
+would not be a record, and whitespace where a record belongs is the first sign
+of the framing damage the next paragraph refuses. An Event stream stays diffable
+for the reason a log does — a new record is a new line, and no existing line
+moves.
 
 The framing is exact in both directions. **Every line is a record and every
 record is terminated**: a blank or whitespace-only line is refused rather than
@@ -1823,9 +1865,11 @@ this generation: an absent optional, an empty array and an empty object are all
 written the same way, which is not at all. So an omitted list and an explicit
 empty one are not two spellings of the same sidecar — the second is not a
 spelling this generation has, and a reader refuses it. More generally, a stored
-sidecar MUST be held to exactly what the write path can produce — a reader that
-accepts shapes the API refuses is a second, larger schema that only ever gets
-discovered by something that came to depend on it. A fault in a stored file is a
+sidecar MUST be held to exactly what the write path can produce, up to the
+layout [the persisted form](#model) exempts — a reader that accepts *shapes* the
+API refuses is a second, larger schema that only ever gets discovered by
+something that came to depend on it, while whitespace between tokens is not a
+shape. A fault in a stored file is a
 **schema** fault, not a usage error: nobody currently running a command wrote it.
 
 `dependencies[]` and each `items[].commits[]` are sets, in the shared JCS-element

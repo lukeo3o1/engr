@@ -2369,25 +2369,37 @@ fn a_purged_event_prefix_is_refused() {
 /// A historical Object is its canonical JCS bytes, like every other persisted
 /// resource. A snapshot that merely parses to the right value is a second
 /// encoding of the material a Ref's digest was taken over.
+///
+/// Layout is not that second encoding, and the test says which is which: the
+/// same members in another order is refused, while the same bytes laid out
+/// differently is the same Object. A commit cannot be rewritten, so a snapshot
+/// refused for how it was broken across lines would be refused forever.
 #[test]
 fn a_historical_object_must_be_jcs() {
     let (_dir, root) = workspace();
     let id = new_object(&root, "historical format");
     let path = store::object_path(&root, &id);
-    let canonical = std::fs::read_to_string(&path).expect("canonical object");
-    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("json");
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&parsed).expect("pretty"),
-    )
-    .expect("noncanonical snapshot");
+    let stored = std::fs::read_to_string(&path).expect("stored object");
+    std::fs::write(&path, common::reordered(&stored)).expect("noncanonical snapshot");
     let commit = commit_all(&root, "noncanonical historical object");
-    std::fs::write(&path, &canonical).expect("restore working object");
+    std::fs::write(&path, &stored).expect("restore working object");
 
     let error = engr::git::object_at(&root, &commit, &id)
         .expect_err("a historical Object carries its canonical spelling");
     assert_eq!(error.code, engr::EXIT_SCHEMA);
     assert!(error.message.contains("canonical JCS bytes"), "{error}");
+
+    // The compact spelling is what every build before the layout wrote, and it
+    // is still this Object.
+    std::fs::write(&path, engr::proof::compacted(&stored)).expect("an earlier build's bytes");
+    let commit = commit_all(&root, "a snapshot laid out another way");
+    std::fs::write(&path, &stored).expect("restore working object");
+    assert!(
+        engr::git::object_at(&root, &commit, &id)
+            .expect("layout is not a second encoding")
+            .is_some(),
+        "the snapshot reads"
+    );
 }
 
 /// A transition whose numbers no identity can carry is refused before anything

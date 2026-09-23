@@ -218,8 +218,13 @@ pub fn object_at(root: &Path, commit: &str, id: &str) -> Result<Option<Historica
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("{path}: {error}")))?;
         let object = crate::store::decode_object(Path::new(&path), id, value)?;
         let canonical = crate::proof::canonical_bytes(&object, "historical Object")?;
+        // The layout comes back out first, exactly as the worktree read does.
+        // A snapshot is whatever the build that committed it wrote, and how
+        // that build broke the file across lines is not something a later one
+        // may call a different Object — least of all here, where the commit is
+        // immutable and a refusal would be permanent.
         ensure!(
-            bytes == canonical.as_bytes(),
+            crate::proof::compacted(text) == canonical,
             EXIT_SCHEMA,
             "{path}: an Object is persisted as its canonical JCS bytes, and this snapshot is not"
         );

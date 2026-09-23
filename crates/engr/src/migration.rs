@@ -1818,7 +1818,11 @@ fn stage_destination(root: &Path, challenge: &str, derived: &[Derived]) -> Resul
     for one in derived {
         let value = serde_json::to_value(&one.object)
             .map_err(|error| Error::new(EXIT_SCHEMA, format!("object: {error}")))?;
-        let object = crate::proof::canonical_bytes(&value, "object")?;
+        // Exactly what publication will put in `.engr/objects/` — the laid-out
+        // spelling for the Object, the compact record for the stream — because
+        // publication copies these bytes verbatim and the workspace they
+        // activate has to be able to read them.
+        let object = crate::proof::stored_bytes(&value, "object")?;
         let event = crate::proof::canonical_bytes(&one.event, "Event")?;
         store::write_text(
             &temp.join("objects").join(format!("{}.json", one.object.id)),
@@ -1945,12 +1949,12 @@ fn confirmed_destination(
         // something the workspace will hold — and `VERSION` goes down after it,
         // declaring the result current. A check that only proved the bytes
         // *parse into* the right value would let a semantically identical
-        // rewrite through: different member order, different whitespace, an
-        // explicit null where the writer omits the member. All of those satisfy
-        // the digests, because the digests are taken over the value. None of
-        // them satisfy the read path, which requires the canonical JCS bytes —
-        // so the transaction would activate a workspace unable to read its own
-        // migrated resources.
+        // rewrite through: different member order, an explicit null where the
+        // writer omits the member. Both satisfy the digests, because the digests
+        // are taken over the value. Neither satisfies the read path, which
+        // requires the canonical JCS bytes under whatever layout the file
+        // carries — so the transaction would activate a workspace unable to read
+        // its own migrated resources.
         let object = store::decode_object_text(&object_path, &file.object, &object_text)?;
         ensure!(
             object.digest == file.object_digest
