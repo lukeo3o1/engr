@@ -443,6 +443,80 @@ Objects are addressed by unique id prefix, like a git commit. A uuidv7 prefix is
 a timestamp, so objects created close together need more characters; engr widens
 the abbreviation for you.
 
+## When the conversation is gone
+
+Your context can be compacted or cleared at any point, without warning, and
+whoever continues — you, later — has only the repository and what engr holds.
+Three things go wrong there, and each needs a different defence.
+
+**Nothing was written.** The agent that forgot does not remember forgetting, so
+this cannot be caught from the inside. Write at the moment something settles,
+not at the end: a decision when it is made, a question when you decide not to
+settle it now, an item the moment it is done. The end of a session is the worst
+time to write — the context is fullest, the wish to finish strongest, and the
+end may never be announced. On resuming, compare the repository with what the
+sidecar last said: commits after its `Updated` time, or uncommitted changes
+nothing mentions, are work the previous session did not record.
+
+```bash
+engr work ls
+git log --oneline --since "<Updated, from engr work ls>"
+git status --short
+```
+
+**It was written, but not enough.** It reads fluently and says too little, and
+its author cannot see that. The detector is a reader with none of your context:
+the drill below.
+
+**It was written wrong, or has gone stale.** The most dangerous of the three,
+because the next agent acts on it. So on resuming, read what engr holds as
+claims to check, not as facts. Sections are checked for you — `show` marks drift
+and tampering. A sidecar and a backlog point are not, and say so on every
+screen: check each claim against the thing it names before you rely on it.
+
+When you find a gap, **fill it from evidence, never from what is plausible**:
+`git log` and `git diff`, a test run, `engr show`, the transcript if there is
+one. Every reconstructed line should be able to say where it came from. What you
+cannot reconstruct is written down as unknown — a backlog question, or a question
+for the human. A plausible guess written into the sidecar is worse than the gap
+it filled, because the next reader cannot tell it from a fact.
+
+Correct in the open. A wrong sidecar line is simply rewritten — git keeps the
+old one. A wrong Section is revised through its admission path, with the reason.
+
+### The resume drill
+
+Whether what you left is enough can only be tested one way: by something that
+has nothing else. When a stretch of work is finished — do not wait for the end
+of the session, which may not come — give a fresh subagent this guide and the
+output of these, and nothing from the conversation:
+
+```bash
+engr ls --verify
+engr backlog ls
+engr work ls
+engr collection ls
+engr candidate
+```
+
+— plus `engr work show` and `engr backlog show` for everything the listings
+name. Ask it:
+
+```text
+1. What is settled? Cite the Section.
+2. What is still open?
+3. What command would you run next, and why?
+4. What would you have to ask before continuing?
+```
+
+Compare its answers with what you know. Every difference is something engr is
+missing or has wrong: fix it, and run the drill again with a reader who has not
+seen the earlier version.
+
+If your harness runs hooks, the reading at the start and a check before
+stopping need not depend on remembering them. engr's repository carries two for
+Claude Code under `skill/hooks/`.
+
 ## When an object or a section is marked
 
 `show` answers two questions, and the first one is about the object as a whole.
@@ -508,6 +582,28 @@ engr backlog merge <id> --into 2 --section 5 --text "one point after all"
 engr backlog produced <id> --section 2 --target engr:obj:<id>:3
 engr backlog consume <id> --section 2     # consuming it is what says "settled"
 ```
+
+**A point is one question, stated so it can be settled.** Three things, a
+sentence each:
+
+- **what is undecided** — one question per point;
+- **why it is not obvious** — what pulls against what;
+- **what would settle it** — the evidence, the measurement, or the person who
+  decides.
+
+```text
+Whether the deferral bound counts lost turns or elapsed time.
+A count is exact under steady load; only time also covers a stalled dispatcher.
+Settled by which of those two failures the service owner will accept.
+```
+
+Nothing else: not who has looked at it, not what was tried, not what comes
+next. The third sentence is the one most often missing and the one that
+matters most — a point that does not say what would settle it cannot be worked
+on, and cannot honestly be consumed, because nobody can tell whether it has
+been. engr limits a topic's title and not a point's text, so keeping it short is
+yours to do. If it needs more than three sentences it is usually two points, or
+part of it is already settled and belongs in the record.
 
 `merge` names one destination and one source. It keeps the destination and
 removes the source; it never mints a third section, so anything already pointing
@@ -665,6 +761,81 @@ point per item, concrete verbs, outcomes rather than reasoning. The limits are
 enforced — 300 characters for the summary, 160 for an item, 240 for a result, 200
 for a reason — and there is no oversize exception, because nothing here is worth
 admitting past its limit. If it will not fit, it belongs in backlog or the Object.
+
+The summary says where things stand and which item is next. It is not a
+changelog: what is done is in the items, with their results.
+
+### An item is a step you can tell is finished
+
+Write each item as one verb, one thing, and the condition that makes it done:
+
+```text
+✗ fairness in the dispatcher
+✓ stop idle tenants counting toward share; done when test_idle_tenant passes
+```
+
+If you cannot write the condition, it is not a step yet: it is a question, and
+belongs in backlog, or it is several steps. The right size is what one sitting
+or one commit finishes.
+
+**One item active at a time.** Making the next one active is the moment to close
+the one before it — done, or back to pending with a result that says why.
+Attention moves to the next thing the instant the last one works, and that
+instant is exactly when the tick gets forgotten.
+
+**Close it in the same step as the proof.** When the test passes or the commit
+lands, run these before anything else:
+
+```bash
+engr work item state <subject> --item 2 --state done
+engr work item result <subject> --item 2 --text "test_idle_tenant passes"
+engr work item commit <subject> --item 2 --commit HEAD
+```
+
+The result says how you know it is done, not that it is. Take every specific in
+it — a hash, a count, a test name, a code — from command output rather than
+from memory: a plausible hash reads exactly like a real one. `--commit HEAD` is
+the tool resolving it for you; prefer that shape wherever one exists.
+
+### What of your thinking to keep
+
+The reasoning that got you here is usually a mess — abandoned guesses beside
+conclusions, in the order you had them. **Do not store it.** A later agent reads
+every sentence as equally meant; it cannot tell the guess you dropped from the
+result, and it will pick the dropped one back up. The mess is in git and in the
+transcript if anybody ever needs it.
+
+What it contains that the next agent needs goes where it belongs:
+
+| In your reasoning | Where it goes |
+| --- | --- |
+| A conclusion that is settled | A Section: the claim and its reason |
+| A question you will not settle now | A backlog point |
+| A hypothesis you are testing | An active item: "check whether X causes Y" |
+| What that showed, or a path you ruled out | That item's result: "X fails: Y" |
+| What comes next | The next pending item, and the summary |
+| How you got there | Nowhere |
+
+So thinking in progress is not a separate thing to save. A hypothesis is an
+item, and its result is the conclusion; the 240-character limit on a result has
+room for what was found and none for how.
+
+To decide whether a line stays, do not ask yourself whether the next agent would
+miss it. That is predicting a reader without your context, which is the one
+thing the writer cannot do. Do these instead:
+
+1. **Classify it** by the table. "How you got there" goes, and that alone
+   removes most of it.
+2. **A ruled-out path stays if you actually tried it.** It attracted you, and
+   the next agent is attracted by the same things. One you dismissed at a
+   glance can go.
+3. **For the few lines you still cannot call, test them.** Ask a reader with no
+   context what it would do next and what it would try first — once with the
+   line, and once, a different reader, without it. If the answer does not
+   change, the line goes.
+4. **When still unsure, weigh the costs.** A missing ruled-out path costs the
+   next agent the whole detour; an extra line of history costs attention and
+   goes stale. Keep paths and constraints, drop narrative, always keep pointers.
 
 **A sidecar is only as true as the last time it was checked against what it
 names.** A blocker that names a candidate, an item marked active, a dependency
