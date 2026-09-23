@@ -103,6 +103,122 @@ the second line`, send that whole string. engr will refuse it and discard the
 candidate, which is correct — that was a qualified yes, and deciding it counted
 as a yes is not your call.
 
+## Writing for a reader who was not there
+
+Everything engr keeps is read later by somebody who has only the page — a
+Section, a title, a backlog point, a sidecar, a plan's reason. You write it out
+of everything you know, and when you read it back, what you know fills in
+whatever the page left out. So the draft looks complete to you and to nobody
+else, and reading it again more carefully does not help: the second reading has
+the same knowledge as the first.
+
+The gaps are not random. Cold reviewers keep finding the same few, and each was
+invisible to the agent that wrote it:
+
+- **The reason stayed with you.** "When a job repeatedly loses its turn" read as
+  a justification to the agent that knew the argument. It is a scope clause. If
+  no words on the page say *why*, the reason is not on the page.
+- **The number stayed with you.** "Released after losing its turn a set number
+  of times", and in the next candidate "the agreed number of times" — the author
+  knew the number and the record never said it. A quantity somebody decided is
+  written out.
+- **Several claims read as one.** Three assertions in one Section, read as one
+  "because I meant them as one". If a reader could accept part and reject the
+  rest, it is more than one.
+- **The story of the work instead of its result.** "Nobody has weighed the two
+  against each other here" says what the analysis has not done yet. What was
+  tried, who looked, and what comes next are not what is unresolved.
+- **Written against the unit, not its neighbours.** A backlog revision that
+  quietly ruled out its sibling point, because its author was looking at one
+  point and its reviewer at the topic. A sidecar still reporting a candidate as
+  pending a session after the human had answered it.
+- **Material moved instead of placed.** A required header typed into the prose;
+  whole functions copied in as excerpts because the field that says where code
+  lives was not open on that path. A substitute field is still the wrong field.
+- **Vague after a fix.** A flagged word replaced with an emptier one, until the
+  wording is clean and a reader can no longer say what to do.
+
+So do the work in an order that asks those questions before there is wording to
+defend:
+
+1. **Choose where it goes.** Settled is the record, unresolved is the backlog,
+   where execution stands is a sidecar, and a passing thought is nowhere.
+2. **Read what it sits beside.** The whole Object or topic, not only the section
+   you are changing; and for a sidecar, the current state of everything it
+   claims.
+
+   ```bash
+   engr show <id>
+   engr backlog show <id>
+   engr work show <subject>
+   engr candidate
+   ```
+
+3. **Write the content down before the wording** — for anything that asserts,
+   a few lines in a scratch file, never in engr:
+
+   ```text
+   claim      the one thing a reader should believe or do
+   because    why it holds, in words a stranger could check
+   quantity   any number a person decided — or "none"
+   source     the code it is about, and the field that will carry it — or "none"
+   rests on   the Section and the fields it depends on — or "none"
+   beside     what nearby it could contradict, repeat or rule out
+   ```
+
+   "none" is a real answer. The note is not for engr and nobody attests to it.
+   It exists so that, before the draft does, there is something to compare the
+   draft against other than your own reading of it.
+4. **Draft from the note**, one claim per unit. Everything that is not prose
+   goes in the field that owns it. When that field is not open on your path —
+   an agent-admitted Section carries no implementation relation — report that
+   rather than putting the material somewhere else.
+5. **Have the screen read cold.** Take what engr renders — the first
+   `--agent` call, the candidate, or `show` on what you just wrote — and hand a
+   reader that never saw the draft *that screen and nothing else*: no Rule, no
+   note, no account of what you meant. Where engr renders nothing before a
+   review — a governed backlog mutation, a governed Human `prepare` — give it
+   the exact command and the files it reads instead, and say that is what it
+   is. Ask exactly this:
+
+   ```text
+   1. In one sentence of your own: what does this ask a reader to believe or do?
+   2. Why? Quote the words that give the reason, or say there are none.
+   3. Is there a quantity somebody decided? Quote it, or say there is none.
+   4. List each thing it asserts that a reader could accept or reject alone.
+   5. What would you have to ask the author before acting on it?
+   6. If the screen shows more than this change: does the change contradict,
+      repeat or rule out anything else on it?
+   ```
+
+   Compare the answers with the note, line by line. Every difference is a
+   fact about the page, not a disagreement to argue: the reader had only the
+   page, and so will everyone after you. Fix the wording, and ask a reader who
+   has not seen this version. The page carries what you meant when the answers
+   match the note and the last two come back empty.
+6. **Then review it against the Rules**, below. Check the mechanical
+   requirements by doing rather than reading: count the words against a ceiling,
+   point at the question mark a Rule asks for, find the header in its field on
+   the screen, and the relation or reference your note's `source` and `rests
+   on` named — those are fields rather than wording, so a paraphrase never
+   notices they are missing. Your reading passes all of these; counting does
+   not.
+
+**The cold read is drafting, not Rule Review, and it is not an attempt.** It is
+never shown a Rule and it returns no verdict — it says what the page says, and
+you decide whether that is what you meant. That is why it can be repeated
+without spending the ceiling, and why it stops being free the moment it is
+handed a Rule or asked whether the wording passes. Then it is a review, and it
+counts.
+
+Spend a subagent on it where a mistake is expensive: every Section and every
+Human candidate, because a failed review is one attempt out of a small budget
+and a rejected candidate is a person's reading spent; and a backlog point that a
+Rule governs or that somebody will decide from. A title asserts nothing for the
+questions to find; what fails there is mechanical, and counting is its check. A
+sidecar entry or a plan's reason does not need a reader either — what goes wrong
+there is staleness, and reading what it names is what catches it.
+
 ## Agent admission
 
 An Agent semantic mutation needs at least one applicable, usable Object Rule and
@@ -134,6 +250,12 @@ call prints exactly what would be stored and writes nothing — hand a subagent
 else. No draft history, no explanation of what you were going for, no opinion
 about whether it passes. Ask for one answer: does this meet every requirement,
 and if not, which one does it miss.
+
+Have the screen read cold first — see
+[Writing for a reader who was not there](#writing-for-a-reader-who-was-not-there).
+A review is an attempt against a ceiling of a few, and spending one to learn
+that the reason never reached the page spends it on something the cold read
+finds without costing any.
 
 **Hand over the screen, not the prose.** A Section is more than its text: the
 header, the role, the supplementary content and the basis are all inside the
@@ -441,6 +563,11 @@ own policy is a point somebody has to come back and fix, so the saving is often
 borrowed rather than made. Delegate when the rule sets checkable requirements
 on the wording; review it yourself when it does not.
 
+For a `revise` or a `merge`, the screen to hand over is the whole topic —
+`engr backlog show <id>` — not the point alone. A point is revised against its
+siblings whether you look at them or not, and one sharpened in isolation has
+ruled out the question sitting next to it.
+
 Every one of these takes `--attempt <n>` when a project rule governs backlog
 (`--review-attempt` is accepted too, since that is what `prepare` calls it) —
 which try of your own review this is, counted from 1, and 1 if you say nothing.
@@ -538,6 +665,16 @@ point per item, concrete verbs, outcomes rather than reasoning. The limits are
 enforced — 300 characters for the summary, 160 for an item, 240 for a result, 200
 for a reason — and there is no oversize exception, because nothing here is worth
 admitting past its limit. If it will not fit, it belongs in backlog or the Object.
+
+**A sidecar is only as true as the last time it was checked against what it
+names.** A blocker that names a candidate, an item marked active, a dependency
+on a point — each is a claim about something else, and that thing moves without
+touching the sidecar. One session's blocker said a candidate was still waiting
+on a human; the human had answered it a session earlier, and the next agent
+found that out only because it checked. So update the sidecar in the same step
+as the act that changes it, and when resuming, check each claim against its
+thing before relying on it — a pending code with `engr candidate`, a point with
+`engr backlog show`.
 
 Keep the language already in the sidecar; if it has none, follow the repository's
 working language. Do not translate existing entries because this conversation is

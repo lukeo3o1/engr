@@ -56,6 +56,13 @@ and give it only the Rule, its bases and the exact wording. You pass your own
 work — not dishonestly, but because you read what you meant rather than what is
 there.
 
+Before that review, have the rendered screen read cold: a reader with no Rule
+says what the page asserts, why, and what it would have to ask, and you compare
+that with a note of what you meant, written before the draft. It returns no
+verdict, so it is drafting rather than an attempt — and it is what finds the
+reason or the number that stayed in your head, before a review spends one of a
+few attempts finding it. `skill/SKILL.md` has the order and the exact questions.
+
 `engr candidate <code>` re-renders a pending candidate. Use it when a human comes
 back later — **re-running `prepare` mints a new code and voids the one they are
 holding.**
