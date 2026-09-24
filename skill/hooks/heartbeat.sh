@@ -13,9 +13,12 @@ input=$(cat)
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 [ -d .engr ] || exit 0
 
-every=${HEARTBEAT_EVERY:-15}
+every=${HEARTBEAT_EVERY:-10}
 session=$(printf '%s' "$input" | sed -n 's/.*"session_id": *"\([^"]*\)".*/\1/p' | head -n 1)
 counter="${TMPDIR:-/tmp}/engr-heartbeat-${session:-unknown}"
+# When this session began, for gate.sh: with no sidecar yet, a commit made since
+# then is still work nobody recorded.
+[ -e "$counter.start" ] || date -u +%Y-%m-%dT%H:%M:%SZ > "$counter.start"
 
 say() {
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$1"
