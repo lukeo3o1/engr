@@ -26,7 +26,7 @@ run work ls
 # its full reference, so that is looked up rather than built.
 engr work ls 2>/dev/null | while read -r id kind _; do
   case "$kind" in
-    object) run work show "$id" ;;
+    obj | object) run work show "$id" ;;
     backlog)
       reference=$(engr backlog show "$id" --format json 2>/dev/null |
         sed -n 's/^  "reference": "\(engr:backlog:[^"]*\)".*/\1/p')
