@@ -30,17 +30,20 @@ if printf '%s' "$input" | grep -qE 'engr (work (start|summary|item|block|unblock
   exit 0
 fi
 
+count=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
+echo "$count" > "$counter"
+
+# A commit is not a handoff, so it does not reset the count gate.sh reads; it
+# is only the likeliest moment for an item to have finished.
 if printf '%s' "$input" | grep -qE '"command": *"[^"]*git commit'; then
-  echo 0 > "$counter"
   say "engr: a commit just landed. If it finishes a work item, close it now, before anything else: item state done, item result saying how you know, item commit --commit HEAD. If it settles a decision or leaves a question open, record that too."
   exit 0
 fi
 
-count=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
-if [ "$count" -ge "$every" ]; then
-  echo 0 > "$counter"
-  say "engr: $every tool calls since execution memory was last written. Your session can end without warning, and the next one sees only the repository and engr. If since then a step finished, a hypothesis was confirmed or ruled out, a decision settled or a question came up, record it now. If nothing did, carry on."
-else
-  echo "$count" > "$counter"
+# Speaking does not reset the count either: a reminder that was read past is
+# exactly the case gate.sh exists for, and it can only see that if the count
+# keeps growing until engr is actually written to.
+if [ $((count % every)) -eq 0 ]; then
+  say "engr: $count tool calls since execution memory was last written. Your session can end without warning, and the next one sees only the repository and engr. If since then a step finished, a hypothesis was confirmed or ruled out, a decision settled or a question came up, record it now. If nothing did, carry on."
 fi
 exit 0
