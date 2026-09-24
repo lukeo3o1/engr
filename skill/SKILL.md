@@ -513,9 +513,9 @@ Compare its answers with what you know. Every difference is something engr is
 missing or has wrong: fix it, and run the drill again with a reader who has not
 seen the earlier version.
 
-If your harness runs hooks, the reading at the start and a check before
-stopping need not depend on remembering them. engr's repository carries two for
-Claude Code under `skill/hooks/`.
+If your harness runs hooks, the reading at the start, a nudge while the work is
+going and a check before stopping need not depend on remembering them. engr's
+repository carries all three for Claude Code under `skill/hooks/`.
 
 ## When an object or a section is marked
 
