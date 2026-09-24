@@ -13,6 +13,22 @@ tick it. These move all three out of the agent's memory and into the harness.
 | `heartbeat.sh` | `PostToolUse` on `Bash\|Edit\|Write` | Every `HEARTBEAT_EVERY` tool calls (10 by default) without a write to engr, and straight after a `git commit`, adds a one-line reminder to record what finished, settled or came up. Writes nothing. |
 | `gate.sh` | `PreToolUse` on `Edit\|Write` | Once `HEARTBEAT_GATE` tool calls (20 by default) have gone by without a write to engr, and there is unrecorded work to show for it, refuses the next edit until engr is written to. Needs `heartbeat.sh`, which keeps the count. |
 
+What they bought, measured on one run each of a real three-session task cut
+off without warning, as how many turns the handoff was behind the work at each
+cut, on average:
+
+| Setup | Behind |
+| --- | --- |
+| the guide on `main`, no hooks | 68 |
+| the revised guide, start and stop hooks | 47 |
+| the same, plus `skill/project-instructions.md` loaded as project instructions | 46 |
+| the revised guide, all four hooks, the harness's task list turned off | 8 |
+
+The reminder was answered about half the time when the harness's own task list
+was off, and never while it was in use. The gate fired once in the whole
+dogfood, and the edit it held turned into a recorded bug fix that would
+otherwise have been lost.
+
 None of them can tell whether what is in engr is *right*. They catch the
 mechanically visible half — work the sidecar does not know about — and leave
 the rest to the resume drill in `skill/SKILL.md`.

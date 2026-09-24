@@ -251,6 +251,10 @@ else. No draft history, no explanation of what you were going for, no opinion
 about whether it passes. Ask for one answer: does this meet every requirement,
 and if not, which one does it miss.
 
+Nothing that asks for agreement, either. "This was verified independently" and
+"this is the final attempt" both appeared in one dogfood's review prompts; a
+reviewer told either has been told what answer is wanted.
+
 Have the screen read cold first — see
 [Writing for a reader who was not there](#writing-for-a-reader-who-was-not-there).
 A review is an attempt against a ceiling of a few, and spending one to learn
@@ -515,7 +519,11 @@ seen the earlier version.
 
 If your harness runs hooks, the reading at the start, a nudge while the work is
 going and a check before stopping need not depend on remembering them. engr's
-repository carries all three for Claude Code under `skill/hooks/`.
+repository carries them for Claude Code under `skill/hooks/`, and
+`skill/project-instructions.md` is the short block of these rules that belongs
+in the project's always-loaded instructions. Measured, the hooks with the
+harness's task list turned off kept the handoff within a few turns of the work;
+the instructions without the mid-session hooks did not.
 
 ## When an object or a section is marked
 
@@ -777,8 +785,19 @@ enforced — 300 characters for the summary, 160 for an item, 240 for a result, 
 for a reason — and there is no oversize exception, because nothing here is worth
 admitting past its limit. If it will not fit, it belongs in backlog or the Object.
 
+**A refused write is not a shorter write.** Every time an item or a result was
+refused for length in the dogfood, the agent cut the reason and kept the what —
+and the reason was the part the next session needed. Put it where it fits, a
+Section or a backlog point, and keep the line short by pointing at it. Nor chain
+engr writes with `&&` without reading each answer: one refused for length
+silently stopped every update after it, and nothing showed it at the cut.
+
 The summary says where things stand and which item is next. It is not a
-changelog: what is done is in the items, with their results.
+changelog: what is done is in the items, with their results. **Rewrite it
+whenever an item changes state.** In every dogfood run it was written once and
+left; one still read "deciding domain scope before writing code" at the third
+cut, long after the scope was built, and sent the next agent back to work that
+was done.
 
 ### An item is a step you can tell is finished
 
@@ -812,6 +831,12 @@ it — a hash, a count, a test name, a code — from command output rather than
 from memory: a plausible hash reads exactly like a real one. `--commit HEAD` is
 the tool resolving it for you; prefer that shape wherever one exists.
 
+**Done means the item's words are true — all of them.** An item promising
+create, add, revise and remove was ticked done with revise never built, and
+nothing said so; the next reader believed the tick. If the scope shrank, say so
+in the result, and record the cut: a decision if you chose it, a backlog point if
+it is still open.
+
 ### What of your thinking to keep
 
 The reasoning that got you here is usually a mess — abandoned guesses beside
@@ -841,6 +866,13 @@ item and was still pending when the session was cut — the one step nobody's
 next step ever reaches, while the decisions it meant lived in a summary line and
 a code comment. If the admission path costs a review, pay it then: that is when
 you know the reason, and when the wording is cheapest to get right.
+
+**A fact you learn about the code is a constraint, and it outlives the step.**
+One run learned that the writer lock cannot be taken twice by one process, left
+that in a code comment, built the deadlock anyway, and cost the next session
+twenty turns finding it again; another run hung on what looked like the same
+lock and recorded nothing. The one run that admitted it as a Section never hit
+it.
 
 To decide whether a line stays, do not ask yourself whether the next agent would
 miss it. That is predicting a reader without your context, which is the one
