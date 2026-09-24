@@ -61,5 +61,15 @@ Copy them into the project, then add to `.claude/settings.json`:
 }
 ```
 
-All of them need `engr` and `git` on `PATH`, and do nothing in a repository without
-`.engr`.
+The same file can take away the harness's own task list, which is where an
+agent's urge to track its steps otherwise goes — and which disappears with the
+context. In the dogfood that motivated these hooks, sessions that kept their
+steps there wrote nothing to engr and answered none of the heartbeat's
+reminders; sessions without it answered half.
+
+```json
+{ "permissions": { "deny": ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite"] } }
+```
+
+All of them need `engr` and `git` on `PATH`, and do nothing in a repository
+without `.engr`.

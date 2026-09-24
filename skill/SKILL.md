@@ -605,6 +605,14 @@ been. engr limits a topic's title and not a point's text, so keeping it short is
 yours to do. If it needs more than three sentences it is usually two points, or
 part of it is already settled and belongs in the record.
 
+**The third sentence names what would decide it, never the decision.** "Settled
+by building the smaller slice first" is not a test anyone can apply; it is a
+choice already made, staged where no review reaches it and where the next
+reader cannot tell whether it is decided — a cold reader handed two such points
+summarised them as settled. If you chose, the choice goes in the record, saying
+it holds for this slice if that is all it holds for, and the backlog keeps only
+what is still open about it.
+
 `merge` names one destination and one source. It keeps the destination and
 removes the source; it never mints a third section, so anything already pointing
 at `--into` still points at it. What the source produced comes along. Two points
@@ -756,6 +764,13 @@ Start by reading it, not by writing it. `engr work ls` is the first thing to run
 when resuming: it says which Objects and Backlog items have execution memory,
 which are blocked and which a human stopped.
 
+**If your harness has a task list of its own, keep this work out of it.** A
+built-in todo list is where the urge to track steps naturally goes, and it
+disappears with the context. Watched across twelve sessions, every one that kept
+its steps in the harness's list wrote nothing to engr, and read past every
+reminder to. The sidecar is that list: use it the way you would the other, one
+item per step, and the next session has it too.
+
 **Write the shortest useful handoff, not the history of the work.** One action or
 point per item, concrete verbs, outcomes rather than reasoning. The limits are
 enforced — 300 characters for the summary, 160 for an item, 240 for a result, 200
@@ -819,6 +834,13 @@ What it contains that the next agent needs goes where it belongs:
 So thinking in progress is not a separate thing to save. A hypothesis is an
 item, and its result is the conclusion; the 240-character limit on a result has
 room for what was found and none for how.
+
+**A decision is recorded when it is made, not added as an item to record it
+later.** Twice, "record the settled decisions as Sections" went in as a pending
+item and was still pending when the session was cut — the one step nobody's
+next step ever reaches, while the decisions it meant lived in a summary line and
+a code comment. If the admission path costs a review, pay it then: that is when
+you know the reason, and when the wording is cheapest to get right.
 
 To decide whether a line stays, do not ask yourself whether the next agent would
 miss it. That is predicting a reader without your context, which is the one
