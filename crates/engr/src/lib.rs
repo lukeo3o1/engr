@@ -5,6 +5,7 @@
 //! time. Git additionally preserves committed projections.
 
 pub mod backlog;
+pub mod changeset;
 pub mod collection;
 pub mod confirmation;
 pub mod dependency;

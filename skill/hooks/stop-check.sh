@@ -35,16 +35,28 @@ else
   moved=$(git status --porcelain -- . ':!.engr' 2>/dev/null)
   since="and no execution memory exists"
 fi
-moved=$(printf '%s\n' "$moved" | sed '/^$/d' | head -n 10)
-[ -n "$moved" ] || exit 0
+# A drafted ChangeSet is a decision that reached this machine and not the
+# record, which is the gap this hook exists for, whatever the timestamps say.
+drafted=$(engr changeset ls 2>/dev/null | grep -v '^no ChangeSets' |
+  sed 's/^\([^ ]*\) .*/changeset \1 (not applied)/')
+moved=$(printf '%s\n' "$moved" | sed '/^$/d')
+if [ -n "$moved" ]; then
+  headline="the repository moved $since"
+elif [ -n "$drafted" ]; then
+  headline="decisions are drafted on this machine and not in the record"
+else
+  exit 0
+fi
+moved=$(printf '%s\n%s\n' "$moved" "$drafted" | sed '/^$/d' | head -n 10)
 
 cat >&2 <<MESSAGE
-engr: the repository moved $since:
+engr: $headline:
 $moved
 
 Before stopping, make what the next session reads true:
 - close finished items with their evidence: item state done, item result, item commit
 - record a decision that settled, and stage a question you are leaving, in the backlog
+- apply a ChangeSet you drafted (engr changeset show <id>), or discard it
 - rewrite the summary to where things stand and which item is next
 If none of this needs a handoff, stop again; this asks only once.
 MESSAGE

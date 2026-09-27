@@ -18,6 +18,7 @@
 //!   rules/*.md                       project review policy
 //!   local/lock                       one writer at a time
 //!   local/challenges/<CODE>.json     awaiting a human
+//!   local/changesets/<uuid>.json     several mutations, not yet applied
 //! ```
 //!
 //! `local/` is the one non-Git-tracked directory, and everything that must not
@@ -1439,7 +1440,7 @@ fn check_event_record(
 /// inputs live. The lock is taken because the checks read the durable tail, and
 /// an answer about a tail that is moving is not an answer.
 pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
-    with_lock(root, || check_appendable_locked(root, event, None))
+    with_lock(root, || check_appendable_locked(root, event, None, &[]))
 }
 
 /// The durable append, for a caller already inside [`with_lock`] — which is
@@ -1461,9 +1462,36 @@ pub fn check_appendable(root: &Path, event: &Event) -> Result<()> {
 /// rewriting a file this operation has already read and validated in full, which
 /// is what the continuity and replay checks above do anyway.
 pub(crate) fn append_event_locked(root: &Path, object: &str, event: &Event) -> Result<()> {
-    check_appendable_locked(root, event, Some(object))?;
+    append_events_locked(root, object, std::slice::from_ref(event))
+}
+
+/// Several records onto one stream, as one publication.
+///
+/// A ChangeSet admits several mutations of one Object under one review, and
+/// readers must see all of them or none. The stream is already republished
+/// whole on every append, so the several records go out in the one rename: a
+/// reader, and a crash, see the complete old stream or the complete new one.
+/// History ahead of the projection is the crash the recovery model expects, so
+/// the projection saved after this needs no new recovery of its own.
+///
+/// Each record is checked exactly as a lone append would be, against the
+/// history as it will stand once the records before it in the batch are there —
+/// not against the stream on disk, which does not have them yet.
+pub(crate) fn append_events_locked(root: &Path, object: &str, events: &[Event]) -> Result<()> {
+    ensure!(
+        !events.is_empty(),
+        crate::EXIT_INVARIANT,
+        "an append names at least one record"
+    );
+    for (index, event) in events.iter().enumerate() {
+        check_appendable_locked(root, event, Some(object), &events[..index])?;
+    }
     let path = events_path(root, object);
-    let line = crate::proof::canonical_bytes(event, "Event")?;
+    let mut lines = String::new();
+    for event in events {
+        lines.push_str(&crate::proof::canonical_bytes(event, "Event")?);
+        lines.push('\n');
+    }
     let held = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1479,7 +1507,7 @@ pub(crate) fn append_event_locked(root: &Path, object: &str, event: &Event) -> R
         "{}: the last record has no delimiter after it, so appending would join two events into one",
         path.display()
     );
-    publish(&path, &format!("{held}{line}\n"))
+    publish(&path, &format!("{held}{lines}"))
 }
 
 /// Every check the append performs, and none of the writing.
@@ -1488,7 +1516,16 @@ pub(crate) fn append_event_locked(root: &Path, object: &str, event: &Event) -> R
 /// Event does not carry it: the stream binds it, and the seal binds it again. A
 /// caller with no Object in hand recovers it from the seal — there is at most
 /// one Object the digest can have been taken for.
-fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> Result<()> {
+///
+/// `pending` is the records of the same publication that come before this one:
+/// written in the same rename, so not on disk yet, and part of the history this
+/// record follows.
+fn check_appendable_locked(
+    root: &Path,
+    event: &Event,
+    object: Option<&str>,
+    pending: &[Event],
+) -> Result<()> {
     // The durable Event path is part of the workspace-generation boundary, and a
     // direct library caller reaches it without passing the gate. Asked here as
     // well as there, because "this build may write this workspace" is a property
@@ -1507,6 +1544,7 @@ fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> 
     // tail is the cost of not being able to append a revision the next load
     // would refuse.
     let mut tail = load_events(root, &id)?;
+    tail.extend_from_slice(pending);
     if let Some(last) = tail.last() {
         ensure!(
             last.rev.checked_add(1) == Some(event.rev),
@@ -1560,7 +1598,7 @@ fn check_appendable_locked(root: &Path, event: &Event, object: Option<&str>) -> 
     // Last, and only for a record that is otherwise sound: a malformed Event
     // should be refused for being malformed, not for failing a proof about a
     // shape nothing could admit anyway.
-    crate::gate::check_admission(root, &id, event)
+    crate::gate::check_admission(root, &id, event, pending)
 }
 
 /// Which Object an Event belongs to, recovered from its own seal.

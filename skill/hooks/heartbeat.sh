@@ -25,7 +25,7 @@ say() {
 }
 
 # A write to engr's agent-managed state, or an admission, resets the count.
-if printf '%s' "$input" | grep -qE 'engr (work (start|summary|item|block|unblock|depend|undepend)|backlog (new|add|revise|merge|produced|consume|rename|subjects)|prepare|collection (new|add|order|priority|rm|state))'; then
+if printf '%s' "$input" | grep -qE 'engr (work (start|summary|item|block|unblock|depend|undepend)|backlog (new|add|revise|merge|produced|consume|rename|subjects)|prepare|changeset (new|add|rm|apply)|collection (new|add|order|priority|rm|state))'; then
   echo 0 > "$counter"
   exit 0
 fi

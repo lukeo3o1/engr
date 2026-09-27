@@ -760,7 +760,9 @@ sequence. Moving one is a change to the assertion.
 six-character challenge from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — no `0`/`O` or
 `1`/`I` — and stores it as a Challenge under `.engr/local/challenges/`.
 `prepare --agent` instead validates and admits an Agent mutation under the same
-writer lock; it never mints a Human challenge.
+writer lock; it never mints a Human challenge. `changeset apply` admits several
+Section mutations of one Object that way under one review — see
+[Several mutations of one Object, reviewed once](#several-mutations-of-one-object-reviewed-once).
 
 A Challenge is one shape for every family that needs a human answer:
 
@@ -2664,6 +2666,112 @@ applicable Rule went in with no evidence any review had happened. Dogfooding
 found the predictable result, an agent writing to backlog without reading the
 rule governing it, and option B from the same list is what replaces it.
 
+### Several mutations of one Object, reviewed once
+
+A Rule Review is paid for with a reader who never saw the draft, and it is paid
+per admission. In the dogfood of 2026-09-24 the arm that recorded its decisions
+as Sections spent about 75 turns and ten reviewer subagents on eight of them,
+most in its last session; another spent 17 turns and six subagents on one title
+and one sentence; five of the seven admitted no Section at all. A review priced
+per Section pushes decisions to the end of the work or out of the record, which
+is the opposite of what a Rule is for. So the review — and only the review — can
+be shared.
+
+A **ChangeSet** is an ordered list of Section mutations — `section.created`,
+`section.updated`, `section.merged`, `section.deleted` — to **one existing
+Object**, applied as one Agent admission under one review. It carries no title,
+lifecycle, classification, supersession or repair, and no step names a
+destination state: each of those is its own statement about the whole Object,
+and all but the title are Human admissions.
+
+**Every step is checked exactly as a lone Agent mutation is**, against the Object
+as the steps before it leave it — size, that it changes something, references,
+relations, which door may change which wording, and that the result is
+representable. A refusal names the step by its number. The steps are checked
+when each is added and all of them again at apply, so nothing a ChangeSet admits
+could not have been admitted one step at a time. What it shares is the review,
+not the rules.
+
+A step MUST NOT reference a Section of its own Object that the ChangeSet
+creates, revises, merges or deletes. A reference pins committed wording, and the
+wording such a step would pin is either gone by the time the reference is
+admitted or does not exist yet. Apply the ChangeSet, commit it, and reference
+what it wrote.
+
+**The subject is the sequence.** The binding is Object-domain, and its mutation
+descriptor is
+
+```json
+{
+  "operation": { "name": "changeset", "parameters": {} },
+  "target": "obj:<compact>",
+  "steps": [ <each step's own descriptor: { operation, target, after }> ]
+}
+```
+
+with the precondition `{"expected_rev": <the rev the first step applies to>}`.
+Each step's descriptor is exactly the one that step would bind alone, built from
+the states either side of it, so a step means the same thing in a ChangeSet as
+it does on its own. `steps` stands where a lone mutation has `after`: the Object
+as the last step leaves it follows from the steps, and binding it as well would
+say one thing twice. The order is in the digest, because a revision after an
+addition is not the same act as the addition alone. One precondition binds every
+step, since each later step's predecessor follows from it and the steps before.
+
+The two calls are the ones every governed mutation makes. Without an
+attestation nothing is written and the subject is shown — every step, and the
+Object as the last one leaves it, not only the new wording, because a Rule about
+one assertion per Section is about the Section a later step deletes and the one
+an earlier step already says the same thing in. With one, the digest is
+recomputed under the writer lock from current state and the Rule ids are
+checked, so a ChangeSet reviewed before its Object moved is refused whole.
+
+**Only a review that passed admits a ChangeSet.** A failed or exhausted review
+of one is not offered to a person for override: that would be a Human confirming
+several actions under one answer, which the growth table below still keeps
+absent. It is taken apart into single mutations instead, each of which has the
+whole ordinary path, escalation included. A ChangeSet with no applicable usable
+Object Rule is refused, as every semantic Agent mutation is; there is no title
+exception to fall back on, because a ChangeSet carries no title.
+
+**What is admitted is one record per step.** Consecutive revs, each
+`admitted.by = agent`, each carrying the review's provenance, and one `at` for
+all of them — one review admitted them at one moment, and a record stating
+several moments for one act would describe a sequence that did not happen.
+Nothing in the record says the steps were a ChangeSet, and the digest is not
+kept, as it is not kept for any Agent admission. How a review was paid for is
+not engineering meaning; if a reader ever needs to know which admissions were
+reviewed together, that is the signal to record it.
+
+**One Object is what makes it atomic without a new recovery model.** Every
+record goes out in **one publication** of the Object's stream — staged beside it,
+flushed and renamed — and only then is the projection written. A reader sees all
+of them or none, and a crash between the two is history ahead of its projection,
+which [Confirming](#confirming) already names as the crash this design expects
+and reconciles. Across several
+Objects there is no one publication to lean on, which is why a ChangeSet does
+not span them.
+
+Before publishing, an apply writes the Event ids it is about to publish into the
+ChangeSet as `committing`. They are minted fresh by every attempt, so an apply
+that finds them set can tell the two possible crashes apart without guessing:
+every id in the Object's history means the ChangeSet was admitted, and it is
+removed and reported rather than admitted twice; none means the attempt never
+happened, and the ChangeSet goes on as it was. Some and not the others is not a
+crash one rename could leave, and is refused. While `committing` is set, nothing
+may change, show or discard the ChangeSet — discarding it would throw away the
+only thing that can say whether it was admitted.
+
+A ChangeSet lives under `.engr/local/changesets/<uuid>.json` and is never
+committed. It is intent nobody has admitted: it survives a restart on this
+machine so an interrupted agent can pick the draft up rather than rebuild it
+from a conversation that is gone, and it is not a record, nothing refers to it,
+and removing it changes nothing else. It keeps the steps as the plan produced
+them — bases and references resolved — so what a reviewer is later shown is what
+was checked. It stores no digest and no attempt: it is the mutation, not a review
+of it, and so not the pending-review resource
+[How many attempts](#how-many-attempts-and-what-happens-after) rules out.
+
 ### Unordered sets have one order
 
 Canonical bytes for Rule Review are **RFC 8785 (JCS)**, not merely a stable
@@ -3467,6 +3575,7 @@ it said under the authority path that admitted it.
   local/
     lock                         one writer at a time
     challenges/<CODE>.json       awaiting a human       never commit this
+    changesets/<uuid>.json       reviewed once, unapplied  never commit this
 ```
 
 Backlog is committed: git is its only history. A new optional directory is not
@@ -3584,7 +3693,9 @@ bring it in:
 | A priority on an object | Which record matters more has to be answered mechanically — a listing has to order by it |
 | Path scoping on a section (`--about internal/audit/**`) | A basis reads as moved because of a change to an area the section does not cover, often enough that the signal stops being read |
 | A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
-| More than one action per confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
+| More than one action per Human confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
+| A ChangeSet across Objects | One decision has to change two Objects together, and a reader who saw one change without the other would be misled |
+| A Human override of a failed ChangeSet review | Taking a failed ChangeSet apart into single mutations costs more than a person reading the whole of it |
 
 Splitting untyped `closed` is the nearest of these, and part of its signal is
 already visible: abandoned untyped work can only be closed, so the record goes on
@@ -3612,8 +3723,16 @@ what a Section is *about* is part of what was admitted — and it MUST then be
 omitted from the canonical form when empty, or every section already recorded
 fails its own hash the day the field is added.
 
-More than one action per confirmation MUST NOT be reached by allowing several
-live Challenges for one object: each pins `expected_rev`, so confirming one
-kills the rest. It would have to be one Challenge carrying several actions,
-appending an event per action with consecutive revs — which leaves projection
-untouched and keeps crash recovery working off the first event.
+More than one action per confirmation came in for Agent admission, as the
+[ChangeSet](#several-mutations-of-one-object-reviewed-once), when its signal
+fired from the Agent side: eight Sections of one piece of work were each paid
+for with a review of their own, and the person running the work said to share
+it. It came in the way this paragraph always said it would have to — one
+admission carrying several actions, appending an event per action with
+consecutive revs, which leaves projection untouched and keeps crash recovery
+working off the history.
+
+The Human half MUST be reached the same way when its own signal fires, and MUST
+NOT be reached by allowing several live Challenges for one object: each pins
+`expected_rev`, so confirming one kills the rest. It would have to be one
+Challenge carrying several actions.

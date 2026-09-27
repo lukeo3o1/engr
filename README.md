@@ -171,6 +171,22 @@ After reviewing that exact material, repeat the command with `--agent`,
 `--review-result passed`. The digest is recomputed under the mutation lock, so a
 changed Object or Rule cannot slip beneath the review.
 
+Several Section mutations of one Object can share that review. A ChangeSet holds
+them on this machine, checked step by step as they are added, and admits every
+one or none:
+
+```bash
+engr changeset new --object <id>
+engr changeset add <changeset> --add --text-file f.txt
+engr changeset add <changeset> --revise 3 --text-file g.txt
+engr changeset show <changeset>              # every step, the result, the one digest
+engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
+  --review-result passed
+```
+
+Each step still becomes its own Agent-admitted event. Only the review is shared,
+and only a passing one applies it.
+
 Objects are addressed by unique id prefix, like a git commit.
 
 Work that is not settled yet goes somewhere else entirely:

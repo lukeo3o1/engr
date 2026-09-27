@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, V
 use engr::backlog::{self, Subject};
 use engr::model::{self, Action, Merge, Payload, Ref};
 use engr::semantics::{self, Relation, Supplement, Target};
-use engr::{collection, gate, git, ops, rules, store, view, work};
+use engr::{changeset, collection, gate, git, ops, rules, store, view, work};
 use engr::{ensure, Error, Result, EXIT_NOT_FOUND, EXIT_SCHEMA, EXIT_USAGE};
 use std::path::{Path, PathBuf};
 
@@ -96,9 +96,74 @@ enum Command {
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
+    /// Several Section mutations of one Object, reviewed once and admitted
+    /// together. Kept on this machine until applied; nothing here is a record
+    #[command(subcommand)]
+    Changeset(ChangesetCommand),
     /// Project rules an agent must read before a semantic mutation
     #[command(subcommand)]
     Rules(RulesCommand),
+}
+
+#[derive(Subcommand)]
+enum ChangesetCommand {
+    /// Start a ChangeSet for one existing Object
+    New {
+        /// The Object every step will change. Any unique id prefix
+        #[arg(long)]
+        object: String,
+    },
+    /// Add a step, described with the same arguments `prepare` takes for
+    /// section work: --add, --revise, --merge or --delete, and the wording
+    Add(Box<ChangesetAdd>),
+    /// Remove one step by its position
+    Rm {
+        changeset: String,
+        #[arg(long, value_name = "N")]
+        step: usize,
+    },
+    /// ChangeSets on this machine
+    Ls,
+    /// What the ChangeSet would admit, and the one review it needs. Writes nothing
+    Show {
+        changeset: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: Format,
+    },
+    /// Admit every step under one passing review, or none of them
+    Apply {
+        changeset: String,
+        /// ReviewDigest surfaced by `show`, or by `apply` without it
+        #[arg(long = "review", value_name = "DIGEST")]
+        review_digest: Option<String>,
+        /// Rule id actually reviewed. Repeat for the complete surfaced set
+        #[arg(long = "reviewed-rule", value_name = "RULE")]
+        reviewed_rules: Vec<String>,
+        /// Which attempt of the continuous review sequence this is. Also
+        /// accepted as `--attempt`
+        #[arg(
+            long = "review-attempt",
+            alias = "attempt",
+            default_value_t = 1,
+            value_name = "N"
+        )]
+        review_attempt: u32,
+        /// Agent-attested outcome of reviewing every step. Only `passed` admits
+        #[arg(long = "review-result", value_enum, value_name = "RESULT")]
+        review_result: Option<ReviewResultArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Throw a ChangeSet away. Nothing was admitted, so nothing else changes
+    Discard { changeset: String },
+}
+
+#[derive(Args)]
+struct ChangesetAdd {
+    /// The ChangeSet to add to. Any unique id prefix
+    changeset: String,
+    #[command(flatten)]
+    step: Prepare,
 }
 
 /// Rules are project policy data, so this surface is read-only.
@@ -905,7 +970,14 @@ enum ContentSource {
 /// arbitrary text and one that happens to read `--content-file` would fool a
 /// scan of the raw arguments. clap already knows which tokens were flags.
 fn content_order(matches: &clap::ArgMatches) -> Vec<ContentSource> {
-    let Some(prepare) = matches.subcommand_matches("prepare") else {
+    // A ChangeSet step is described with `prepare`'s own arguments, so its
+    // excerpts are ordered by the same rule from the same kind of matches.
+    let prepare = matches.subcommand_matches("prepare").or_else(|| {
+        matches
+            .subcommand_matches("changeset")
+            .and_then(|changeset| changeset.subcommand_matches("add"))
+    });
+    let Some(prepare) = prepare else {
         return Vec::new();
     };
     let mut written: Vec<(usize, ContentSource)> = Vec::new();
@@ -941,6 +1013,9 @@ fn main() {
     };
     if let Command::Prepare(prepare) = &mut cli.command {
         prepare.content_order = content_order(&matches);
+    }
+    if let Command::Changeset(ChangesetCommand::Add(add)) = &mut cli.command {
+        add.step.content_order = content_order(&matches);
     }
     if let Err(error) = run(cli) {
         eprintln!("error: {}", error.message);
@@ -1248,6 +1323,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify { object } => verify(&root, object.as_deref()),
         Command::Repair { object, json } => repair(&root, &object, json),
         Command::Backlog(command) => backlog_command(&root, command),
+        Command::Changeset(command) => changeset_command(&root, command),
         Command::Rules(command) => rules_command(&root, command),
         Command::Work { attempt, command } => {
             work_command(&root, command, rules::Attempt::new(attempt)?)
@@ -1256,6 +1332,359 @@ fn run(cli: Cli) -> Result<()> {
             collection_command(&root, command, rules::Attempt::new(attempt)?)
         }
     }
+}
+
+fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
+    match command {
+        ChangesetCommand::New { object } => {
+            let object = resolve_object_argument(root, "--object", &object)?;
+            let created = changeset::create(root, &object)?;
+            println!(
+                "CHANGESET  {}  for {}",
+                created.id,
+                shorten(&created.object, view::width(root))
+            );
+            println!(
+                "note       kept under {}/local on this machine; nothing in it is a record until it is applied",
+                store::DIR
+            );
+            println!(
+                "next       engr changeset add {} --add --header <HEADER> --text <WORDING>",
+                created.id
+            );
+            Ok(())
+        }
+        ChangesetCommand::Add(add) => {
+            let ChangesetAdd {
+                changeset: id,
+                step,
+            } = *add;
+            check_changeset_step(&step)?;
+            let id = changeset::resolve(root, &id)?;
+            let mut step = step;
+            step.object = Some(changeset::load(root, &id)?.object);
+            // Every step is admitted through the Agent door, and the value
+            // carries which door it came through, so it is built as one.
+            step.agent = true;
+            let json = step.json;
+            let payload = prepare_payload(root, &step)?;
+            let (changeset, plan) = changeset::add(root, &id, payload)?;
+            if json {
+                println!("{}", to_json(&changeset)?);
+                return Ok(());
+            }
+            print!("{}", render_changeset_steps(root, &changeset, &plan));
+            println!(
+                "\nnext       engr changeset show {} renders the Object as every step leaves it, and the one review it needs",
+                changeset.id
+            );
+            Ok(())
+        }
+        ChangesetCommand::Rm {
+            changeset: id,
+            step,
+        } => {
+            let changeset = changeset::remove(root, &id, step)?;
+            println!(
+                "REMOVED    step {step} of {}; {} step(s) remain",
+                changeset.id,
+                changeset.steps.len()
+            );
+            Ok(())
+        }
+        ChangesetCommand::Ls => {
+            let found = changeset::list(root)?;
+            if found.is_empty() {
+                println!("no ChangeSets on this machine");
+            }
+            let width = view::width(root);
+            for changeset in found {
+                println!(
+                    "{}  {}  {} step(s)  created {}{}",
+                    changeset.id,
+                    shorten(&changeset.object, width),
+                    changeset.steps.len(),
+                    changeset.created_at,
+                    if changeset.committing.is_some() {
+                        "  apply interrupted: run apply to finish it"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Ok(())
+        }
+        ChangesetCommand::Show {
+            changeset: id,
+            format,
+        } => {
+            let loaded = changeset::load(root, &id)?;
+            if loaded.steps.is_empty() && loaded.committing.is_none() {
+                match format {
+                    Format::Json => println!("{}", to_json(&loaded)?),
+                    Format::Text => println!(
+                        "CHANGESET  {}  for {}  no steps yet",
+                        loaded.id,
+                        shorten(&loaded.object, view::width(root))
+                    ),
+                }
+                return Ok(());
+            }
+            let (changeset, plan) = changeset::plan(root, &loaded.id)?;
+            match format {
+                Format::Json => println!("{}", render_changeset_json(&changeset, &plan)?),
+                Format::Text => print!("{}", render_changeset(root, &changeset, &plan)),
+            }
+            Ok(())
+        }
+        ChangesetCommand::Apply {
+            changeset: id,
+            review_digest,
+            reviewed_rules,
+            review_attempt,
+            review_result,
+            json,
+        } => {
+            let review =
+                match (review_digest, review_result) {
+                    (None, None) if reviewed_rules.is_empty() => None,
+                    (Some(review_digest), Some(result)) => Some(gate::ReviewAttestation {
+                        review_digest,
+                        reviewed_rules,
+                        attempt: review_attempt,
+                        result: result.model(),
+                        explanation: None,
+                    }),
+                    (None, _) => {
+                        return Err(Error::new(
+                            EXIT_USAGE,
+                            "a Rule Review attestation needs --review <DIGEST>",
+                        ))
+                    }
+                    (Some(_), None) => return Err(Error::new(
+                        EXIT_USAGE,
+                        "a Rule Review attestation needs --review-result passed|failed|exhausted",
+                    )),
+                };
+            let id = changeset::resolve(root, &id)?;
+            match changeset::apply(root, &id, review)? {
+                changeset::Applied::Admitted { events, object } => {
+                    if json {
+                        println!(
+                            "{}",
+                            to_json(&serde_json::json!({ "events": events, "object": object }))?
+                        );
+                        return Ok(());
+                    }
+                    let width = view::width(root);
+                    for event in &events {
+                        println!(
+                            "ADMITTED   {}  {}  rev {}  agent",
+                            shorten(&object.id, width),
+                            event.action.event_type(),
+                            event.rev
+                        );
+                    }
+                    warn_uncommitted(root, &object.id);
+                    Ok(())
+                }
+                changeset::Applied::AlreadyAdmitted { events } => {
+                    if json {
+                        println!(
+                            "{}",
+                            to_json(&serde_json::json!({ "already_admitted": events }))?
+                        );
+                    } else {
+                        println!(
+                            "ADMITTED   by an earlier apply of {id}, which published its {} record(s) and was interrupted before it could say so; nothing was admitted twice",
+                            events.len()
+                        );
+                    }
+                    Ok(())
+                }
+                changeset::Applied::NeedsReview(plan) => {
+                    // As a lone Agent mutation does: the subject on stdout for
+                    // whoever reviews it, the one-line refusal on stderr, and an
+                    // exit code that says nothing was written.
+                    let changeset = changeset::load(root, &id)?;
+                    if json {
+                        println!("{}", render_changeset_json(&changeset, &plan)?);
+                    } else {
+                        print!("{}", render_changeset(root, &changeset, &plan));
+                    }
+                    Err(plan.refusal())
+                }
+            }
+        }
+        ChangesetCommand::Discard { changeset: id } => {
+            let discarded = changeset::discard(root, &id)?;
+            println!(
+                "DISCARDED  {}  {} step(s); nothing was admitted",
+                discarded.id,
+                discarded.steps.len()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Refuse what a step cannot mean, before it is parsed as though it could.
+///
+/// A step borrows `prepare`'s vocabulary, and most of `prepare`'s flags are
+/// about the admission rather than the mutation. Those belong to the ChangeSet
+/// as a whole — it names the Object, and it is reviewed once, at apply — so on
+/// a step they would be a second answer to a question already answered.
+fn check_changeset_step(step: &Prepare) -> Result<()> {
+    ensure!(
+        !(step.new
+            || step.rename
+            || step.close
+            || step.reopen
+            || step.classify
+            || step.supersede.is_some()),
+        EXIT_USAGE,
+        "a ChangeSet carries Section mutations: --add, --revise, --merge or --delete; a title, a lifecycle and a supersession are each admitted on their own"
+    );
+    ensure!(
+        step.object_type.is_none() && !step.untyped && step.state.is_none(),
+        EXIT_USAGE,
+        "a ChangeSet does not move the Object's lifecycle; classify it on its own"
+    );
+    ensure!(
+        step.object.is_none(),
+        EXIT_USAGE,
+        "a ChangeSet names its Object once, at `changeset new`; a step does not take --object"
+    );
+    ensure!(
+        step.review_digest.is_none()
+            && step.reviewed_rules.is_empty()
+            && step.review_result.is_none()
+            && step.review_explanation.is_none()
+            && step.review_attempt == 1,
+        EXIT_USAGE,
+        "a ChangeSet is reviewed once, as a whole, at `changeset apply`; a step takes no review flags"
+    );
+    ensure!(
+        !step.oversize,
+        EXIT_USAGE,
+        "--oversize is a Human candidate exception; a ChangeSet is an Agent admission and cannot claim it"
+    );
+    Ok(())
+}
+
+/// One line per step, saying what it does to which Section.
+fn render_changeset_steps(
+    root: &Path,
+    changeset: &changeset::ChangeSet,
+    plan: &gate::ChangeSetPlan,
+) -> String {
+    let mut out = format!(
+        "CHANGESET  {}  for {}  rev {} → {}\n",
+        changeset.id,
+        shorten(&changeset.object, view::width(root)),
+        plan.before.rev,
+        plan.before.rev + plan.steps.len() as u64
+    );
+    let mut before = &plan.before;
+    for (index, step) in plan.steps.iter().enumerate() {
+        out.push_str(&format!(
+            "{:>4}  {}\n",
+            index + 1,
+            describe_step(before, step)
+        ));
+        before = &step.after;
+    }
+    out
+}
+
+fn describe_step(before: &model::Object, step: &gate::PlannedStep) -> String {
+    let header = |object: &model::Object, id: u64| {
+        object
+            .section(id)
+            .ok()
+            .and_then(|section| section.header.clone())
+            .map(|header| format!("  {header}"))
+            .unwrap_or_default()
+    };
+    match &step.payload.action {
+        Action::SectionCreated { .. } => match step
+            .after
+            .sections
+            .iter()
+            .find(|section| before.section(section.id).is_err())
+        {
+            Some(added) => format!("add     §{}{}", added.id, header(&step.after, added.id)),
+            None => "add".to_owned(),
+        },
+        Action::SectionUpdated { section, .. } => {
+            format!("revise  §{section}{}", header(&step.after, *section))
+        }
+        Action::SectionMerged { merge, .. } => format!(
+            "merge   §{} ← {}{}",
+            merge.destination,
+            merge
+                .sources
+                .iter()
+                .map(|source| format!("§{source}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            header(&step.after, merge.destination)
+        ),
+        Action::SectionDeleted { section, .. } => {
+            format!("delete  §{section}{}", header(before, *section))
+        }
+        other => other.event_type().to_owned(),
+    }
+}
+
+/// The review subject: every step, the Object as the last one leaves it, and
+/// what the review must cover.
+///
+/// The steps and the whole Object, not the new wording alone. A reviewer handed
+/// only the sentences being added cannot see the Section a later step deletes
+/// or the one an earlier step already says the same thing in, and those are
+/// exactly what a Rule about one assertion per Section is about.
+fn render_changeset(
+    root: &Path,
+    changeset: &changeset::ChangeSet,
+    plan: &gate::ChangeSetPlan,
+) -> String {
+    let mut out = render_changeset_steps(root, changeset, plan);
+    out.push('\n');
+    out.push_str(&view::render_projection(plan.after()));
+    if plan.rules.is_empty() {
+        out.push_str(
+            "\nUNGOVERNED  no applicable usable Object Rule. An Agent admission needs one, so this\n            ChangeSet cannot be applied until a Rule governs its Object.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the Object as\n              it would stand, not only the new wording — then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE> --review-result passed\n\n              Nothing has been written.\n",
+            plan.rules.join(", "),
+            changeset.id,
+            plan.digest
+        ));
+    }
+    out
+}
+
+fn render_changeset_json(
+    changeset: &changeset::ChangeSet,
+    plan: &gate::ChangeSetPlan,
+) -> Result<String> {
+    to_json(&serde_json::json!({
+        "changeset": changeset,
+        "before_rev": plan.before.rev,
+        "projected": plan.after(),
+        "needs_review": {
+            "digest": plan.digest,
+            "rules": plan.rules,
+        },
+    }))
+}
+
+fn to_json(value: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| Error::new(engr::EXIT_SCHEMA, format!("json: {error}")))
 }
 
 fn backlog_command(root: &Path, command: Backlog) -> Result<()> {
@@ -1514,6 +1943,18 @@ impl Chosen {
 }
 
 fn prepare(root: &Path, command: Prepare) -> Result<()> {
+    let payload = prepare_payload(root, &command)?;
+    let review = command.review()?;
+    prepare_payload_admission(root, command, payload, review)
+}
+
+/// The Payload a `prepare` command describes, checked as far as its own
+/// arguments can be, and not yet offered to anything.
+///
+/// Its own function because a ChangeSet step is described with exactly the
+/// same arguments: two parsers of one vocabulary would be two places for a
+/// flag to mean different things.
+fn prepare_payload(root: &Path, command: &Prepare) -> Result<Payload> {
     let mut merge = None;
     let chosen = if command.new {
         Chosen::Create
@@ -1840,8 +2281,15 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
         },
         Chosen::Supersede => Action::ObjectSuperseded { value: value() },
     };
-    let review = command.review()?;
-    let payload = Payload::new(object, action);
+    Ok(Payload::new(object, action))
+}
+
+fn prepare_payload_admission(
+    root: &Path,
+    command: Prepare,
+    payload: Payload,
+    review: Option<gate::ReviewAttestation>,
+) -> Result<()> {
     if command.agent {
         ensure!(
             !command.oversize,

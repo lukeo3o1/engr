@@ -428,10 +428,26 @@ fn check_projection_is_representable(projected: &Object) -> Result<()> {
 /// Asked at the boundary rather than at the two callers, because the point is
 /// the boundary and not the route to it — and asked under the writer lock, so
 /// the material it recomputes against is the material the append lands on.
-pub(crate) fn check_admission(root: &Path, id: &str, event: &Event) -> Result<()> {
+///
+/// `pending` are the records ahead of this one in the same publication — a
+/// ChangeSet's earlier steps. They are not on disk yet and they are this
+/// record's predecessor, so the state it is proved against is the effective
+/// Object with them applied. Only an Agent admission publishes more than one
+/// record at once: a Human confirmation answers one Challenge for one act.
+pub(crate) fn check_admission(
+    root: &Path,
+    id: &str,
+    event: &Event,
+    pending: &[Event],
+) -> Result<()> {
     let admitted = &event.metadata.admitted;
     match admitted.by {
         Admission::Human => {
+            ensure!(
+                pending.is_empty(),
+                EXIT_INVARIANT,
+                "a Human confirmation admits one act, so it is never published behind another"
+            );
             let confirmation = admitted.confirmation.as_ref().ok_or_else(|| {
                 Error::new(
                     EXIT_SCHEMA,
@@ -462,13 +478,16 @@ pub(crate) fn check_admission(root: &Path, id: &str, event: &Event) -> Result<()
         }
         Admission::Agent => {
             let payload = event.payload(id);
-            let before = match ops::effective(root, id) {
+            let mut before = match ops::effective(root, id) {
                 Ok(object) => object,
                 Err(error) if error.code == EXIT_NOT_FOUND => {
                     Object::new(id.to_owned(), String::new())?
                 }
                 Err(error) => return Err(error),
             };
+            for earlier in pending {
+                project(&mut before, earlier)?;
+            }
             let mut after = before.clone();
             project(&mut after, event)?;
             let Some(review) = admitted.review.as_ref() else {
@@ -1495,6 +1514,23 @@ fn checked_review(
 ) -> Result<ReviewCheck> {
     let mutation = crate::proof::object_review_mutation(before, after, payload)?;
     let binding = crate::rules::bind_object(root, &mutation, expected_rev)?;
+    check_attestation(&binding, attestation, |review| {
+        crate::proof::check_object_review_identity(review, &mutation, expected_rev)
+    })
+}
+
+/// Hold an attestation to the binding it claims to be of.
+///
+/// One place for the whole answer — ungoverned, not yet reviewed, or attested
+/// and holding — because a lone mutation and a ChangeSet ask exactly the same
+/// question of their attestation, and two copies of these refusals would be two
+/// places for one of them to drift. `identity` is the check only the caller's
+/// shape of subject can make.
+fn check_attestation(
+    binding: &crate::rules::ReviewBinding,
+    attestation: Option<ReviewAttestation>,
+    identity: impl FnOnce(&crate::proof::CandidateReview) -> Result<()>,
+) -> Result<ReviewCheck> {
     let expected_digest = binding.digest()?.to_string();
     let expected_rules = binding.rule_ids();
 
@@ -1547,7 +1583,7 @@ fn checked_review(
         explanation: attestation.explanation,
     };
     crate::proof::check_review_report(&review)?;
-    crate::proof::check_object_review_identity(&review, &mutation, expected_rev)?;
+    identity(&review)?;
     Ok(ReviewCheck::Attested(review))
 }
 
@@ -1989,6 +2025,293 @@ fn admit_agent_locked(
     store::save_object(root, &object)?;
     Ok(AgentOutcome::Admitted(Box::new(Admitted { event, object })))
 }
+/// One step of a ChangeSet, as it will be admitted.
+#[derive(Debug, Clone)]
+pub struct PlannedStep {
+    /// The canonical payload — bases and references resolved — which is what is
+    /// reviewed and what is admitted, rather than what the caller typed.
+    pub payload: Payload,
+    /// The Object as this step leaves it.
+    pub after: Object,
+}
+
+/// Several mutations of one Object, projected in order and named as one
+/// review subject.
+#[derive(Debug)]
+pub struct ChangeSetPlan {
+    /// The Object the first step applies to.
+    pub before: Object,
+    pub steps: Vec<PlannedStep>,
+    /// The name of the whole sequence under `ReviewDigestContract`.
+    pub digest: String,
+    /// Every Rule id the one review must cover.
+    pub rules: Vec<String>,
+}
+
+impl ChangeSetPlan {
+    /// The Object as the last step leaves it.
+    pub fn after(&self) -> &Object {
+        self.steps
+            .last()
+            .map(|step| &step.after)
+            .unwrap_or(&self.before)
+    }
+
+    /// The refusal an unreviewed apply is, in one sentence, for the same reason
+    /// [`NeedsReview::refusal`] is one place.
+    pub fn refusal(&self) -> Error {
+        Error::new(
+            EXIT_USAGE,
+            format!(
+                "this ChangeSet is governed by {}; review every step against the surfaced Rules, then apply it with review digest {} and the review outcome",
+                self.rules.join(", "),
+                self.digest
+            ),
+        )
+    }
+}
+
+/// A ChangeSet whose review holds: the records to publish, and the Object they
+/// produce. Nothing has been written.
+#[derive(Debug)]
+pub struct SealedChangeSet {
+    pub events: Vec<Event>,
+    pub object: Object,
+}
+
+#[derive(Debug)]
+pub enum ChangeSetOutcome {
+    Sealed(Box<SealedChangeSet>),
+    /// Governed and not yet reviewed, exactly as a lone Agent mutation is:
+    /// here is the subject, and nothing has been written.
+    NeedsReview(Box<ChangeSetPlan>),
+}
+
+/// Project a ChangeSet's steps against the Object as it stands, and name the
+/// sequence as one review subject.
+///
+/// Every step is checked exactly as a lone Agent mutation is — size, that it
+/// changes something, references, relations, and that the result is
+/// representable — against the Object as the steps before it leave it. So a
+/// ChangeSet admits nothing a sequence of single admissions could not, and a
+/// step that would be refused alone is refused here, by its number.
+///
+/// Read-only, and meant to be called under the writer lock: the answer is only
+/// worth what the Object is worth at the moment it is given.
+pub(crate) fn plan_changeset_locked(
+    root: &Path,
+    object: &str,
+    payloads: Vec<Payload>,
+) -> Result<ChangeSetPlan> {
+    Ok(plan_and_bind(root, object, payloads)?.0)
+}
+
+/// The plan and the binding it was named by, for a caller that goes on to hold
+/// an attestation to that binding.
+fn plan_and_bind(
+    root: &Path,
+    object: &str,
+    payloads: Vec<Payload>,
+) -> Result<(ChangeSetPlan, crate::rules::ReviewBinding)> {
+    store::require_current(root)?;
+    ensure!(
+        !payloads.is_empty(),
+        EXIT_USAGE,
+        "this ChangeSet has no steps yet; add one with `engr changeset add`"
+    );
+    let before = ops::admission_predecessor(root, object)?;
+    let at = now();
+    let mut current = before.clone();
+    let mut steps = Vec::with_capacity(payloads.len());
+    let mut mutations = Vec::with_capacity(payloads.len());
+    for (index, payload) in payloads.into_iter().enumerate() {
+        let step = index + 1;
+        let (payload, after) = plan_step(root, object, &current, payload, &at)
+            .map_err(|error| Error::new(error.code, format!("step {step}: {}", error.message)))?;
+        mutations.push(crate::proof::object_review_mutation(
+            &current, &after, &payload,
+        )?);
+        steps.push(PlannedStep {
+            payload,
+            after: after.clone(),
+        });
+        current = after;
+    }
+    check_references_outside_changeset(object, &before, &steps)?;
+    let binding = crate::rules::bind_object_changeset(root, object, &mutations, before.rev)?;
+    let plan = ChangeSetPlan {
+        before,
+        steps,
+        digest: binding.digest()?.to_string(),
+        rules: binding.rule_ids(),
+    };
+    Ok((plan, binding))
+}
+
+/// One step, against the Object as the steps before it leave it.
+fn plan_step(
+    root: &Path,
+    object: &str,
+    current: &Object,
+    mut payload: Payload,
+    at: &str,
+) -> Result<(Payload, Object)> {
+    ensure!(
+        payload.object == object,
+        EXIT_USAGE,
+        "a ChangeSet changes one Object, and this step names another"
+    );
+    // Section work only. A title, a lifecycle and a supersession are each their
+    // own statement about the whole Object — and all but the title are Human
+    // admissions — so none of them rides inside a batch of wording.
+    ensure!(
+        matches!(
+            payload.action,
+            Action::SectionCreated { .. }
+                | Action::SectionUpdated { .. }
+                | Action::SectionMerged { .. }
+                | Action::SectionDeleted { .. }
+        ),
+        EXIT_USAGE,
+        "a ChangeSet carries Section mutations: add, revise, merge or delete"
+    );
+    ensure!(
+        payload.becomes().is_none(),
+        EXIT_USAGE,
+        "a ChangeSet does not move the Object's lifecycle; classify it on its own"
+    );
+    canonicalize_payload(root, &mut payload)?;
+    if payload.action.carries_content() {
+        check_allowance(root, &payload, Allowance::Normal)?;
+    }
+    check_is_a_change(&payload, Some(current))?;
+    let mut after = current.clone();
+    project(
+        &mut after,
+        &probe(&payload, current.rev + 1, Admission::Agent, at),
+    )?;
+    check_projection_is_representable(&after)?;
+    validate_refs(root, &payload, Admission::Agent)?;
+    validate_relations(root, &payload, &after)?;
+    Ok((payload, after))
+}
+
+/// Refuse a step that depends on wording the same ChangeSet changes.
+///
+/// A reference pins the target as it is committed, and a Section this ChangeSet
+/// creates, rewrites, merges or removes is not committed in the form the
+/// ChangeSet leaves it — so the reference would be pinned to wording that is
+/// already gone by the time it is admitted, or to nothing. Apply the ChangeSet,
+/// commit it, and reference the result.
+fn check_references_outside_changeset(
+    object: &str,
+    before: &Object,
+    steps: &[PlannedStep],
+) -> Result<()> {
+    let mut touched = std::collections::BTreeSet::new();
+    let mut previous = before;
+    for step in steps {
+        let ids: std::collections::BTreeSet<u64> = previous
+            .sections
+            .iter()
+            .chain(step.after.sections.iter())
+            .map(|section| section.id)
+            .collect();
+        for id in ids {
+            if previous.section(id).ok() != step.after.section(id).ok() {
+                touched.insert(id);
+            }
+        }
+        previous = &step.after;
+    }
+    for (index, step) in steps.iter().enumerate() {
+        let Some(value) = step.payload.value() else {
+            continue;
+        };
+        for reference in &value.content.refs {
+            let (target, section) = crate::dependency::parse_target(reference.target())?;
+            ensure!(
+                !(target == object && touched.contains(&section)),
+                EXIT_USAGE,
+                "step {}: it references §{section}, which this ChangeSet changes; apply the \
+                 ChangeSet first, then reference what it wrote",
+                index + 1
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Plan a ChangeSet and hold its attestation to the plan.
+///
+/// The same two calls as a lone Agent mutation: without an attestation the
+/// subject comes back and nothing is written; with one, the digest is
+/// recomputed from current state under the lock the caller holds, and a review
+/// of anything else is refused. A ChangeSet is admitted only by a review that
+/// passed. One that did not can still be taken apart into single mutations,
+/// and each of those has the whole of the ordinary path, escalation included —
+/// what a batch cannot do is ask a person to override one review for several
+/// acts, which is a Human confirmation of more than one action.
+pub(crate) fn seal_changeset_locked(
+    root: &Path,
+    object: &str,
+    payloads: Vec<Payload>,
+    review: Option<ReviewAttestation>,
+) -> Result<ChangeSetOutcome> {
+    let (plan, binding) = plan_and_bind(root, object, payloads)?;
+    // Before the attestation is read as a report, whose rules are about offering
+    // a failure to a person for override — which a ChangeSet never does.
+    if let Some(review) = &review {
+        ensure!(
+            review.result == crate::proof::ReviewResult::Passed,
+            EXIT_INVARIANT,
+            "a ChangeSet is admitted only by a review that passed; take it apart into single \
+             mutations, each of which can go the ordinary way, escalation included"
+        );
+    }
+    // No identity check beyond the digest's. A lone mutation's rebuilds the
+    // binding from the review's Rule snapshots for a candidate that may be
+    // confirmed later; this review is held to the binding it was just compared
+    // with, and nothing about it outlives this call.
+    let review =
+        match check_attestation(&binding, review, |_| Ok(()))? {
+            ReviewCheck::Needed { .. } => return Ok(ChangeSetOutcome::NeedsReview(Box::new(plan))),
+            ReviewCheck::Ungoverned => return Err(Error::new(
+                EXIT_INVARIANT,
+                "Agent semantic Object admission needs at least one applicable usable Object Rule",
+            )),
+            ReviewCheck::Attested(review) => review,
+        };
+    let reviewed = ReviewProvenance {
+        outcome: ReviewOutcome::Passed,
+        result: review.result,
+        attempts: review.attempt,
+    };
+    // One clock read for the whole ChangeSet: its steps are admitted by one
+    // review at one moment, and a record stating several moments for one act
+    // would be describing a sequence that did not happen.
+    let at = now();
+    let mut object_state = plan.before.clone();
+    let mut events = Vec::with_capacity(plan.steps.len());
+    for step in &plan.steps {
+        let event = Event::sealed(
+            object,
+            crate::model::new_id(),
+            admitted_at(step.payload.action.clone(), &at),
+            object_state.rev + 1,
+            agent_admission(&at, Some(reviewed.clone())),
+        )?;
+        object_state =
+            crate::integrity::mutate(&object_state, |next| project(next, &event))?.object;
+        validate_relations(root, &step.payload, &object_state)?;
+        events.push(event);
+    }
+    Ok(ChangeSetOutcome::Sealed(Box::new(SealedChangeSet {
+        events,
+        object: object_state,
+    })))
+}
+
 /// Everything a relation claims about the world outside this payload.
 ///
 /// Checked at the gate rather than in the reducer, which stays a pure function

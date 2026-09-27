@@ -34,6 +34,8 @@ only this repository and what engr holds.
   result and record the cut.
 - A decision is recorded when it is made, as a Section. Not as a backlog point
   whose "settled by" is the answer, and not as an item to record it later.
+  Several about one Object can go into a ChangeSet as they settle and share one
+  review; apply it before the work it records is committed.
 - A fact you learn about the code — a constraint, a dead end, a bug — is recorded
   when you learn it. A comment in the code is not where the next session looks.
 - A question you will not settle now is a backlog point: what is undecided, why

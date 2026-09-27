@@ -1770,6 +1770,51 @@ pub fn rebind_object(
     })
 }
 
+/// Bind one Object-domain review over several mutations of one Object.
+///
+/// A ChangeSet's steps are reviewed once, as the ordered sequence they will be
+/// admitted in. Each step is described by the frozen single-operation
+/// descriptor — built by [`crate::proof::object_review_mutation`] from the
+/// states either side of it, exactly as a lone mutation's is — so a step means
+/// the same thing in a batch as it does on its own, and the batch adds only
+/// the order and the Object they share.
+///
+/// The precondition is the revision the first step applies to. Every later
+/// step's predecessor follows from it and the steps before, so binding it once
+/// binds them all; binding each would say the same thing several times, in
+/// several places that could disagree.
+pub fn bind_object_changeset(
+    root: &Path,
+    object: &str,
+    steps: &[crate::proof::ReviewMutation],
+    expected_rev: u64,
+) -> Result<ReviewBinding> {
+    ensure!(
+        !steps.is_empty(),
+        EXIT_USAGE,
+        "a ChangeSet with nothing in it has nothing to review"
+    );
+    let mut described = Vec::with_capacity(steps.len());
+    for step in steps {
+        let (mutation, _) = object_binding_inputs(step, expected_rev)?;
+        described.push(mutation);
+    }
+    let mutation = serde_json::json!({
+        "operation": { "name": "changeset", "parameters": {} },
+        "target": crate::proof::object_target(object)?,
+        "steps": described,
+    });
+    let precondition = serde_json::to_value(crate::proof::ReviewPrecondition { expected_rev })
+        .map_err(|error| Error::new(EXIT_SCHEMA, format!("review precondition: {error}")))?;
+    within_safe_integers(&mutation, "mutation")?;
+    Ok(ReviewBinding {
+        domain: Domain::Object,
+        mutation,
+        precondition,
+        rules: bound_rules(root, Domain::Object)?,
+    })
+}
+
 fn object_binding_inputs(
     mutation: &crate::proof::ReviewMutation,
     expected_rev: u64,

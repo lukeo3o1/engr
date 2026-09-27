@@ -20,6 +20,12 @@ run ls --verify
 run backlog ls
 run candidate
 run work ls
+# A ChangeSet is decisions drafted and not yet admitted, kept on this machine
+# only. Nothing the record shows points at one, so a session that does not look
+# here leaves it unapplied for good.
+if engr changeset ls 2>/dev/null | grep -qv '^no ChangeSets'; then
+  run changeset ls
+fi
 
 # The sidecar is the handoff itself, so it is shown in full rather than as a
 # row. `work ls` prints a short id, and a Backlog subject has to be written as

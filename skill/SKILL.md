@@ -314,6 +314,50 @@ Creating or renaming a title is the only Agent operation allowed without an
 applicable Rule, because the title is navigation metadata. All Section semantics
 still need governed Agent admission.
 
+### Several Sections of one Object, one review
+
+A review costs a reader who never saw the draft, and paid once per Section it is
+what pushed decisions to the end of the work or out of the record in the
+dogfood. When one piece of work settles several things about the same Object,
+add each as a step of a ChangeSet when it settles, and pay for one review when
+you apply them:
+
+```bash
+engr changeset new --object <id>
+engr changeset add <changeset> --add --header "Lock Once" --text-file lock.txt
+engr changeset add <changeset> --revise 2 --text-file budget.txt
+engr changeset show <changeset>
+#   CHANGESET  <changeset>  for <id>  rev 4 → 6
+#      1  add     §5  Lock Once
+#      2  revise  §2  Sync Budget
+#
+#   ... the Object as the last step leaves it ...
+#
+#   NEEDS REVIEW  governed by <rule-id>. ...
+engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
+  --review-attempt 1 --review-result passed
+```
+
+A step takes the same arguments as `prepare` and is checked the same way the
+moment you add it; one that would be refused alone is refused there, by its
+number. Hand the reviewer the `show` screen — every step and the whole Object —
+as you would the screen of a single mutation. It passes or fails as one subject.
+To fix a step, `engr changeset rm <changeset> --step <n>` and add the corrected
+one; it goes to the end, so read `show` again before the next attempt.
+
+Only a passing review applies a ChangeSet. If you cannot get one, discard it and
+admit the steps one at a time with `prepare --agent`, which keeps the ordinary
+path, escalation included. A ChangeSet takes Section work on one existing Object
+and nothing else — not a title, not a lifecycle move, not another Object — and a
+step may not reference a Section the same ChangeSet changes: apply, commit, and
+reference what it wrote.
+
+A step is on disk the moment it is added, and survives a lost context on this
+machine — but it is not a record. The next session will not see it in `engr
+show`, only in `engr changeset ls`, and the hooks in `skill/hooks/` print that
+list at the start and ask once before stopping while one is unapplied. Apply
+before the work it records is committed, not at the end of the session.
+
 ## Coming back later
 
 A human often replies hours later, and your terminal output is gone.
