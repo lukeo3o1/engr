@@ -224,8 +224,13 @@ make the reminders heard.
   probes' copies showed the harness's own settings edit as an uncommitted change
   until the probe runner hid it; D's gate could not fire; the start hook skipped
   an Object's sidecar for C's last probe.
-- **Untested:** the cold read before a first review never ran as described, and
-  the resume drill ran once, in E.
+- **Barely exercised:** the cold read ran as the guide describes six times, in E
+  and G — the rendered screen alone, the six questions, and in E a note written
+  before the draft. G twice more handed its cold reader the Rule as well, which
+  the guide counts as a review. The resume drill ran once, in E's last session,
+  and found a real gap: its reader nearly rebuilt the `engr` on `PATH` from the
+  checkout, which the project forbids, and E wrote the correction into engr.
+  Neither was used in any other arm, so neither is measured here.
 
 ## Evidence
 
