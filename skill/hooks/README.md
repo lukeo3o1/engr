@@ -1,6 +1,6 @@
 # Hooks for Claude Code
 
-Three things in `skill/SKILL.md` fail in the same way when they are left to the
+Three things in `skill/engr/SKILL.md` fail in the same way when they are left to the
 agent: the reads at the start of a session, the writes while the work is going,
 and the handoff before it ends. An agent whose context was just compacted does
 not remember to read, and an agent whose step just worked does not remember to
@@ -31,7 +31,7 @@ otherwise have been lost.
 
 None of them can tell whether what is in engr is *right*. They catch the
 mechanically visible half — work the sidecar does not know about — and leave
-the rest to the resume drill in `skill/SKILL.md`.
+the rest to the resume drill in `skill/engr/SKILL.md`.
 
 An abrupt end — a turn limit, a crash, a context cleared mid-step — fires no
 `Stop` hook. That is the case the start hook's "committed after the newest

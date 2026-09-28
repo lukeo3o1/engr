@@ -7453,7 +7453,27 @@ fn every_documented_command_is_one_the_cli_accepts() {
         .expect("repository root")
         .to_path_buf();
     let mut checked = 0usize;
-    for document in ["README.md", "skill/SKILL.md"] {
+    // Every skill, not a list of them: a skill added later with a stale example
+    // in it would otherwise be the one document nobody checks.
+    let mut documents = vec!["README.md".to_owned()];
+    let skills = repository.join("skill");
+    for entry in std::fs::read_dir(&skills).expect("skill directory") {
+        let skill = entry.expect("skill entry").path().join("SKILL.md");
+        if skill.is_file() {
+            documents.push(
+                skill
+                    .strip_prefix(&repository)
+                    .expect("inside the repository")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    assert!(
+        documents.len() >= 6,
+        "expected README.md and the five engr skills, found {documents:?}"
+    );
+    for document in &documents {
         let text = std::fs::read_to_string(repository.join(document))
             .unwrap_or_else(|error| panic!("{document}: {error}"));
         for command in documented_commands(&text) {

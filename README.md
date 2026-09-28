@@ -309,11 +309,21 @@ The `latest` release is published by hand from the Actions tab — **release** �
 nothing to download, and the installers say so rather than looking like a network
 failure.
 
-## The Skill
+## The Skills
 
-[skill/SKILL.md](skill/SKILL.md) is the runtime guide for an agent working in a
-project that has adopted `.engr/`. It explains both the Human candidate flow and
-the Agent Rule Review flow, including when the agent must stop and wait.
+[skill/](skill/) is the runtime guide for an agent working in a project that has
+adopted `.engr/`, as five Claude Code skills. [engr](skill/engr/SKILL.md) is read
+first: where each kind of thing goes, when to write it, project Rules and their
+reviews, resuming from a lost context, and what to commit. The other four each
+cover one domain's commands, and are loaded before those commands run:
+[engr-object](skill/engr-object/SKILL.md) for the record — both the Human
+candidate flow and the Agent Rule Review flow, including when the agent must
+stop and wait — [engr-backlog](skill/engr-backlog/SKILL.md),
+[engr-work](skill/engr-work/SKILL.md) and
+[engr-collection](skill/engr-collection/SKILL.md). Copy the five directories into
+the project's `.claude/skills/`. [skill/hooks/](skill/hooks/README.md) holds the
+hooks that make the reading, writing and handoff not depend on the agent
+remembering them.
 
 ## Build
 

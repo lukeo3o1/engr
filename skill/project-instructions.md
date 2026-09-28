@@ -1,6 +1,6 @@
 # A block for the project's CLAUDE.md or AGENTS.md
 
-`skill/SKILL.md` is read once, near the start, and then sits further back in the
+`skill/engr/SKILL.md` is read once, near the start, and then sits further back in the
 context with every turn. The file a harness loads as project instructions is in
 every turn, and survives a compacted context. So the few rules that decide
 whether an agent's working state survives belong there too, short, with the
@@ -45,5 +45,5 @@ only this repository and what engr holds.
 - A hook message that starts with `engr:` is part of this project's setup, not
   noise. Answer it before your next edit.
 
-`skill/SKILL.md` has the reasons and the commands.
+The skills under `skill/` have the reasons and the commands.
 ```

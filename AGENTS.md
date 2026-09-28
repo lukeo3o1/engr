@@ -64,7 +64,7 @@ says what the page asserts, why, and what it would have to ask, and you compare
 that with a note of what you meant, written before the draft. It returns no
 verdict, so it is drafting rather than an attempt — and it is what finds the
 reason or the number that stayed in your head, before a review spends one of a
-few attempts finding it. `skill/SKILL.md` has the order and the exact questions.
+few attempts finding it. `skill/engr-object/SKILL.md` has the order and the exact questions.
 
 `engr candidate <code>` re-renders a pending candidate. Use it when a human comes
 back later — **re-running `prepare` mints a new code and voids the one they are
