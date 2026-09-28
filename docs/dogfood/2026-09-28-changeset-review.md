@@ -173,16 +173,89 @@ Each of these was learned by a run going wrong:
   stretch without a write is now reported beside it, and writes to a scratch
   workspace no longer count.
 
+## Two more runs: v1.1, and the guide as five skills
+
+**Run four** is the third run's arm with `d74f6fe`'s ChangeSet. S1 designed while
+it built, and its sidecar carried item 7, "record settled design decisions as
+Sections; open questions to backlog", pending through S1 and S2. S3's agent
+began by reading "the actual implementation to understand the design decisions
+made" (S3 T4), drafted eleven steps, and applied them over three reviews: the
+first failed steps 2 and 10 and admitted the other eight, the second failed step
+1 and admitted one, the third passed the last two. The count went 1, 2, 3 — no
+reset — and the eleven Sections cost one cold read and three reviews. None was
+recorded in the session that made it, so the rule was not met and no baseline
+arm was run. It was not audited. US$11.3.
+
+**Run five** changed the guide: the five skills of `26562df`, with the fixes of
+`795d323`, installed as Claude Code skills, the `Skill` tool allowed, and one
+sentence of the prompt changed from reading `skill/SKILL.md` to loading the
+`engr` skill. Everything else was run four's. The account's session limit
+stopped the chain at 09:53: S2 lost about its last three turns (a review it had
+sent out came back empty), and S3 and probes 2 and 3 never ran. Those three were
+run again from the same sandbox after the limit reset; the spoiled records are
+kept (`K/limit-hit/`). US$10.8.
+
+- **The skills were loaded before their commands**, in every session. S1 loaded
+  all four at T29, before its first engr command at T30; S2 loaded `engr-work` at T9
+  before its first `engr work` at T23, `engr-object` at T53 before drafting at
+  T62, and `engr-backlog` at T67 before T68; S3 likewise.
+- **The rule they carried did not hold.** "Not added as an item to record it
+  later … add it as a step of a ChangeSet the moment it is made" is in both
+  `engr` and `engr-work`, loaded at S1 T1 and T29. The sidecar S1 wrote at T36
+  carried item 7, "Record settled design decisions as Sections via ChangeSet".
+- **The draft survived the cut.** S2 drafted thirteen steps at T62–T64 and was
+  cut before applying them. S3 found the ChangeSet at its start, through the
+  start hook's `engr changeset ls`, and finished it: three reviews, nine
+  admitted at T41, and the tenth — exhausted — taken to a Human candidate,
+  which is the Rule's policy, and left there for a person.
+- **A second way past a review.** The third review passed nine steps and failed
+  the tenth (T34). The agent removed the tenth (T39), took the digest of the
+  nine that remained (T40), and attested *that* as passed at attempt 3 (T41).
+  The nine were word for word what the reviewer passed; the digest attested was
+  of a sequence no reviewer saw. `apply` with the reviewed digest and
+  `--review-result failed --failed-step 10` admits the same nine honestly, and
+  engr cannot tell the two apart.
+
+The blind audit (`appendix-k-skills-run-audit.md`, label Y) scored backlog 3,
+work items 2, reasoning 3 and resume 3. Of 19 design decisions, **none** was
+recorded as a Section in the session that made it; nine were, all at S3 T41, one
+or two sessions later; ten never were — one waits on a person, three live only
+in the backlog or the plan, and six are nowhere in engr. S2 drafted the steps
+from the code and got three wrong: a lock's path, a validation check, and who
+may close a Session. Recording cost about 70 turns, six
+subagents and ten refused commands, and S3 did no engineering at all.
+
+### What the five runs show together
+
+- **The rule, wherever it is written, did not move when a decision is recorded.**
+  In four of the five runs the agent wrote "record the settled decisions" as a
+  later work item with the rule against it in front of it — in one guide, in
+  the core of five skills loaded at the start, and in the skill it had loaded to
+  write that very item. The one run that recorded first did so before writing code,
+  and then recorded nothing it decided while writing it.
+- **The ChangeSet does what it was built to.** In run four per-step verdicts
+  landed what passed and the count carried from round to round; in run five a
+  draft outlived the session that wrote it, and an exhausted step went to a
+  person.
+- **Two ways past a review that engr cannot see**: taking a failed ChangeSet
+  apart and starting the count again (run three, answered in the guide), and
+  removing a failed step to attest the digest of what is left (run five, not yet
+  answered).
+
 ## What this does not show
 
-- **Whether v1.1 does better.** It has not been run.
 - **Whether any of this beats no ChangeSet on this task.** The baseline arm (E
   on the #40 slice) has not been run; the pre-registered rule reserved it for a
-  run that met the bar through the ChangeSet, which this one did not.
+  run that met the bar through the ChangeSet, which no run did.
+- **What the split did on its own.** Run five changed the split and the guide's
+  wording together, so any effect of either is not separable; neither moved the
+  measure the rule was about.
+- **Any effect smaller than the swings between runs.** Every configuration ran
+  once, and two runs of one configuration went opposite ways.
 - **Anything from the first two runs beyond what is quoted above.** Both are
   kept (`H`, `H2-signing-defect`) and were not audited.
 
 ## Cost
 
-About US$38 across the three runs (14.0, 12.9 and 10.6, sessions and probes),
-and one Opus audit.
+About US$60 across the five runs (14.0, 12.9, 10.6, 11.3 and 10.8, sessions
+and probes, run five's rerun included), and two Opus audits.
