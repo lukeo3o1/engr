@@ -189,7 +189,7 @@ about whether it passes. Ask for one answer: does this meet every requirement,
 and if not, which one does it miss.
 
 Nothing that asks for agreement, either. "This was verified independently" and
-"this is the final attempt" both appeared in one dogfood's review prompts; a
+"this is the final attempt" both appeared in one watched run's review prompts; a
 reviewer told either has been told what answer is wanted.
 
 Have the screen read cold first — see
@@ -254,8 +254,8 @@ still need governed Agent admission.
 ### Several Sections of one Object, one review
 
 A review costs a reader who never saw the draft, and paid once per Section it is
-what pushed decisions to the end of the work or out of the record in the
-dogfood. When one piece of work settles several things about the same Object,
+what pushes decisions to the end of the work or out of the record. When one
+piece of work settles several things about the same Object,
 add each as a step of a ChangeSet when it settles, and pay for one review when
 you apply them:
 
@@ -316,6 +316,9 @@ engr candidate ABC123     # render it again, in full
 the one they are holding.
 
 ## Reading the record
+
+What to run at the start of work is in the `engr` skill. This is what the
+listings and `show` do and do not tell you.
 
 **A search that finds nothing is not proof that the record holds nothing.**
 `engr ls` and `engr ls --all --sections` read stored projections only — that is
@@ -412,6 +415,9 @@ record's own files, so `basis moved` means real work landed.
 | What kind of thing this is, or where it now stands | `--classify` |
 | Another object has replaced this one | `--supersede <object>` |
 | A **settled** object needs work again | that same action, plus `--type` and `--state` — [one confirmation](#type-state-and-attention), not two |
+
+`--close`, `--reopen`, `--classify` and `--supersede` set the object's own
+lifecycle, and only a person admits that: `--agent` is refused for each of them.
 
 The last row is the one most easily missed. `--add`, `--revise`, `--merge`,
 `--delete` and `--rename` all refuse an object nobody is looking at — but they

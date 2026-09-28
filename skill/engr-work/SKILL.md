@@ -69,10 +69,11 @@ which are blocked and which a human stopped.
 
 **If your harness has a task list of its own, keep this work out of it.** A
 built-in todo list is where the urge to track steps naturally goes, and it
-disappears with the context. Watched across twelve sessions, every one that kept
-its steps in the harness's list wrote nothing to engr, and read past every
-reminder to. The sidecar is that list: use it the way you would the other, one
-item per step, and the next session has it too.
+disappears with the context. Of four watched sessions that kept their steps in
+the harness's list, three wrote nothing to engr and the fourth stopped after its
+first 27 turns, and none answered any of the seven reminders they were given.
+The sidecar is that list: use it the way you would the other, one item per step,
+and the next session has it too.
 
 **Write the shortest useful handoff, not the history of the work.** One action or
 point per item, concrete verbs, outcomes rather than reasoning. The limits are
@@ -80,8 +81,9 @@ enforced — 300 characters for the summary, 160 for an item, 240 for a result, 
 for a reason — and there is no oversize exception, because nothing here is worth
 admitting past its limit. If it will not fit, it belongs in backlog or the Object.
 
-**A refused write is not a shorter write.** Every time an item or a result was
-refused for length in the dogfood, the agent cut the reason and kept the what —
+**A refused write is not a shorter write.** In one watched run, every time an
+item or a result was refused for length, the agent cut the reason and kept the
+what —
 and the reason was the part the next session needed. Put it where it fits, a
 Section or a backlog point, and keep the line short by pointing at it. Nor chain
 engr writes with `&&` without reading each answer: one refused for length
@@ -89,7 +91,7 @@ silently stopped every update after it, and nothing showed it at the cut.
 
 The summary says where things stand and which item is next. It is not a
 changelog: what is done is in the items, with their results. **Rewrite it
-whenever an item changes state.** In every dogfood run it was written once and
+whenever an item changes state.** In every watched run it was written once and
 left; one still read "deciding domain scope before writing code" at the third
 cut, long after the scope was built, and sent the next agent back to work that
 was done.
@@ -156,11 +158,13 @@ item, and its result is the conclusion; the 240-character limit on a result has
 room for what was found and none for how.
 
 **A decision is recorded when it is made, not added as an item to record it
-later.** Twice, "record the settled decisions as Sections" went in as a pending
-item and was still pending when the session was cut — the one step nobody's
-next step ever reaches, while the decisions it meant lived in a summary line and
-a code comment. If the admission path costs a review, pay it then: that is when
-you know the reason, and when the wording is cheapest to get right.
+later.** In five watched runs "record the settled decisions as Sections" went in
+as a pending item — three of them with this rule already in the guide — and each
+time the decisions reached the record late or not at all, living meanwhile in a
+summary line, a code comment or the code alone. Recording one now costs no
+review: add it as a step of a ChangeSet on its Object the moment it is made
+(`engr changeset add`, in `engr-object`), while you know the reason, and pay for
+one review when you apply several.
 
 **A fact you learn about the code is a constraint, and it outlives the step.**
 One run learned that the writer lock cannot be taken twice by one process, left

@@ -321,9 +321,9 @@ candidate flow and the Agent Rule Review flow, including when the agent must
 stop and wait — [engr-backlog](skill/engr-backlog/SKILL.md),
 [engr-work](skill/engr-work/SKILL.md) and
 [engr-collection](skill/engr-collection/SKILL.md). Copy the five directories into
-the project's `.claude/skills/`. [skill/hooks/](skill/hooks/README.md) holds the
-hooks that make the reading, writing and handoff not depend on the agent
-remembering them.
+the project's `.claude/skills/`. [skill/hooks/](skill/hooks/README.md) holds
+hooks that remind the agent to read, write and hand off, and hold it once when
+it has not.
 
 ## Build
 

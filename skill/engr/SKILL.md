@@ -20,9 +20,10 @@ metadata:
 The runtime guide for working with a project's record. For changing the engr
 repository itself, read `AGENTS.md` there instead.
 
-This skill and the four beside it are all you need to use the record. When something comes up that it does not
-answer — what a signal actually guarantees, what a stored field means, why a
-command exited the way it did — the binary carries its own specification:
+This skill and the four beside it are all you need to use the record. When
+something comes up that they do not answer — what a signal actually guarantees,
+what a stored field means, why a command exited the way it did — the binary
+carries its own specification:
 
 ```bash
 engr protocol
@@ -45,7 +46,8 @@ right about what the tool does — say so rather than working around it.
 | How you got there | Nowhere | — |
 
 Load the skill before you run the commands it covers. Each of them assumes this
-one: what goes where, and when, is said here and not repeated there.
+one: what goes where, and when, is said here, and repeated there only where it
+matters at the moment that skill is in use.
 
 ## The one rule
 
@@ -106,31 +108,34 @@ significant architectural or behavioral decision, search existing titles and
 section wording with `engr ls --all --sections` and an appropriate text search.
 Re-evaluate any relevant moved basis or dependency before relying on it.
 
-Also run `engr backlog ls`, `engr work ls` and `engr collection ls` — an
-unresolved point recorded in
-one and an execution checkpoint left in the other are exactly the context a
+Also run `engr backlog ls`, `engr work ls`, `engr collection ls` and `engr
+changeset ls` — an unresolved point, an execution checkpoint, a plan, and
+decisions drafted on this machine but not yet applied are exactly the context a
 previous session left for you, and re-deciding or redoing something an earlier
 session already handled is the failure they exist to prevent.
 
 ## When to write
 
-What goes wrong is rarely what an agent wrote but when: a session that writes
-nothing while the work is going leaves the next one nothing, whatever the guide
-says about wording. These are the rules about when; the domain skills say how.
+A session that writes nothing while the work is going leaves the next one
+nothing, however well it would have worded it. These are the rules about when;
+the domain skills say how.
 
 **If your harness has a task list of its own, keep this work out of it.** A
 built-in todo list is where the urge to track steps naturally goes, and it
-disappears with the context. Watched across twelve sessions, every one that kept
-its steps in the harness's list wrote nothing to engr, and read past every
-reminder to. The sidecar is that list: use it the way you would the other, one
-item per step, and the next session has it too.
+disappears with the context. Of four watched sessions that kept their steps in
+the harness's list, three wrote nothing to engr and the fourth stopped after its
+first 27 turns, and none answered any of the seven reminders they were given.
+The sidecar is that list: use it the way you would the other, one item per step,
+and the next session has it too.
 
 **A decision is recorded when it is made, not added as an item to record it
-later.** Twice, "record the settled decisions as Sections" went in as a pending
-item and was still pending when the session was cut — the one step nobody's
-next step ever reaches, while the decisions it meant lived in a summary line and
-a code comment. If the admission path costs a review, pay it then: that is when
-you know the reason, and when the wording is cheapest to get right.
+later.** In five watched runs "record the settled decisions as Sections" went in
+as a pending item — three of them with this rule already in the guide — and each
+time the decisions reached the record late or not at all, living meanwhile in a
+summary line, a code comment or the code alone. Recording one now costs no
+review: add it as a step of a ChangeSet on its Object the moment it is made
+(`engr changeset add`, in `engr-object`), while you know the reason, and pay for
+one review when you apply several.
 
 **A fact you learn about the code is a constraint, and it outlives the step.**
 One run learned that the writer lock cannot be taken twice by one process, left
@@ -139,10 +144,9 @@ twenty turns finding it again; another run hung on what looked like the same
 lock and recorded nothing. The one run that admitted it as a Section never hit
 it.
 
-After a durable decision, constraint, assumption, or rationale is established,
-consider capturing it when a future agent would need it. Do not record transient
-task state, guesses, routine observations, or every thought merely because engr
-is available. An open question is not a decision: stage it instead.
+What is not settled is not recorded: not transient task state, guesses, routine
+observations, or every thought merely because engr is available. An open
+question is not a decision: stage it instead.
 
 When a test passes or a commit lands, close the item that step finished before
 anything else — `engr-work`, *Close it in the same step as the proof*.
@@ -183,8 +187,11 @@ nothing about review still has a limit. There is no unlimited rule.
 
 The attempt count is **yours to report honestly**. engr does not track it, stores
 no history of your tries, and can only tell you what a number means. It counts
-one run of self-review: if you lose the thread or start over, a later independent
-attempt at the same work legitimately begins at 1 again.
+one run of review of the same wording. Only a run that was genuinely lost — a
+cleared context that left no record of the earlier tries — lets a later one
+begin at 1 again. Starting over after a refusal, or taking the same wording to
+another path, continues the count: a step taken out of a ChangeSet keeps the
+attempts it had there.
 
 That is not a way around the ceiling. It is there because you are the only one
 who knows how many times you have tried, and reporting a low number to get past a
@@ -205,6 +212,9 @@ deliberate:
   standing note that this went in without a passing review, not a free pass.
   **Consuming** a Backlog point is the exception: that destroys unresolved work,
   so it needs a review that actually passed.
+- In **Work** and **Collections**, a mutation past every applicable ceiling is
+  refused. What exhaustion should mean there is not settled, and engr will not
+  guess.
 
 Do not treat the Backlog marker as somewhere to put work you could not get past
 a rule. It is visible, it says what happened, and the point that produced it is
@@ -266,6 +276,7 @@ engr ls --verify
 engr backlog ls
 engr work ls
 engr collection ls
+engr changeset ls
 engr candidate
 ```
 
@@ -288,14 +299,16 @@ going and a check before stopping need not depend on remembering them. engr's
 repository carries them for Claude Code under `skill/hooks/`, and
 `skill/project-instructions.md` is the short block of these rules that belongs
 in the project's always-loaded instructions. Measured, the hooks with the
-harness's task list turned off kept the handoff within a few turns of the work;
-the instructions without the mid-session hooks did not.
+harness's task list turned off brought the handoff from 68 turns behind the work
+at a cut to 8 on average, though stretches of 30 turns without a write still
+happened; the instructions without the mid-session hooks did not move it.
 
 ## Committing
 
-Objects and admitted history live in the repository. **Remind the human to
-commit `.engr/objects`, `.engr/eventstore`, `.engr/rules`, `.engr/backlog`,
-`.engr/work` and `.engr/collections`.**
+Objects and admitted history live in the repository. **Commit
+`.engr/objects`, `.engr/eventstore`, `.engr/rules`, `.engr/backlog`,
+`.engr/work` and `.engr/collections`** — or, where committing is the human's,
+remind them to.
 
 All six. Rules, Work and Collections are non-authoritative, but git is the only
 history they have — an uncommitted policy, plan or handoff is simply lost, and
