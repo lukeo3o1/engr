@@ -341,16 +341,24 @@ engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
 A step takes the same arguments as `prepare` and is checked the same way the
 moment you add it; one that would be refused alone is refused there, by its
 number. Hand the reviewer the `show` screen — every step and the whole Object —
-as you would the screen of a single mutation. It passes or fails as one subject.
-To fix a step, `engr changeset rm <changeset> --step <n>` and add the corrected
-one; it goes to the end, so read `show` again before the next attempt.
+as you would the screen of a single mutation, and ask for a verdict on each
+step. If it failed some, apply with `--review-result failed` and a
+`--failed-step <n>` for each: the steps it passed are admitted, and the failed
+ones stay. To fix one, `engr changeset rm <changeset> --step <n>` and add the
+corrected wording.
 
-Only a passing review applies a ChangeSet. If you cannot get one, discard it and
-admit the steps one at a time with `prepare --agent`, which keeps the ordinary
-path, escalation included. A ChangeSet takes Section work on one existing Object
-and nothing else — not a title, not a lifecycle move, not another Object — and a
-step may not reference a Section the same ChangeSet changes: apply, commit, and
-reference what it wrote.
+**A step that failed is on its next attempt when it is reviewed again** — in the
+ChangeSet or alone. Taking it out does not start its count again. One run whose
+ChangeSet had failed three times took the steps out and admitted each at attempt
+1, past a Rule that asked for a person after three; the count is yours to keep,
+because engr cannot. A step that runs out of attempts goes alone to `prepare
+--agent` at its next attempt, and the Rule's exhaustion policy decides.
+
+A ChangeSet takes Section work on one existing Object and nothing else — not a
+title, not a lifecycle move, not another Object — and a step may not reference a
+Section the same ChangeSet changes: apply, commit, and reference what it wrote.
+A step that revises a Section another step adds cannot be admitted if that other
+step fails; apply refuses it rather than guess.
 
 A step is on disk the moment it is added, and survives a lost context on this
 machine — but it is not a record. The next session will not see it in `engr

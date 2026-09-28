@@ -172,8 +172,8 @@ After reviewing that exact material, repeat the command with `--agent`,
 changed Object or Rule cannot slip beneath the review.
 
 Several Section mutations of one Object can share that review. A ChangeSet holds
-them on this machine, checked step by step as they are added, and admits every
-one or none:
+them on this machine, checked step by step as they are added; the review reads
+them all and passes or fails each, and the steps it passed are admitted together:
 
 ```bash
 engr changeset new --object <id>
@@ -181,11 +181,11 @@ engr changeset add <changeset> --add --text-file f.txt
 engr changeset add <changeset> --revise 3 --text-file g.txt
 engr changeset show <changeset>              # every step, the result, the one digest
 engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
-  --review-result passed
+  --review-result passed                     # or: failed --failed-step <n>
 ```
 
-Each step still becomes its own Agent-admitted event. Only the review is shared,
-and only a passing one applies it.
+Each step still becomes its own Agent-admitted event. Only the reading is shared;
+a step the review failed stays behind, on its next attempt.
 
 Objects are addressed by unique id prefix, like a git commit.
 

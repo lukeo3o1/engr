@@ -2033,6 +2033,9 @@ pub struct PlannedStep {
     pub payload: Payload,
     /// The Object as this step leaves it.
     pub after: Object,
+    /// What the review of this step is a review of. Kept so that admitting some
+    /// steps without others can be held to it.
+    pub(crate) descriptor: crate::proof::ReviewMutation,
 }
 
 /// Several mutations of one Object, projected in order and named as one
@@ -2063,7 +2066,7 @@ impl ChangeSetPlan {
         Error::new(
             EXIT_USAGE,
             format!(
-                "this ChangeSet is governed by {}; review every step against the surfaced Rules, then apply it with review digest {} and the review outcome",
+                "this ChangeSet is governed by {}; review every step against the surfaced Rules, then apply it with review digest {} and the review's verdict",
                 self.rules.join(", "),
                 self.digest
             ),
@@ -2077,6 +2080,8 @@ impl ChangeSetPlan {
 pub struct SealedChangeSet {
     pub events: Vec<Event>,
     pub object: Object,
+    /// Which steps, counted from 0, the events are: every step a review passed.
+    pub admitted: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -2128,12 +2133,12 @@ fn plan_and_bind(
         let step = index + 1;
         let (payload, after) = plan_step(root, object, &current, payload, &at)
             .map_err(|error| Error::new(error.code, format!("step {step}: {}", error.message)))?;
-        mutations.push(crate::proof::object_review_mutation(
-            &current, &after, &payload,
-        )?);
+        let descriptor = crate::proof::changeset_step_mutation(&current, &after, &payload)?;
+        mutations.push(descriptor.clone());
         steps.push(PlannedStep {
             payload,
             after: after.clone(),
+            descriptor,
         });
         current = after;
     }
@@ -2247,28 +2252,84 @@ fn check_references_outside_changeset(
 /// The same two calls as a lone Agent mutation: without an attestation the
 /// subject comes back and nothing is written; with one, the digest is
 /// recomputed from current state under the lock the caller holds, and a review
-/// of anything else is refused. A ChangeSet is admitted only by a review that
-/// passed. One that did not can still be taken apart into single mutations,
-/// and each of those has the whole of the ordinary path, escalation included —
-/// what a batch cannot do is ask a person to override one review for several
-/// acts, which is a Human confirmation of more than one action.
+/// of anything else is refused.
+///
+/// **One review, a verdict per step.** A review reads every step, and says of
+/// each whether it passed. The steps it passed are admitted; the ones it failed
+/// are not, and stay behind to be fixed. All-or-nothing was the first version,
+/// and it failed in the obvious way under a Rule of one assertion per Section:
+/// each round of seven steps found a different step to fail, three rounds used
+/// up the ceiling, and six steps nobody faulted were held back by the seventh
+/// each time. What the steps share is the reading, not the verdict.
+///
+/// A step that passed is admitted only if leaving out the steps that failed
+/// does not change it — a revision of a Section a failed step would have added,
+/// or a merge whose result spans a Section a failed step would have rewritten,
+/// is not the step the reviewer passed, and is refused rather than admitted
+/// under a review of something else.
+///
+/// An exhausted review of a ChangeSet admits nothing: no person is asked to
+/// override one review for several acts, which would be a Human confirmation of
+/// more than one action. An exhausted step is admitted alone, where the Rule's
+/// exhaustion policy decides — and its attempts do not start again for leaving
+/// the ChangeSet.
 pub(crate) fn seal_changeset_locked(
     root: &Path,
     object: &str,
     payloads: Vec<Payload>,
     review: Option<ReviewAttestation>,
+    failed: &[usize],
 ) -> Result<ChangeSetOutcome> {
     let (plan, binding) = plan_and_bind(root, object, payloads)?;
-    // Before the attestation is read as a report, whose rules are about offering
-    // a failure to a person for override — which a ChangeSet never does.
-    if let Some(review) = &review {
+    for (index, step) in failed.iter().enumerate() {
         ensure!(
-            review.result == crate::proof::ReviewResult::Passed,
-            EXIT_INVARIANT,
-            "a ChangeSet is admitted only by a review that passed; take it apart into single \
-             mutations, each of which can go the ordinary way, escalation included"
+            *step >= 1 && *step <= plan.steps.len(),
+            EXIT_USAGE,
+            "this ChangeSet has {} step(s); a review cannot have failed step {step}",
+            plan.steps.len()
+        );
+        ensure!(
+            !failed[..index].contains(step),
+            EXIT_USAGE,
+            "step {step} is named as failed twice"
         );
     }
+    // The verdict is read before the attestation is checked as a report, whose
+    // rules are about offering a failure to a person for override — which a
+    // ChangeSet never does. What is checked against the binding is a review of
+    // the steps it admits, and those passed.
+    let review = match review {
+        None => None,
+        Some(mut review) => {
+            use crate::proof::ReviewResult;
+            match (review.result, failed.is_empty()) {
+                (ReviewResult::Passed, true) => {}
+                (ReviewResult::Failed, false) => review.result = ReviewResult::Passed,
+                (ReviewResult::Passed, false) => return Err(Error::new(
+                    EXIT_USAGE,
+                    "a review that passed every step names no failed step; one that failed some \
+                         is --review-result failed",
+                )),
+                (ReviewResult::Failed, true) => {
+                    return Err(Error::new(
+                        EXIT_USAGE,
+                        "name each step the review failed with --failed-step; the others are the \
+                         ones it passed",
+                    ))
+                }
+                (ReviewResult::Exhausted, _) => {
+                    return Err(Error::new(
+                        EXIT_INVARIANT,
+                        "a ChangeSet is not admitted on an exhausted review; remove the exhausted \
+                         step and admit it alone with `prepare --agent` at its next attempt, where \
+                         the Rule decides what exhaustion means — leaving the ChangeSet does not \
+                         start its count again",
+                    ))
+                }
+            }
+            Some(review)
+        }
+    };
     // No identity check beyond the digest's. A lone mutation's rebuilds the
     // binding from the review's Rule snapshots for a candidate that may be
     // confirmed later; this review is held to the binding it was just compared
@@ -2282,6 +2343,41 @@ pub(crate) fn seal_changeset_locked(
             )),
             ReviewCheck::Attested(review) => review,
         };
+    let admitted: Vec<usize> = (0..plan.steps.len())
+        .filter(|index| !failed.contains(&(index + 1)))
+        .collect();
+    if !failed.is_empty() {
+        let left_out = failed
+            .iter()
+            .map(|step| step.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let at = now();
+        let mut current = plan.before.clone();
+        for &index in &admitted {
+            let step = &plan.steps[index];
+            let (payload, after) = plan_step(root, object, &current, step.payload.clone(), &at)
+                .map_err(|error| {
+                    Error::new(
+                        error.code,
+                        format!(
+                            "step {}: without step(s) {left_out} it cannot be admitted: {}",
+                            index + 1,
+                            error.message
+                        ),
+                    )
+                })?;
+            let descriptor = crate::proof::changeset_step_mutation(&current, &after, &payload)?;
+            ensure!(
+                descriptor == step.descriptor,
+                EXIT_INVARIANT,
+                "step {}: leaving out step(s) {left_out} changes what it does, so the review it \
+                 passed was of something else; remove it too, or review what is left",
+                index + 1
+            );
+            current = after;
+        }
+    }
     let reviewed = ReviewProvenance {
         outcome: ReviewOutcome::Passed,
         result: review.result,
@@ -2292,8 +2388,9 @@ pub(crate) fn seal_changeset_locked(
     // would be describing a sequence that did not happen.
     let at = now();
     let mut object_state = plan.before.clone();
-    let mut events = Vec::with_capacity(plan.steps.len());
-    for step in &plan.steps {
+    let mut events = Vec::with_capacity(admitted.len());
+    for &index in &admitted {
+        let step = &plan.steps[index];
         let event = Event::sealed(
             object,
             crate::model::new_id(),
@@ -2309,6 +2406,7 @@ pub(crate) fn seal_changeset_locked(
     Ok(ChangeSetOutcome::Sealed(Box::new(SealedChangeSet {
         events,
         object: object_state,
+        admitted,
     })))
 }
 

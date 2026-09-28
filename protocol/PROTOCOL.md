@@ -2710,9 +2710,18 @@ descriptor is
 ```
 
 with the precondition `{"expected_rev": <the rev the first step applies to>}`.
-Each step's descriptor is exactly the one that step would bind alone, built from
-the states either side of it, so a step means the same thing in a ChangeSet as
-it does on its own. `steps` stands where a lone mutation has `after`: the Object
+Each step's descriptor is the one that step would bind alone, built from the
+states either side of it, so a step means the same thing in a ChangeSet as it
+does on its own — with one exception. **A Section creation names no Section
+number:** its `parameters.section` is `null`. Alone, the number a creation is
+allocated is fixed by its predecessor, and binding it costs nothing. In a
+ChangeSet it depends on which of the creations before it are admitted, and a
+review can pass some steps and fail others (below); bound, one failed creation
+would void the review of every creation after it, whose wording nobody faulted.
+It is [A creation names no target](#a-creation-names-no-target) one level down:
+the identity is engr's to issue while it performs the act, and the review is of
+the intent. A step that acts on an existing Section still names it, because that
+is what it acts on. `steps` stands where a lone mutation has `after`: the Object
 as the last step leaves it follows from the steps, and binding it as well would
 say one thing twice. The order is in the digest, because a revision after an
 addition is not the same act as the addition alone. One precondition binds every
@@ -2726,13 +2735,43 @@ an earlier step already says the same thing in. With one, the digest is
 recomputed under the writer lock from current state and the Rule ids are
 checked, so a ChangeSet reviewed before its Object moved is refused whole.
 
-**Only a review that passed admits a ChangeSet.** A failed or exhausted review
-of one is not offered to a person for override: that would be a Human confirming
-several actions under one answer, which the growth table below still keeps
-absent. It is taken apart into single mutations instead, each of which has the
-whole ordinary path, escalation included. A ChangeSet with no applicable usable
-Object Rule is refused, as every semantic Agent mutation is; there is no title
-exception to fall back on, because a ChangeSet carries no title.
+**One review, a verdict per step.** A review reads every step and says of each
+whether it passed. The apply attests the digest, the Rule ids, the attempt, and
+either `passed` for every step or `failed` naming each step that failed; the
+steps that passed are admitted together, and the ones that failed stay in the
+ChangeSet to be fixed. All-or-nothing was the first version, and it failed in
+the obvious way under a Rule of one assertion per Section: each round of seven
+steps found a different step to fail, three rounds exhausted the ceiling, and
+six steps nobody faulted waited on the seventh every time. What the steps share
+is the reading, not the verdict.
+
+A step the review passed is admitted only if leaving out the ones it failed does
+not change it. A revision of a Section a failed step would have added, or a
+merge whose result spans a Section a failed step would have rewritten, is not
+the step that was reviewed, and the apply is refused naming it rather than
+admitting it under a review of something else. Its descriptor is recomputed
+without the failed steps and held to the reviewed one byte for byte; the
+unbound creation number is what lets the common case — independent additions —
+pass that test.
+
+**A failed step keeps its count.** The review of a step that failed continues
+its sequence: the next review of it is the next attempt, whether it is reviewed
+again in this ChangeSet or alone. Leaving the ChangeSet does not start the count
+again. That is not something engr can enforce — attempts are agent-attested, as
+[How many attempts](#how-many-attempts-and-what-happens-after) says — and it is
+said here because the first version said the opposite: it told an agent whose
+ChangeSet had failed three times to take it apart into single mutations, and the
+agent admitted each at attempt 1, past a Rule whose exhaustion policy was a
+person's confirmation.
+
+**An exhausted review admits nothing from a ChangeSet.** It is not offered to a
+person for override: that would be a Human confirming several actions under one
+answer, which the growth table below still keeps absent. The exhausted step is
+admitted alone with `prepare --agent` at its next attempt, where the Rule's
+exhaustion policy decides — a person's confirmation or a refusal. A ChangeSet
+with no applicable usable Object Rule is refused, as every semantic Agent
+mutation is; there is no title exception to fall back on, because a ChangeSet
+carries no title.
 
 **What is admitted is one record per step.** Consecutive revs, each
 `admitted.by = agent`, each carrying the review's provenance, and one `at` for
@@ -2752,11 +2791,12 @@ and reconciles. Across several
 Objects there is no one publication to lean on, which is why a ChangeSet does
 not span them.
 
-Before publishing, an apply writes the Event ids it is about to publish into the
-ChangeSet as `committing`. They are minted fresh by every attempt, so an apply
-that finds them set can tell the two possible crashes apart without guessing:
-every id in the Object's history means the ChangeSet was admitted, and it is
-removed and reported rather than admitted twice; none means the attempt never
+Before publishing, an apply writes the Event ids it is about to publish, and
+which steps they are, into the ChangeSet as `committing`. The ids are minted
+fresh by every attempt, so an apply that finds them set can tell the two
+possible crashes apart without guessing: every id in the Object's history means
+those steps were admitted, and they are removed and reported rather than
+admitted twice, leaving any the review failed; none means the attempt never
 happened, and the ChangeSet goes on as it was. Some and not the others is not a
 crash one rename could leave, and is refused. While `committing` is set, nothing
 may change, show or discard the ChangeSet — discarding it would throw away the
@@ -3695,7 +3735,7 @@ bring it in:
 | A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
 | More than one action per Human confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
 | A ChangeSet across Objects | One decision has to change two Objects together, and a reader who saw one change without the other would be misled |
-| A Human override of a failed ChangeSet review | Taking a failed ChangeSet apart into single mutations costs more than a person reading the whole of it |
+| A Human override of an exhausted ChangeSet review | Admitting exhausted steps one at a time, each through its own exhaustion policy, costs more than a person reading all of them at once |
 
 Splitting untyped `closed` is the nearest of these, and part of its signal is
 already visible: abandoned untyped work can only be closed, so the record goes on

@@ -10,8 +10,8 @@
 //!
 //! A ChangeSet is the mutation boundary #41 describes, in its narrowest useful
 //! form: an ordered list of Section mutations to **one existing Object**, kept
-//! as local, non-authoritative working state until it is applied. Applying it is
-//! one Agent admission of the whole sequence under one review. Each step is
+//! as local, non-authoritative working state until it is applied. Applying it
+//! admits, under one review, every step that review passed. Each step is
 //! checked exactly as a lone mutation is, and each becomes its own Event, so
 //! nothing a ChangeSet admits could not have been admitted one step at a time —
 //! it is the review that is shared, not the rules.
@@ -48,29 +48,49 @@ pub struct ChangeSet {
     /// In the order they will be admitted. Order is semantic: a revise after an
     /// add is not the same act as the add alone.
     pub steps: Vec<Payload>,
-    /// The records an apply was about to publish, written down before it
-    /// published them.
-    ///
-    /// The one thing a restart must be able to tell apart is a ChangeSet that
-    /// was admitted and one that was not, and never admit it twice. The Event
-    /// ids are minted fresh by each attempt, so finding them in the Object's
-    /// history is proof this attempt landed, and finding none is proof it did
-    /// not. Nothing else about a crash needs deciding here: the publication is
-    /// one rename, so there is no third answer.
+    /// What an apply was about to publish, written down before it published it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub committing: Option<Vec<String>>,
+    pub committing: Option<Committing>,
+}
+
+/// The records an apply was about to publish, and which steps they are.
+///
+/// The one thing a restart must be able to tell apart is steps that were
+/// admitted and steps that were not, and never admit one twice. The Event ids
+/// are minted fresh by each attempt, so finding them in the Object's history is
+/// proof this attempt landed, and finding none is proof it did not. Nothing else
+/// about a crash needs deciding here: the publication is one rename, so there is
+/// no third answer. The steps are named because a review may have passed only
+/// some of them, and the ones it failed must survive the crash still waiting.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Committing {
+    pub events: Vec<String>,
+    /// Counted from 0, in the order they were admitted.
+    pub steps: Vec<usize>,
 }
 
 /// What an apply did.
 #[derive(Debug)]
 pub enum Applied {
-    /// Every step admitted, as these records, producing this Object.
-    Admitted { events: Vec<Event>, object: Object },
+    /// The steps the review passed, admitted as these records and producing
+    /// this Object. `remaining` steps failed and are still in the ChangeSet.
+    Admitted {
+        events: Vec<Event>,
+        object: Object,
+        remaining: usize,
+    },
+    /// The review failed every step. Nothing was written.
+    NoneAdmitted { remaining: usize },
     /// Governed and not yet reviewed: the subject, and nothing written.
     NeedsReview(Box<ChangeSetPlan>),
     /// An earlier apply published these records and was interrupted before it
-    /// could say so. Nothing was admitted twice; the ChangeSet is gone now.
-    AlreadyAdmitted { events: Vec<String> },
+    /// could say so. Nothing was admitted twice, and the steps it admitted are
+    /// gone from the ChangeSet now; `remaining` are the ones it did not.
+    AlreadyAdmitted {
+        events: Vec<String>,
+        remaining: usize,
+    },
 }
 
 pub fn dir(root: &Path) -> PathBuf {
@@ -201,20 +221,29 @@ pub fn plan(root: &Path, id: &str) -> Result<(ChangeSet, ChangeSetPlan)> {
     })
 }
 
-/// Admit every step under one review, or none of them.
+/// Admit the steps a review passed, and keep the ones it failed.
 ///
 /// Without an attestation this is [`plan`] with the same refusal a lone Agent
 /// mutation gives. With one, the digest is recomputed under the writer lock
-/// from the Object as it now stands, and the records are published together.
-pub fn apply(root: &Path, id: &str, review: Option<ReviewAttestation>) -> Result<Applied> {
+/// from the Object as it now stands, and every step the review passed is
+/// published together; `failed` names the rest, counted from 1.
+pub fn apply(
+    root: &Path,
+    id: &str,
+    review: Option<ReviewAttestation>,
+    failed: &[usize],
+) -> Result<Applied> {
     store::require_current(root)?;
     let id = resolve(root, id)?;
     store::with_lock(root, || {
         let mut changeset = load_exact(root, &id)?;
-        if let Some(events) = changeset.committing.clone() {
-            if landed(root, &changeset.object, &events)? {
-                store::remove_durably(&path(root, &id))?;
-                return Ok(Applied::AlreadyAdmitted { events });
+        if let Some(committing) = changeset.committing.clone() {
+            if landed(root, &changeset.object, &committing.events)? {
+                let remaining = finish(root, &mut changeset, &committing.steps)?;
+                return Ok(Applied::AlreadyAdmitted {
+                    events: committing.events,
+                    remaining,
+                });
             }
             // Written down and never published: the attempt did not happen, and
             // the ChangeSet is exactly as it was before it.
@@ -226,20 +255,47 @@ pub fn apply(root: &Path, id: &str, review: Option<ReviewAttestation>) -> Result
             &changeset.object,
             changeset.steps.clone(),
             review,
+            failed,
         )? {
             ChangeSetOutcome::NeedsReview(plan) => return Ok(Applied::NeedsReview(plan)),
             ChangeSetOutcome::Sealed(sealed) => *sealed,
         };
-        changeset.committing = Some(sealed.events.iter().map(|event| event.id.clone()).collect());
+        if sealed.events.is_empty() {
+            return Ok(Applied::NoneAdmitted {
+                remaining: changeset.steps.len(),
+            });
+        }
+        changeset.committing = Some(Committing {
+            events: sealed.events.iter().map(|event| event.id.clone()).collect(),
+            steps: sealed.admitted.clone(),
+        });
         save(root, &changeset)?;
         store::append_events_locked(root, &changeset.object, &sealed.events)?;
         store::save_object(root, &sealed.object)?;
-        store::remove_durably(&path(root, &id))?;
+        let remaining = finish(root, &mut changeset, &sealed.admitted)?;
         Ok(Applied::Admitted {
             events: sealed.events,
             object: sealed.object,
+            remaining,
         })
     })
+}
+
+/// Take the admitted steps out, and the ChangeSet with them once it is empty.
+fn finish(root: &Path, changeset: &mut ChangeSet, admitted: &[usize]) -> Result<usize> {
+    changeset.steps = std::mem::take(&mut changeset.steps)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !admitted.contains(index))
+        .map(|(_, step)| step)
+        .collect();
+    changeset.committing = None;
+    if changeset.steps.is_empty() {
+        store::remove_durably(&path(root, &changeset.id))?;
+    } else {
+        save(root, changeset)?;
+    }
+    Ok(changeset.steps.len())
 }
 
 /// Throw a ChangeSet away. It was never a record, so nothing else changes.

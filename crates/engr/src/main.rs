@@ -130,7 +130,7 @@ enum ChangesetCommand {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Admit every step under one passing review, or none of them
+    /// Admit the steps a review passed, together, and keep the ones it failed
     Apply {
         changeset: String,
         /// ReviewDigest surfaced by `show`, or by `apply` without it
@@ -148,9 +148,14 @@ enum ChangesetCommand {
             value_name = "N"
         )]
         review_attempt: u32,
-        /// Agent-attested outcome of reviewing every step. Only `passed` admits
+        /// The review's verdict: `passed` if it passed every step, `failed`
+        /// with --failed-step for each step it did not
         #[arg(long = "review-result", value_enum, value_name = "RESULT")]
         review_result: Option<ReviewResultArg>,
+        /// A step the review failed, counted from 1. Repeat for each. The steps
+        /// it passed are admitted; these stay in the ChangeSet
+        #[arg(long = "failed-step", value_name = "N")]
+        failed_steps: Vec<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -1443,6 +1448,7 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             reviewed_rules,
             review_attempt,
             review_result,
+            failed_steps,
             json,
         } => {
             let review =
@@ -1467,12 +1473,31 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
                     )),
                 };
             let id = changeset::resolve(root, &id)?;
-            match changeset::apply(root, &id, review)? {
-                changeset::Applied::Admitted { events, object } => {
+            // A step the review failed is on its next attempt when it is reviewed
+            // again — in this ChangeSet or alone. Said here because this is the
+            // moment the count would otherwise be lost.
+            let kept = |remaining: usize| {
+                if remaining > 0 {
+                    println!(
+                        "KEPT       {remaining} step(s) the review failed, still in {id}; fix them and review again at attempt {}",
+                        review_attempt.saturating_add(1)
+                    );
+                }
+            };
+            match changeset::apply(root, &id, review, &failed_steps)? {
+                changeset::Applied::Admitted {
+                    events,
+                    object,
+                    remaining,
+                } => {
                     if json {
                         println!(
                             "{}",
-                            to_json(&serde_json::json!({ "events": events, "object": object }))?
+                            to_json(&serde_json::json!({
+                                "events": events,
+                                "object": object,
+                                "remaining": remaining,
+                            }))?
                         );
                         return Ok(());
                     }
@@ -1485,20 +1510,39 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
                             event.rev
                         );
                     }
+                    kept(remaining);
                     warn_uncommitted(root, &object.id);
                     Ok(())
                 }
-                changeset::Applied::AlreadyAdmitted { events } => {
+                changeset::Applied::NoneAdmitted { remaining } => {
                     if json {
                         println!(
                             "{}",
-                            to_json(&serde_json::json!({ "already_admitted": events }))?
+                            to_json(&serde_json::json!({ "events": [], "remaining": remaining }))?
+                        );
+                    } else {
+                        println!("ADMITTED   nothing: the review failed every step");
+                        kept(remaining);
+                    }
+                    Ok(())
+                }
+                changeset::Applied::AlreadyAdmitted { events, remaining } => {
+                    if json {
+                        println!(
+                            "{}",
+                            to_json(&serde_json::json!({
+                                "already_admitted": events,
+                                "remaining": remaining,
+                            }))?
                         );
                     } else {
                         println!(
                             "ADMITTED   by an earlier apply of {id}, which published its {} record(s) and was interrupted before it could say so; nothing was admitted twice",
                             events.len()
                         );
+                        if remaining > 0 {
+                            println!("KEPT       {remaining} step(s) that apply did not admit, still in {id}");
+                        }
                     }
                     Ok(())
                 }
@@ -1658,7 +1702,7 @@ fn render_changeset(
         );
     } else {
         out.push_str(&format!(
-            "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the Object as\n              it would stand, not only the new wording — then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE> --review-result passed\n\n              Nothing has been written.\n",
+            "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the Object as\n              it would stand, not only the new wording — with a verdict for\n              each step, then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE> --review-result passed\n\n              or, if it failed some, --review-result failed --failed-step <N>\n              for each: the rest are admitted and those stay here. A failed\n              step's next review is its next attempt, here or alone.\n\n              Nothing has been written.\n",
             plan.rules.join(", "),
             changeset.id,
             plan.digest

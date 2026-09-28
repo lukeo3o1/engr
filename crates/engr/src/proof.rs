@@ -1122,6 +1122,31 @@ pub fn object_review_mutation(
     })
 }
 
+/// The descriptor of one ChangeSet step: the frozen one, except that a Section
+/// creation names no Section number.
+///
+/// Alone, the number a creation gets is fixed by its predecessor, so binding it
+/// costs nothing. In a ChangeSet it is not: a review can pass some steps and
+/// fail others, and the steps that passed are admitted without the ones that
+/// did not — so which number a creation is allocated depends on which of the
+/// creations before it were admitted. Bound, one failed creation would void the
+/// review of every creation after it, whose wording nobody faulted. It is the
+/// reason [`ObjectProjection::target`] is `null` for an Object creation, one
+/// level down: the identity is engr's to issue at the moment it performs the
+/// act, and the review is of the intent. A step that acts on a Section still
+/// names it, because that is what it acts on.
+pub fn changeset_step_mutation(
+    before: &Object,
+    after: &Object,
+    payload: &Payload,
+) -> Result<ReviewMutation> {
+    let mut mutation = object_review_mutation(before, after, payload)?;
+    if matches!(payload.action, Action::SectionCreated { .. }) {
+        mutation.operation.parameters["section"] = serde_json::Value::Null;
+    }
+    Ok(mutation)
+}
+
 /// The member names an Object-domain review binds over, and exactly those.
 const OBJECT_MUTATION_MEMBERS: &[&str] = &["after", "operation", "target"];
 const OBJECT_PRECONDITION_MEMBERS: &[&str] = &["expected_rev"];
