@@ -1391,10 +1391,19 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
         } => {
             let changeset = changeset::remove(root, &id, step)?;
             println!(
-                "REMOVED    step {step} of {}; {} step(s) remain",
+                "REMOVED    step {step} of {}; the steps after it move up one, and {} step(s) remain",
                 changeset.id,
                 changeset.steps.len()
             );
+            // Said here because one run took a failed step out and attested the
+            // digest of what was left as passed: word for word what its reviewer
+            // passed, under a digest no reviewer saw, and engr cannot tell that
+            // from the honest apply.
+            if !changeset.steps.is_empty() {
+                println!(
+                    "note       this changed the ChangeSet's digest, so no earlier review covers what remains; it needs a review of its own. To admit what a review passed, apply that review's digest with --failed-step before taking a failed step out"
+                );
+            }
             Ok(())
         }
         ChangesetCommand::Ls => {
@@ -1702,7 +1711,7 @@ fn render_changeset(
         );
     } else {
         out.push_str(&format!(
-            "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the Object as\n              it would stand, not only the new wording — with a verdict for\n              each step, then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE> --review-result passed\n\n              or, if it failed some, --review-result failed --failed-step <N>\n              for each: the rest are admitted and those stay here. A failed\n              step's next review is its next attempt, here or alone.\n\n              Nothing has been written.\n",
+            "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the Object as\n              it would stand, not only the new wording — with a verdict for\n              each step, then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE> --review-result passed\n\n              or, if it failed some, --review-result failed --failed-step <N>\n              for each: the rest are admitted and those stay here. A failed\n              step's next review is its next attempt, here or alone. Apply\n              this digest before changing a step: after a change it is not\n              the one reviewed.\n\n              Nothing has been written.\n",
             plan.rules.join(", "),
             changeset.id,
             plan.digest

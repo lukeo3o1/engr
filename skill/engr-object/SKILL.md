@@ -281,8 +281,14 @@ number. Hand the reviewer the `show` screen — every step and the whole Object 
 as you would the screen of a single mutation, and ask for a verdict on each
 step. If it failed some, apply with `--review-result failed` and a
 `--failed-step <n>` for each: the steps it passed are admitted, and the failed
-ones stay. To fix one, `engr changeset rm <changeset> --step <n>` and add the
+ones stay. Then fix one: `engr changeset rm <changeset> --step <n>` and add the
 corrected wording.
+
+**Attest the digest that was reviewed, and apply it before you change a step.**
+Taking a failed step out first gives what is left a digest no reviewer saw, and
+attesting that as passed says a review happened that did not — even when the
+steps left are word for word the ones it passed. One run did exactly that; the
+honest apply admits the same steps, and engr cannot tell the two apart.
 
 **A step that failed is on its next attempt when it is reviewed again** — in the
 ChangeSet or alone. Taking it out does not start its count again. One run whose

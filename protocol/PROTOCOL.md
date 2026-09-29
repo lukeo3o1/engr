@@ -2764,6 +2764,15 @@ ChangeSet had failed three times to take it apart into single mutations, and the
 agent admitted each at attempt 1, past a Rule whose exhaustion policy was a
 person's confirmation.
 
+**The digest attested is the digest reviewed.** Taking a step out changes the
+digest, so a review from before no longer admits anything. Attesting the digest
+of what is left as passed would say a reviewer saw a sequence nobody saw, even
+when every step left is word for word one the review passed. The steps a review
+passed are admitted by applying its own digest with the failed steps named, and
+a failed step is taken out after that. engr cannot tell the two apart, and it is
+said here because one agent took the failed step out first and attested what
+was left.
+
 **An exhausted review admits nothing from a ChangeSet.** It is not offered to a
 person for override: that would be a Human confirming several actions under one
 answer, which the growth table below still keeps absent. The exhausted step is

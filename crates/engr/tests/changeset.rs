@@ -793,3 +793,48 @@ fn the_command_line_admits_what_passed_and_says_what_attempt_comes_next() {
     );
     assert_eq!(changeset::load(&root, &id).expect("kept").steps.len(), 1);
 }
+
+#[test]
+fn taking_a_step_out_says_no_earlier_review_covers_what_remains() {
+    let (_temp, root) = common::repository();
+    let object = common::object_with_section(&root, "Command line", "Committed wording.");
+    object_rule(&root);
+    common::git(&root, &["add", "-A"]);
+    common::git(&root, &["commit", "-qm", "object"]);
+    let id = changeset::create(&root, &object).expect("create").id;
+    for text in ["Stays.", "Taken out."] {
+        let output = engr(
+            &root,
+            &[
+                "changeset",
+                "add",
+                &id,
+                "--add",
+                "--text",
+                text,
+                "--no-based-on",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let (_, reviewed) = changeset::plan(&root, &id).expect("plan");
+
+    let removed = engr(&root, &["changeset", "rm", &id, "--step", "2"]);
+    assert!(removed.status.success());
+    let said = String::from_utf8_lossy(&removed.stdout);
+    assert!(
+        said.contains("no earlier review covers what remains") && said.contains("--failed-step"),
+        "{said}"
+    );
+    let (_, remaining) = changeset::plan(&root, &id).expect("plan");
+    assert_ne!(remaining.digest, reviewed.digest);
+
+    // With nothing left there is no digest to warn about.
+    let emptied = engr(&root, &["changeset", "rm", &id, "--step", "1"]);
+    assert!(emptied.status.success());
+    assert!(!String::from_utf8_lossy(&emptied.stdout).contains("note"));
+}
