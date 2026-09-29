@@ -24,6 +24,23 @@ say() {
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$1"
 }
 
+# A subagent's own tool calls reach this hook too, marked with its agent_id.
+# They are not the handoff this counts: a worker hands off through its commit,
+# its drafted decisions and its report, and a reminder to close an item it does
+# not own would land in the wrong context. So they neither count nor speak.
+if printf '%s' "$input" | grep -qE '(^|[^\\])"agent_id" *:'; then
+  exit 0
+fi
+
+# A subagent coming back is the moment its work gets recorded or does not. Said
+# before the write check below, because the prompt that sent a worker out quotes
+# engr commands, and reading them as a write would reset the count.
+if printf '%s' "$input" | grep -qE '(^|[^\\])"tool_name" *: *"(Agent|Task)"'; then
+  echo $(( $(cat "$counter" 2>/dev/null || echo 0) + 1 )) > "$counter"
+  say "engr: a subagent just returned. If it was a worker on an item, record it before anything else, and before delegating again: run the item's check yourself, read its diff against its DECISIONS, close the item with its result and commit, stage its OPEN lines in the backlog, then review and apply its ChangeSet. If it was a reviewer or a reader, carry on."
+  exit 0
+fi
+
 # A write to engr's agent-managed state, or an admission, resets the count.
 if printf '%s' "$input" | grep -qE 'engr (work (start|summary|item|block|unblock|depend|undepend)|backlog (new|add|revise|merge|produced|consume|rename|subjects)|prepare|changeset (new|add|rm|apply)|collection (new|add|order|priority|rm|state))'; then
   echo 0 > "$counter"

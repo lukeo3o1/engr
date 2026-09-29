@@ -7470,8 +7470,8 @@ fn every_documented_command_is_one_the_cli_accepts() {
         }
     }
     assert!(
-        documents.len() >= 6,
-        "expected README.md and the five engr skills, found {documents:?}"
+        documents.len() >= 7,
+        "expected README.md and the six engr skills, found {documents:?}"
     );
     for document in &documents {
         let text = std::fs::read_to_string(repository.join(document))

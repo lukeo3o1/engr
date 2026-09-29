@@ -6,8 +6,8 @@ description: >-
   where each kind of thing goes, when to write it, how project Rules and their
   reviews work, how to resume from what an earlier session left, and what to
   commit. Each domain has its own skill for how: engr-object for the record,
-  engr-backlog for what is unresolved, engr-work for where execution stands, and
-  engr-collection for plans. Not for application event-sourcing architecture,
+  engr-backlog for what is unresolved, engr-work for where execution stands,
+  engr-collection for plans, and engr-delegate for handing items to subagents. Not for application event-sourcing architecture,
   EventStoreDB or Kafka work, ordinary logs, personal journals, private session
   checkpoints, or writing decision documents outside an adopted project.
 license: MIT
@@ -20,7 +20,7 @@ metadata:
 The runtime guide for working with a project's record. For changing the engr
 repository itself, read `AGENTS.md` there instead.
 
-This skill and the four beside it are all you need to use the record. When
+This skill and the five beside it are all you need to use the record. When
 something comes up that they do not answer — what a signal actually guarantees,
 what a stored field means, why a command exited the way it did — the binary
 carries its own specification:
@@ -43,6 +43,7 @@ right about what the tool does — say so rather than working around it.
 | A question you will not settle now | A backlog point | `engr-backlog` |
 | Where execution stands: the steps, which is next, what one showed | A work sidecar | `engr-work` |
 | Which work belongs together, and in what order | A collection | `engr-collection` |
+| An item a subagent will do, and what it reports back | The same sidecar, a ChangeSet, the backlog | `engr-delegate` |
 | How you got there | Nowhere | — |
 
 Load the skill before you run the commands it covers. Each of them assumes this

@@ -10,8 +10,8 @@ tick it. These move all three out of the agent's memory and into the harness.
 | --- | --- | --- |
 | `session-start.sh` | `SessionStart`, including after `compact` and `clear` | Prints the record's state, every sidecar in full, and anything committed or modified after the newest sidecar was written. Claude Code adds it to the new context. Writes nothing. |
 | `stop-check.sh` | `Stop` | Refuses the first attempt to finish when a commit or a modified file is newer than the newest sidecar, and says what to update. Lets the second attempt through. |
-| `heartbeat.sh` | `PostToolUse` on `Bash\|Edit\|Write` | Every `HEARTBEAT_EVERY` tool calls (10 by default) without a write to engr, and straight after a `git commit`, adds a one-line reminder to record what finished, settled or came up. Writes nothing. |
-| `gate.sh` | `PreToolUse` on `Edit\|Write` | Once `HEARTBEAT_GATE` tool calls (20 by default) have gone by without a write to engr, and there is unrecorded work to show for it, refuses the next edit until engr is written to. Needs `heartbeat.sh`, which keeps the count. |
+| `heartbeat.sh` | `PostToolUse` on `Bash\|Edit\|Write\|Agent\|Task` | Every `HEARTBEAT_EVERY` tool calls (10 by default) without a write to engr, and straight after a `git commit`, adds a one-line reminder to record what finished, settled or came up. When a subagent returns, reminds the coordinator to record a worker's item before delegating again (`engr-delegate`). A subagent's own tool calls neither count nor get reminded. Writes nothing. |
+| `gate.sh` | `PreToolUse` on `Edit\|Write` | Once `HEARTBEAT_GATE` tool calls (20 by default) have gone by without a write to engr, and there is unrecorded work to show for it, refuses the next edit until engr is written to. Never holds a subagent's edit. Needs `heartbeat.sh`, which keeps the count. |
 
 What they bought, measured on one run each of a real three-session task cut
 off without warning, as how many turns the handoff was behind the work at each
@@ -59,7 +59,7 @@ Copy them into the project, then add to `.claude/settings.json`:
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write",
+        "matcher": "Bash|Edit|Write|Agent|Task",
         "hooks": [
           { "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/heartbeat.sh\"" }
         ]
@@ -86,6 +86,13 @@ reminders; sessions without it answered half.
 ```json
 { "permissions": { "deny": ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite"] } }
 ```
+
+A subagent's tool calls fire these hooks too, marked with the subagent's
+`agent_id`. `heartbeat.sh` and `gate.sh` pass them over: the count is about the
+handoff of the session that keeps the sidecar, and a worker hands off through
+its commit, its drafted decisions and its report instead. Before they did, a
+worker's edits counted toward its coordinator's total, and the gate could hold
+the one party that could not release it.
 
 All of them need `engr` and `git` on `PATH`, and do nothing in a repository
 without `.engr`.

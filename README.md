@@ -312,16 +312,19 @@ failure.
 ## The Skills
 
 [skill/](skill/) is the runtime guide for an agent working in a project that has
-adopted `.engr/`, as five Claude Code skills. [engr](skill/engr/SKILL.md) is read
+adopted `.engr/`, as six Claude Code skills. [engr](skill/engr/SKILL.md) is read
 first: where each kind of thing goes, when to write it, project Rules and their
-reviews, resuming from a lost context, and what to commit. The other four each
+reviews, resuming from a lost context, and what to commit. Four more each
 cover one domain's commands, and are loaded before those commands run:
 [engr-object](skill/engr-object/SKILL.md) for the record — both the Human
 candidate flow and the Agent Rule Review flow, including when the agent must
 stop and wait — [engr-backlog](skill/engr-backlog/SKILL.md),
 [engr-work](skill/engr-work/SKILL.md) and
-[engr-collection](skill/engr-collection/SKILL.md). Copy the five directories into
-the project's `.claude/skills/`. [skill/hooks/](skill/hooks/README.md) holds
+[engr-collection](skill/engr-collection/SKILL.md).
+[engr-delegate](skill/engr-delegate/SKILL.md) is for working as a coordinator:
+defining items in engr, handing each to a subagent with a packet built from the
+record, and recording what it returns before the next. Copy the six directories
+into the project's `.claude/skills/`. [skill/hooks/](skill/hooks/README.md) holds
 hooks that remind the agent to read, write and hand off, and hold it once when
 it has not.
 

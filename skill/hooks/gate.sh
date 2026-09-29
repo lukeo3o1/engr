@@ -16,6 +16,12 @@ input=$(cat)
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 [ -d .engr ] || exit 0
 command -v engr >/dev/null 2>&1 || exit 0
+# A subagent's edit is its own work, not the handoff the count is about: holding
+# a worker because its coordinator has not written would stop the one party that
+# cannot fix it.
+if printf '%s' "$input" | grep -qE '(^|[^\\])"agent_id" *:'; then
+  exit 0
+fi
 
 limit=${HEARTBEAT_GATE:-20}
 session=$(printf '%s' "$input" | sed -n 's/.*"session_id": *"\([^"]*\)".*/\1/p' | head -n 1)

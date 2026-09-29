@@ -42,6 +42,9 @@ only this repository and what engr holds.
   it is not obvious, what would decide it.
 - A write engr refuses for length is not a shorter write: move the reason to a
   Section or a backlog point instead of cutting it.
+- When subagents do the work: build each one's prompt from engr output, not
+  your own words, and record what a worker returns — its item, its drafted
+  decisions, its open questions — before delegating the next.
 - A hook message that starts with `engr:` is part of this project's setup, not
   noise. Answer it before your next edit.
 
