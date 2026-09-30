@@ -45,15 +45,20 @@ notice:
   written in the workers' contexts, so what is left in yours is what engr can
   give back after a cut.
 
-None of this has been measured yet. It is the shape the failures above point to,
-not a result.
+Measured once, on the same task: 41 of about 49 decisions reached engr in the
+session that made them, against none of 19, twenty of them drafted by the
+worker that made them; the sidecar matched the repository at both cuts but for
+one stale candidate code. It also cost twice as much, the coordinator's context
+grew rather than shrank, and both decisions whose reviews ran out were lost.
+What follows is that version with each of those failures answered — which is
+not yet a result.
 
 ## The loop
 
 ```text
 discuss    open questions to backlog; what the human settles, to Sections
 define     work items: a verb, a thing, and when it is done
-delegate   one worker per item, with a packet built from engr
+delegate   one worker per item, with a packet that points at engr
 return     check it, record it, apply its decisions, commit
            then the next item
 ```
@@ -74,13 +79,20 @@ reviews the guess. Settle it first, or make settling it the item.
 The shape is `engr-work`'s: one verb, one thing, and the condition that makes it
 done. Delegating asks more of each part:
 
-- **"Done when" is a check someone else can run.** A test name, a command and
-  what it prints, a behaviour you can show. "Works", "is clean" and "handles
-  errors" are not checks; the worker will decide what they mean.
+- **"Done when" is a check someone else can run, and it is in the item.** A
+  test name, a command and what it prints, a behaviour you can show. "Works",
+  "is clean" and "handles errors" are not checks; the worker will decide what
+  they mean. One run wrote detailed checks into every worker's prompt and not
+  one into an item, so no check outlived a cut: the coordinator after one
+  closed items against whatever tests it found. Name the command and the Sections whose behaviour it must show, and
+  it fits: `implement session.rs; done when cargo test session passes with a
+  test for each of §4–§7`. What the behaviour is, is the Sections' job.
 - **What does not fit in 160 characters is not part of the item.** A constraint
-  on how is a Section, a question is a backlog point, and the packet carries
+  on how is a Section, a question is a backlog point, and the worker reads
   both. An item that needs a paragraph is an item with its decisions still in
   your head.
+- **Tests are part of each item's check, not an item of their own.** One run's
+  "tests" item repeated the four before it and was closed when they were.
 - **One worker's run.** If it will not finish in one, it is several items.
 - **Finding something out is an item too:** "find where X is decided; done when
   the report names the function". What the worker learns comes back as drafted
@@ -91,18 +103,23 @@ done. Delegating asks more of each part:
 Write every item you can see before delegating the first. The items are the plan
 a coordinator resumes from, and the summary says which one is next.
 
-### Delegate: the packet is engr's output
+### Delegate: the packet points at engr
 
-Build the worker's prompt from the template below and the output of engr
-commands, pasted as they print. **Do not describe the work in your own words
-beside them.** Anything you want to add is something you know and engr does not:
-record it first — a Section if it is settled, a backlog point if it is open, the
-item's text if it is the step — and then it is in the packet. A paraphrase next
-to the record is a second statement of the same thing, and when they differ the
-worker cannot tell which one counts.
+The worker's prompt is the template below, and what it tells the worker to read
+is engr. **Do not describe the work in your own words beside it.** Anything you
+want to add is something you know and engr does not: record it first — a
+Section if it is settled, a backlog point if it is open, the item's text if it
+is the step — and then the worker reads it there. A paraphrase next to the
+record is a second statement of the same thing, and when they differ the worker
+cannot tell which one counts.
 
 That rule is also what keeps your own context rebuildable: what a worker needs to
 start cold is exactly what you need after a cut.
+
+**Name the commands; do not paste their output.** The worker runs them itself.
+One run pasted `engr show` into every packet: by its 70th turn it had sent
+60–75k characters of prompts, and its context was larger than that of an agent
+writing the code itself at the same turn.
 
 Before the worker starts:
 
@@ -120,36 +137,39 @@ The packet:
 
 ```text
 You are doing one step of a larger piece of work in this repository. You have
-none of the conversation that defined it; everything you are given is below.
-If something you need is not here, do not guess: stop, and say what is missing.
+none of the conversation that defined it. What you need is in engr: read it
+first, from the repository root.
 
-THE STEP, item 3 of `engr work show <subject>`:
-<the item's line, as it prints>
+  engr work show <subject>
+  engr show <object>
+  engr backlog ls
+  engr rules show <rule>
 
-WHAT IS SETTLED, from `engr show <object>`:
-<as it prints>
+Your step is item 3 in the first, and its "done when" is your check. The second
+is what is settled: build on it and contradict none of it. What the backlog
+lists is open and not yours to settle — `engr backlog show` any that touch the
+step. The last is how a decision is worded here. If something you need is in
+none of them, do not guess: stop, and say what is missing.
 
-WHAT IS OPEN, AND NOT YOURS TO SETTLE, from `engr backlog show <id>`:
-<as it prints, or: nothing>
-
-HOW A DECISION IS WORDED HERE, from `engr rules show <rule>`:
-<as it prints>
-
-While you work, settle nothing listed as open; if the step cannot be done
-without settling it, stop and report. Run no engr command that writes, except
-the one below.
+Run no engr command that writes, except `engr changeset add` below.
 
 When the step's check passes:
 
 1. Commit your change. In the message body, put your OPEN and DEVIATION lines
    from the report below: your reply can be lost, the commit cannot.
-2. For each choice you made that neither the step nor a settled Section
-   dictated — anything a reader of the diff would ask "why this way?" about —
-   and each fact you learned about the code that constrains later work, add
-   one step to the ChangeSet: one assertion, with its reason, worded as the
-   rule above asks.
+2. Add a step to the ChangeSet for each decision you made that a later step,
+   or whoever changes this code next, needs and could get wrong: what the code
+   must keep doing and why, an attractive alternative you ruled out, a
+   constraint you found. Not what the code already says and nobody would
+   revisit — a name, a visibility, which helper, type or exit code. One
+   assertion, with its reason, worded as the rule asks:
 
-   engr changeset add <changeset> --add --header "<the claim, short>" --text "<the claim, and why>"
+     engr changeset add <changeset> --add --header "<the claim, short>" --text "<the claim, and why>"
+
+   If a decision changes what a settled Section says, revise that Section
+   rather than adding one beside it that contradicts it:
+
+     engr changeset add <changeset> --revise 4 --text "<the Section as it now holds, and why>"
 
 3. Reply with exactly this, writing "none" rather than leaving a line out:
 
@@ -164,6 +184,12 @@ Commit before drafting: a step added with the change committed rests on the
 commit that implements it, and one added over a dirty tree needs a basis chosen
 by hand.
 
+The decision test is narrow on purpose. "Anything a reader of the diff would
+ask about" was the first wording, and workers drafted `Option<&str>`,
+`pub(crate)` and exit-code choices as Sections; review kept failing them as
+restatements of the code, and the two whose attempts ran out were both details
+of that kind.
+
 "none" is required because an empty line and a forgotten one look the same.
 
 **One worker at a time.** Two workers in one working tree edit the same files
@@ -177,25 +203,46 @@ human — in this order:
 1. **Run the check yourself.** The report says what the worker saw; marking the
    item done is yours. If the check fails, the item goes back to pending with a
    result saying what failed, and the next packet carries that.
-2. **Read the diff against DECISIONS.** A choice you can see in the code that no
-   step records is a decision nobody wrote down. Draft it yourself if the reason
-   is in evidence — the code, a comment, the report. If it is not, it is a
-   backlog point asking why. For a large diff, give it and the DECISIONS lines
-   to a reader and ask which choices in it no step states.
-3. **Record the item**, the way `engr-work` closes one:
+2. **Read the diff against DECISIONS and against the settled Sections.** A
+   choice you can see in the code that no step records is a decision nobody
+   wrote down. Draft it yourself if the reason is in evidence — the code, a
+   comment, the report. If it is not, it is a backlog point asking why. A
+   Section the code now contradicts is revised in this ChangeSet: one run gave
+   interaction events a module of their own while an earlier Section still put
+   them in another file, and nothing ever revised it. For a large diff, give it,
+   the DECISIONS lines and `engr show` to a reader and ask what no step states
+   and what a Section no longer says truly.
+3. **Record the item**, the way `engr-work` closes one — with the hash from its
+   COMMIT line, not `HEAD`. By the time you close an item, `HEAD` can be your
+   own bookkeeping commit, and one run pointed two items at "delegate item 5".
 
    ```bash
    engr work item state <subject> --item 3 --state done
-   engr work item result <subject> --item 3 --text "test_idle_tenant passes; 2 decisions drafted"
-   engr work item commit <subject> --item 3 --commit HEAD
+   engr work item result <subject> --item 3 --text "cargo test session passes, a test each for §4-§7; 2 decisions drafted"
+   engr work item commit <subject> --item 3 --commit <hash>
    ```
 
 4. **Stage each OPEN line as a backlog point** in its own words. Do not settle
    it here because you happen to know the answer; if you do, that is a Section.
 5. **Review and apply the ChangeSet** — a cold read, then a reviewer that never
-   saw the drafts (`engr-object`). Fix a failed step yourself unless fixing it
-   needs the code to change, which is an item.
+   saw the drafts (`engr-object`), each handed the `changeset show` screen as
+   it prints: every step and the whole Object, never Sections you picked. One
+   review was shown four Sections and passed a step that contradicted a fifth.
+   Fix a failed step yourself unless fixing it needs the code to change, which
+   is an item.
 6. **Rewrite the summary** to the next item, and commit `.engr`.
+
+**A step whose attempts run out goes to the backlog first**, whole: its wording,
+its reason, how many attempts it used, and what the reviews found — then, when
+it is time, to `prepare --agent` at its next attempt, where the Rule decides.
+There is one live Human candidate per Object, and any admission to the Object
+kills it, so in a loop that keeps admitting to one Object a candidate is the
+least durable thing engr holds. One run lost both of its exhausted decisions
+that way: the second candidate voided the first, the next ChangeSet killed the
+second, and the first then lived only as a clause in a summary that was
+rewritten without it. Prepare the candidate once no further admission to that
+Object is coming — at the end of the work, or when a person is there to answer
+— one at a time, and consume the backlog point only when it is admitted.
 
 A DEVIATION is not a failure; it is the step changing under you. If the worker
 had a reason, it is a decision and should be a step. If the item was wrong,
@@ -205,11 +252,11 @@ A worker that stopped because something was missing is the definition failing,
 not the worker. Record what was missing — a Section, a backlog point, or a
 question for the human — rewrite the item, and delegate it again.
 
-**Apply before the next delegation.** The next packet is built from `engr show`,
-which shows only what was admitted, and a worker that cannot see the last
-worker's decisions makes them again, differently. If the review has to wait,
-put `engr changeset show <changeset>` in the next packet under "decided, not yet
-admitted".
+**Apply before the next delegation.** The next worker reads `engr show`, which
+shows only what was admitted, and a worker that cannot see the last worker's
+decisions makes them again, differently. If the review has to wait, add `engr
+changeset show <changeset>` to the next packet's list, as decided but not yet
+admitted.
 
 Reviewers and readers are subagents too, and return the same way. Nothing above
 applies to them; carry on with the step that sent them out.
@@ -240,8 +287,9 @@ about anything: the next coordinator is you with nothing but this.
 
 ## What not to do
 
-- Do not paraphrase engr into the packet, or add the conversation, or a summary
-  of it. What a worker needs from the conversation belongs in engr first.
+- Do not paste engr into the packet or paraphrase it, and do not add the
+  conversation or a summary of it. What a worker needs from the conversation
+  belongs in engr first.
 - Do not let a worker apply, review, confirm or stage. It drafted the decisions,
   so it cannot be their reviewer, and admitting them is yours.
 - Do not mark an item done on the worker's word. Run the check.

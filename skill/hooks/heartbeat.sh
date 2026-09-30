@@ -37,7 +37,7 @@ fi
 # engr commands, and reading them as a write would reset the count.
 if printf '%s' "$input" | grep -qE '(^|[^\\])"tool_name" *: *"(Agent|Task)"'; then
   echo $(( $(cat "$counter" 2>/dev/null || echo 0) + 1 )) > "$counter"
-  say "engr: a subagent just returned. If it was a worker on an item, record it before anything else, and before delegating again: run the item's check yourself, read its diff against its DECISIONS, close the item with its result and commit, stage its OPEN lines in the backlog, then review and apply its ChangeSet. If it was a reviewer or a reader, carry on."
+  say "engr: a subagent just returned. If it was a worker on an item, record it before anything else, and before delegating again: run the item's check yourself, read its diff against its DECISIONS, close the item with its result and the commit it reported, stage its OPEN lines in the backlog, then review and apply its ChangeSet. If it was a reviewer or a reader, carry on."
   exit 0
 fi
 
