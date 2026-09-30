@@ -123,6 +123,10 @@ engr work item result <subject> --item 2 --text "test_idle_tenant passes"
 engr work item commit <subject> --item 2 --commit HEAD
 ```
 
+A worker a coordinator handed the item to does not run these: it reports, and
+the coordinator closes the item (`engr-delegate`). One worker told to read this
+skill closed its own item from it, against the prompt it was given.
+
 The result says how you know it is done, not that it is. Take every specific in
 it — a hash, a count, a test name, a code — from command output rather than
 from memory: a plausible hash reads exactly like a real one. `--commit HEAD` is

@@ -150,7 +150,9 @@ observations, or every thought merely because engr is available. An open
 question is not a decision: stage it instead.
 
 When a test passes or a commit lands, close the item that step finished before
-anything else — `engr-work`, *Close it in the same step as the proof*.
+anything else — `engr-work`, *Close it in the same step as the proof*. Unless a
+coordinator handed you that item: the sidecar is then its, and you write only
+what its prompt asks (`engr-delegate`).
 
 ## Project rules
 

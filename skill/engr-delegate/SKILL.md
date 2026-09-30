@@ -45,13 +45,14 @@ notice:
   written in the workers' contexts, so what is left in yours is what engr can
   give back after a cut.
 
-Measured once, on the same task: 41 of about 49 decisions reached engr in the
-session that made them, against none of 19, twenty of them drafted by the
-worker that made them; the sidecar matched the repository at both cuts but for
-one stale candidate code. It also cost twice as much, the coordinator's context
-grew rather than shrank, and both decisions whose reviews ran out were lost.
-What follows is that version with each of those failures answered — which is
-not yet a result.
+Measured twice, on the same task. Both times most decisions reached engr in the
+session that made them — against none of 19 when one agent did everything —
+many drafted by the worker that made them, and a resuming session found its
+place within a few turns of every cut. Both times the review of what was
+recorded cost more turns than the work that produced it: about 70% of the
+coordinator's turns in the first, about 85% in the second, which finished three
+items short. What follows answers that by sending less through review and
+spending one reader per round, which is not yet a result.
 
 ## The loop
 
@@ -157,12 +158,13 @@ When the step's check passes:
 
 1. Commit your change. In the message body, put your OPEN and DEVIATION lines
    from the report below: your reply can be lost, the commit cannot.
-2. Add a step to the ChangeSet for each decision you made that a later step,
-   or whoever changes this code next, needs and could get wrong: what the code
-   must keep doing and why, an attractive alternative you ruled out, a
-   constraint you found. Not what the code already says and nobody would
-   revisit — a name, a visibility, which helper, type or exit code. One
-   assertion, with its reason, worded as the rule asks:
+2. Add a step to the ChangeSet for each decision that someone outside the code
+   you touched relies on — a later step, another module, a caller of what you
+   built: what it must keep doing and why, an attractive alternative you ruled
+   out, a constraint a caller could break. A reason that matters only to
+   whoever edits these lines is a comment beside them, as this repository's
+   comments are: why, not what. A name, a visibility, which helper or type is
+   neither. One assertion, with its reason, worded as the rule asks:
 
      engr changeset add <changeset> --add --header "<the claim, short>" --text "<the claim, and why>"
 
@@ -184,11 +186,18 @@ Commit before drafting: a step added with the change committed rests on the
 commit that implements it, and one added over a dirty tree needs a basis chosen
 by hand.
 
-The decision test is narrow on purpose. "Anything a reader of the diff would
-ask about" was the first wording, and workers drafted `Option<&str>`,
-`pub(crate)` and exit-code choices as Sections; review kept failing them as
-restatements of the code, and the two whose attempts ran out were both details
-of that kind.
+The line is drawn by who reads it, because every step in the ChangeSet costs a
+review and most reviews fail a step. "Anything a reader of the diff would ask
+about" was the first wording, and workers drafted `Option<&str>`, `pub(crate)`
+and exit-code choices as Sections; review kept failing them as restatements of
+the code, and the two whose attempts ran out were both details of that kind. A
+narrower wording — what the next person to change the code needs — still sent
+local reasons through review, and the coordinator spent about 85% of its turns
+on the record. A reason for these lines is read by whoever opens this file, and
+a comment is where they look. A constraint a caller elsewhere could break is
+the record's even when it is also a comment: one run left "this lock cannot be
+taken twice" beside the lock, and the next session built the deadlock in
+another file.
 
 "none" is required because an empty line and a forgotten one look the same.
 
@@ -224,12 +233,22 @@ human — in this order:
 
 4. **Stage each OPEN line as a backlog point** in its own words. Do not settle
    it here because you happen to know the answer; if you do, that is a Section.
-5. **Review and apply the ChangeSet** — a cold read, then a reviewer that never
-   saw the drafts (`engr-object`), each handed the `changeset show` screen as
-   it prints: every step and the whole Object, never Sections you picked. One
-   review was shown four Sections and passed a step that contradicted a fifth.
-   Fix a failed step yourself unless fixing it needs the code to change, which
-   is an item.
+5. **Review and apply the ChangeSet** — one cold read of the drafts, then a
+   reviewer that never saw them (`engr-object`), each handed the `changeset
+   show` screen as it prints: every step and the whole Object, never Sections
+   you picked. One review was shown four Sections and passed a step that
+   contradicted a fifth. Apply what passed with `--failed-step` for the rest,
+   fix each failed step for what the review named, and send the fixes to the
+   next reviewer — not back to a cold read, which would spend a subagent
+   learning what the verdict already said. Fixing it yourself is right unless
+   it needs the code to change, which is an item.
+
+   **A failed step is fixed, or it goes somewhere; it is never just removed.**
+   One run took four failed steps out to let the rest pass, and none reached
+   engr again — among them that `ui.update` patches a copy and persists only
+   what validates. If the review showed it is not a decision at all, say so in
+   the item's result; if it is one whose wording will not pass, it goes to the
+   backlog whole, like an exhausted step.
 6. **Rewrite the summary** to the next item, and commit `.engr`.
 
 **A step whose attempts run out goes to the backlog first**, whole: its wording,

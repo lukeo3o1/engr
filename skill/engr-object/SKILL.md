@@ -130,9 +130,11 @@ defend:
 
    Compare the answers with the note, line by line. Every difference is a
    fact about the page, not a disagreement to argue: the reader had only the
-   page, and so will everyone after you. Fix the wording, and ask a reader who
-   has not seen this version. The page carries what you meant when the answers
-   match the note and the last two come back empty.
+   page, and so will everyone after you. Fix the wording. The page carries what
+   you meant when the answers match the note and the last two come back empty.
+   Ask a reader who has not seen the new version only if the fix rewrote the
+   claim; a gap the first reader named and you filled is one you already know
+   about, and each reader is a subagent.
 6. **Then review it against the Rules**, below. Check the mechanical
    requirements by doing rather than reading: count the words against a ceiling,
    point at the question mark a Rule asks for, find the header in its field on
@@ -197,6 +199,11 @@ Have the screen read cold first — see
 A review is an attempt against a ceiling of a few, and spending one to learn
 that the reason never reached the page spends it on something the cold read
 finds without costing any.
+
+**After a failed review, fix what it named and go to the next review**, not
+back to a cold read: the verdict already says what the page lacks, and a reader
+then spends a subagent to say it again. One run cold-read every revision and
+spent five subagents and 52 turns admitting two Sections.
 
 **Hand over the screen, not the prose.** A Section is more than its text: the
 header, the role, the supplementary content and the basis are all inside the
