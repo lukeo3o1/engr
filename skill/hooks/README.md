@@ -21,7 +21,7 @@ cut, on average:
 | --- | --- |
 | the guide on `main`, no hooks | 68 |
 | the revised guide, start and stop hooks | 47 |
-| the same, plus `skill/project-instructions.md` loaded as project instructions | 46 |
+| the same, plus the earlier `skill/project-instructions.md` loaded as project instructions | 46 |
 | the revised guide, all four hooks, the harness's task list turned off | 8 |
 
 The reminder was answered about half the time when the harness's own task list
