@@ -19,8 +19,9 @@ Two meanings differ from the rest of engr, and the block overrides them:
 - **Consuming does not always mean resolved.** It can also mean that a settled
   entry's work is over and the entry was not worth promoting.
 
-The engr skills still keep progress in a work sidecar and record a decision as
-a Section when it is made; the block's opening line says it wins. Rule 10
+The engr skills, and engr's own instructions and command help, still keep
+progress in a work sidecar, call the backlog unresolved and record a decision as
+a Section when it is made; the block's opening says it wins over all of them. Rule 10
 assumes the hooks in `skill/hooks/`.
 
 ---
@@ -29,7 +30,7 @@ assumes the hooks in `skill/hooks/`.
 ## engr holds knowledge; the repository holds progress
 
 Your context can end at any moment; the next session has only this repository
-and engr. Where an engr skill disagrees, this section wins.
+and engr. Where other engr guidance disagrees, this section wins.
 
 1. Keep out of engr what a new agent can reliably recover from the repository
    (code, tests, Git) — progress above all: no work sidecar, summary, current or
