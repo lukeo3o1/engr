@@ -132,6 +132,29 @@ remove a point; rename has nowhere to put the marker, and an exhausted change
 that leaves no trace is the one thing the marker exists to prevent. Revise it,
 or raise the ceiling.
 
+**Several changes to one topic share one review.** When a Rule governs backlog
+and you have more than one change for the same topic — a topic and its first
+points, or the points one piece of work settled — stage them in a ChangeSet and
+review once, instead of two calls and a review per point:
+
+```bash
+engr changeset new --new-topic "<the piece of work>"   # or --backlog <id> for a topic that exists
+engr changeset backlog <changeset> add --text "<point>"
+engr changeset backlog <changeset> revise --section 2 --text "<point>"
+engr changeset backlog <changeset> consume --section 3
+engr changeset show <changeset>      # every step, the topic as it would stand, the one digest
+engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id>
+```
+
+Each step is checked the moment you add it, as the lone command would check it,
+and refused by its number. The ChangeSet binds the whole topic, so it takes no
+`--expect`; if anything in the topic moves before you apply, the digest no
+longer matches — read and review again. It is written whole or not at all: fix
+what the review faults with `engr changeset rm` and `engr changeset backlog`,
+then review the whole again at the next `--attempt`. A ChangeSet that creates a
+topic only adds its points. Where no backlog Rule applies there is no review to
+share, and `changeset new` refuses; use the lone commands.
+
 Every screen says `UNCONFIRMED STAGING`, and it means it. **Never reason from a
 backlog section as though it were the record**, and never quote one to a human
 without saying where it came from. If a point has become something you can

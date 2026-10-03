@@ -171,14 +171,15 @@ After reviewing that exact material, repeat the command with `--agent`,
 `--review-result passed`. The digest is recomputed under the mutation lock, so a
 changed Object or Rule cannot slip beneath the review.
 
-Several Section mutations of one Object can share that review. A ChangeSet holds
-them on this machine, checked step by step as they are added; the review reads
-them all and passes or fails each, and the steps it passed are admitted together:
+Several mutations of one Object can share that review. A ChangeSet holds them on
+this machine, checked step by step as they are added; the review reads them all
+and passes or fails each, and the steps it passed are admitted together:
 
 ```bash
-engr changeset new --object <id>
+engr changeset new --object <id>             # or --title "<title>" to create it as step 1
 engr changeset add <changeset> --add --text-file f.txt
 engr changeset add <changeset> --revise 3 --text-file g.txt
+engr changeset add <changeset> --rename --title "a better title"
 engr changeset show <changeset>              # every step, the result, the one digest
 engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
   --review-result passed                     # or: failed --failed-step <n>
@@ -186,6 +187,18 @@ engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
 
 Each step still becomes its own Agent-admitted event. Only the reading is shared;
 a step the review failed stays behind, on its next attempt.
+
+Where a backlog Rule governs, several changes to one backlog topic share a
+review the same way, and are written whole or not at all:
+
+```bash
+engr changeset new --backlog <topic>         # or --new-topic "<title>" to create it
+engr changeset backlog <changeset> add --text "another point"
+engr changeset backlog <changeset> revise --section 2 --text "reworded"
+engr changeset backlog <changeset> consume --section 3
+engr changeset show <changeset>
+engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id>
+```
 
 Objects are addressed by unique id prefix, like a git commit.
 

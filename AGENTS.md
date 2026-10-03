@@ -22,7 +22,7 @@ crates/engr/src/semantics.rs    type/state, attention, roles, relations, bounded
 crates/engr/src/gate.rs         prepare, confirm, candidates
 crates/engr/src/confirmation.rs the shared, domain-neutral admission primitive
 crates/engr/src/backlog.rs      unresolved staging: subjects, produced, reconciliation
-crates/engr/src/changeset.rs    several Section mutations of one Object, reviewed once
+crates/engr/src/changeset.rs    several mutations of one Object or one backlog topic, reviewed once
 crates/engr/src/work.rs         execution memory: the sidecar an agent keeps for an object
 crates/engr/src/collection.rs   planning metadata: plans, members, order, priority
 crates/engr/src/store.rs        filesystem layout, locking, atomic writes
@@ -52,7 +52,9 @@ ReviewDigest, complete Rule ids and a passing result. That path writes
 immediately and records Agent admission. It refuses semantic work with no
 applicable usable Object Rule; title create/rename is the sole non-authoritative
 exception. Several Section mutations of one Object can share one such review
-through `engr changeset`: add each step when it settles, apply them together.
+through `engr changeset`: add each step when it settles, apply them together. A
+new Object and its first Sections share one too, as do several changes to one
+backlog topic where a backlog Rule governs it.
 
 Delegate the review of your own wording to a subagent that never saw the draft,
 and give it only the Rule, its bases and the exact wording. You pass your own

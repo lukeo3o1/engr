@@ -282,6 +282,12 @@ engr changeset apply <changeset> --review <digest> --reviewed-rule <rule-id> \
   --review-attempt 1 --review-result passed
 ```
 
+A new Object and its first Sections are one review too: `engr changeset new
+--title "<the area>"` makes the creation step 1, and the steps after it add to
+what it creates. A title change rides along as `engr changeset add <changeset>
+--rename --title "<title>"`. If the review fails the creation, nothing else can
+be admitted without it: fix it and review the whole again.
+
 A step takes the same arguments as `prepare` and is checked the same way the
 moment you add it; one that would be refused alone is refused there, by its
 number. Hand the reviewer the `show` screen — every step and the whole Object —
@@ -304,8 +310,8 @@ ChangeSet had failed three times took the steps out and admitted each at attempt
 because engr cannot. A step that runs out of attempts goes alone to `prepare
 --agent` at its next attempt, and the Rule's exhaustion policy decides.
 
-A ChangeSet takes Section work on one existing Object and nothing else — not a
-title, not a lifecycle move, not another Object — and a step may not reference a
+A ChangeSet takes the title and Section work on one Object and nothing else —
+not a lifecycle move, not another Object — and a step may not reference a
 Section the same ChangeSet changes: apply, commit, and reference what it wrote.
 A step that revises a Section another step adds cannot be admitted if that other
 step fails; apply refuses it rather than guess.

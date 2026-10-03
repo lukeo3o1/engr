@@ -8348,3 +8348,189 @@ fn the_expect_refusal_names_the_token_this_operation_binds() {
     assert_eq!(stale.status.code(), Some(engr::EXIT_STALE));
     assert!(String::from_utf8_lossy(&stale.stderr).contains("not what is there now"));
 }
+
+/// A topic's ChangeSet from the command line: staged step by step, refused
+/// with its digest, and written whole once that digest is attested — and it
+/// takes no verdict, because a backlog review is not repeated with one.
+#[test]
+fn a_topic_changeset_is_staged_shown_and_written_whole() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    let id = governed_backlog(root, 3);
+
+    let created = run_engr(root, &["changeset", "new", "--backlog", &id]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let changeset = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .nth(1)
+        .expect("the ChangeSet id")
+        .to_owned();
+    for step in [
+        vec!["add", "--text", "a second point"],
+        vec![
+            "revise",
+            "--section",
+            "1",
+            "--text",
+            "the first point, sharper",
+        ],
+    ] {
+        let mut args = vec!["changeset", "backlog", changeset.as_str()];
+        args.extend(step);
+        let output = run_engr(root, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let refused = run_engr(root, &["changeset", "apply", &changeset]);
+    assert_eq!(refused.status.code(), Some(engr::EXIT_USAGE));
+    let stderr = String::from_utf8_lossy(&refused.stderr).to_string();
+    let digest = stderr
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .expect("the digest is surfaced")
+        .to_owned();
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("the first point, sharper"));
+
+    let verdict = run_engr(
+        root,
+        &[
+            "changeset",
+            "apply",
+            &changeset,
+            "--review",
+            &digest,
+            "--reviewed-rule",
+            "careful",
+            "--review-result",
+            "passed",
+        ],
+    );
+    assert_eq!(verdict.status.code(), Some(engr::EXIT_USAGE));
+
+    let applied = run_engr(
+        root,
+        &[
+            "changeset",
+            "apply",
+            &changeset,
+            "--review",
+            &digest,
+            "--reviewed-rule",
+            "careful",
+        ],
+    );
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let item = engr::backlog::load(root, &id).expect("topic");
+    assert_eq!(item.sections.len(), 2);
+    assert_eq!(
+        item.section(1).expect("§1").text,
+        "the first point, sharper"
+    );
+}
+
+/// A new Object from the command line: `--title` makes the creation step 1,
+/// and the steps after it name the Object the ChangeSet issued.
+#[test]
+fn a_changeset_can_start_by_creating_its_object() {
+    let workspace = TempDir::new().expect("temp dir");
+    let root = workspace.path();
+    store::init(root).expect("init");
+    std::fs::create_dir_all(engr::rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        engr::rules::dir(root).join("policy.md"),
+        "---\nid: policy\napplies:\n  domains:\n    - object\n---\n\n# Policy\n\nReview it.\n",
+    )
+    .expect("rule");
+
+    let created = run_engr(root, &["changeset", "new", "--title", "Session store"]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let changeset = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .nth(1)
+        .expect("the ChangeSet id")
+        .to_owned();
+    let added = run_engr(
+        root,
+        &[
+            "changeset",
+            "add",
+            &changeset,
+            "--add",
+            "--text",
+            "Close is final.",
+            "--no-based-on",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let renamed = run_engr(
+        root,
+        &[
+            "changeset",
+            "add",
+            &changeset,
+            "--rename",
+            "--title",
+            "Session store, local",
+        ],
+    );
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let shown = run_engr(root, &["changeset", "show", &changeset, "--format", "json"]);
+    let document: Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(document["before_rev"], 0);
+    assert_eq!(document["projected"]["title"], "Session store, local");
+    let digest = document["needs_review"]["digest"]
+        .as_str()
+        .expect("digest")
+        .to_owned();
+
+    let applied = run_engr(
+        root,
+        &[
+            "changeset",
+            "apply",
+            &changeset,
+            "--review",
+            &digest,
+            "--reviewed-rule",
+            "policy",
+            "--review-result",
+            "passed",
+        ],
+    );
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&applied.stdout)
+            .matches("ADMITTED")
+            .count(),
+        3
+    );
+}

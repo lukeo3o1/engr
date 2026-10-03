@@ -1,6 +1,6 @@
-//! What a ChangeSet is: several Section mutations of one Object, reviewed once
-//! and admitted together — and what it is not, which is a way around anything a
-//! lone Agent mutation has to pass.
+//! What a ChangeSet is: several mutations of one Object or one backlog topic,
+//! reviewed once and admitted together — and what it is not, which is a way
+//! around anything a lone mutation has to pass.
 
 mod common;
 
@@ -229,14 +229,25 @@ fn a_step_that_would_be_refused_alone_is_refused_by_its_number() {
 }
 
 #[test]
-fn a_changeset_carries_section_work_only() {
+fn a_changeset_carries_the_title_and_section_work_and_no_lifecycle() {
     let (_temp, root, object, id) = governed();
-    let title = agent_payload(Act::Rename, &object, wording("Another title"));
+    // A rename is an Agent admission alone, so it rides with the wording.
+    let (_, plan) = changeset::add(&root, &id, common::rename(&object, "Another title"))
+        .expect("a rename is a step");
+    assert_eq!(plan.after().title, "Another title");
+    changeset::remove(&root, &id, 1).expect("take it out again");
+
+    // A lifecycle move and a supersession are Human admissions, in a ChangeSet
+    // or out of one.
     let close = agent_payload(Act::Close, &object, Content::default());
-    for payload in [title, close] {
-        let error = changeset::add(&root, &id, payload).expect_err("not section work");
-        assert_eq!(error.code, engr::EXIT_USAGE);
-    }
+    let error = changeset::add(&root, &id, close).expect_err("a Human admission");
+    assert_eq!(error.code, engr::EXIT_USAGE, "{}", error.message);
+    // And an Object that exists is not created again, for the reason it is not
+    // alone.
+    let error = changeset::add(&root, &id, common::create(&object, "Again"))
+        .expect_err("it already exists");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{}", error.message);
+    assert!(error.message.starts_with("step 1: "), "{}", error.message);
     let lifecycle = common::becoming(
         add(&object, "And classify it too."),
         engr::model::Destination {
@@ -494,6 +505,7 @@ fn an_interrupted_apply_is_found_admitted_or_not_and_never_admitted_twice() {
     interrupted.committing = Some(changeset::Committing {
         events: events.iter().map(|event| event.id.clone()).collect(),
         steps: vec![0],
+        topic: None,
     });
     rewrite(&root, &interrupted);
 
@@ -532,6 +544,7 @@ fn an_interrupted_apply_is_found_admitted_or_not_and_never_admitted_twice() {
     interrupted.committing = Some(changeset::Committing {
         events: vec![engr::model::new_id()],
         steps: vec![0],
+        topic: None,
     });
     rewrite(&root, &interrupted);
     assert!(matches!(
@@ -546,6 +559,7 @@ fn an_interrupted_apply_is_found_admitted_or_not_and_never_admitted_twice() {
     interrupted.committing = Some(changeset::Committing {
         events: vec![events[0].id.clone(), engr::model::new_id()],
         steps: vec![0],
+        topic: None,
     });
     rewrite(&root, &interrupted);
     let error = changeset::apply(&root, &id, None, &[]).expect_err("partial");
@@ -723,6 +737,7 @@ fn an_interrupted_partial_apply_keeps_exactly_the_steps_it_did_not_admit() {
     interrupted.committing = Some(changeset::Committing {
         events: events.iter().map(|event| event.id.clone()).collect(),
         steps: vec![0],
+        topic: None,
     });
     rewrite(&root, &interrupted);
 
@@ -837,4 +852,483 @@ fn taking_a_step_out_says_no_earlier_review_covers_what_remains() {
     let emptied = engr(&root, &["changeset", "rm", &id, "--step", "1"]);
     assert!(emptied.status.success());
     assert!(!String::from_utf8_lossy(&emptied.stdout).contains("note"));
+}
+
+// ---------------------------------------------------------------------------
+// A ChangeSet that creates its Object
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_new_object_and_its_sections_are_reviewed_once() {
+    let (_temp, root) = common::workspace();
+    object_rule(&root);
+    let (created, plan) = changeset::create_object(&root, "Session store").expect("create");
+    let object = created.object.clone().expect("an Object ChangeSet");
+    assert_eq!(plan.before.rev, 0);
+    assert!(
+        store::load_object(&root, &object).is_err(),
+        "nothing exists until the ChangeSet is applied"
+    );
+    changeset::add(&root, &created.id, add(&object, "Close is final.")).expect("step 2");
+    let (_, plan) =
+        changeset::add(&root, &created.id, add(&object, "Owner is exclusive.")).expect("step 3");
+
+    let Applied::Admitted {
+        events,
+        object: after,
+        ..
+    } = changeset::apply(&root, &created.id, Some(passed(&plan)), &[]).expect("apply")
+    else {
+        panic!("a passing review admits every step");
+    };
+    assert_eq!(after.title, "Session store");
+    assert_eq!(after.sections.len(), 2);
+    assert_eq!(
+        events.iter().map(|event| event.rev).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(events
+        .iter()
+        .all(|event| event.metadata.admitted.at == events[0].metadata.admitted.at));
+    assert!(changeset::list(&root).expect("list").is_empty());
+}
+
+#[test]
+fn a_new_objects_digest_is_the_same_on_every_attempt() {
+    let (_temp, root) = common::workspace();
+    object_rule(&root);
+    let (created, first) = changeset::create_object(&root, "Stable").expect("create");
+    let (_, again) = changeset::plan(&root, &created.id).expect("replan");
+    // The id is issued once, when the ChangeSet starts, so a review of it is a
+    // review of the same Object the next time it is planned.
+    assert_eq!(first.digest, again.digest);
+}
+
+#[test]
+fn a_failed_creation_admits_nothing_else() {
+    let (_temp, root) = common::workspace();
+    object_rule(&root);
+    let (created, _) = changeset::create_object(&root, "Doomed").expect("create");
+    let object = created.object.clone().expect("object");
+    let (_, plan) =
+        changeset::add(&root, &created.id, add(&object, "Depends on it.")).expect("add");
+    let error = changeset::apply(
+        &root,
+        &created.id,
+        Some(attest(&plan, proof::ReviewResult::Failed)),
+        &[1],
+    )
+    .expect_err("nothing without the creation");
+    assert_eq!(error.code, engr::EXIT_USAGE, "{}", error.message);
+    assert!(store::load_object(&root, &object).is_err());
+    assert_eq!(
+        changeset::load(&root, &created.id)
+            .expect("kept")
+            .steps
+            .len(),
+        2
+    );
+
+    // Nor can the creation be taken out from under the steps that change it.
+    let error = changeset::remove(&root, &created.id, 1).expect_err("creation stays first");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+}
+
+#[test]
+fn a_new_object_starts_with_its_creation() {
+    let (_temp, root) = common::workspace();
+    object_rule(&root);
+    let (created, _) = changeset::create_object(&root, "Once").expect("create");
+    let object = created.object.clone().expect("object");
+    let error = changeset::add(&root, &created.id, common::create(&object, "Twice"))
+        .expect_err("one creation");
+    assert!(error.message.starts_with("step 2: "), "{}", error.message);
+}
+
+// ---------------------------------------------------------------------------
+// A ChangeSet over one backlog topic
+// ---------------------------------------------------------------------------
+
+use engr::backlog::{self, Prepared, Step};
+
+fn backlog_rule(root: &Path, max_attempts: u32) {
+    std::fs::create_dir_all(rules::dir(root)).expect("rules dir");
+    std::fs::write(
+        rules::dir(root).join("backlog-policy.md"),
+        format!("---\nid: backlog-policy\napplies:\n  domains:\n    - backlog\nreview:\n  max_attempts: {max_attempts}\n---\n\n# Backlog policy\n\nOne point per entry.\n"),
+    )
+    .expect("rule");
+}
+
+/// The digest a governed lone backlog mutation is refused with.
+fn refused_digest(error: &engr::Error) -> String {
+    error
+        .message
+        .split_whitespace()
+        .find(|word| word.starts_with("1:") && word.len() == 66)
+        .unwrap_or_else(|| panic!("no digest offered: {}", error.message))
+        .to_owned()
+}
+
+fn attestation(plan: &backlog::TopicPlan) -> Prepared {
+    Prepared::first().reviewed(Some(backlog::Attestation {
+        review_digest: plan.digest.clone(),
+        reviewed_rules: plan.rules.clone(),
+    }))
+}
+
+/// A governed topic with two points, made the lone way.
+fn topic(root: &Path) -> String {
+    let first = backlog::create(
+        root,
+        "Store slice",
+        "First point.",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect_err("governed");
+    let item = backlog::create(
+        root,
+        "Store slice",
+        "First point.",
+        Vec::new(),
+        &Prepared::first().reviewed(Some(backlog::Attestation {
+            review_digest: refused_digest(&first),
+            reviewed_rules: vec!["backlog-policy".to_owned()],
+        })),
+    )
+    .expect("create");
+    let changeset = changeset::create_topic(root, Some(&item.id), None).expect("changeset");
+    let (_, plan) = changeset::add_backlog(
+        root,
+        &changeset.id,
+        Step::Add {
+            text: "Second point.".to_owned(),
+            subjects: Vec::new(),
+        },
+    )
+    .expect("add");
+    changeset::apply_topic(root, &changeset.id, &attestation(&plan)).expect("apply");
+    item.id
+}
+
+fn add_point(text: &str) -> Step {
+    Step::Add {
+        text: text.to_owned(),
+        subjects: Vec::new(),
+    }
+}
+
+#[test]
+fn a_topics_steps_are_reviewed_once_and_written_together() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    changeset::add_backlog(&root, &changeset, add_point("Third point.")).expect("add");
+    changeset::add_backlog(
+        &root,
+        &changeset,
+        Step::Revise {
+            section: 1,
+            text: "First point, reworded.".to_owned(),
+        },
+    )
+    .expect("revise");
+    let (_, plan) =
+        changeset::add_backlog(&root, &changeset, Step::Consume { section: 2 }).expect("consume");
+
+    let before = backlog::load(&root, &id).expect("before");
+    match changeset::apply_topic(&root, &changeset, &Prepared::first()).expect("unreviewed") {
+        changeset::TopicApplied::NeedsReview(shown) => assert_eq!(shown.digest, plan.digest),
+        other => panic!("a governed ChangeSet waits for its review: {other:?}"),
+    }
+    assert_eq!(backlog::load(&root, &id).expect("unchanged"), before);
+
+    let changeset::TopicApplied::Admitted {
+        result: Some(after),
+    } = changeset::apply_topic(&root, &changeset, &attestation(&plan)).expect("apply")
+    else {
+        panic!("a passing review writes the topic");
+    };
+    assert_eq!(
+        after
+            .sections
+            .iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(after.section(1).expect("§1").text, "First point, reworded.");
+    assert_eq!(backlog::load(&root, &id).expect("stored"), after);
+    assert!(changeset::list(&root).expect("list").is_empty());
+}
+
+#[test]
+fn a_new_topic_is_reviewed_as_the_creation_it_is() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let created = changeset::create_topic(&root, None, Some("Fresh topic")).expect("create");
+    let (_, one) =
+        changeset::add_backlog(&root, &created.id, add_point("Only point.")).expect("add");
+    // One point is a lone `backlog new`, and its review is of the same subject.
+    let lone = backlog::create(
+        &root,
+        "Fresh topic",
+        "Only point.",
+        Vec::new(),
+        &Prepared::first(),
+    )
+    .expect_err("governed");
+    assert_eq!(one.digest, refused_digest(&lone));
+
+    changeset::add_backlog(&root, &created.id, add_point("Second point.")).expect("add");
+    let (_, plan) =
+        changeset::add_backlog(&root, &created.id, add_point("Third point.")).expect("add");
+    let changeset::TopicApplied::Admitted { result: Some(item) } =
+        changeset::apply_topic(&root, &created.id, &attestation(&plan)).expect("apply")
+    else {
+        panic!("the topic is created");
+    };
+    let topic = created.topic.expect("topic");
+    assert_eq!(item.id, topic.id);
+    assert_eq!(item.title, "Fresh topic");
+    assert_eq!(item.next_section_id, 4);
+    assert_eq!(backlog::load(&root, &topic.id).expect("stored"), item);
+
+    // A new topic's ChangeSet only adds its points.
+    let other = changeset::create_topic(&root, None, Some("Another")).expect("create");
+    changeset::add_backlog(&root, &other.id, add_point("A point.")).expect("add");
+    let error = changeset::add_backlog(&root, &other.id, Step::Consume { section: 1 })
+        .expect_err("only additions");
+    assert!(error.message.starts_with("step 2: "), "{}", error.message);
+}
+
+#[test]
+fn a_topic_changeset_needs_a_backlog_rule() {
+    let (_temp, root) = common::workspace();
+    let error = changeset::create_topic(&root, None, Some("Ungoverned")).expect_err("no rule");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{}", error.message);
+}
+
+#[test]
+fn a_review_of_the_topic_as_it_was_is_refused() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    let (_, plan) = changeset::add_backlog(&root, &changeset, add_point("Later.")).expect("add");
+
+    // Somebody else changes the topic in between.
+    let other = changeset::create_topic(&root, Some(&id), None)
+        .expect("other")
+        .id;
+    let (_, theirs) = changeset::add_backlog(&root, &other, add_point("Meanwhile.")).expect("add");
+    changeset::apply_topic(&root, &other, &attestation(&theirs)).expect("apply theirs");
+
+    let error = changeset::apply_topic(&root, &changeset, &attestation(&plan))
+        .expect_err("reviewed against something else");
+    assert_eq!(error.code, engr::EXIT_INVARIANT, "{}", error.message);
+    assert!(
+        changeset::load(&root, &changeset).is_ok(),
+        "kept to review again"
+    );
+}
+
+#[test]
+fn a_topics_steps_are_checked_as_lone_mutations_are() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    for (step, why) in [
+        (
+            Step::Revise {
+                section: 9,
+                text: "Nothing there.".to_owned(),
+            },
+            "no such point",
+        ),
+        (
+            Step::Merge {
+                into: 1,
+                section: 1,
+                text: "Into itself.".to_owned(),
+                subjects: Vec::new(),
+            },
+            "a merge into itself",
+        ),
+        (
+            Step::Produced {
+                section: 1,
+                outcome: backlog::Produced::object(format!(
+                    "obj:{}",
+                    engr::reference::encode_uuid_str(&engr::model::new_id()).expect("compact")
+                )),
+            },
+            "an Object that does not exist",
+        ),
+    ] {
+        let error = changeset::add_backlog(&root, &changeset, step).expect_err(why);
+        assert!(
+            error.message.starts_with("step 1: "),
+            "{why}: {}",
+            error.message
+        );
+    }
+    assert!(changeset::load(&root, &changeset)
+        .expect("load")
+        .backlog_steps
+        .is_empty());
+
+    // Nothing follows the step that empties the topic.
+    changeset::add_backlog(&root, &changeset, Step::Consume { section: 1 }).expect("consume");
+    changeset::add_backlog(&root, &changeset, Step::Consume { section: 2 }).expect("consume");
+    let error = changeset::add_backlog(&root, &changeset, add_point("Too late."))
+        .expect_err("the topic is gone");
+    assert!(error.message.starts_with("step 3: "), "{}", error.message);
+}
+
+#[test]
+fn consuming_the_last_point_takes_the_topic_with_it() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    changeset::add_backlog(&root, &changeset, Step::Consume { section: 1 }).expect("consume");
+    let (_, plan) =
+        changeset::add_backlog(&root, &changeset, Step::Consume { section: 2 }).expect("consume");
+    assert!(plan.result().is_none());
+    let changeset::TopicApplied::Admitted { result: None } =
+        changeset::apply_topic(&root, &changeset, &attestation(&plan)).expect("apply")
+    else {
+        panic!("the topic goes with its last point");
+    };
+    assert_eq!(
+        backlog::load(&root, &id).expect_err("gone").code,
+        engr::EXIT_NOT_FOUND
+    );
+}
+
+#[test]
+fn an_exhausted_review_marks_what_it_keeps_and_refuses_what_it_removes() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 1);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    let (_, plan) =
+        changeset::add_backlog(&root, &changeset, add_point("Past the ceiling.")).expect("add");
+    let second = backlog::Attestation {
+        review_digest: plan.digest.clone(),
+        reviewed_rules: plan.rules.clone(),
+    };
+    let attempt = |n| Prepared::attempt(rules::Attempt::new(n).expect("attempt"));
+    let changeset::TopicApplied::Admitted { result: Some(item) } = changeset::apply_topic(
+        &root,
+        &changeset,
+        &attempt(2).reviewed(Some(second.clone())),
+    )
+    .expect("apply") else {
+        panic!("an exhausted review keeps the point");
+    };
+    let added = item.sections.last().expect("added");
+    assert_eq!(added.review_exhaustion.expect("marked").attempts, 2);
+
+    let removal = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    changeset::add_backlog(&root, &removal, Step::Consume { section: 1 }).expect("consume");
+    let (_, plan) = changeset::plan_topic(&root, &removal).expect("plan");
+    let error = changeset::apply_topic(
+        &root,
+        &removal,
+        &attempt(2).reviewed(Some(backlog::Attestation {
+            review_digest: plan.digest.clone(),
+            reviewed_rules: plan.rules.clone(),
+        })),
+    )
+    .expect_err("a removal needs a review that passed");
+    assert!(error.message.starts_with("step 1: "), "{}", error.message);
+    assert!(backlog::load(&root, &id).expect("kept").section(1).is_ok());
+}
+
+#[test]
+fn an_interrupted_topic_apply_is_found_rather_than_written_twice() {
+    let (_temp, root) = common::workspace();
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let changeset = changeset::create_topic(&root, Some(&id), None)
+        .expect("create")
+        .id;
+    let (_, plan) = changeset::add_backlog(&root, &changeset, add_point("Landed.")).expect("add");
+    let draft = std::fs::read(file(&root, &changeset)).expect("draft");
+    changeset::apply_topic(&root, &changeset, &attestation(&plan)).expect("apply");
+    let landed = backlog::load(&root, &id).expect("landed");
+
+    // The crash after the topic was written and before the draft was removed.
+    std::fs::write(file(&root, &changeset), &draft).expect("restore");
+    let mut interrupted = changeset::load(&root, &changeset).expect("load");
+    interrupted.committing = Some(changeset::Committing {
+        events: Vec::new(),
+        steps: Vec::new(),
+        topic: Some(changeset::TopicResult {
+            result: Some(
+                backlog::Precondition::of_item(&landed)
+                    .token()
+                    .expect("token"),
+            ),
+        }),
+    });
+    rewrite(&root, &interrupted);
+    assert!(matches!(
+        changeset::apply_topic(&root, &changeset, &Prepared::first()).expect("finish"),
+        changeset::TopicApplied::AlreadyAdmitted
+    ));
+    assert_eq!(backlog::load(&root, &id).expect("once"), landed);
+
+    // And the crash before it: the draft says what it was about to write, the
+    // topic is not that, so the apply simply has not happened.
+    std::fs::write(file(&root, &changeset), &draft).expect("restore");
+    let mut interrupted = changeset::load(&root, &changeset).expect("load");
+    interrupted.committing = Some(changeset::Committing {
+        events: Vec::new(),
+        steps: Vec::new(),
+        topic: Some(changeset::TopicResult {
+            result: Some("not what is there".to_owned()),
+        }),
+    });
+    rewrite(&root, &interrupted);
+    assert!(matches!(
+        changeset::apply_topic(&root, &changeset, &Prepared::first()).expect("replan"),
+        changeset::TopicApplied::NeedsReview(_)
+    ));
+}
+
+#[test]
+fn a_changeset_holds_steps_of_its_own_kind_only() {
+    let (_temp, root) = common::workspace();
+    let object = common::new_object(&root, "Elsewhere");
+    object_rule(&root);
+    backlog_rule(&root, 3);
+    let id = topic(&root);
+    let over_topic = changeset::create_topic(&root, Some(&id), None)
+        .expect("topic")
+        .id;
+    let error = changeset::add(&root, &over_topic, add(&object, "Wrong kind."))
+        .expect_err("an Object step on a topic");
+    assert_eq!(error.code, engr::EXIT_USAGE);
+    let over_object = changeset::create(&root, &object).expect("object").id;
+    let error = changeset::add_backlog(&root, &over_object, add_point("Wrong kind."))
+        .expect_err("a backlog step on an Object");
+    assert_eq!(error.code, engr::EXIT_USAGE);
 }

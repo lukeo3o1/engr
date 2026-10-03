@@ -2124,7 +2124,7 @@ fn plan_and_bind(
         EXIT_USAGE,
         "this ChangeSet has no steps yet; add one with `engr changeset add`"
     );
-    let before = ops::admission_predecessor(root, object)?;
+    let before = predecessor(root, object)?;
     let at = now();
     let mut current = before.clone();
     let mut steps = Vec::with_capacity(payloads.len());
@@ -2153,6 +2153,20 @@ fn plan_and_bind(
     Ok((plan, binding))
 }
 
+/// The Object a ChangeSet's first step applies to.
+///
+/// One that does not exist yet is the empty Object at rev 0 — the same
+/// predecessor a lone creation is reviewed against — and its ChangeSet then has
+/// to start by creating it. Any other failure to read it is a failure, not an
+/// absence.
+fn predecessor(root: &Path, object: &str) -> Result<Object> {
+    match ops::admission_predecessor(root, object) {
+        Ok(object) => Ok(object),
+        Err(error) if error.code == EXIT_NOT_FOUND => Object::new(object.to_owned(), String::new()),
+        Err(error) => Err(error),
+    }
+}
+
 /// One step, against the Object as the steps before it leave it.
 fn plan_step(
     root: &Path,
@@ -2166,30 +2180,48 @@ fn plan_step(
         EXIT_USAGE,
         "a ChangeSet changes one Object, and this step names another"
     );
-    // Section work only. A title, a lifecycle and a supersession are each their
-    // own statement about the whole Object — and all but the title are Human
-    // admissions — so none of them rides inside a batch of wording.
+    // Section work and the title. A lifecycle, a classification and a
+    // supersession are Human admissions, so no Agent review can carry them, in
+    // a ChangeSet or out of one. The title can: it is an Agent admission alone,
+    // and making it wait for a review round of its own was the one thing that
+    // kept a new Object and its first Sections from being reviewed together.
     ensure!(
         matches!(
             payload.action,
-            Action::SectionCreated { .. }
+            Action::ObjectCreated { .. }
+                | Action::ObjectRenamed { .. }
+                | Action::SectionCreated { .. }
                 | Action::SectionUpdated { .. }
                 | Action::SectionMerged { .. }
                 | Action::SectionDeleted { .. }
         ),
         EXIT_USAGE,
-        "a ChangeSet carries Section mutations: add, revise, merge or delete"
+        "a ChangeSet carries the title and Section mutations: new, rename, add, revise, merge or \
+         delete; a lifecycle, a classification and a supersession are Human admissions"
     );
     ensure!(
         payload.becomes().is_none(),
         EXIT_USAGE,
         "a ChangeSet does not move the Object's lifecycle; classify it on its own"
     );
+    // Creation is the first step or no step. Every later step acts on the
+    // Object it makes, and an Object made halfway through a sequence would
+    // mean the steps before it acted on nothing.
+    let exists = current.rev > 0;
+    ensure!(
+        exists || matches!(payload.action, Action::ObjectCreated { .. }),
+        EXIT_USAGE,
+        "{} does not exist yet, so its ChangeSet starts by creating it",
+        payload.object
+    );
+    validate_title_context(&payload)?;
     canonicalize_payload(root, &mut payload)?;
-    if payload.action.carries_content() {
+    trim_title(&mut payload);
+    check_target_exists(&payload, exists, "--title", "--rename")?;
+    if payload.action.carries_content() && !payload.action.carries_title() {
         check_allowance(root, &payload, Allowance::Normal)?;
     }
-    check_is_a_change(&payload, Some(current))?;
+    check_is_a_change(&payload, exists.then_some(current))?;
     let mut after = current.clone();
     project(
         &mut after,
@@ -2294,6 +2326,16 @@ pub(crate) fn seal_changeset_locked(
             "step {step} is named as failed twice"
         );
     }
+    // A new Object is its first step, and every other step changes it: with the
+    // creation failed there is nothing for the steps the review passed to act
+    // on, so nothing is admitted rather than steps that would be refused one by
+    // one for the same reason.
+    ensure!(
+        !(plan.before.rev == 0 && failed.contains(&1)),
+        EXIT_USAGE,
+        "step 1 creates the Object, and the review failed it; nothing else here can be admitted \
+         without it. Fix it and review the whole ChangeSet again"
+    );
     // The verdict is read before the attestation is checked as a report, whose
     // rules are about offering a failure to a person for override — which a
     // ChangeSet never does. What is checked against the binding is a review of

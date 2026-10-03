@@ -761,8 +761,10 @@ six-character challenge from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — no `0`/`O` o
 `1`/`I` — and stores it as a Challenge under `.engr/local/challenges/`.
 `prepare --agent` instead validates and admits an Agent mutation under the same
 writer lock; it never mints a Human challenge. `changeset apply` admits several
-Section mutations of one Object that way under one review — see
-[Several mutations of one Object, reviewed once](#several-mutations-of-one-object-reviewed-once).
+mutations of one Object that way under one review — see
+[Several mutations of one Object, reviewed once](#several-mutations-of-one-object-reviewed-once)
+— and writes several mutations of one backlog topic under one review — see
+[Several mutations of one topic, reviewed once](#several-mutations-of-one-topic-reviewed-once).
 
 A Challenge is one shape for every family that needs a human answer:
 
@@ -2677,12 +2679,28 @@ per Section pushes decisions to the end of the work or out of the record, which
 is the opposite of what a Rule is for. So the review — and only the review — can
 be shared.
 
-A **ChangeSet** is an ordered list of Section mutations — `section.created`,
-`section.updated`, `section.merged`, `section.deleted` — to **one existing
-Object**, applied as one Agent admission under one review. It carries no title,
-lifecycle, classification, supersession or repair, and no step names a
-destination state: each of those is its own statement about the whole Object,
-and all but the title are Human admissions.
+A **ChangeSet** is an ordered list of mutations — `object.created`,
+`object.renamed`, `section.created`, `section.updated`, `section.merged`,
+`section.deleted` — to **one Object**, applied as one Agent admission under one
+review. It carries no lifecycle, classification, supersession or repair, and no
+step names a destination state: those are Human admissions, and no Agent review
+can carry them, in a ChangeSet or out of one. The title can. It was left out at
+first as a statement about the whole Object, and that made every new Object two
+review rounds — one for its title alone, then one for its Sections — where the
+reading the title needed was the reading of the Sections under it.
+
+**A ChangeSet may create its Object.** Its first step is then the creation, and
+every other step changes what the creation makes. The id is issued when the
+ChangeSet is started and kept with it, so every attempt at its review is a
+review of the same Object. [A creation names no
+target](#a-creation-names-no-target) because a lone creation's id is minted
+afresh by each attempt; here it is not, so the ChangeSet's `target` and the steps
+after the creation name the Object as they would any other, while the creation
+step itself still names none, as every creation does. The precondition is
+`{"expected_rev": 0}`. A creation is the first step or
+no step; a review that fails it admits nothing, because every other step acts on
+what it would have made; and it cannot be taken out of the ChangeSet, which would
+leave the other steps acting on nothing.
 
 **Every step is checked exactly as a lone Agent mutation is**, against the Object
 as the steps before it leave it — size, that it changes something, references,
@@ -2779,8 +2797,8 @@ answer, which the growth table below still keeps absent. The exhausted step is
 admitted alone with `prepare --agent` at its next attempt, where the Rule's
 exhaustion policy decides — a person's confirmation or a refusal. A ChangeSet
 with no applicable usable Object Rule is refused, as every semantic Agent
-mutation is; there is no title exception to fall back on, because a ChangeSet
-carries no title.
+mutation is. The title exception is for a title admitted alone: a ChangeSet
+exists to share a review, and with no Rule there is none to share.
 
 **What is admitted is one record per step.** Consecutive revs, each
 `admitted.by = agent`, each carrying the review's provenance, and one `at` for
@@ -2820,6 +2838,74 @@ them — bases and references resolved — so what a reviewer is later shown is 
 was checked. It stores no digest and no attempt: it is the mutation, not a review
 of it, and so not the pending-review resource
 [How many attempts](#how-many-attempts-and-what-happens-after) rules out.
+
+### Several mutations of one topic, reviewed once
+
+Once a backlog Rule governed every backlog write, the cost the ChangeSet above
+removed for Objects reappeared in the backlog, in the same shape: a topic written
+point by point paid one review per point, and each review was two calls — the
+refused write that surfaces the digest, and the write again with it. The topic a
+piece of work was defined in held twelve points, and was twenty-six calls.
+
+A backlog **ChangeSet** is an ordered list of backlog mutations — `section.create`,
+`section.update`, `section.subjects`, `section.produced`, `section.merge`,
+`section.consume` and `rename` — to **one topic**, written as one change under
+one review. Or it creates the topic, from a title: every step is then a
+`section.create`, and the subject is the creation it is — the `create`
+descriptor, no target, no predecessor, and the whole topic it makes as `after`.
+One point or several is the same act, so a ChangeSet that creates a topic with
+one point has the digest a lone `backlog new` has. Its id is issued when the
+ChangeSet is started, as a new Object's is.
+
+**Every step runs the body its lone mutation runs**, against the topic as the
+steps before it leave it — the text and title limits, that the point exists,
+that an outcome's Object is sound, that a merge has one source, that removing
+the last point is not blocked by execution memory. A refusal names the step by
+its number. Nothing follows a step that consumes the topic's last point.
+
+**The subject is the sequence.** The binding is Backlog-domain, and its mutation
+descriptor is
+
+```json
+{
+  "operation": { "name": "changeset", "parameters": {} },
+  "target": "backlog:<compact>",
+  "steps": [ <each step's own descriptor: { operation, target, after }> ]
+}
+```
+
+with the precondition the whole topic as it stands — the predecessor a rename
+binds. Each step's descriptor is the one it would bind alone, built from the
+topic either side of it, the number a point is allocated included: a backlog
+review passes or fails the whole, so no step's number depends on another
+step's verdict. One precondition binds every step, since each later step's
+predecessor follows from it and the steps before; and since the digest is
+recomputed from it under the writer lock, a ChangeSet takes no `expect` token.
+
+**All or nothing.** A backlog review is not repeated with a verdict: one that
+did not pass is acted on and reviewed again. So a review cannot fail one step
+and pass the rest, and a ChangeSet is written whole or not at all. An exhausted
+review writes what an exhausted lone mutation would — the points it keeps, each
+carrying the marker — and a step that removes a point, merges one away or
+renames the topic refuses the whole ChangeSet, by that step's number.
+
+**A topic ChangeSet needs a backlog Rule.** It exists to share a review. Where no
+Rule governs there is no review to share, and the lone mutations — each carrying
+the exact predecessor it was written against — are what keep a concurrent write
+from landing underneath one. A ChangeSet there would be a weaker guarantee than
+the commands it stands for, so it is refused at `changeset new`.
+
+A topic is one file, replaced in one rename. Before writing it, an apply records
+in the ChangeSet, as `committing.topic.result`, a token of the topic it is about
+to leave — `null` when the last step removes it. An apply that finds it set
+compares: the topic is that, and the ChangeSet is removed and reported as already
+written; or it is not, and the earlier attempt never happened. The token is the
+one the topic's `expect.rename` would carry, and like it is never persisted
+anywhere a record reads.
+
+A topic ChangeSet lives beside an Object's, under
+`.engr/local/changesets/<uuid>.json`, holds `topic` and `backlog_steps` where an
+Object's holds `object` and `steps`, and is never committed.
 
 ### Unordered sets have one order
 
@@ -3743,7 +3829,7 @@ bring it in:
 | Path scoping on a section (`--about internal/audit/**`) | A basis reads as moved because of a change to an area the section does not cover, often enough that the signal stops being read |
 | A human-chosen short id (`AUD-3`) | A uuid prefix misdirects someone in speech or in a commit message |
 | More than one action per Human confirmation | One piece of work needs the same object prepared and confirmed three times over, and the human says so |
-| A ChangeSet across Objects | One decision has to change two Objects together, and a reader who saw one change without the other would be misled |
+| A ChangeSet across Objects, or across an Object and a topic | One decision has to change two of them together, and a reader who saw one change without the other would be misled — a promotion admitted into an Object while the point it came from still reads as unresolved is the nearest case |
 | A Human override of an exhausted ChangeSet review | Admitting exhausted steps one at a time, each through its own exhaustion policy, costs more than a person reading all of them at once |
 
 Splitting untyped `closed` is the nearest of these, and part of its signal is

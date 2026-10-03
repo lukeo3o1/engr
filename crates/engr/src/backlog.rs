@@ -1951,12 +1951,17 @@ pub fn create(
 pub fn rename(root: &Path, id: &str, title: &str, prepared: &Prepared) -> Result<Item> {
     check_title(title)?;
     edit(root, id, prepared, Mutation::Rename, |item, reviewed| {
-        reviewed.must_have_passed(
-            "a title is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
-        )?;
-        title.trim().clone_into(&mut item.title);
+        rename_body(item, title, reviewed)?;
         Ok(item.clone())
     })
+}
+
+fn rename_body(item: &mut Item, title: &str, reviewed: &Reviewed) -> Result<()> {
+    reviewed.must_have_passed(
+        "a title is not renamed on an exhausted review, because there is nowhere to record that it was: the marker belongs to a point, and this changes none of them",
+    )?;
+    title.trim().clone_into(&mut item.title);
+    Ok(())
 }
 
 pub fn add_section(
@@ -1972,23 +1977,30 @@ pub fn add_section(
         id,
         prepared,
         Mutation::SectionCreate,
-        |item, reviewed| {
-            let section = take_id(item)?;
-            let mut added = Section {
-                id: section,
-                text: text.to_owned(),
-                updated_at: now(),
-                subjects,
-                produced: Vec::new(),
-                header: None,
-                content: Vec::new(),
-                review_exhaustion: None,
-            };
-            reviewed.mark(&mut added);
-            item.sections.push(added);
-            Ok(section)
-        },
+        |item, reviewed| add_body(item, text, subjects, reviewed),
     )
+}
+
+fn add_body(
+    item: &mut Item,
+    text: &str,
+    subjects: Vec<Subject>,
+    reviewed: &Reviewed,
+) -> Result<u64> {
+    let section = take_id(item)?;
+    let mut added = Section {
+        id: section,
+        text: text.to_owned(),
+        updated_at: now(),
+        subjects,
+        produced: Vec::new(),
+        header: None,
+        content: Vec::new(),
+        review_exhaustion: None,
+    };
+    reviewed.mark(&mut added);
+    item.sections.push(added);
+    Ok(section)
 }
 
 pub fn revise_section(
@@ -2004,28 +2016,30 @@ pub fn revise_section(
         id,
         prepared,
         Mutation::SectionUpdate(section),
-        |item, reviewed| {
-            item.section(section)?;
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|candidate| candidate.id == section)
-                .expect("section presence checked above");
-            // Rewriting a section with the wording it already had is not work on
-            // it. An idempotent write must not manufacture activity, or a retried
-            // command makes an untouched point look like the freshest one.
-            //
-            // The verdict follows the same test, for the same reason: a write that
-            // changed nothing admitted nothing, so it neither earns a marker nor
-            // clears one somebody else's write put there.
-            if slot.text != text {
-                text.clone_into(&mut slot.text);
-                slot.updated_at = now();
-                reviewed.mark(slot);
-            }
-            Ok(())
-        },
+        |item, reviewed| revise_body(item, section, text, reviewed),
     )
+}
+
+fn revise_body(item: &mut Item, section: u64, text: &str, reviewed: &Reviewed) -> Result<()> {
+    item.section(section)?;
+    let slot = item
+        .sections
+        .iter_mut()
+        .find(|candidate| candidate.id == section)
+        .expect("section presence checked above");
+    // Rewriting a section with the wording it already had is not work on it.
+    // An idempotent write must not manufacture activity, or a retried command
+    // makes an untouched point look like the freshest one.
+    //
+    // The verdict follows the same test, for the same reason: a write that
+    // changed nothing admitted nothing, so it neither earns a marker nor clears
+    // one somebody else's write put there.
+    if slot.text != text {
+        text.clone_into(&mut slot.text);
+        slot.updated_at = now();
+        reviewed.mark(slot);
+    }
+    Ok(())
 }
 
 pub fn set_subjects(
@@ -2040,25 +2054,32 @@ pub fn set_subjects(
         id,
         prepared,
         Mutation::SectionSubjects(section),
-        |item, reviewed| {
-            item.section(section)?;
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|candidate| candidate.id == section)
-                .expect("section presence checked above");
-            // The caller's order is persisted, because no canonical order is
-            // required — but reordering a set is not a change to what is
-            // unresolved, and the set comparison already says so.
-            let changed = !same_subjects(&slot.subjects, &subjects)?;
-            slot.subjects = subjects;
-            if changed {
-                slot.updated_at = now();
-                reviewed.mark(slot);
-            }
-            Ok(())
-        },
+        |item, reviewed| subjects_body(item, section, subjects, reviewed),
     )
+}
+
+fn subjects_body(
+    item: &mut Item,
+    section: u64,
+    subjects: Vec<Subject>,
+    reviewed: &Reviewed,
+) -> Result<()> {
+    item.section(section)?;
+    let slot = item
+        .sections
+        .iter_mut()
+        .find(|candidate| candidate.id == section)
+        .expect("section presence checked above");
+    // The caller's order is persisted, because no canonical order is required —
+    // but reordering a set is not a change to what is unresolved, and the set
+    // comparison already says so.
+    let changed = !same_subjects(&slot.subjects, &subjects)?;
+    slot.subjects = subjects;
+    if changed {
+        slot.updated_at = now();
+        reviewed.mark(slot);
+    }
+    Ok(())
 }
 
 /// Record that working on this point produced durable knowledge.
@@ -2083,7 +2104,6 @@ pub fn record_produced(
     prepared: &Prepared,
 ) -> Result<bool> {
     outcome.validate()?;
-    let (object, target_section) = outcome.target()?;
     edit(
         root,
         id,
@@ -2093,79 +2113,89 @@ pub fn record_produced(
             outcome: outcome.clone(),
             forget: false,
         },
-        |item, reviewed| {
-            // Inside the lock, not before it. Existence is checked exactly once, at
-            // the moment the claim is made — so it has to be checked at the moment
-            // the claim is *written*. Validating first and appending afterwards
-            // leaves a gap an Object mutation fits through, and the one check this
-            // relationship ever gets would have been against something that no
-            // longer existed when the relationship landed.
-            let projected = crate::ops::effective(root, &object).map_err(|error| {
-                // Absent and unreadable are different answers, and #13 §4 says
-                // so: never downgrade invalid authority to "not found". The
-                // exit code already distinguished them; the wording did not,
-                // and the wording is what a person acts on — "does not exist"
-                // sends someone looking for a missing object when what they
-                // have is a present one whose history will not load.
-                let what = if error.code == EXIT_NOT_FOUND {
-                    "does not exist"
-                } else {
-                    "cannot be read as authority"
-                };
-                Error::new(
-                    error.code,
-                    format!(
-                        "produced outcome names object {}, which {what}: {}",
-                        short(&object),
-                        error.message
-                    ),
-                )
-            })?;
-            if let Some(target_section) = target_section {
-                projected.section(target_section).map_err(|_| {
-                    Error::new(
-                        EXIT_NOT_FOUND,
-                        format!(
-                            "produced outcome names {} §{target_section}, which does not exist",
-                            short(&object)
-                        ),
-                    )
-                })?;
-            }
-            // Existing is not the same as sound. This entry asserts that a
-            // durably admitted outcome exists, and authority whose wording was
-            // changed outside the gate is exactly what that assertion must not
-            // be allowed to launder — the claim gets made once and is never
-            // re-examined, so the one check it gets has to be the real one.
-            crate::ops::sound(root, &projected, target_section).map_err(|error| {
-                Error::new(
-                    error.code,
-                    format!(
-                        "produced outcome names authority that is not intact: {}",
-                        error.message
-                    ),
-                )
-            })?;
-            item.section(section)?;
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|candidate| candidate.id == section)
-                .expect("section presence checked above");
-            // A set: claiming the same outcome twice carries no more than claiming
-            // it once, so a repeated call is not an error and not a duplicate.
-            if slot.produced.contains(&outcome) {
-                return Ok(false);
-            }
-            slot.produced.push(outcome.clone());
-            // Bookkeeping *is* activity on the unresolved work, even though the
-            // wording did not move: `updated_at` means last meaningful activity, and
-            // learning what a point produced is meaningful to whoever picks it up.
-            slot.updated_at = now();
-            reviewed.mark(slot);
-            Ok(true)
-        },
+        |item, reviewed| produced_body(root, item, section, &outcome, reviewed),
     )
+}
+
+/// The claim itself, for a lone `produced` and for one inside a ChangeSet.
+fn produced_body(
+    root: &Path,
+    item: &mut Item,
+    section: u64,
+    outcome: &Produced,
+    reviewed: &Reviewed,
+) -> Result<bool> {
+    let (object, target_section) = outcome.target()?;
+    // Inside the lock, not before it. Existence is checked exactly once, at
+    // the moment the claim is made — so it has to be checked at the moment
+    // the claim is *written*. Validating first and appending afterwards
+    // leaves a gap an Object mutation fits through, and the one check this
+    // relationship ever gets would have been against something that no
+    // longer existed when the relationship landed.
+    let projected = crate::ops::effective(root, &object).map_err(|error| {
+        // Absent and unreadable are different answers, and #13 §4 says
+        // so: never downgrade invalid authority to "not found". The
+        // exit code already distinguished them; the wording did not,
+        // and the wording is what a person acts on — "does not exist"
+        // sends someone looking for a missing object when what they
+        // have is a present one whose history will not load.
+        let what = if error.code == EXIT_NOT_FOUND {
+            "does not exist"
+        } else {
+            "cannot be read as authority"
+        };
+        Error::new(
+            error.code,
+            format!(
+                "produced outcome names object {}, which {what}: {}",
+                short(&object),
+                error.message
+            ),
+        )
+    })?;
+    if let Some(target_section) = target_section {
+        projected.section(target_section).map_err(|_| {
+            Error::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "produced outcome names {} §{target_section}, which does not exist",
+                    short(&object)
+                ),
+            )
+        })?;
+    }
+    // Existing is not the same as sound. This entry asserts that a
+    // durably admitted outcome exists, and authority whose wording was
+    // changed outside the gate is exactly what that assertion must not
+    // be allowed to launder — the claim gets made once and is never
+    // re-examined, so the one check it gets has to be the real one.
+    crate::ops::sound(root, &projected, target_section).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "produced outcome names authority that is not intact: {}",
+                error.message
+            ),
+        )
+    })?;
+    item.section(section)?;
+    let slot = item
+        .sections
+        .iter_mut()
+        .find(|candidate| candidate.id == section)
+        .expect("section presence checked above");
+    // A set: claiming the same outcome twice carries no more than claiming
+    // it once, so a repeated call is not an error and not a duplicate.
+    if slot.produced.contains(outcome) {
+        return Ok(false);
+    }
+    slot.produced.push(outcome.clone());
+    // Bookkeeping *is* activity on the unresolved work, even though the
+    // wording did not move: `updated_at` means last meaningful activity, and
+    // learning what a point produced is meaningful to whoever picks it up.
+    slot.updated_at = now();
+    reviewed.mark(slot);
+    Ok(true)
 }
 
 /// Take an outcome back off a point.
@@ -2191,23 +2221,30 @@ pub fn forget_produced(
             outcome: outcome.clone(),
             forget: true,
         },
-        |item, reviewed| {
-            item.section(section)?;
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|candidate| candidate.id == section)
-                .expect("section presence checked above");
-            let before = slot.produced.len();
-            slot.produced.retain(|entry| entry != outcome);
-            let removed = slot.produced.len() != before;
-            if removed {
-                slot.updated_at = now();
-                reviewed.mark(slot);
-            }
-            Ok(removed)
-        },
+        |item, reviewed| forget_body(item, section, outcome, reviewed),
     )
+}
+
+fn forget_body(
+    item: &mut Item,
+    section: u64,
+    outcome: &Produced,
+    reviewed: &Reviewed,
+) -> Result<bool> {
+    item.section(section)?;
+    let slot = item
+        .sections
+        .iter_mut()
+        .find(|candidate| candidate.id == section)
+        .expect("section presence checked above");
+    let before = slot.produced.len();
+    slot.produced.retain(|entry| entry != outcome);
+    let removed = slot.produced.len() != before;
+    if removed {
+        slot.updated_at = now();
+        reviewed.mark(slot);
+    }
+    Ok(removed)
 }
 
 /// Consolidate unresolved points into one, **into an explicit destination**.
@@ -2256,39 +2293,48 @@ pub fn merge_into(
             destination,
             source,
         },
-        |item, reviewed| {
-            // A merge removes the source, and a Section leaves only through a
-            // review that passed — a consume, or atomically as the source of a
-            // merge. Soft-admission is for mutations that keep the unresolved point
-            // available, and the source's own wording does not survive this one.
-            reviewed.must_have_passed(
-            "a merge removes its source, and an unresolved point is not removed on an exhausted review",
-        )?;
-            // Both participants are checked before anything moves, so a merge
-            // naming a section that is not there changes nothing at all.
-            let mut produced = item.section(destination)?.produced.clone();
-            for outcome in &item.section(source)?.produced {
-                if !produced.contains(outcome) {
-                    produced.push(outcome.clone());
-                }
-            }
-            item.sections.retain(|section| section.id != source);
-            let slot = item
-                .sections
-                .iter_mut()
-                .find(|section| section.id == destination)
-                .expect("destination presence checked above");
-            text.clone_into(&mut slot.text);
-            slot.subjects = subjects;
-            slot.produced = produced;
-            // Unambiguously activity: the destination now states something it did
-            // not state before, whatever the wording happens to be.
-            slot.updated_at = now();
-            // Reached only on a review that passed, so this always clears.
-            reviewed.mark(slot);
-            Ok(())
-        },
+        |item, reviewed| merge_body(item, destination, source, text, subjects, reviewed),
     )
+}
+
+fn merge_body(
+    item: &mut Item,
+    destination: u64,
+    source: u64,
+    text: &str,
+    subjects: Vec<Subject>,
+    reviewed: &Reviewed,
+) -> Result<()> {
+    // A merge removes the source, and a Section leaves only through a
+    // review that passed — a consume, or atomically as the source of a
+    // merge. Soft-admission is for mutations that keep the unresolved point
+    // available, and the source's own wording does not survive this one.
+    reviewed.must_have_passed(
+        "a merge removes its source, and an unresolved point is not removed on an exhausted review",
+    )?;
+    // Both participants are checked before anything moves, so a merge
+    // naming a section that is not there changes nothing at all.
+    let mut produced = item.section(destination)?.produced.clone();
+    for outcome in &item.section(source)?.produced {
+        if !produced.contains(outcome) {
+            produced.push(outcome.clone());
+        }
+    }
+    item.sections.retain(|section| section.id != source);
+    let slot = item
+        .sections
+        .iter_mut()
+        .find(|section| section.id == destination)
+        .expect("destination presence checked above");
+    text.clone_into(&mut slot.text);
+    slot.subjects = subjects;
+    slot.produced = produced;
+    // Unambiguously activity: the destination now states something it did
+    // not state before, whatever the wording happens to be.
+    slot.updated_at = now();
+    // Reached only on a review that passed, so this always clears.
+    reviewed.mark(slot);
+    Ok(())
 }
 
 /// Consume one unresolved point: judge it resolved and take it out.
@@ -2327,16 +2373,7 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
             "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
         )?;
         let mut item = load(root, id)?;
-        item.section(section)?;
-        // Asked before anything moves. `section` is known to exist by the line
-        // above, so one remaining Section means this consume is the one that
-        // takes the item with it — and that is the only consume Work has any
-        // say over.
-        if item.sections.len() == 1 {
-            require_no_work(root, id)?;
-        }
-        item.sections.retain(|candidate| candidate.id != section);
-        let emptied = item.sections.is_empty();
+        let emptied = consume_body(root, &mut item, section, &reviewed)?;
         // `after` is the whole absence when the topic goes with the point.
         // Consuming the last point is a different judgement from consuming one
         // of several, and a review must be able to tell them apart: one ends an
@@ -2355,6 +2392,22 @@ pub fn consume_section(root: &Path, id: &str, section: u64, prepared: &Prepared)
         save(root, &item)?;
         Ok(false)
     })
+}
+
+/// Take one point out, and say whether the topic went with it.
+fn consume_body(root: &Path, item: &mut Item, section: u64, reviewed: &Reviewed) -> Result<bool> {
+    reviewed.must_have_passed(
+        "an unresolved point is not removed on an exhausted review. Revise it or raise the ceiling — it is still here either way",
+    )?;
+    item.section(section)?;
+    // Asked before anything moves. `section` is known to exist by the line
+    // above, so one remaining Section means this consume is the one that takes
+    // the item with it — and that is the only consume Work has any say over.
+    if item.sections.len() == 1 {
+        require_no_work(root, &item.id)?;
+    }
+    item.sections.retain(|candidate| candidate.id != section);
+    Ok(item.sections.is_empty())
 }
 
 /// A Backlog item may not be removed while it still owns execution memory.
@@ -2388,6 +2441,424 @@ fn require_no_work(root: &Path, id: &str) -> Result<()> {
          `engr work rm {subject}` and consume again, or record what it was for first"
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Several mutations of one topic, reviewed once
+// ---------------------------------------------------------------------------
+
+/// One mutation of a topic, as a ChangeSet keeps it until it is applied.
+///
+/// The arguments a lone mutation takes, already resolved — subjects pinned,
+/// outcomes parsed — so the step a reviewer is shown is the step that is
+/// checked and applied. What it does not carry is what a lone mutation carries
+/// besides the change: no predecessor and no review. A ChangeSet binds the whole
+/// topic once, and is reviewed once.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Step {
+    Rename {
+        title: String,
+    },
+    Add {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subjects: Vec<Subject>,
+    },
+    Revise {
+        section: u64,
+        text: String,
+    },
+    Subjects {
+        section: u64,
+        subjects: Vec<Subject>,
+    },
+    Produced {
+        section: u64,
+        outcome: Produced,
+    },
+    Forget {
+        section: u64,
+        outcome: Produced,
+    },
+    Merge {
+        into: u64,
+        section: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subjects: Vec<Subject>,
+    },
+    Consume {
+        section: u64,
+    },
+}
+
+impl Step {
+    /// The checks a lone mutation makes before it takes the lock.
+    pub fn check(&self) -> Result<()> {
+        match self {
+            Self::Rename { title } => check_title(title),
+            Self::Add { text, .. } | Self::Revise { text, .. } => check_text(text),
+            Self::Merge {
+                into,
+                section,
+                text,
+                ..
+            } => {
+                check_text(text)?;
+                ensure!(
+                    section != into,
+                    EXIT_INVARIANT,
+                    "§{into} is the destination, so it cannot also be merged into itself"
+                );
+                Ok(())
+            }
+            Self::Produced { outcome, .. } => outcome.validate(),
+            Self::Subjects { .. } | Self::Forget { .. } | Self::Consume { .. } => Ok(()),
+        }
+    }
+
+    /// The lone mutation this step is, which names its review descriptor.
+    fn mutation(&self) -> Mutation {
+        match self {
+            Self::Rename { .. } => Mutation::Rename,
+            Self::Add { .. } => Mutation::SectionCreate,
+            Self::Revise { section, .. } => Mutation::SectionUpdate(*section),
+            Self::Subjects { section, .. } => Mutation::SectionSubjects(*section),
+            Self::Produced { section, outcome } => Mutation::SectionProduced {
+                section: *section,
+                outcome: outcome.clone(),
+                forget: false,
+            },
+            Self::Forget { section, outcome } => Mutation::SectionProduced {
+                section: *section,
+                outcome: outcome.clone(),
+                forget: true,
+            },
+            Self::Merge { into, section, .. } => Mutation::SectionMerge {
+                destination: *into,
+                source: *section,
+            },
+            Self::Consume { section } => Mutation::SectionConsume(*section),
+        }
+    }
+
+    /// Apply the step to the topic as the steps before it leave it, through the
+    /// same body the lone mutation runs. Returns whether the topic is gone.
+    fn apply(&self, root: &Path, item: &mut Item, reviewed: &Reviewed) -> Result<bool> {
+        match self {
+            Self::Rename { title } => rename_body(item, title, reviewed)?,
+            Self::Add { text, subjects } => {
+                add_body(item, text, subjects.clone(), reviewed)?;
+            }
+            Self::Revise { section, text } => revise_body(item, *section, text, reviewed)?,
+            Self::Subjects { section, subjects } => {
+                subjects_body(item, *section, subjects.clone(), reviewed)?;
+            }
+            Self::Produced { section, outcome } => {
+                produced_body(root, item, *section, outcome, reviewed)?;
+            }
+            Self::Forget { section, outcome } => {
+                forget_body(item, *section, outcome, reviewed)?;
+            }
+            Self::Merge {
+                into,
+                section,
+                text,
+                subjects,
+            } => merge_body(item, *into, *section, text, subjects.clone(), reviewed)?,
+            Self::Consume { section } => return consume_body(root, item, *section, reviewed),
+        }
+        item.sections.sort_by_key(|section| section.id);
+        Ok(false)
+    }
+}
+
+/// What a ChangeSet over one topic would leave, and the one review it needs.
+#[derive(Debug)]
+pub struct TopicPlan {
+    /// The topic the first step applies to, or `None` when the ChangeSet
+    /// creates it.
+    pub before: Option<Item>,
+    /// The topic as each step leaves it; `None` once a step has consumed its
+    /// last point.
+    pub after: Vec<Option<Item>>,
+    /// The name of the whole sequence under `ReviewDigestContract`.
+    pub digest: String,
+    /// Every Rule id the one review must cover.
+    pub rules: Vec<String>,
+}
+
+impl TopicPlan {
+    /// The topic as the last step leaves it, or `None` if it is gone.
+    pub fn result(&self) -> Option<&Item> {
+        match self.after.last() {
+            Some(after) => after.as_ref(),
+            None => self.before.as_ref(),
+        }
+    }
+
+    /// The refusal an unreviewed apply is.
+    pub fn refusal(&self) -> Error {
+        Error::new(
+            EXIT_USAGE,
+            format!(
+                "this ChangeSet is governed by {}; review every step against the surfaced Rules, then apply it with review digest {} and the complete rule set",
+                self.rules.join(", "),
+                self.digest
+            ),
+        )
+    }
+}
+
+/// A topic ChangeSet whose review holds: the topic to write, or `None` to
+/// remove it. Nothing has been written.
+#[derive(Debug)]
+pub struct SealedTopic {
+    pub id: String,
+    pub result: Option<Item>,
+}
+
+#[derive(Debug)]
+pub enum TopicOutcome {
+    Sealed(SealedTopic),
+    NeedsReview(TopicPlan),
+}
+
+/// The topic a ChangeSet starts from: the one that exists, or a new one.
+///
+/// A new topic is the item a lone `backlog new` would make before its first
+/// point — the id the ChangeSet was started with, the title, no points yet —
+/// and every step of its ChangeSet is an addition.
+fn topic_before(root: &Path, id: &str, creates: Option<&str>) -> Result<Option<Item>> {
+    match creates {
+        Some(_) => {
+            ensure!(
+                !store::resource_present(&item_path(root, id))?,
+                EXIT_INVARIANT,
+                "backlog {} already exists, so a ChangeSet cannot create it",
+                short(id)
+            );
+            Ok(None)
+        }
+        None => load(root, id).map(Some),
+    }
+}
+
+/// Project every step against the topic as the steps before it leave it, and
+/// name the sequence as one review subject.
+///
+/// Each step runs the body its lone mutation runs, so it is refused here for
+/// the reason it would be refused alone, by its number. Read-only, and meant to
+/// be called under the writer lock.
+///
+/// **A ChangeSet exists to share a review.** Where no backlog Rule governs, there
+/// is no review to share, and the lone mutations — each with its own `--expect`
+/// — are what keep a concurrent write from landing underneath; so a ChangeSet
+/// with no applicable Rule is refused rather than given a weaker guarantee than
+/// the commands it stands for.
+fn plan_topic(
+    root: &Path,
+    id: &str,
+    creates: Option<&str>,
+    steps: &[Step],
+    attempt: Attempt,
+) -> Result<(TopicPlan, crate::rules::ReviewBinding)> {
+    ensure!(
+        !steps.is_empty(),
+        EXIT_USAGE,
+        "this ChangeSet has no steps yet; add one with `engr changeset backlog`"
+    );
+    let rules = crate::rules::resolved(root, crate::rules::Domain::Backlog)?;
+    ensure!(
+        !rules.is_empty(),
+        EXIT_INVARIANT,
+        "no backlog Rule applies here, so there is no review for a ChangeSet to share; make each change with its own `engr backlog` command"
+    );
+    let reviewed = Reviewed::of(&rules, attempt)?;
+    let before = topic_before(root, id, creates)?;
+    let mut current = match (&before, creates) {
+        (Some(item), _) => item.clone(),
+        (None, Some(title)) => {
+            check_title(title)?;
+            Item {
+                id: id.to_owned(),
+                title: title.trim().to_owned(),
+                next_section_id: 1,
+                sections: Vec::new(),
+            }
+        }
+        (None, None) => unreachable!("topic_before loads an existing topic or refuses"),
+    };
+    let mut after = Vec::with_capacity(steps.len());
+    let mut descriptors = Vec::with_capacity(steps.len());
+    let mut gone: Option<usize> = None;
+    for (index, step) in steps.iter().enumerate() {
+        let number = index + 1;
+        let fail =
+            |error: Error| Error::new(error.code, format!("step {number}: {}", error.message));
+        if let Some(at) = gone {
+            return Err(fail(Error::new(
+                EXIT_USAGE,
+                format!("step {at} consumed the topic's last point, so nothing is left to change"),
+            )));
+        }
+        // A new topic is made of its points. Anything else in its ChangeSet
+        // would act on a point the same ChangeSet is still writing, and those
+        // are the steps a lone `backlog new` followed by `add`s never takes.
+        ensure!(
+            creates.is_none() || matches!(step, Step::Add { .. }),
+            EXIT_USAGE,
+            "step {number}: a ChangeSet that creates its topic only adds points to it; change them once it is applied"
+        );
+        step.check().map_err(fail)?;
+        let allocated = current.next_section_id;
+        let emptied = step.apply(root, &mut current, &reviewed).map_err(fail)?;
+        if creates.is_none() {
+            descriptors.push(review_mutation(
+                &step.mutation(),
+                id,
+                allocated,
+                (!emptied).then_some(&current),
+            )?);
+        }
+        if emptied {
+            gone = Some(number);
+            after.push(None);
+        } else {
+            after.push(Some(current.clone()));
+        }
+    }
+    let (mutation, precondition) = match &before {
+        // A creation is reviewed for its intent, exactly as a lone `backlog
+        // new` is: no target, no predecessor, and the topic it makes — every
+        // point of it — as `after`. One point or several is the same act.
+        None => (
+            serde_json::to_value(creation_mutation(&current)?)
+                .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?,
+            review_precondition(None)?,
+        ),
+        // The steps in order, each the descriptor it would bind alone, and the
+        // whole topic as the one predecessor they all rest on: each later
+        // step's predecessor follows from it and the steps before.
+        Some(item) => (
+            serde_json::json!({
+                "operation": { "name": "changeset", "parameters": {} },
+                "target": item_target(id)?,
+                "steps": descriptors
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| Error::new(EXIT_SCHEMA, format!("review mutation: {error}")))?,
+            }),
+            review_precondition(Some(&Precondition::of_item(item)))?,
+        ),
+    };
+    let binding =
+        crate::rules::rebind(crate::rules::Domain::Backlog, mutation, precondition, rules)?;
+    let plan = TopicPlan {
+        before,
+        after,
+        digest: binding.digest()?.to_string(),
+        rules: binding.rule_ids(),
+    };
+    Ok((plan, binding))
+}
+
+/// What a topic ChangeSet would leave, and the review it needs. Writes nothing.
+pub(crate) fn plan_changeset_locked(
+    root: &Path,
+    id: &str,
+    creates: Option<&str>,
+    steps: &[Step],
+) -> Result<TopicPlan> {
+    Ok(plan_topic(root, id, creates, steps, Attempt::FIRST)?.0)
+}
+
+/// Plan a topic ChangeSet and hold its attestation to the plan.
+///
+/// All or nothing. A backlog review is not repeated with a verdict — one that
+/// did not pass is acted on and reviewed again — so there is no step for it to
+/// fail on its own. An exhausted review admits what an exhausted lone mutation
+/// would: the points it keeps, each marked, and nothing that removes a point
+/// or renames the topic, which refuses the whole ChangeSet by that step's
+/// number.
+pub(crate) fn seal_changeset_locked(
+    root: &Path,
+    id: &str,
+    creates: Option<&str>,
+    steps: &[Step],
+    prepared: &Prepared,
+) -> Result<TopicOutcome> {
+    ensure!(
+        prepared.precondition.is_none(),
+        EXIT_USAGE,
+        "a ChangeSet binds the whole topic in its digest, so it takes no --expect"
+    );
+    let (plan, binding) = plan_topic(root, id, creates, steps, prepared.attempt)?;
+    let Some(attestation) = prepared.review.as_ref() else {
+        return Ok(TopicOutcome::NeedsReview(plan));
+    };
+    let mut reviewed = attestation.reviewed_rules.clone();
+    reviewed.sort();
+    reviewed.dedup();
+    let expected = binding.rule_ids();
+    ensure!(
+        reviewed == expected,
+        EXIT_INVARIANT,
+        "the review names {}, and this ChangeSet is governed by {}",
+        if reviewed.is_empty() {
+            "no Rules".to_owned()
+        } else {
+            reviewed.join(", ")
+        },
+        expected.join(", ")
+    );
+    ensure!(
+        attestation.review_digest == plan.digest,
+        EXIT_INVARIANT,
+        "this review was of something else: a step, the topic or a rule has changed since it was reviewed. Review the current subject and attest to {}",
+        plan.digest
+    );
+    let result = plan.result().cloned();
+    Ok(TopicOutcome::Sealed(SealedTopic {
+        id: id.to_owned(),
+        result,
+    }))
+}
+
+/// Write what a sealed topic ChangeSet produced: the topic, or its absence.
+pub(crate) fn publish_changeset_locked(root: &Path, sealed: &SealedTopic) -> Result<()> {
+    match &sealed.result {
+        Some(item) => save(root, item),
+        None => remove(root, &sealed.id),
+    }
+}
+
+/// A short stand-in for the topic as an apply leaves it, or `None` for no topic.
+///
+/// Written into the ChangeSet before the topic is, so an apply interrupted
+/// between the two can tell whether its write landed: the topic file is
+/// replaced in one rename, so it is either this or what it was.
+pub(crate) fn result_token(result: Option<&Item>) -> Result<Option<String>> {
+    result
+        .map(|item| Precondition::of_item(item).token())
+        .transpose()
+}
+
+/// Whether the topic stands as an interrupted apply was about to leave it.
+pub(crate) fn landed(root: &Path, id: &str, token: Option<&str>) -> Result<bool> {
+    let current = match load(root, id) {
+        Ok(item) => Some(item),
+        Err(error) if error.code == EXIT_NOT_FOUND => None,
+        Err(error) => return Err(error),
+    };
+    Ok(result_token(current.as_ref())?.as_deref() == token)
+}
+
+/// A fresh topic id, for a ChangeSet that creates its topic.
+pub(crate) fn mint_id() -> String {
+    new_id()
 }
 
 #[cfg(test)]

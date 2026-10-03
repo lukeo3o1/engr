@@ -96,8 +96,9 @@ enum Command {
     /// Unresolved staging. Nothing here is confirmed
     #[command(subcommand)]
     Backlog(Backlog),
-    /// Several Section mutations of one Object, reviewed once and admitted
-    /// together. Kept on this machine until applied; nothing here is a record
+    /// Several mutations of one Object or one backlog topic, reviewed once and
+    /// admitted together. Kept on this machine until applied; nothing here is a
+    /// record
     #[command(subcommand)]
     Changeset(ChangesetCommand),
     /// Project rules an agent must read before a semantic mutation
@@ -107,15 +108,39 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ChangesetCommand {
-    /// Start a ChangeSet for one existing Object
+    /// Start a ChangeSet for one Object or one backlog topic, existing or new
+    #[command(group(
+        ArgGroup::new("target")
+            .required(true)
+            .args(["object", "title", "backlog", "new_topic"])
+    ))]
     New {
-        /// The Object every step will change. Any unique id prefix
+        /// The existing Object every step will change. Any unique id prefix
         #[arg(long)]
-        object: String,
+        object: Option<String>,
+        /// Create a new Object with this title as the first step; the other
+        /// steps then change it
+        #[arg(long)]
+        title: Option<String>,
+        /// The existing backlog topic every step will change. Any unique id
+        /// prefix
+        #[arg(long, value_name = "TOPIC")]
+        backlog: Option<String>,
+        /// Create a new backlog topic with this title; its steps add its points
+        #[arg(long, value_name = "TITLE")]
+        new_topic: Option<String>,
     },
-    /// Add a step, described with the same arguments `prepare` takes for
-    /// section work: --add, --revise, --merge or --delete, and the wording
+    /// Add an Object step, described with the same arguments `prepare` takes:
+    /// --rename, --add, --revise, --merge or --delete, and the wording
     Add(Box<ChangesetAdd>),
+    /// Add a backlog step, described with the same arguments `engr backlog`
+    /// takes, without the topic and the review
+    Backlog {
+        /// The ChangeSet to add to. Any unique id prefix
+        changeset: String,
+        #[command(subcommand)]
+        step: BacklogStep,
+    },
     /// Remove one step by its position
     Rm {
         changeset: String,
@@ -130,7 +155,8 @@ enum ChangesetCommand {
         #[arg(long, value_enum, default_value = "text")]
         format: Format,
     },
-    /// Admit the steps a review passed, together, and keep the ones it failed
+    /// Admit the steps a review passed, together, and keep the ones it failed.
+    /// A backlog ChangeSet is admitted whole, and takes no verdict
     Apply {
         changeset: String,
         /// ReviewDigest surfaced by `show`, or by `apply` without it
@@ -161,6 +187,67 @@ enum ChangesetCommand {
     },
     /// Throw a ChangeSet away. Nothing was admitted, so nothing else changes
     Discard { changeset: String },
+}
+
+/// One backlog mutation for a ChangeSet: `engr backlog`'s own arguments,
+/// without the topic, which the ChangeSet names, and without a review or
+/// `--expect`, which the ChangeSet takes once, as a whole.
+#[derive(Subcommand)]
+enum BacklogStep {
+    /// Add an unresolved point
+    Add {
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Reword an unresolved point
+    Revise {
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        text: TextArg,
+    },
+    /// Replace what an unresolved point concerns
+    Subjects {
+        #[arg(long)]
+        section: u64,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Consolidate one point into another
+    Merge {
+        /// The point that survives, keeping its id and taking the merged wording
+        #[arg(long = "into", value_name = "SECTION")]
+        into: u64,
+        /// The point merged into it
+        #[arg(long, value_name = "SECTION")]
+        section: u64,
+        #[command(flatten)]
+        text: TextArg,
+        #[command(flatten)]
+        subjects: SubjectArgs,
+    },
+    /// Record durable knowledge a point produced, or take it back off
+    Produced {
+        #[arg(long)]
+        section: u64,
+        /// The outcome, as engr:obj:<id> or engr:obj:<id>:<section>
+        #[arg(long = "target", value_name = "ENGR_REF")]
+        target: String,
+        #[arg(long)]
+        forget: bool,
+    },
+    /// Consume a resolved point
+    Consume {
+        #[arg(long)]
+        section: u64,
+    },
+    /// Replace the topic's title
+    Rename {
+        #[arg(long)]
+        title: String,
+    },
 }
 
 #[derive(Args)]
@@ -1341,22 +1428,66 @@ fn run(cli: Cli) -> Result<()> {
 
 fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
     match command {
-        ChangesetCommand::New { object } => {
-            let object = resolve_object_argument(root, "--object", &object)?;
-            let created = changeset::create(root, &object)?;
-            println!(
-                "CHANGESET  {}  for {}",
-                created.id,
-                shorten(&created.object, view::width(root))
-            );
+        ChangesetCommand::New {
+            object,
+            title,
+            backlog: topic,
+            new_topic,
+        } => {
+            let created = match (object, title, topic, new_topic) {
+                (Some(object), None, None, None) => {
+                    let object = resolve_object_argument(root, "--object", &object)?;
+                    changeset::create(root, &object)?
+                }
+                (None, Some(title), None, None) => changeset::create_object(root, &title)?.0,
+                (None, None, Some(topic), None) => {
+                    let topic = resolve_backlog_argument(root, "--backlog", &topic)?;
+                    changeset::create_topic(root, Some(&topic), None)?
+                }
+                (None, None, None, Some(title)) => {
+                    changeset::create_topic(root, None, Some(&title))?
+                }
+                _ => unreachable!("clap allows exactly one of the four"),
+            };
+            let width = view::width(root);
+            match created.target() {
+                changeset::Target::Object(object) => {
+                    let creates = if created.steps.is_empty() {
+                        ""
+                    } else {
+                        "  (step 1 creates it)"
+                    };
+                    println!(
+                        "CHANGESET  {}  for {}{creates}",
+                        created.id,
+                        shorten(object, width)
+                    );
+                }
+                changeset::Target::Topic(topic) => println!(
+                    "CHANGESET  {}  for backlog {}{}",
+                    created.id,
+                    shorten(&topic.id, view::backlog_width(root)),
+                    if topic.creates.is_some() {
+                        "  (applying it creates the topic)"
+                    } else {
+                        ""
+                    }
+                ),
+            }
             println!(
                 "note       kept under {}/local on this machine; nothing in it is a record until it is applied",
                 store::DIR
             );
-            println!(
-                "next       engr changeset add {} --add --header <HEADER> --text <WORDING>",
-                created.id
-            );
+            match created.target() {
+                changeset::Target::Object(_) => println!(
+                    "next       engr changeset add {} --add --header <HEADER> --text <WORDING>",
+                    created.id
+                ),
+                changeset::Target::Topic(_) => println!(
+                    "next       engr changeset backlog {} add --text <WORDING>",
+                    created.id
+                ),
+            }
             Ok(())
         }
         ChangesetCommand::Add(add) => {
@@ -1366,13 +1497,21 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             } = *add;
             check_changeset_step(&step)?;
             let id = changeset::resolve(root, &id)?;
+            let loaded = changeset::load(root, &id)?;
+            let changeset::Target::Object(object) = loaded.target() else {
+                return Err(Error::new(
+                    EXIT_USAGE,
+                    format!("ChangeSet {id} changes a backlog topic; add its steps with `engr changeset backlog {id} <step>`"),
+                ));
+            };
+            let object = object.to_owned();
             let mut step = step;
-            step.object = Some(changeset::load(root, &id)?.object);
+            step.object = Some(object.clone());
             // Every step is admitted through the Agent door, and the value
             // carries which door it came through, so it is built as one.
             step.agent = true;
             let json = step.json;
-            let payload = prepare_payload(root, &step)?;
+            let payload = prepare_payload_for(root, &step, Some(&object))?;
             let (changeset, plan) = changeset::add(root, &id, payload)?;
             if json {
                 println!("{}", to_json(&changeset)?);
@@ -1385,6 +1524,19 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             );
             Ok(())
         }
+        ChangesetCommand::Backlog {
+            changeset: id,
+            step,
+        } => {
+            let step = backlog_step(root, step)?;
+            let (changeset, plan) = changeset::add_backlog(root, &id, step)?;
+            print!("{}", render_topic_steps(root, &changeset, &plan));
+            println!(
+                "\nnext       engr changeset show {} renders the topic as every step leaves it, and the one review it needs",
+                changeset.id
+            );
+            Ok(())
+        }
         ChangesetCommand::Rm {
             changeset: id,
             step,
@@ -1393,16 +1545,21 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             println!(
                 "REMOVED    step {step} of {}; the steps after it move up one, and {} step(s) remain",
                 changeset.id,
-                changeset.steps.len()
+                changeset.len()
             );
             // Said here because one run took a failed step out and attested the
             // digest of what was left as passed: word for word what its reviewer
             // passed, under a digest no reviewer saw, and engr cannot tell that
             // from the honest apply.
-            if !changeset.steps.is_empty() {
-                println!(
-                    "note       this changed the ChangeSet's digest, so no earlier review covers what remains; it needs a review of its own. To admit what a review passed, apply that review's digest with --failed-step before taking a failed step out"
-                );
+            if !changeset.is_empty() {
+                match changeset.target() {
+                    changeset::Target::Object(_) => println!(
+                        "note       this changed the ChangeSet's digest, so no earlier review covers what remains; it needs a review of its own. To admit what a review passed, apply that review's digest with --failed-step before taking a failed step out"
+                    ),
+                    changeset::Target::Topic(_) => println!(
+                        "note       this changed the ChangeSet's digest, so no earlier review covers what remains; review the whole again, at its next attempt"
+                    ),
+                }
             }
             Ok(())
         }
@@ -1413,11 +1570,17 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             }
             let width = view::width(root);
             for changeset in found {
+                let subject = match changeset.target() {
+                    changeset::Target::Object(object) => shorten(object, width).to_owned(),
+                    changeset::Target::Topic(topic) => {
+                        format!("backlog {}", shorten(&topic.id, width))
+                    }
+                };
                 println!(
                     "{}  {}  {} step(s)  created {}{}",
                     changeset.id,
-                    shorten(&changeset.object, width),
-                    changeset.steps.len(),
+                    subject,
+                    changeset.len(),
                     changeset.created_at,
                     if changeset.committing.is_some() {
                         "  apply interrupted: run apply to finish it"
@@ -1433,14 +1596,22 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             format,
         } => {
             let loaded = changeset::load(root, &id)?;
-            if loaded.steps.is_empty() && loaded.committing.is_none() {
+            if loaded.is_empty() && loaded.committing.is_none() {
                 match format {
                     Format::Json => println!("{}", to_json(&loaded)?),
                     Format::Text => println!(
                         "CHANGESET  {}  for {}  no steps yet",
                         loaded.id,
-                        shorten(&loaded.object, view::width(root))
+                        shorten(loaded.subject(), view::width(root))
                     ),
+                }
+                return Ok(());
+            }
+            if let changeset::Target::Topic(_) = loaded.target() {
+                let (changeset, plan) = changeset::plan_topic(root, &loaded.id)?;
+                match format {
+                    Format::Json => println!("{}", render_topic_json(&changeset, &plan)?),
+                    Format::Text => print!("{}", render_topic(root, &changeset, &plan)),
                 }
                 return Ok(());
             }
@@ -1460,6 +1631,22 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             failed_steps,
             json,
         } => {
+            let id = changeset::resolve(root, &id)?;
+            if let changeset::Target::Topic(_) = changeset::load(root, &id)?.target() {
+                ensure!(
+                    review_result.is_none() && failed_steps.is_empty(),
+                    EXIT_USAGE,
+                    "a backlog ChangeSet is admitted whole and takes no --review-result or --failed-step: a review that did not pass is acted on and reviewed again"
+                );
+                return apply_topic(
+                    root,
+                    &id,
+                    review_digest,
+                    reviewed_rules,
+                    review_attempt,
+                    json,
+                );
+            }
             let review =
                 match (review_digest, review_result) {
                     (None, None) if reviewed_rules.is_empty() => None,
@@ -1481,7 +1668,6 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
                         "a Rule Review attestation needs --review-result passed|failed|exhausted",
                     )),
                 };
-            let id = changeset::resolve(root, &id)?;
             // A step the review failed is on its next attempt when it is reviewed
             // again — in this ChangeSet or alone. Said here because this is the
             // moment the count would otherwise be lost.
@@ -1574,7 +1760,7 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
             println!(
                 "DISCARDED  {}  {} step(s); nothing was admitted",
                 discarded.id,
-                discarded.steps.len()
+                discarded.len()
             );
             Ok(())
         }
@@ -1589,14 +1775,14 @@ fn changeset_command(root: &Path, command: ChangesetCommand) -> Result<()> {
 /// a step they would be a second answer to a question already answered.
 fn check_changeset_step(step: &Prepare) -> Result<()> {
     ensure!(
-        !(step.new
-            || step.rename
-            || step.close
-            || step.reopen
-            || step.classify
-            || step.supersede.is_some()),
+        !step.new,
         EXIT_USAGE,
-        "a ChangeSet carries Section mutations: --add, --revise, --merge or --delete; a title, a lifecycle and a supersession are each admitted on their own"
+        "a ChangeSet creates its Object at the start: `engr changeset new --title <TITLE>`"
+    );
+    ensure!(
+        !(step.close || step.reopen || step.classify || step.supersede.is_some()),
+        EXIT_USAGE,
+        "a ChangeSet carries the title and Section mutations: --rename, --add, --revise, --merge or --delete; a lifecycle, a classification and a supersession are Human admissions"
     );
     ensure!(
         step.object_type.is_none() && !step.untyped && step.state.is_none(),
@@ -1634,7 +1820,7 @@ fn render_changeset_steps(
     let mut out = format!(
         "CHANGESET  {}  for {}  rev {} → {}\n",
         changeset.id,
-        shorten(&changeset.object, view::width(root)),
+        shorten(changeset.subject(), view::width(root)),
         plan.before.rev,
         plan.before.rev + plan.steps.len() as u64
     );
@@ -1686,6 +1872,8 @@ fn describe_step(before: &model::Object, step: &gate::PlannedStep) -> String {
         Action::SectionDeleted { section, .. } => {
             format!("delete  §{section}{}", header(before, *section))
         }
+        Action::ObjectCreated { title } => format!("new     {title}"),
+        Action::ObjectRenamed { title, .. } => format!("rename  {title}"),
         other => other.event_type().to_owned(),
     }
 }
@@ -1728,6 +1916,232 @@ fn render_changeset_json(
         "changeset": changeset,
         "before_rev": plan.before.rev,
         "projected": plan.after(),
+        "needs_review": {
+            "digest": plan.digest,
+            "rules": plan.rules,
+        },
+    }))
+}
+
+/// Build a backlog step from its arguments, resolved now — subjects pinned and
+/// the outcome parsed — so the step a reviewer is shown is the one applied.
+fn backlog_step(root: &Path, step: BacklogStep) -> Result<backlog::Step> {
+    Ok(match step {
+        BacklogStep::Add { text, subjects } => backlog::Step::Add {
+            text: text.read()?,
+            subjects: subjects.build(root)?,
+        },
+        BacklogStep::Revise { section, text } => backlog::Step::Revise {
+            section,
+            text: text.read()?,
+        },
+        BacklogStep::Subjects { section, subjects } => backlog::Step::Subjects {
+            section,
+            subjects: subjects.build(root)?,
+        },
+        BacklogStep::Merge {
+            into,
+            section,
+            text,
+            subjects,
+        } => backlog::Step::Merge {
+            into,
+            section,
+            text: text.read()?,
+            subjects: subjects.build(root)?,
+        },
+        BacklogStep::Produced {
+            section,
+            target,
+            forget,
+        } => {
+            let outcome = produced_outcome(root, &target)?;
+            if forget {
+                backlog::Step::Forget { section, outcome }
+            } else {
+                backlog::Step::Produced { section, outcome }
+            }
+        }
+        BacklogStep::Consume { section } => backlog::Step::Consume { section },
+        BacklogStep::Rename { title } => backlog::Step::Rename { title },
+    })
+}
+
+/// The Object or Object Section a `produced` names, as a backlog outcome.
+fn produced_outcome(root: &Path, target: &str) -> Result<backlog::Produced> {
+    let reference = engr::reference::EngrRef::parse_standalone(target)
+        .map_err(|error| malformed_argument("--target", target, error))?
+        .canonicalize(|revision| git::resolve(root, revision))
+        .map_err(|error| malformed_argument("--target", target, error))?;
+    ensure!(
+        reference.kind() == engr::reference::ResourceKind::Object && reference.snapshot().is_none(),
+        EXIT_USAGE,
+        "--target {target:?} must identify a current Object or Object section"
+    );
+    Ok(backlog::Produced::object(reference.embedded()))
+}
+
+fn apply_topic(
+    root: &Path,
+    id: &str,
+    review_digest: Option<String>,
+    reviewed_rules: Vec<String>,
+    attempt: u32,
+    json: bool,
+) -> Result<()> {
+    let review = match review_digest {
+        Some(review_digest) => Some(backlog::Attestation {
+            review_digest,
+            reviewed_rules,
+        }),
+        None => {
+            ensure!(
+                reviewed_rules.is_empty(),
+                EXIT_USAGE,
+                "--reviewed-rule says what a review covered, so it needs the --review digest that review was of"
+            );
+            None
+        }
+    };
+    let attempt = rules::Attempt::new(attempt)?;
+    let prepared = backlog::Prepared::attempt(attempt).reviewed(review);
+    match changeset::apply_topic(root, id, &prepared)? {
+        changeset::TopicApplied::Admitted { result } => {
+            if json {
+                println!("{}", to_json(&serde_json::json!({ "topic": result }))?);
+                return Ok(());
+            }
+            match result {
+                Some(item) => {
+                    println!(
+                        "ADMITTED   backlog {}  {} point(s) unresolved",
+                        shorten(&item.id, view::backlog_width(root)),
+                        item.sections.len()
+                    );
+                    for section in &item.sections {
+                        if let Some(marker) = section.review_exhaustion {
+                            println!(
+                                "EXHAUSTED  §{} went in at attempt {} of {}; it is marked so",
+                                section.id, marker.attempts, marker.limit
+                            );
+                        }
+                    }
+                }
+                None => println!("ADMITTED   and the topic is gone: its last point was consumed"),
+            }
+            Ok(())
+        }
+        changeset::TopicApplied::AlreadyAdmitted => {
+            if json {
+                println!(
+                    "{}",
+                    to_json(&serde_json::json!({ "already_admitted": true }))?
+                );
+            } else {
+                println!(
+                    "ADMITTED   by an earlier apply of {id}, which wrote the topic and was interrupted before it could say so; nothing was written twice"
+                );
+            }
+            Ok(())
+        }
+        changeset::TopicApplied::NeedsReview(plan) => {
+            let changeset = changeset::load(root, id)?;
+            if json {
+                println!("{}", render_topic_json(&changeset, &plan)?);
+            } else {
+                print!("{}", render_topic(root, &changeset, &plan));
+            }
+            Err(plan.refusal())
+        }
+    }
+}
+
+/// One line per step of a topic's ChangeSet.
+fn render_topic_steps(
+    root: &Path,
+    changeset: &changeset::ChangeSet,
+    plan: &backlog::TopicPlan,
+) -> String {
+    let creates = match changeset.target() {
+        changeset::Target::Topic(topic) => topic.creates.clone(),
+        changeset::Target::Object(_) => None,
+    };
+    let mut out = format!(
+        "CHANGESET  {}  for backlog {}{}\n",
+        changeset.id,
+        shorten(changeset.subject(), view::backlog_width(root)),
+        match &creates {
+            Some(title) => format!("  new topic: {title}"),
+            None => String::new(),
+        }
+    );
+    let mut before = plan.before.as_ref();
+    for (index, (step, after)) in changeset
+        .backlog_steps
+        .iter()
+        .zip(plan.after.iter())
+        .enumerate()
+    {
+        let line = match step {
+            backlog::Step::Add { .. } => match after.as_ref().and_then(|item| {
+                item.sections
+                    .iter()
+                    .map(|section| section.id)
+                    .find(|id| before.is_none_or(|before| before.section(*id).is_err()))
+            }) {
+                Some(id) => format!("add      §{id}"),
+                None => "add".to_owned(),
+            },
+            backlog::Step::Revise { section, .. } => format!("revise   §{section}"),
+            backlog::Step::Subjects { section, .. } => format!("subjects §{section}"),
+            backlog::Step::Produced { section, outcome } => {
+                format!("produced §{section} → {}", outcome.target.reference)
+            }
+            backlog::Step::Forget { section, outcome } => {
+                format!("forget   §{section} → {}", outcome.target.reference)
+            }
+            backlog::Step::Merge { into, section, .. } => format!("merge    §{into} ← §{section}"),
+            backlog::Step::Consume { section } => format!("consume  §{section}"),
+            backlog::Step::Rename { title } => format!("rename   {title}"),
+        };
+        out.push_str(&format!("{:>4}  {line}\n", index + 1));
+        before = after.as_ref();
+    }
+    out
+}
+
+/// The review subject of a topic's ChangeSet: every step, the topic as the last
+/// one leaves it, and what the review must cover.
+fn render_topic(
+    root: &Path,
+    changeset: &changeset::ChangeSet,
+    plan: &backlog::TopicPlan,
+) -> String {
+    let mut out = render_topic_steps(root, changeset, plan);
+    out.push('\n');
+    match plan.result() {
+        Some(item) => out.push_str(&view::render_backlog_show(root, item)),
+        None => out.push_str(
+            "The last step consumes the topic's last point, so the topic goes with it.\n",
+        ),
+    }
+    out.push_str(&format!(
+        "\nNEEDS REVIEW  governed by {}. Read those Rules and everything they\n              rest on, review every step above against them — the topic as\n              it would stand, not only the new wording — then run\n\n                  engr changeset apply {} --review {} --reviewed-rule <RULE>\n\n              with --attempt <N> after a review that did not pass. It is\n              admitted whole: a step the review faults is fixed here and the\n              whole is reviewed again.\n\n              Nothing has been written.\n",
+        plan.rules.join(", "),
+        changeset.id,
+        plan.digest
+    ));
+    out
+}
+
+fn render_topic_json(
+    changeset: &changeset::ChangeSet,
+    plan: &backlog::TopicPlan,
+) -> Result<String> {
+    to_json(&serde_json::json!({
+        "changeset": changeset,
+        "before": plan.before,
+        "projected": plan.result(),
         "needs_review": {
             "digest": plan.digest,
             "rules": plan.rules,
@@ -2008,6 +2422,14 @@ fn prepare(root: &Path, command: Prepare) -> Result<()> {
 /// same arguments: two parsers of one vocabulary would be two places for a
 /// flag to mean different things.
 fn prepare_payload(root: &Path, command: &Prepare) -> Result<Payload> {
+    prepare_payload_for(root, command, None)
+}
+
+/// Build the payload, with `known` naming its Object exactly when the caller
+/// already holds the id: a ChangeSet that creates its Object issued it, and the
+/// Object is not there to resolve a prefix against until the ChangeSet is
+/// applied.
+fn prepare_payload_for(root: &Path, command: &Prepare, known: Option<&str>) -> Result<Payload> {
     let mut merge = None;
     let chosen = if command.new {
         Chosen::Create
@@ -2138,6 +2560,7 @@ fn prepare_payload(root: &Path, command: &Prepare) -> Result<Payload> {
     };
 
     let object = match (chosen, &command.object) {
+        (_, Some(_)) if known.is_some() => known.expect("checked").to_owned(),
         (Chosen::Create, Some(_)) => {
             return Err(Error::new(
                 EXIT_USAGE,
